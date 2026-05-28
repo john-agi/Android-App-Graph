@@ -336,10 +336,3 @@ maps its output into Android World's `JSONAction` format. For other tools, write
 an equivalent adapter that maps graph-guided decisions into that tool's action
 space.
 
-## Notes for Publishing
-
-- Rotate any API keys that were ever committed before making the repository
-  public.
-- Generated graph files may contain screenshots or app content. Review them
-  before sharing separately.
-- Keep private configs in `configs/*.local.yaml`; those files are ignored by git.
