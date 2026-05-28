@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ui-kobe"
+dynamic = ["version"]
+description = "UI-KOBE: Knowledge Ontology Builder and Explorer for mobile GUI Agents"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "networkx",
+    "openai",
+    "pyyaml",
+    "pillow",
+    "rich",
+    "dill",
+    "aitk",
+    "pyvis>=0.3.2",
+    "matplotlib",
+]
+authors = [
+    { name = "Yuxiang Chai" },
+]
+
+[project.scripts]
+kobe-explore = "ui_kobe.cli:main"
+
+[project.optional-dependencies]
+explore = []
+
+[project.urls]
+Homepage = "https://github.com/YuxiangChai/UI-KOBE"
+
+[tool.uv.sources]
+aitk = { path = "../AITK", editable = true }
+
+[tool.hatch.version]
+path = "ui_kobe/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ui_kobe"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/ui_kobe",
+    "/aitk_files",
+    "/aw_files",
+    "/configs",
+    "/scripts",
+    "/README.md",
+    "/LICENSE",
+]

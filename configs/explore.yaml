@@ -1,0 +1,48 @@
+device:
+  # Use "emulator-5554" for the default Android Emulator device.
+  # Use "127.0.0.1:6555" for the default Genymotion device.
+  udid: emulator-5554
+  avd_name: AndroidWorldAvd
+
+experiment:
+  name: demo
+  graph_dir: graphs/
+  max_steps: 100
+  resume_from: auto
+  coverage_checkpoint_steps: 50
+  coverage_checkpoint_top_k: 15
+
+apps:
+  - name: demo_app
+    package_name: com.example.app
+    # Optional. Use this when package launch cannot find the correct activity.
+    # launch_activity: com.example.app/.MainActivity
+
+vlm:
+  similarity_threshold: 0.84
+
+  page_detail:
+    model: ${UI_KOBE_PAGE_DETAIL_MODEL}
+    base_url: ${UI_KOBE_PAGE_DETAIL_BASE_URL}
+    api_key: ${UI_KOBE_PAGE_DETAIL_API_KEY}
+
+  embedding:
+    model: ${UI_KOBE_EMBEDDING_MODEL}
+    base_url: ${UI_KOBE_EMBEDDING_BASE_URL}
+    api_key: ${UI_KOBE_EMBEDDING_API_KEY}
+
+  instruction:
+    model: ${UI_KOBE_INSTRUCTION_MODEL}
+    base_url: ${UI_KOBE_INSTRUCTION_BASE_URL}
+    api_key: ${UI_KOBE_INSTRUCTION_API_KEY}
+
+  action:
+    model: ${UI_KOBE_ACTION_MODEL}
+    base_url: ${UI_KOBE_ACTION_BASE_URL}
+    api_key: ${UI_KOBE_ACTION_API_KEY}
+
+  # Optional native Gemini image embedding settings used by the v2 runtime.
+  image_embedding:
+    model: models/gemini-embedding-exp-03-07
+    native_base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key: ${GEMINI_API_KEY}
