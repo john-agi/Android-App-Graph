@@ -1,0 +1,77 @@
+# Dependency security: `uv audit` plus uv's on-sync OSV malware check.
+#
+# Policy (the same text lives in AGENTS.md, section "Dependency security"):
+# - Pull requests that change pyproject.toml, uv.lock or this file: a red
+#   run is blocking. Fix the dependency (uv lock --upgrade-package <name>)
+#   or record a reviewed exception in [tool.uv.audit] with a comment and a
+#   linked issue before merging. Reviewers do not merge over a red run.
+# - Scheduled and manual runs: a red run means a new advisory against a
+#   locked dependency, or OSV was unreachable. Triage it the same day.
+#   Never silence it by disabling the workflow, this job, or the check.
+# - If the only error is "Malware check failed due to an error from OSV"
+#   (uv sync exits 2) or a network error from `uv audit`, rerun the job:
+#   gh run rerun <run-id>. Do not set UV_MALWARE_CHECK=0 to get green.
+# - This workflow is deliberately not part of `poe check` and not a
+#   required status check: it needs network access to OSV, its result
+#   changes as advisories are published, and a path-filtered required
+#   check would block every PR that does not touch dependencies.
+#
+# Both uv features are preview (https://docs.astral.sh/uv/concepts/preview/):
+# `uv audit` is the "audit-command" preview feature and the malware check is
+# the "malware-check" preview feature, enabled by UV_MALWARE_CHECK=1
+# (https://docs.astral.sh/uv/concepts/projects/sync/#malware-checks).
+# The checkout, setup-uv and Python steps below are byte-for-byte copies of
+# the ones in ci.yml: uv is pinned to the [tool.uv] required-version range,
+# passed to setup-uv as `version:`. Preview features are exempt from uv's
+# stability promise, so a patch release inside the range can still change
+# them; whenever a new uv release changes these preview features, re-read
+# its release notes and this file. A green run proves the malware check ran
+# only if the sync step's log contains "Malware checks are experimental";
+# the "experimental" warnings both steps print are expected and are left
+# visible on purpose.
+name: Security
+
+on:
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/security.yml
+  schedule:
+    # Daily at 06:17 UTC. Off the top of the hour because runs queued at
+    # :00 are delayed. Runs against the latest commit on main and is
+    # auto-disabled after 60 days without repository activity.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout only; nothing is written and no secrets are used
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ">=0.12.9,<0.13"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Sync the locked environment with the OSV malware check
+        env:
+          UV_MALWARE_CHECK: "1"
+        run: uv sync --locked
+
+      - name: Audit locked dependencies for vulnerabilities and adverse statuses
+        run: uv audit
