@@ -95,3 +95,45 @@ allow-star-arg-any = true
 [tool.ruff.format]
 # Also format doctest and fenced code examples inside docstrings.
 docstring-code-format = true
+
+# Poe the Poet task runner. Always invoke as `uv run --locked poe <task>`.
+# executor = "simple" runs commands directly on PATH: `uv run` has already
+# activated .venv, so the default "auto" executor would nest a second `uv run`
+# per task (it selects the uv executor whenever uv.lock exists).
+[tool.poe]
+executor = "simple"
+
+# Private leaf tasks are inline strings and underscore-prefixed: hidden from
+# `poe --help`, not runnable directly, referenced only from the sequences.
+# Public leaf tasks that carry help text are tables with `help` and `cmd`.
+# Composite tasks are tables with `help` and `sequence`. Never write an inline
+# array next to an existing table (TOML rejects duplicate keys). Canonical
+# final order:
+#   check-fast: _format-check, _lint, _typecheck, _architecture
+#   check:      check-fast, _dependencies, _environment, _dead-code, _test,
+#               _actions, _build
+# Later issues insert their task by position relative to the neighbours that
+# already exist: _typecheck right after _lint; _architecture right after
+# _typecheck; _dependencies right after check-fast; _dead-code right after
+# _environment; _test right before _actions if present, otherwise right
+# before _build; _actions right before _build. _build is always last. The
+# help strings are fixed; do not edit them.
+[tool.poe.tasks]
+_fix-lint = "ruff check --fix --exit-zero ."
+_format = "ruff format ."
+_format-check = "ruff format --check ."
+_lint = "ruff check ."
+_environment = "uv pip check"
+_build = "uv build --no-sources"
+
+[tool.poe.tasks.fix]
+help = "Apply safe autofixes and format"
+sequence = ["_fix-lint", "_format"]
+
+[tool.poe.tasks.check-fast]
+help = "Fast checks: format, lint, types"
+sequence = ["_format-check", "_lint"]
+
+[tool.poe.tasks.check]
+help = "Definition of done: every non-mutating check"
+sequence = ["check-fast", "_environment", "_build"]
