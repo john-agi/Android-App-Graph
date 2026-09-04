@@ -57,6 +57,7 @@ dev = [
     "pytest-randomly>=5.0.0",
     "ruff>=0.16.5",
     "ty>=0.0.77",
+    "vulture>=2.16",
     "zizmor>=1.30.0",
 ]
 
@@ -101,6 +102,8 @@ extend-select = [
 "aw_files/**" = ["T201", "T203", "INP001"]
 # Tests are not a package. S101 is listed now so `assert` stays allowed if S is ever enabled.
 "tests/**" = ["INP001", "S101"]
+# Vulture allowlist entries are intentionally bare attribute expressions.
+"vulture_allowlist.py" = ["B018"]
 
 [tool.ruff.lint.flake8-annotations]
 # `**kwargs: Any` is the honest annotation for pass-through keyword arguments.
@@ -120,6 +123,14 @@ known_first_party = ["ui_kobe"]
 DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
 DEP002 = ["dill"]
+
+# Vulture dead-code detection. Policy and the allowlist rule: see AGENTS.md.
+[tool.vulture]
+# https://github.com/jendrikseipp/vulture#configuration
+# Positional paths on the command line REPLACE this list (verified with 2.16),
+# so every Poe task repeats it, allowlist included.
+paths = ["src", "tests", "vulture_allowlist.py"]
+min_confidence = 90
 
 # ty type checker. Rationale and the suppression rule: see AGENTS.md.
 [tool.ty.src]
@@ -189,6 +200,7 @@ _environment = "uv pip check"
 _test = "pytest --cov=ui_kobe --cov-report=term-missing"
 _actions = "zizmor --offline ."
 _build = "uv build --no-sources"
+_dead-code = "vulture src tests vulture_allowlist.py --min-confidence 90"
 
 [tool.poe.tasks.fix]
 help = "Apply safe autofixes and format"
@@ -204,4 +216,8 @@ cmd = "pytest"
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_dependencies", "_environment", "_test", "_actions", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_dead-code", "_test", "_actions", "_build"]
+
+[tool.poe.tasks.dead-code-review]
+help = "Review queue: likely-dead code at 60% confidence, sorted by size, smallest first (largest last). Never deleted automatically; see AGENTS.md."
+cmd = "vulture src tests vulture_allowlist.py --min-confidence 60 --sort-by-size"
