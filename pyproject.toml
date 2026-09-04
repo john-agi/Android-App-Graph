@@ -176,6 +176,18 @@ skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
 fail_under = 53
 
+# mutmut mutation testing, run only by `poe mutate` and .github/workflows/mutation.yml.
+# Never part of `poe check`; surviving mutants are a review queue. See AGENTS.md.
+[tool.mutmut]
+# Mutate only the package; scripts/, aitk_files/ and aw_files/ are copy-in adapters (see AGENTS.md).
+source_paths = ["src/ui_kobe/"]
+# Test selection passed to pytest inside mutants/ (mutmut copies tests/ and pyproject.toml there itself).
+pytest_add_cli_args_test_selection = ["tests/"]
+# --no-cov: coverage is enabled only by the _test task's --cov flag, never in addopts; this guards
+# mutmut's own pytest.main() run against a future move of --cov into addopts, where
+# [tool.coverage.report] fail_under would abort the clean stats run.
+pytest_add_cli_args = ["--no-cov"]
+
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
@@ -208,3 +220,10 @@ cmd = "pytest"
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
 sequence = ["check-fast", "_dependencies", "_environment", "_test", "_actions", "_build"]
+
+[tool.poe.tasks.mutate]
+help = "Mutation testing of src/ui_kobe with tests/ (review queue, never a gate); state in mutants/"
+cmd = "mutmut run"
+# Deterministic Hypothesis profile (derandomize, no deadline) so a slow mutant run never
+# produces a spurious DeadlineExceeded kill; tests/conftest.py honours HYPOTHESIS_PROFILE.
+env = { HYPOTHESIS_PROFILE = "ci" }
