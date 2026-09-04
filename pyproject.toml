@@ -41,6 +41,7 @@ viz = [
 
 [tool.uv]
 required-version = ">=0.12.9,<0.13"
+exclude-newer = "3 days"
 
 [tool.uv.sources]
 aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae699401c1a6f894ba926c44" }
@@ -49,9 +50,9 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 dev = [
     "deptry>=0.25.1",
     "poethepoet>=0.48.0",
-    "prek>=0.5.2",
-    "ruff>=0.16.6",
-    "ty>=0.0.78",
+    "prek>=0.5.1",
+    "ruff>=0.16.5",
+    "ty>=0.0.77",
     "zizmor>=1.30.0",
 ]
 
