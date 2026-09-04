@@ -196,11 +196,6 @@ style.
   self-contained, importing `ui_kobe` and their host framework and nothing
   from `scripts/`. `scripts/` import `ui_kobe` as an installed package; no
   `sys.path` edits.
-- `CLAUDE.md` at the root is a committed symlink to `AGENTS.md` (git mode
-  `120000`), so Claude Code reads the same contract as every other agent.
-  Never edit or replace it with a regular file: edit `AGENTS.md`. Checkouts
-  on Windows need `git config core.symlinks true` (and Developer Mode or an
-  elevated shell) to materialise it as a link rather than a text file.
 - Generated graphs, logs, outputs and `dist/` are git-ignored; `.gitignore` is
   the authority on what is not tracked.
 
