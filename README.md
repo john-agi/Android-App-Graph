@@ -45,8 +45,7 @@ UI-KOBE/
 `ui_kobe/` is the installable Python package used by the exploration CLI and by
 the AITK translator. Keep it installed in the same environment as AITK.
 
-Generated graphs, logs, outputs, tests, and local documents are intentionally
-ignored by git.
+Generated graphs, logs, and outputs are intentionally ignored by git.
 
 ## Prerequisites
 

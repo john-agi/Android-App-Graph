@@ -208,13 +208,14 @@ __marimo__/
 
 graphs/
 outputs/
-docs/
-tests/
 
 .claude/
 
 logs/
 .venv/
+
+# mutmut mutation-testing state
+mutants/
 
 # Local generated files
 .DS_Store
