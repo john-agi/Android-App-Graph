@@ -27,8 +27,10 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
+from openai import OpenAI
 
 from ui_kobe.utils import make_client
 from ui_kobe.utils.graph_manager import GraphManager
@@ -39,6 +41,9 @@ from ui_kobe.utils.vlm_utils import (
     token_tracker,
     verify_same_node,
 )
+
+if TYPE_CHECKING:
+    from aitk.utils.adb_controller import ADBController
 
 logger = logging.getLogger("ui_kobe.audit")
 
@@ -157,7 +162,7 @@ def select_apps_for_audit(
 def verify_and_merge_nodes(
     graph: GraphManager,
     merge_issues: list[dict],
-    page_detail_client,
+    page_detail_client: OpenAI,
     page_detail_model: str,
 ) -> list[dict]:
     """Verify merge candidates using screenshot comparison, then merge confirmed pairs.
@@ -252,13 +257,13 @@ def verify_and_merge_nodes(
 def re_explore_issues(
     graph: GraphManager,
     issues: list[dict],
-    controller,
+    controller: ADBController,
     app_name: str,
     package_name: str,
     graph_path: Path,
-    instruction_client,
+    instruction_client: OpenAI,
     instruction_model: str,
-    action_client,
+    action_client: OpenAI,
     action_model: str,
     steps_per_issue: int = 5,
 ) -> list[dict]:

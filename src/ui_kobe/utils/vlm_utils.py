@@ -8,11 +8,16 @@ import json
 import logging
 import math
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from openai import OpenAI
 from PIL import Image
+
+if TYPE_CHECKING:
+    from openai.types import CompletionUsage
+    from openai.types.chat import ChatCompletion
+    from openai.types.create_embedding_response import Usage as EmbeddingUsage
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +35,12 @@ class TokenTracker:
     def __init__(self) -> None:
         self._usage: dict[str, dict[str, int]] = {}
 
-    def record(self, call_type: str, model: str, usage) -> None:
+    def record(
+        self,
+        call_type: str,
+        model: str,
+        usage: CompletionUsage | EmbeddingUsage | None,
+    ) -> None:
         """Record token usage from an API response.
 
         Args:
@@ -1314,7 +1324,7 @@ def plan_next_action(
     return instruction
 
 
-def _parse_agent_response(resp) -> tuple[dict | None, str, str]:
+def _parse_agent_response(resp: ChatCompletion) -> tuple[dict | None, str, str]:
     """Parse an action agent VLM response.
 
     Handles both XML <tool_call> responses and native tool calling.

@@ -7,7 +7,7 @@ import io
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from aitk.translators.ui_kobe_v2 import UIKobeV2Translator
@@ -15,10 +15,13 @@ from android_world.agents import base_agent
 from android_world.env import adb_utils, interface, json_action
 from PIL import Image
 
+if TYPE_CHECKING:
+    import numpy as np
+
 logger = logging.getLogger("ui_kobe.android_world")
 
 
-def _pixels_to_png_b64(pixels) -> str:
+def _pixels_to_png_b64(pixels: np.ndarray) -> str:
     buffer = io.BytesIO()
     Image.fromarray(pixels).save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -117,7 +120,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         cls,
         env: interface.AsyncEnv,
         config_path: str | Path,
-        **kwargs,
+        **kwargs: Any,
     ) -> UIKobeAndroidWorldAgent:
         graph_dir, vlm_config = load_agent_settings(Path(config_path))
         return cls(env, graph_dir=graph_dir, vlm_config=vlm_config, **kwargs)

@@ -3,14 +3,18 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from ui_kobe.kobe import Kobe
 from ui_kobe.utils.logging import setup_logging
 
+if TYPE_CHECKING:
+    from aitk.utils.avd_manager import AVDManager
 
-def check_avd(avd_manager, config: dict, logger: logging.Logger) -> None:
+
+def check_avd(avd_manager: AVDManager, config: dict, logger: logging.Logger) -> None:
     """Ensure an AVD is running. If not, duplicate the base AVD and launch it."""
     running_avd_list = avd_manager.get_running_avd_list()
     if running_avd_list:

@@ -839,7 +839,7 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _edge_weight(source, target, edge_data) -> int:
+    def _edge_weight(source: str, target: str, edge_data: dict) -> int:
         """Return the minimum num_steps for an edge (used as path weight)."""
         steps = edge_data.get("num_steps", [1])
         return min(steps) if steps else 1

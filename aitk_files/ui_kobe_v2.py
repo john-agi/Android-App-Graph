@@ -33,6 +33,7 @@ import math
 import os
 import re
 import time
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -199,7 +200,7 @@ one-step instruction. No explanations."""
 # ---------------------------------------------------------------------------
 
 
-def _load_graph_from_json(path: Path):
+def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -257,7 +258,7 @@ def _image_embeddings_path(graph_path: Path) -> Path:
     return graph_path.with_suffix(".image_emb.json")
 
 
-def _save_image_embeddings(graph_path: Path, G) -> None:
+def _save_image_embeddings(graph_path: Path, G: nx.DiGraph) -> None:
     embeddings = {
         node_id: data["image_embedding"]
         for node_id, data in G.nodes(data=True)
@@ -299,7 +300,7 @@ def _package_from_activity(activity: str) -> str:
     return activity
 
 
-def _extract_packages_from_graph(G) -> set[str]:
+def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
     packages = set()
     for _, data in G.nodes(data=True):
         activity = data.get("activity", "")
@@ -456,7 +457,7 @@ def _parse_decide_output(raw: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _call_with_retry(label: str, func):
+def _call_with_retry[T](label: str, func: Callable[[], T]) -> T:
     """Run one API operation with up to three total attempts."""
     attempts = V2_API_RETRIES + 1
     for attempt in range(attempts):
@@ -478,7 +479,12 @@ def _call_with_retry(label: str, func):
     raise RuntimeError("unreachable")
 
 
-def _chat_completion_content(client, *, parse_retries: int = V2_PARSE_RETRIES, **kwargs):
+def _chat_completion_content(
+    client: OpenAI,
+    *,
+    parse_retries: int = V2_PARSE_RETRIES,
+    **kwargs: Any,
+) -> Iterator[tuple[int, str, bool]]:
     """Yield chat completion content, retrying at the caller's parse boundary."""
     for attempt in range(parse_retries + 1):
         resp = _call_with_retry(
@@ -742,7 +748,7 @@ class UIKobeV2Translator(BaseTranslator):
                 return app_name
         return None
 
-    def _get_graph_for_package(self, package: str):
+    def _get_graph_for_package(self, package: str) -> nx.DiGraph | None:
         app_name = self._package_to_app.get(package)
         if not app_name:
             app_name = self._package_to_app.get(_package_from_activity(package))
@@ -967,7 +973,7 @@ class UIKobeV2Translator(BaseTranslator):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _unpack_template(tmpl) -> tuple[str, str]:
+    def _unpack_template(tmpl: dict | str) -> tuple[str, str]:
         """Extract (instruction_text, observation_text) from a template entry."""
         if isinstance(tmpl, dict):
             return tmpl.get("template", ""), tmpl.get("observation_template", "")
