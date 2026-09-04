@@ -88,6 +88,9 @@ style.
 - Type checker: ty (`uv run --locked ty check`; `_typecheck` in
   `poe check-fast`, right after `_lint`; scope is `src/` and `tests/` only, the
   root adapters and scripts are not type-checked).
+- Tests: pytest with pytest-cov (branch coverage of `ui_kobe`, floor
+  `[tool.coverage.report] fail_under`), pytest-randomly and Hypothesis
+  (`_test` in `poe check`; `poe test-unit` for a fast run without coverage).
 
 ## Policies
 
@@ -221,3 +224,33 @@ The aitk device surface is typed through the `DeviceController` and
 `AvdManager` Protocols in `src/ui_kobe/device.py`. Tests and moved scripts
 take those Protocols, never the concrete `ADBController` and `AVDManager`
 classes, which is what lets a fake device stand in without adb or an emulator.
+
+## Tests
+
+- Run `uv run --locked poe test-unit` for a fast run and
+  `uv run --locked poe check` for the definition of done (includes coverage).
+  Free arguments are appended to pytest:
+  `uv run --locked poe test-unit -k cli -x`.
+- pytest runs in strict mode with `filterwarnings = ["error"]`,
+  `--import-mode=importlib` and random ordering (pytest-randomly). Reproduce an
+  order-dependent failure with `--randomly-seed=<n>` (the seed is printed at the
+  top of every run) and a Hypothesis failure with `--hypothesis-seed=<n>`; the
+  two seeds are independent because pytest-randomly does not reseed Hypothesis.
+  `-p no:randomly` disables shuffling for one run only; never put it in
+  configuration.
+- Coverage is branch coverage of `ui_kobe`, measured by `_test`
+  (`pytest --cov=ui_kobe --cov-report=term-missing`).
+  `[tool.coverage.report] fail_under` is a ratchet: it was set from the measured
+  baseline, it is raised when coverage grows, and it is never lowered.
+  `--cov-fail-under` never appears in `addopts` or a task. A PR that lowers the
+  floor is rejected.
+- Tests must never need adb, an emulator, network access or API keys.
+  `tests/conftest.py` deletes every `UI_KOBE_*`, `GEMINI_API_KEY` and
+  `OPENAI_API_KEY` variable before each test; do not work around it.
+- Hypothesis profiles live in `tests/conftest.py`: `default` locally, `ci`
+  (500 examples, deterministic) when `CI` is set or `HYPOTHESIS_PROFILE=ci`.
+- `tests/` has no `__init__.py`; test modules cannot import each other, so
+  shared fixtures go in `tests/conftest.py`. Unused parameters of fakes are
+  named with a leading underscore instead of being suppressed.
+- Do not add `# pragma: no cover`, `exclude_also` patterns, or warning ignores
+  for code in `src/` to make a check pass.
