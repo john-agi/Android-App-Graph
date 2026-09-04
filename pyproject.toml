@@ -122,6 +122,7 @@ _fix-lint = "ruff check --fix --exit-zero ."
 _format = "ruff format ."
 _format-check = "ruff format --check ."
 _lint = "ruff check ."
+_dependencies = "deptry ."
 _environment = "uv pip check"
 _build = "uv build --no-sources"
 
@@ -135,4 +136,4 @@ sequence = ["_format-check", "_lint"]
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_environment", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_build"]

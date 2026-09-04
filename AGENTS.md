@@ -67,6 +67,17 @@ style.
   `ruff format .`).
 - Environment check: `uv pip check` (`_environment` in `poe check`).
 - Package build: `uv build --no-sources` (`_build` in `poe check`).
+- Dependency hygiene: deptry (`uv run --locked deptry .`; `_dependencies` in
+  `poe check`, immediately after `check-fast`). Declared dependencies must
+  match the imports in `src/`, `scripts/`, `aitk_files/` and `aw_files/`:
+  fix findings with `uv add`, `uv add --dev`, `uv add --optional <extra>` or
+  `uv remove`, never with `exclude`, `extend_exclude`, `ignore` or
+  `package_module_name_map`. Suppressions are `# deptry: ignore[DEPxxx]  # reason`
+  on the import line or a `[tool.deptry.per_rule_ignores]` entry with a TOML
+  comment naming the file that needs it; the two pre-approved entries are
+  `DEP001 = ["android_world"]` (copy-in Android World adapter) and
+  `DEP002 = ["dill"]` (imported by the git-pinned `aitk`, which declares no
+  dependencies).
 
 ## Policies
 
