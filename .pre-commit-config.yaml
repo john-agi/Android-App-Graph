@@ -1,0 +1,28 @@
+# Git hooks managed by prek (https://prek.j178.dev/). Install once per clone:
+#   uv run prek install --hook-type pre-commit --hook-type pre-push
+# Hooks are local convenience only; CI runs `uv run --locked poe check` and is the gate.
+default_install_hook_types: [pre-commit, pre-push]
+repos:
+  - repo: local
+    hooks:
+      - id: project-precommit-fix
+        name: poe fix
+        entry: uv run --locked poe fix
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: project-precommit-check-fast
+        name: poe check-fast
+        entry: uv run --locked poe check-fast
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: project-prepush
+        name: poe check
+        entry: uv run --locked poe check
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
