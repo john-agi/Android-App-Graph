@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import re
+import subprocess
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime
@@ -204,9 +205,9 @@ def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise ValueError(f"Runtime graph JSON must be an object: {path}")
+        raise TypeError(f"Runtime graph JSON must be an object: {path}")
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
-        raise ValueError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
+        raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
     screenshots_dir = path.parent / (path.stem + "_screenshots")
     if not screenshots_dir.exists() and path.stem.endswith("_audited"):
@@ -720,13 +721,12 @@ class UIKobeV2Translator(BaseTranslator):
                             node_id,
                             time.perf_counter() - started,
                         )
-                    except Exception as exc:
-                        logger.error(
+                    except Exception:
+                        logger.exception(
                             "Runtime image embedding failed for graph %s node %s after retries; "
-                            "continuing without this node embedding. Error: %s",
+                            "continuing without this node embedding.",
                             app_name,
                             node_id,
-                            exc,
                         )
                 if updated_image_cache:
                     logger.info("[GRAPH] %s: image embedding cache updated", app_name)
@@ -738,8 +738,8 @@ class UIKobeV2Translator(BaseTranslator):
                     app_name,
                     sorted(_extract_packages_from_graph(G)),
                 )
-            except Exception as e:
-                logger.error("Failed to load graph %s: %s", graph_file, e)
+            except Exception:
+                logger.exception("Failed to load graph %s", graph_file)
 
     def _resolve_app_from_task(self, task: str) -> str | None:
         task_lower = task.lower()
@@ -1284,8 +1284,6 @@ class UIKobeV2Translator(BaseTranslator):
         # Detect if soft keyboard is visible (text field is focused)
         keyboard_hint = ""
         try:
-            import subprocess
-
             kb_check = subprocess.run(
                 ["adb", "shell", "dumpsys", "input_method"],
                 capture_output=True,
@@ -1294,8 +1292,8 @@ class UIKobeV2Translator(BaseTranslator):
             )
             if "mInputShown=true" in kb_check.stdout:
                 keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("Soft keyboard probe failed: %s", exc)
 
         aitk_action, history_entry = _call_with_retry(
             "action agent",

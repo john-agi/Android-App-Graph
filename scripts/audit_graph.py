@@ -373,8 +373,8 @@ def re_explore_issues(
                     input_status = (
                         "Soft keyboard is visible; a text field is focused and ready for typing."
                     )
-            except Exception:
-                pass
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.debug("Soft keyboard probe failed: %s", exc)
 
             instruction = plan_next_action(
                 client=instruction_client,

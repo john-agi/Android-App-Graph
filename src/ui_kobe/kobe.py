@@ -172,9 +172,9 @@ class Kobe:
             actual_node = self.navigate_to_node(selected)
         except Exception as exc:
             self.logger.warning(
-                "Coverage checkpoint navigation to %s failed: %s",
+                "Coverage checkpoint navigation to %s failed.",
                 selected,
-                exc,
+                exc_info=exc,
             )
             return None
         return actual_node
@@ -382,8 +382,8 @@ class Kobe:
                             "Soft keyboard is visible; a text field is focused "
                             "and ready for typing."
                         )
-                except Exception:
-                    pass
+                except (OSError, subprocess.SubprocessError) as exc:
+                    self.logger.debug("Soft keyboard probe failed: %s", exc)
 
                 # Step 1: Plan — decide WHAT to do (natural language)
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)

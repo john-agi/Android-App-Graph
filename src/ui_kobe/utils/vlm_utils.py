@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from PIL import Image
 
 if TYPE_CHECKING:
@@ -1036,7 +1036,7 @@ def get_image_embedding(
             resp = client.embeddings.create(model=model, input=input_payload)
             token_tracker.record("image_embedding", model, resp.usage)
             return resp.data[0].embedding
-        except Exception as exc:
+        except (OpenAIError, TypeError, ValueError) as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
 
     raise RuntimeError(

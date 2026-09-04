@@ -60,7 +60,7 @@ def load_graph_json(graph_path: Path) -> dict:
     with open(graph_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise ValueError(f"Graph JSON must be an object: {graph_path}")
+        raise TypeError(f"Graph JSON must be an object: {graph_path}")
     return data
 
 
@@ -160,14 +160,13 @@ def precompute_graph_image_embeddings(
                     node_id,
                     time.perf_counter() - started,
                 )
-            except Exception as exc:
+            except Exception:
                 summary["skipped_failed"] += 1
-                logger.error(
+                logger.exception(
                     "Runtime image embedding failed for graph %s node %s after retries; "
-                    "continuing without this node embedding. Error: %s",
+                    "continuing without this node embedding.",
                     current_app_name,
                     node_id,
-                    exc,
                 )
 
     return summary
