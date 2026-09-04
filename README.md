@@ -349,6 +349,25 @@ maps its output into Android World's `JSONAction` format. For other tools, write
 an equivalent adapter that maps graph-guided decisions into that tool's action
 space.
 
+## Development
+
+This repository uses [uv](https://docs.astral.sh/uv/) as its only project
+manager and [Poe the Poet](https://poethepoet.natn.io/) as its task runner.
+The engineering contract for humans and coding agents is in
+[AGENTS.md](AGENTS.md).
+
+```bash
+uv sync --locked                 # create .venv from uv.lock (Python 3.14)
+uv run --locked poe fix          # apply safe Ruff autofixes and format (mutates files)
+uv run --locked poe check-fast   # fast checks: format, lint, types (no mutations)
+uv run --locked poe check        # definition of done; must exit 0 before a PR
+uv run --locked poe --help       # list every public task with its help text
+```
+
+`uv run --locked` refuses to run when `uv.lock` is stale. Add or remove
+dependencies with `uv add` / `uv remove`, never by editing `uv.lock`, and
+commit `pyproject.toml` and `uv.lock` together.
+
 ## Acknowledgements
 
 Android-App-Graph is a fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE)
