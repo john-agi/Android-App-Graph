@@ -25,26 +25,35 @@ The repository has two main uses:
 
 ```text
 UI-KOBE/
-├── aitk_files/
-│   └── ui_kobe_v2.py              # AITK translator to copy into AITK
-├── aw_files/
-│   └── ui_kobe_aw_agent.py        # Android World agent adapter
-├── configs/
-│   └── explore.yaml               # Sanitized exploration demo config
-├── scripts/
+├── src/
+│   └── ui_kobe/                   # The installable package; the only directory in the wheel
+│       ├── cli.py                 # kobe-explore command
+│       ├── kobe.py                # Core app explorer
+│       └── utils/                 # Graph, VLM, and logging helpers
+├── scripts/                       # Operator scripts, not packaged
 │   ├── audit_graph.py             # Optional graph audit utility
 │   ├── explore.py                 # Script entry point for exploration
 │   ├── plot_graph.py              # Graph visualization utility
 │   ├── precompute_graph_image_embeddings.py
 │   └── run_explore.sh             # Auto-resume wrapper
-└── ui_kobe/
-    ├── cli.py                     # kobe-explore command
-    ├── kobe.py                    # Core app explorer
-    └── utils/                     # Graph, VLM, and logging helpers
+├── aitk_files/                    # Copy-in adapter for AITK, not packaged
+│   └── ui_kobe_v2.py              # AITK translator to copy into AITK
+├── aw_files/                      # Copy-in adapter for Android World, not packaged
+│   └── ui_kobe_aw_agent.py        # Android World agent adapter
+└── configs/
+    └── explore.yaml               # Sanitized exploration demo config
 ```
 
-`ui_kobe/` is the installable Python package used by the exploration CLI and by
-the AITK translator. Keep it installed in the same environment as AITK.
+`src/ui_kobe/` is the installable Python package: `uv build` produces a wheel
+that contains the `ui_kobe` import package and nothing else. Keep it installed
+in the same environment as AITK.
+
+`scripts/`, `aitk_files/`, `aw_files/` and `configs/` deliberately stay at the
+repository root and are not part of the wheel. `scripts/` holds operator
+scripts that import `ui_kobe` as an installed package and are run with
+`uv run python scripts/<name>.py`. `aitk_files/` and `aw_files/` are copy-in
+adapters that you copy into an AITK or Android World checkout (see the
+sections below). `configs/` holds example configuration.
 
 Generated graphs, logs, and outputs are intentionally ignored by git.
 
