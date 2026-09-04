@@ -85,6 +85,9 @@ style.
   `DEP001 = ["android_world"]` (copy-in Android World adapter) and
   `DEP002 = ["dill"]` (imported by the git-pinned `aitk`, which declares no
   dependencies).
+- Type checker: ty (`uv run --locked ty check`; `_typecheck` in
+  `poe check-fast`, right after `_lint`; scope is `src/` and `tests/` only, the
+  root adapters and scripts are not type-checked).
 
 ## Policies
 
@@ -189,3 +192,32 @@ byte-for-byte.
 ## Git hooks
 
 After cloning, run `uv run prek install --hook-type pre-commit --hook-type pre-push`. The pre-commit stage runs `poe fix` then `poe check-fast`; the pre-push stage runs `poe check`. Run a stage on demand with `uv run prek run --all-files` (commit stage) or `uv run prek run --all-files --stage pre-push` (push stage). Never bypass the hooks with `git commit --no-verify` or `git push --no-verify` to land a change; fix the cause. If a hook fails with `The lockfile at uv.lock needs to be updated, but --locked was provided`, run `uv lock` and stage `uv.lock`. Hooks are local; CI's `uv run --locked poe check` on every pull request is the gate.
+
+## Type checking
+
+The configuration lives in `[tool.ty]` in `pyproject.toml` and is strict: on
+top of ty's defaults it turns `blanket-ignore-comment`,
+`dynamic-function-decorator-return`, `missing-override-decorator`,
+`missing-type-argument`, `unsound-assignment`, `unsound-return-statement` and
+`unsound-yield` into errors, `possibly-unresolved-reference` and
+`unsupported-dynamic-base` into warnings (blocking, because
+`error-on-warning` is on), and sets `strict-equality-semantics` and
+`strict-generic-narrowing`. `division-by-zero`, `possibly-missing-attribute`
+and `possibly-missing-import` are deliberately left off: ty's migration guide
+says they have a significant number of false positives. Never weaken any of
+this to make a check pass.
+
+`# ty: ignore[rule]  # reason` on the offending line is the only suppression
+that works, and every one of them is justified in the pull request that adds
+it. `# type: ignore` is inert because `respect-type-ignore-comments = false`,
+and a suppression that stops matching is reported by `unused-ignore-comment`
+and must be deleted.
+
+`src/ui_kobe/py.typed` marks the package as typed, so consumers of the wheel
+see these annotations. Untyped payloads are narrowed at the boundary with the
+helpers in `src/ui_kobe/payloads.py` rather than with `cast`.
+
+The aitk device surface is typed through the `DeviceController` and
+`AvdManager` Protocols in `src/ui_kobe/device.py`. Tests and moved scripts
+take those Protocols, never the concrete `ADBController` and `AVDManager`
+classes, which is what lets a fake device stand in without adb or an emulator.

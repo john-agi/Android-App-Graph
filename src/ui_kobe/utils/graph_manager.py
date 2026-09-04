@@ -31,6 +31,7 @@ from typing import Any
 import networkx as nx
 from openai import OpenAI
 
+from ui_kobe.payloads import as_float_list, as_int_list, as_str_dict
 from ui_kobe.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
@@ -65,6 +66,16 @@ def _package_from_activity(activity: str) -> str:
     return activity
 
 
+def _node_id(value: object) -> str:
+    """Return a graph node ID as ``str``.
+
+    ``networkx`` ships no annotations, so every node ID read back out of the
+    graph is ``Unknown``. The graph only ever stores ``str`` IDs, and this is
+    the one place that says so.
+    """
+    return value if isinstance(value, str) else str(value)
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
@@ -96,7 +107,7 @@ def _merge_into_schema(
     return schema
 
 
-def _merge_elements(node_data: dict, new_elements: list[dict[str, str]]) -> None:
+def _merge_elements(node_data: dict[str, Any], new_elements: list[dict[str, str]]) -> None:
     """Merge newly observed elements into a node's existing element list.
 
     New elements whose description doesn't already exist are appended with
@@ -142,6 +153,20 @@ class GraphManager:
         # Cache: (screenshot_hash, activity) → node_id to skip VLM when screen unchanged
         self._last_identify_cache: tuple[int, str, str] | None = None  # (hash, activity, node_id)
         self.total_steps_completed = 0
+
+    def _require_page_detail_client(self) -> OpenAI:
+        """Return the page-detail client, or raise when none was configured."""
+        if self.page_detail_client is None:
+            msg = "GraphManager needs a page_detail_client for this operation"
+            raise RuntimeError(msg)
+        return self.page_detail_client
+
+    def _require_embedding_client(self) -> OpenAI:
+        """Return the embedding client, or raise when none was configured."""
+        if self.embedding_client is None:
+            msg = "GraphManager needs an embedding_client for this operation"
+            raise RuntimeError(msg)
+        return self.embedding_client
 
     # ------------------------------------------------------------------
     # State identification (multi-level)
@@ -194,7 +219,7 @@ class GraphManager:
 
         # Step 2: Single VLM call — always outputs a fresh description
         page_description, detail_snapshot, elements = describe_page_and_state(
-            self.page_detail_client,
+            self._require_page_detail_client(),
             screenshot_b64,
             existing_nodes=same_pkg_descriptions or None,
             existing_keys=same_pkg_keys or None,
@@ -209,10 +234,10 @@ class GraphManager:
 
         # Step 3: Compute embedding and find best candidate
         description_embedding = get_embedding(
-            self.embedding_client, page_description, model=self.embedding_model
+            self._require_embedding_client(), page_description, model=self.embedding_model
         )
 
-        best_node_id = None
+        best_node_id: str | None = None
         best_similarity = -1.0
         for node_id, data in self.graph.nodes(data=True):
             if _package_from_activity(data.get("activity", "")) != current_pkg:
@@ -223,10 +248,10 @@ class GraphManager:
             sim = _cosine_similarity(description_embedding, existing_emb)
             if sim > best_similarity:
                 best_similarity = sim
-                best_node_id = node_id
+                best_node_id = _node_id(node_id)
 
         # Step 4: If similar enough, ALWAYS verify with screenshot comparison
-        matched_node_id = None
+        matched_node_id: str | None = None
 
         if best_node_id is not None:
             logger.info(
@@ -243,7 +268,7 @@ class GraphManager:
 
             if candidate_screenshot:
                 verify_result = verify_same_node(
-                    self.page_detail_client,
+                    self._require_page_detail_client(),
                     screenshot_new_b64=screenshot_b64,
                     screenshot_existing_b64=candidate_screenshot,
                     existing_description=candidate_data.get("page_description", ""),
@@ -272,7 +297,9 @@ class GraphManager:
                     if refined_new:
                         page_description = refined_new
                         description_embedding = get_embedding(
-                            self.embedding_client, page_description, model=self.embedding_model
+                            self._require_embedding_client(),
+                            page_description,
+                            model=self.embedding_model,
                         )
 
                     logger.info(
@@ -401,7 +428,7 @@ class GraphManager:
 
         node_data["page_description"] = page_description
         node_data["description_embedding"] = get_embedding(
-            self.embedding_client, page_description, model=self.embedding_model
+            self._require_embedding_client(), page_description, model=self.embedding_model
         )
 
         if new_node_id != node_id:
@@ -441,7 +468,7 @@ class GraphManager:
         """Return all (node_id, attributes) pairs."""
         return [(n, dict(d)) for n, d in self.graph.nodes(data=True)]
 
-    def get_unexplored_elements(self, node_id: str) -> list[dict]:
+    def get_unexplored_elements(self, node_id: str) -> list[dict[str, Any]]:
         """Return elements on a node that have not been explored yet."""
         if node_id not in self.graph:
             return []
@@ -573,7 +600,7 @@ class GraphManager:
         )
         return True
 
-    def _merge_edge_data(self, source: str, target: str, new_data: dict) -> None:
+    def _merge_edge_data(self, source: str, target: str, new_data: dict[str, Any]) -> None:
         """Merge edge data into an existing edge, or create it if absent."""
         if self.graph.has_edge(source, target):
             existing = self.graph[source][target]
@@ -604,10 +631,10 @@ class GraphManager:
         self,
         source: str,
         target: str,
-        action: dict | list[dict],
+        action: dict[str, Any] | list[dict[str, Any]],
         instruction: str | None = None,
         target_observation: str | None = None,
-        schema_delta: dict | None = None,
+        schema_delta: dict[str, Any] | None = None,
         num_steps: int | None = None,
     ) -> None:
         """Add a directed edge (action) from source to target.
@@ -827,7 +854,7 @@ class GraphManager:
             edges.append(edge_info)
         return edges
 
-    def get_explored_actions_from_node(self, node_id: str) -> list[dict]:
+    def get_explored_actions_from_node(self, node_id: str) -> list[dict[str, Any]]:
         """Return a flat list of all actions already taken from this node."""
         actions = []
         for edge in self.get_all_edges_from_node(node_id):
@@ -839,12 +866,14 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _edge_weight(_source: str, _target: str, edge_data: dict) -> int:
+    def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
         """Return the minimum num_steps for an edge (used as path weight)."""
-        steps = edge_data.get("num_steps", [1])
+        steps = as_int_list(edge_data.get("num_steps"))
         return min(steps) if steps else 1
 
-    def find_path(self, source: str, target: str) -> list[tuple[str, dict | list[dict]]] | None:
+    def find_path(
+        self, source: str, target: str
+    ) -> list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] | None:
         """Find the shortest weighted path from source to target.
 
         Edge weight = minimum num_steps recorded for that edge, so paths
@@ -872,7 +901,9 @@ class GraphManager:
         except nx.NetworkXNoPath:
             return None
 
-        result: list[tuple[str, dict | list[dict]]] = [(node_path[0], {})]
+        result: list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] = [
+            (_node_id(node_path[0]), {})
+        ]
         for i in range(len(node_path) - 1):
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
@@ -891,8 +922,8 @@ class GraphManager:
     def find_guided_path(
         self,
         source: str,
-        waypoints: list[dict],
-    ) -> list[dict] | None:
+        waypoints: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
         """Find a path from source through ordered waypoints (essential nodes).
 
         Each waypoint is a dict:
@@ -916,7 +947,7 @@ class GraphManager:
             ]
             Returns None if any navigation segment has no path.
         """
-        path_steps: list[dict] = []
+        path_steps: list[dict[str, Any]] = []
         current = source
 
         for wp in waypoints:
@@ -973,7 +1004,9 @@ class GraphManager:
 
         return path_steps
 
-    def _find_matching_self_loop(self, node_id: str, required_schema: dict) -> dict | None:
+    def _find_matching_self_loop(
+        self, node_id: str, required_schema: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Find a self-loop edge that changes the required schema keys.
 
         Matches by key overlap — the self-loop must change at least one of
@@ -1026,20 +1059,20 @@ class GraphManager:
 
         Heuristic: the node with the lowest numeric ID suffix (s0_...).
         """
-        candidates = []
+        candidates: list[tuple[int, str]] = []
         for node_id, data in self.graph.nodes(data=True):
             if node_id.startswith("ext_") or data.get("is_external"):
                 continue
             if node_id.startswith("s") and "_" in node_id:
                 num_part = node_id.split("_", 1)[0][1:]
                 if num_part.isdigit():
-                    candidates.append((int(num_part), node_id))
+                    candidates.append((int(num_part), _node_id(node_id)))
 
         if candidates:
             return min(candidates)[1]
 
         nodes = sorted(
-            n
+            _node_id(n)
             for n, data in self.graph.nodes(data=True)
             if not n.startswith("ext_") and not data.get("is_external")
         )
@@ -1058,7 +1091,7 @@ class GraphManager:
 
         # Only consider reachable nodes
         reachable = nx.descendants(self.graph, start) | {start}
-        best_node = None
+        best_node: str | None = None
         min_out_degree = float("inf")
 
         for node in reachable:
@@ -1076,7 +1109,7 @@ class GraphManager:
             out_degree = self.graph.out_degree(node)
             if out_degree < min_out_degree:
                 min_out_degree = out_degree
-                best_node = node
+                best_node = _node_id(node)
 
         return best_node
 
@@ -1238,7 +1271,10 @@ class GraphManager:
         embeddings: dict[str, list[float]] = {}
         if emb_path.exists():
             with open(emb_path, "r", encoding="utf-8") as f:
-                embeddings = json.load(f)
+                embeddings = {
+                    node_id: as_float_list(vector)
+                    for node_id, vector in as_str_dict(json.load(f)).items()
+                }
 
         self._next_id = data.get("next_id", 0)
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
@@ -1307,21 +1343,23 @@ class GraphManager:
 
         Returns a list of (node_id, similarity) sorted descending.
         """
-        query_emb = get_embedding(self.embedding_client, query, model=self.embedding_model)
-        results = []
+        query_emb = get_embedding(
+            self._require_embedding_client(), query, model=self.embedding_model
+        )
+        results: list[tuple[str, float]] = []
         for node_id, data in self.graph.nodes(data=True):
             emb = data.get("description_embedding")
             if emb is None:
                 continue
             sim = _cosine_similarity(query_emb, emb)
-            results.append((node_id, sim))
+            results.append((_node_id(node_id), sim))
         results.sort(key=lambda x: x[1], reverse=True)
         return results
 
     def shortest_path(self, source: str, target: str) -> list[str] | None:
         """Find shortest weighted path between two nodes. Returns list of node IDs or None."""
         try:
-            return nx.shortest_path(
+            node_path = nx.shortest_path(
                 self.graph,
                 source,
                 target,
@@ -1329,8 +1367,9 @@ class GraphManager:
             )
         except nx.NetworkXNoPath:
             return None
+        return [_node_id(node) for node in node_path]
 
-    def get_path_actions(self, path: list[str]) -> list[dict]:
+    def get_path_actions(self, path: list[str]) -> list[dict[str, Any]]:
         """Given a path (list of node IDs), return the sequence of actions to follow it."""
         actions = []
         for i in range(len(path) - 1):
@@ -1401,7 +1440,7 @@ class GraphManager:
 
         return "\n".join(lines)
 
-    def run_audit(self, app_name: str = "") -> dict:
+    def run_audit(self, app_name: str = "") -> dict[str, Any]:
         """Run LLM audit on the graph structure.
 
         Returns the audit result dict with "issues" and "summary".
@@ -1464,7 +1503,7 @@ class GraphManager:
                 return int(num), node_id
         return 10**9, node_id
 
-    def run_node_merge_audit(self, app_name: str = "") -> dict:
+    def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
         """Run a lightweight node-merge audit and merge verified duplicates."""
         if self.page_detail_client is None:
             logger.warning("No page_detail_client — cannot run node merge audit")

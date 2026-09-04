@@ -51,6 +51,7 @@ dev = [
     "poethepoet>=0.48.0",
     "prek>=0.5.2",
     "ruff>=0.16.6",
+    "ty>=0.0.78",
 ]
 
 [tool.ruff]
@@ -113,6 +114,35 @@ DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
 DEP002 = ["dill"]
 
+# ty type checker. Rationale and the suppression rule: see AGENTS.md.
+[tool.ty.src]
+# The root adapters and operator scripts are linted by Ruff, not type-checked.
+include = ["src", "tests"]
+
+[tool.ty.rules]
+# Stricter tier from ty's migration guide plus missing-override-decorator; all
+# default to "ignore". division-by-zero, possibly-missing-attribute and
+# possibly-missing-import stay off: the guide calls them false-positive-prone.
+blanket-ignore-comment = "error"
+dynamic-function-decorator-return = "error"
+missing-override-decorator = "error"
+missing-type-argument = "error"
+unsound-assignment = "error"
+unsound-return-statement = "error"
+unsound-yield = "error"
+possibly-unresolved-reference = "warn"
+unsupported-dynamic-base = "warn"
+
+[tool.ty.analysis]
+# `# ty: ignore[rule]  # reason` is the only suppression that works.
+respect-type-ignore-comments = false
+strict-equality-semantics = true
+strict-generic-narrowing = true
+
+[tool.ty.terminal]
+# Default, stated on purpose: the two "warn" rules above are blocking too.
+error-on-warning = true
+
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
@@ -123,6 +153,7 @@ _fix-lint = "ruff check --fix --exit-zero ."
 _format = "ruff format ."
 _format-check = "ruff format --check ."
 _lint = "ruff check ."
+_typecheck = "ty check"
 _dependencies = "deptry ."
 _environment = "uv pip check"
 _build = "uv build --no-sources"
@@ -133,7 +164,7 @@ sequence = ["_fix-lint", "_format"]
 
 [tool.poe.tasks.check-fast]
 help = "Fast checks: format, lint, types"
-sequence = ["_format-check", "_lint"]
+sequence = ["_format-check", "_lint", "_typecheck"]
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"

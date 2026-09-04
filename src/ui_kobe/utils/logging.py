@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import traceback
 from datetime import datetime
+from typing import override
 
 from rich.console import Console
 from rich.text import Text
@@ -90,6 +91,7 @@ class _ColorHandler(logging.Handler):
             line.append(" " * 24, style=self.dim_detail_style)
             line.append(extra_line, style=text_style)
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
         try:
             component = self._resolve_component(record)

@@ -3,18 +3,16 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import yaml
 
+from ui_kobe.device import AvdManager
 from ui_kobe.kobe import Kobe
 from ui_kobe.utils.logging import setup_logging
 
-if TYPE_CHECKING:
-    from aitk.utils.avd_manager import AVDManager
 
-
-def check_avd(avd_manager: AVDManager, config: dict, logger: logging.Logger) -> None:
+def check_avd(avd_manager: AvdManager, config: dict[str, Any], logger: logging.Logger) -> None:
     """Ensure an AVD is running. If not, duplicate the base AVD and launch it."""
     running_avd_list = avd_manager.get_running_avd_list()
     if running_avd_list:
@@ -37,7 +35,7 @@ def check_avd(avd_manager: AVDManager, config: dict, logger: logging.Logger) -> 
     time.sleep(60)
 
 
-def launch_app(config: dict, app: dict, logger: logging.Logger) -> None:
+def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> None:
     """Launch an app using an explicit activity when configured."""
     udid = config["device"]["udid"]
     app_name = app["name"]
