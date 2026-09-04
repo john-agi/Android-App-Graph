@@ -1289,6 +1289,7 @@ class UIKobeV2Translator(BaseTranslator):
                 capture_output=True,
                 text=True,
                 timeout=3,
+                check=False,
             )
             if "mInputShown=true" in kb_check.stdout:
                 keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"

@@ -375,6 +375,7 @@ class Kobe:
                         capture_output=True,
                         text=True,
                         timeout=3,
+                        check=False,
                     )
                     if "mInputShown=true" in kb_check.stdout:
                         keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
@@ -774,7 +775,7 @@ class Kobe:
             )
             ctrl_config = getattr(self.controller, "config", {})
             udid = ctrl_config.get("device", ctrl_config).get("udid", "emulator-5554")
-            subprocess.run(
+            relaunch = subprocess.run(
                 [
                     "adb",
                     "-s",
@@ -789,7 +790,14 @@ class Kobe:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                check=False,
             )
+            if relaunch.returncode != 0:
+                self.logger.warning(
+                    "Relaunch of %s exited with %d; continuing, the next state check will confirm",
+                    self.package_name,
+                    relaunch.returncode,
+                )
             time.sleep(3)
 
         return ext_node_id

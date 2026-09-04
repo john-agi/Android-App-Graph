@@ -105,6 +105,7 @@ def launch_app(config: dict, app: dict) -> None:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0:
             return
@@ -130,6 +131,7 @@ def launch_app(config: dict, app: dict) -> None:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=True,
     )
 
 
@@ -282,7 +284,7 @@ def re_explore_issues(
         return results
 
     def _relaunch_app() -> None:
-        subprocess.run(
+        relaunch = subprocess.run(
             [
                 "adb",
                 "-s",
@@ -297,7 +299,14 @@ def re_explore_issues(
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            check=False,
         )
+        if relaunch.returncode != 0:
+            logger.warning(
+                "Relaunch of %s exited with %d; continuing, the next state check will confirm",
+                package_name,
+                relaunch.returncode,
+            )
         time.sleep(4)
 
     def _navigate_to(target_node: str) -> str | None:
@@ -367,6 +376,7 @@ def re_explore_issues(
                     capture_output=True,
                     text=True,
                     timeout=3,
+                    check=False,
                 )
                 if "mInputShown=true" in kb_check.stdout:
                     keyboard_hint = " (Note: the soft keyboard is currently visible.)"

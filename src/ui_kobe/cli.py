@@ -59,6 +59,7 @@ def launch_app(config: dict, app: dict, logger: logging.Logger) -> None:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0:
             return
@@ -84,6 +85,7 @@ def launch_app(config: dict, app: dict, logger: logging.Logger) -> None:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=True,
     )
 
 
