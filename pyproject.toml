@@ -42,6 +42,7 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 
 [dependency-groups]
 dev = [
+    "poethepoet>=0.48.0",
     "ruff>=0.16.6",
 ]
 
@@ -94,3 +95,28 @@ allow-star-arg-any = true
 [tool.ruff.format]
 # Also format doctest and fenced code examples inside docstrings.
 docstring-code-format = true
+
+# Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
+# conventions, the canonical order and the insertion rule: see AGENTS.md.
+[tool.poe]
+executor = "simple"
+
+[tool.poe.tasks]
+_fix-lint = "ruff check --fix --exit-zero ."
+_format = "ruff format ."
+_format-check = "ruff format --check ."
+_lint = "ruff check ."
+_environment = "uv pip check"
+_build = "uv build --no-sources"
+
+[tool.poe.tasks.fix]
+help = "Apply safe autofixes and format"
+sequence = ["_fix-lint", "_format"]
+
+[tool.poe.tasks.check-fast]
+help = "Fast checks: format, lint, types"
+sequence = ["_format-check", "_lint"]
+
+[tool.poe.tasks.check]
+help = "Definition of done: every non-mutating check"
+sequence = ["check-fast", "_environment", "_build"]
