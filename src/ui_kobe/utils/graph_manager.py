@@ -147,7 +147,7 @@ class GraphManager:
     # State identification (multi-level)
     # ------------------------------------------------------------------
 
-    def identify_state(self, activity: str, screenshot_b64: str, app_name: str = "") -> str:
+    def identify_state(self, activity: str, screenshot_b64: str) -> str:
         """Identify which node the current screen belongs to, or create a new one.
 
         Process:
@@ -304,7 +304,7 @@ class GraphManager:
                 )
             node_data["activities"] = activities
         else:
-            node_id = self._make_node_id(activity, page_description)
+            node_id = self._make_node_id(page_description)
             # Initialize elements with explored=False
             init_elements = [
                 {
@@ -357,7 +357,7 @@ class GraphManager:
         self._last_identify_cache = (screen_hash, activity, node_id)
         return node_id
 
-    def _make_node_id(self, activity: str, page_description: str) -> str:
+    def _make_node_id(self, page_description: str) -> str:
         """Generate a unique, human-readable node ID."""
         nid = self._next_id
         self._next_id += 1
@@ -839,7 +839,7 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _edge_weight(source: str, target: str, edge_data: dict) -> int:
+    def _edge_weight(_source: str, _target: str, edge_data: dict) -> int:
         """Return the minimum num_steps for an edge (used as path weight)."""
         steps = edge_data.get("num_steps", [1])
         return min(steps) if steps else 1

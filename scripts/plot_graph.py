@@ -59,7 +59,6 @@ def load_graph(graph_path: str) -> tuple[dict, nx.DiGraph]:
     for edge in data["edges"]:
         templates = edge.get("instruction_templates", [])
         instructions = edge.get("instructions", [])
-        target_observations = edge.get("target_observations", [])
 
         # Prefer template for label, fall back to instructions
         if templates and isinstance(templates[0], dict) and templates[0].get("template"):
@@ -492,7 +491,6 @@ def plot_paper_matplotlib(
 def plot_pyvis(
     G: nx.DiGraph,
     output_path: str,
-    title: str = "",
     *,
     max_node_words: int = 5,
     max_edge_words: int = 6,
@@ -565,7 +563,6 @@ def plot_pyvis(
         desc = data.get("page_description", node_id)
         short_desc = _shorten_words(desc, max_node_words, 40)
         visits = data.get("visit_count", 0)
-        n_keys = data.get("num_keys", 0)
         state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
         bg = palette[idx % len(palette)]
@@ -835,7 +832,6 @@ def main() -> None:
         plot_pyvis(
             G,
             output_path,
-            title=graph_path.stem,
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
             node_size=args.node_size,

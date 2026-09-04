@@ -223,7 +223,6 @@ class Kobe:
             return self.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
-                app_name=self.app_name,
             )
 
         self.logger.info(
@@ -266,7 +265,6 @@ class Kobe:
         actual_node = self.graph.identify_state(
             device_state["activity"],
             device_state["screenshot"],
-            app_name=self.app_name,
         )
         if actual_node != target_node:
             self.logger.warning(
@@ -330,7 +328,6 @@ class Kobe:
                 current_node = self.graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
-                    app_name=self.app_name,
                 )
         elif start_step > 0:
             self.logger.info(
@@ -342,14 +339,12 @@ class Kobe:
             current_node = self.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
-                app_name=self.app_name,
             )
         else:
             device_state = self.controller.get_state()
             current_node = self.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
-                app_name=self.app_name,
             )
 
         step = start_step
@@ -461,7 +456,6 @@ class Kobe:
                     current_node = self.graph.identify_state(
                         device_state["activity"],
                         device_state["screenshot"],
-                        app_name=self.app_name,
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,
@@ -475,7 +469,6 @@ class Kobe:
                 new_node = self.graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
-                    app_name=self.app_name,
                 )
 
                 # Check for in-app WebView showing external content
@@ -497,7 +490,6 @@ class Kobe:
                     current_node = self.graph.identify_state(
                         device_state["activity"],
                         device_state["screenshot"],
-                        app_name=self.app_name,
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,

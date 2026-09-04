@@ -323,7 +323,6 @@ def re_explore_issues(
         actual = graph.identify_state(
             device_state["activity"],
             device_state["screenshot"],
-            app_name=app_name,
         )
         if actual != target_node:
             logger.warning(
@@ -419,14 +418,12 @@ def re_explore_issues(
                 current_node = graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
-                    app_name=app_name,
                 )
                 continue
 
             new_node = graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
-                app_name=app_name,
             )
 
             # Build target observation
