@@ -106,6 +106,9 @@ style.
   `UV_MALWARE_CHECK=1 uv sync --locked` for the OSV malware check, then
   `uv audit`; on dependency-changing pull requests, daily, and on demand; no
   Poe task, deliberately outside `poe check`; see "Dependency security").
+- Mutation testing: mutmut (`uv run --locked --group mutation poe mutate`;
+  `mutation` dependency group; not part of `poe check`; runs weekly in
+  `.github/workflows/mutation.yml`; see "Mutation testing" below).
 
 ## Policies
 
@@ -337,3 +340,23 @@ preview and may change; see https://docs.astral.sh/uv/concepts/preview/.
 - This workflow is not part of `poe check` and is not a required status
   check on `main`: it needs the network and its result changes over time.
 - Never hand-edit `uv.lock`; use `uv lock --upgrade-package`.
+
+## Mutation testing
+
+- `uv run --locked --group mutation poe mutate` runs mutmut over `src/ui_kobe` using `tests/`
+  (`[tool.mutmut]` in `pyproject.toml`). It is not part of `poe check` and never gates a
+  merge. `.github/workflows/mutation.yml` runs it every Monday and on demand
+  (`gh workflow run mutation.yml`); the log and the `mutmut-results` artifact list the
+  counts (`mutmut export-cicd-stats`) and the surviving mutants.
+- Surviving mutants are a review queue. Read them with `mutmut browse` (a TUI that can also
+  write a mutant into the real source: only read in it, never use its apply action) and
+  decide per mutant: the mutant reveals an unstated behaviour, so add a test that states
+  that behaviour; or the mutant is equivalent or touches behaviour we do not promise, so
+  leave it (optionally mark the line `# pragma: no mutate` with a reason); or the code is
+  dead, so delete it.
+- Never write a test merely to kill a mutant if that test would restate the implementation
+  (asserting internal call order, exact log text, or re-deriving the formula under test).
+  Such a mutant is a signal to leave it surviving or to simplify the code, not to add a test.
+- Never run `mutmut apply`; it writes mutations into real source files.
+- mutmut needs `fork`: Linux and macOS work; on Windows run inside WSL.
+- `mutants/` is a git-ignored local cache; delete it to force a complete rerun.
