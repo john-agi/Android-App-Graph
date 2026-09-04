@@ -171,7 +171,7 @@ show_missing = true
 skip_covered = true
 skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
-fail_under = 9
+fail_under = 53
 
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
