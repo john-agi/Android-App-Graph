@@ -102,6 +102,10 @@ style.
 - Tests: pytest with pytest-cov (branch coverage of `ui_kobe`, floor
   `[tool.coverage.report] fail_under`), pytest-randomly and Hypothesis
   (`_test` in `poe check`; `poe test-unit` for a fast run without coverage).
+- Dependency security: uv (`.github/workflows/security.yml` runs
+  `UV_MALWARE_CHECK=1 uv sync --locked` for the OSV malware check, then
+  `uv audit`; on dependency-changing pull requests, daily, and on demand; no
+  Poe task, deliberately outside `poe check`; see "Dependency security").
 
 ## Policies
 
@@ -301,3 +305,35 @@ does not read `pyproject.toml`). `disable`, `remap`, `--persona`,
   named with a leading underscore instead of being suppressed.
 - Do not add `# pragma: no cover`, `exclude_also` patterns, or warning ignores
   for code in `src/` to make a check pass.
+
+## Dependency security
+
+`.github/workflows/security.yml` runs `uv sync --locked` with uv's OSV
+malware check (`UV_MALWARE_CHECK=1`) and then `uv audit` on pull requests
+that change `pyproject.toml`, `uv.lock` or the workflow, daily at 06:17
+UTC, and on demand (`gh workflow run security.yml`). Both uv features are
+preview and may change; see https://docs.astral.sh/uv/concepts/preview/.
+
+- A red run on a dependency-changing pull request blocks that pull request.
+  Fix it with `uv lock --upgrade-package <name>` and commit the lockfile
+  change on its own, or, when no fixed version exists, add the advisory ID
+  to `[tool.uv.audit] ignore-until-fixed` with a comment and a linked issue.
+  A plain `ignore` needs a written justification in the pull request.
+- A red scheduled or manual run means a new advisory against a locked
+  dependency or an OSV outage. Triage it the same day in its own pull
+  request; never silence it by disabling the workflow, the job, the check,
+  or by setting `UV_MALWARE_CHECK=0`.
+- If the only error is "Malware check failed due to an error from OSV"
+  (`uv sync` exits 2) or a network error from `uv audit`, rerun the job with
+  `gh run rerun <run-id>`.
+- uv is pinned to the `[tool.uv] required-version` range, which
+  `security.yml` passes to `setup-uv` as `version:` exactly as `ci.yml`
+  does; its checkout, setup-uv and `uv python install` steps are
+  byte-for-byte copies of `ci.yml`. A patch release inside the range can
+  still change these preview features, so a green run proves the malware
+  check ran only if the sync step's log contains
+  "Malware checks are experimental" (`gh run view <run-id> --log`); if that
+  line is gone, treat the run as red and re-read the uv release notes.
+- This workflow is not part of `poe check` and is not a required status
+  check on `main`: it needs the network and its result changes over time.
+- Never hand-edit `uv.lock`; use `uv lock --upgrade-package`.
