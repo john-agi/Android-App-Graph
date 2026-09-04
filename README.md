@@ -204,90 +204,156 @@ uv run python scripts/precompute_graph_image_embeddings.py \
 
 ## Use UI-KOBE with AITK
 
-1. Install AITK and UI-KOBE in the same Python environment.
-2. Copy the v2 translator into AITK:
+AITK loads a translator by module name: `register_translator()` in
+`aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
+from `configs/controller.yaml`, imports it with `importlib.import_module`, and
+calls its `register(translator_args)` function. It cannot import a translator
+from another installed package, so the translator file must be copied into the
+AITK checkout that the environment imports. Verified against AITK commit
+`fd06a28e2286cbc1ae699401c1a6f894ba926c44`, the commit this project pins.
 
-```bash
-cp /path/to/UI-KOBE/aitk_files/ui_kobe_v2.py \
-  /path/to/AITK/aitk/translators/ui_kobe_v2.py
-```
+1. Set up AITK first, in its own environment, following AITK's `docs/setup.md`
+   (`pip install -r requirements.txt` then `pip install -e .` inside the AITK
+   checkout). Create that environment with Python 3.14: UI-KOBE requires
+   Python >= 3.14 and AITK accepts >= 3.10. AITK's `pyproject.toml` declares
+   no dependencies of its own; its runtime needs come from its
+   `requirements.txt`, which is why AITK must be installed before UI-KOBE.
 
-3. Configure your AITK agent to use `ui_kobe_v2` and pass the graph directory
-   plus VLM settings through `translator_args`.
+2. Install UI-KOBE into that same environment, after AITK, from a checkout of
+   this repository:
 
-Example translator args:
+   ```bash
+   uv pip install --python /path/to/aitk-env/bin/python --no-sources /path/to/Android-App-Graph
+   ```
 
-```yaml
-translator_args:
-  graph_dir: /path/to/UI-KOBE/graphs
-  vlm_config:
-    similarity_threshold: 0.84
-    page_detail:
-      model: ${UI_KOBE_PAGE_DETAIL_MODEL}
-      base_url: ${UI_KOBE_PAGE_DETAIL_BASE_URL}
-      api_key: ${UI_KOBE_PAGE_DETAIL_API_KEY}
-    embedding:
-      model: ${UI_KOBE_EMBEDDING_MODEL}
-      base_url: ${UI_KOBE_EMBEDDING_BASE_URL}
-      api_key: ${UI_KOBE_EMBEDDING_API_KEY}
-    instruction:
-      model: ${UI_KOBE_INSTRUCTION_MODEL}
-      base_url: ${UI_KOBE_INSTRUCTION_BASE_URL}
-      api_key: ${UI_KOBE_INSTRUCTION_API_KEY}
-    action:
-      model: ${UI_KOBE_ACTION_MODEL}
-      base_url: ${UI_KOBE_ACTION_BASE_URL}
-      api_key: ${UI_KOBE_ACTION_API_KEY}
-    image_embedding:
-      model: models/gemini-embedding-exp-03-07
-      native_base_url: https://generativelanguage.googleapis.com/v1beta
-      api_key: ${GEMINI_API_KEY}
-```
+   `--no-sources` makes uv ignore this project's `[tool.uv.sources]` pin for
+   `aitk`, so the editable AITK you installed in step 1 satisfies the `aitk`
+   requirement and is kept. Order matters: the PyPI project named `aitk` is an
+   unrelated package, and installing UI-KOBE before AITK pulls it in.
+
+3. Verify that the environment imports the AITK checkout and UI-KOBE:
+
+   ```bash
+   /path/to/aitk-env/bin/python -c "import aitk, aitk.translators as t, ui_kobe; print(aitk.__version__, aitk.__file__); print(t.__path__[0]); print(ui_kobe.__version__)"
+   ```
+
+   Expected: `0.2.1 /path/to/AITK/aitk/__init__.py`, then
+   `/path/to/AITK/aitk/translators`, then the UI-KOBE version. If
+   `aitk.__file__` points into `site-packages` or the version is not `0.2.1`,
+   the wrong `aitk` is installed; fix that before continuing.
+
+4. Copy the translator into the directory printed on the second line:
+
+   ```bash
+   cp /path/to/Android-App-Graph/aitk_files/ui_kobe_v2.py \
+     "$(/path/to/aitk-env/bin/python -c 'import aitk.translators as t; print(t.__path__[0])')/ui_kobe_v2.py"
+   ```
+
+5. Register it in AITK's `configs/controller.yaml`: set `translator: ui_kobe_v2`
+   and pass the graph directory and VLM settings through `translator_args`:
+
+   ```yaml
+   translator_args:
+     graph_dir: /path/to/UI-KOBE/graphs
+     vlm_config:
+       similarity_threshold: 0.84
+       page_detail:
+         model: ${UI_KOBE_PAGE_DETAIL_MODEL}
+         base_url: ${UI_KOBE_PAGE_DETAIL_BASE_URL}
+         api_key: ${UI_KOBE_PAGE_DETAIL_API_KEY}
+       embedding:
+         model: ${UI_KOBE_EMBEDDING_MODEL}
+         base_url: ${UI_KOBE_EMBEDDING_BASE_URL}
+         api_key: ${UI_KOBE_EMBEDDING_API_KEY}
+       instruction:
+         model: ${UI_KOBE_INSTRUCTION_MODEL}
+         base_url: ${UI_KOBE_INSTRUCTION_BASE_URL}
+         api_key: ${UI_KOBE_INSTRUCTION_API_KEY}
+       action:
+         model: ${UI_KOBE_ACTION_MODEL}
+         base_url: ${UI_KOBE_ACTION_BASE_URL}
+         api_key: ${UI_KOBE_ACTION_API_KEY}
+       image_embedding:
+         model: models/gemini-embedding-exp-03-07
+         native_base_url: https://generativelanguage.googleapis.com/v1beta
+         api_key: ${GEMINI_API_KEY}
+   ```
+
+6. Smoke-test the import without a device:
+
+   ```bash
+   /path/to/aitk-env/bin/python -c "import aitk.translators.ui_kobe_v2 as m; print(m.register)"
+   ```
+
+   Expected: `<function register at 0x...>`. Then run AITK as its README
+   describes (`scripts/interact.py` with `configs/controller.yaml`).
 
 The copied translator imports helper functions from the installed `ui_kobe`
-package, so UI-KOBE must be installed in the AITK environment.
+package; that is why UI-KOBE must be installed in the AITK environment.
 
 ## Use UI-KOBE with Android World
 
-1. Install Android World following its upstream instructions.
-2. Install AITK and UI-KOBE in the same environment used by Android World.
-3. Copy the Android World adapter:
+Android World is not published on PyPI and, at commit
+`3e50888527ef9f29b9157ecd537e408008bb1c85` (2026-07-10), requires Python
+>= 3.11 while pinning `numpy==1.26.3` and `pandas==2.1.4`, which publish no
+CPython 3.14 wheels; its `dm-env==1.6` dependency needs CMake to build
+`dm-tree`. UI-KOBE requires Python >= 3.14. There is therefore no single
+environment that can hold both this project and Android World today.
+`aw_files/ui_kobe_aw_agent.py` is kept as a reference implementation; it is
+not installed, type-checked or tested by this repository.
 
-```bash
-cp /path/to/UI-KOBE/aw_files/ui_kobe_aw_agent.py \
-  /path/to/android_world/android_world/agents/ui_kobe_aw_agent.py
-```
+To run it anyway, use an environment that Android World supports (Python
+3.11 or 3.12, following its README). This fork cannot be installed there
+(it requires Python >= 3.14), so the procedure uses the upstream UI-KOBE
+project instead, whose `pyproject.toml` declares `requires-python = ">=3.10"`:
 
-4. Register the agent in Android World's `run.py`.
+1. In that environment, install AITK (`pip install -r requirements.txt`
+   then `pip install -e .` in the AITK checkout, as in the AITK section
+   above) and then the upstream UI-KOBE project from
+   https://github.com/YuxiangChai/UI-KOBE following its README. Copy
+   upstream's `aitk_files/ui_kobe_v2.py` into the AITK checkout's
+   `aitk/translators/` directory exactly as in step 4 of the AITK section,
+   with the upstream path in place of `/path/to/Android-App-Graph`. The
+   adapter imports `aitk.translators.ui_kobe_v2`, so this copy-in must
+   come first. Do not run the `uv pip install --no-sources` command from the
+   AITK section in this environment; it would fail on `requires-python`.
+2. Copy the adapter:
 
-Add the import:
+   ```bash
+   cp /path/to/UI-KOBE/aw_files/ui_kobe_aw_agent.py \
+     /path/to/android_world/android_world/agents/ui_kobe_aw_agent.py
+   ```
 
-```python
-from android_world.agents import ui_kobe_aw_agent
-```
+3. Register the agent in Android World's `run.py`. Android World has no
+   registry; agents are selected by an `if/elif` chain in `_get_agent`. Add
+   the import:
 
-Add a branch inside `_get_agent`:
+   ```python
+   from android_world.agents import ui_kobe_aw_agent
+   ```
 
-```python
-elif _AGENT_NAME.value == 'ui_kobe':
-  agent = ui_kobe_aw_agent.UIKobeAndroidWorldAgent.from_config(
-      env,
-      '/path/to/UI-KOBE/configs/explore.yaml',
-  )
-```
+   and a branch inside `_get_agent`, before `if not agent:`:
 
-5. Run Android World with the UI-KOBE agent:
+   ```python
+   elif _AGENT_NAME.value == 'ui_kobe':
+     agent = ui_kobe_aw_agent.UIKobeAndroidWorldAgent.from_config(
+         env,
+         '/path/to/UI-KOBE/configs/explore.yaml',
+     )
+   ```
 
-```bash
-python run.py \
-  --suite_family=android_world \
-  --agent_name=ui_kobe \
-  --perform_emulator_setup \
-  --tasks=ContactsAddContact
-```
+4. Run Android World with the agent:
 
-The Android World adapter reuses the AITK translator runtime and converts AITK
-actions into Android World `JSONAction` objects.
+   ```bash
+   python run.py \
+     --suite_family=android_world \
+     --agent_name=ui_kobe \
+     --perform_emulator_setup \
+     --tasks=ContactsAddContact
+   ```
+
+The adapter reuses the AITK translator runtime and converts AITK actions into
+Android World `JSONAction` objects.
 
 ## Create Custom Agents
 

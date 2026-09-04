@@ -93,6 +93,12 @@ style.
   `.github/workflows/` for unpinned actions, broad `GITHUB_TOKEN`
   permissions, persisted credentials, template injection and cache misuse;
   audit reference https://docs.zizmor.sh/audits/).
+- Branch protection: GitHub repository ruleset `main`
+  (`.github/rulesets/main.json`, applied with the `gh api` commands in
+  `.github/rulesets/README.md`; `gh ruleset check main` shows the live rules):
+  blocks direct pushes, force pushes and deletion of `main` and requires the
+  `Quality` check on an up-to-date pull request. Enforced by GitHub at push and
+  merge time; no Poe task.
 - Tests: pytest with pytest-cov (branch coverage of `ui_kobe`, floor
   `[tool.coverage.report] fail_under`), pytest-randomly and Hypothesis
   (`_test` in `poe check`; `poe test-unit` for a fast run without coverage).
@@ -243,6 +249,28 @@ comment inside the finding's span, or a `rules.<audit-id>.ignore` entry with a
 `file.yml:line` location plus a YAML comment in `.github/zizmor.yml` (zizmor
 does not read `pyproject.toml`). `disable`, `remap`, `--persona`,
 `--min-severity`, `--min-confidence` and `--no-exit-codes` are never used.
+
+## Branch policy
+
+- `main` is protected by the repository ruleset `main`. Source of truth:
+  `.github/rulesets/main.json`; apply and update commands:
+  `.github/rulesets/README.md`.
+- Direct pushes to `main` are rejected (`GH013: Repository rule violations
+  found`). Every change lands through a pull request whose required status
+  check `Quality` (the job in `.github/workflows/ci.yml`) passed on a branch
+  that is up to date with `main`.
+- Force pushes to `main` and deletion of `main` are blocked. Never run
+  `git push --force` against `origin main`.
+- If `main` moved after your last CI run, update your branch (merge `main` into
+  it, or use "Update branch" on the PR) and wait for `Quality` to pass again
+  before it can be merged.
+- The repository owner merges pull requests; the implementing agent never does
+  (see Policies). The only bypass is the repository admin role, and only when
+  merging a pull request. It is not used to merge a red PR; the PR gets fixed
+  instead.
+- To change the ruleset, edit `.github/rulesets/main.json` in a pull request
+  and re-apply it with the `PUT` command in the README after the merge. Never
+  weaken it: `enforcement` stays `active` and `Quality` stays required.
 
 ## Tests
 

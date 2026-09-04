@@ -116,6 +116,7 @@ known_first_party = ["ui_kobe"]
 
 [tool.deptry.per_rule_ignores]
 # aw_files/ui_kobe_aw_agent.py is a copy-in adapter; android_world is not declared here.
+# It is not on PyPI and not installable on Python 3.14, so it cannot be declared (decision in #19).
 DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
 DEP002 = ["dill"]
@@ -123,6 +124,8 @@ DEP002 = ["dill"]
 # ty type checker. Rationale and the suppression rule: see AGENTS.md.
 [tool.ty.src]
 # The root adapters and operator scripts are linted by Ruff, not type-checked.
+# They are copy-in files, not package code; aw_files/ imports android_world, which is not
+# installable on Python 3.14. aitk_files/ moves into src/ui_kobe/adapters in the follow-up to #19.
 include = ["src", "tests"]
 
 [tool.ty.rules]
