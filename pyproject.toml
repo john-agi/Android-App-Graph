@@ -200,6 +200,7 @@ _environment = "uv pip check"
 _test = "pytest --cov=ui_kobe --cov-report=term-missing"
 _actions = "zizmor --offline ."
 _build = "uv build --no-sources"
+_dead-code = "vulture src tests vulture_allowlist.py --min-confidence 90"
 
 [tool.poe.tasks.fix]
 help = "Apply safe autofixes and format"
@@ -215,4 +216,8 @@ cmd = "pytest"
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_dependencies", "_environment", "_test", "_actions", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_dead-code", "_test", "_actions", "_build"]
+
+[tool.poe.tasks.dead-code-review]
+help = "Review queue: likely-dead code at 60% confidence, sorted by size, smallest first (largest last). Never deleted automatically; see AGENTS.md."
+cmd = "vulture src tests vulture_allowlist.py --min-confidence 60 --sort-by-size"
