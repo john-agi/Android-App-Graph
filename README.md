@@ -368,6 +368,19 @@ uv run --locked poe --help       # list every public task with its help text
 dependencies with `uv add` / `uv remove`, never by editing `uv.lock`, and
 commit `pyproject.toml` and `uv.lock` together.
 
+### Git hooks
+
+The repository ships a `.pre-commit-config.yaml` for [prek](https://prek.j178.dev/), which `uv sync` installs as a dev dependency. Install the git shims once per clone:
+
+```bash
+uv run prek install --hook-type pre-commit --hook-type pre-push
+```
+
+- `git commit` runs `uv run --locked poe fix` and then `uv run --locked poe check-fast`. When `poe fix` changes files the commit is aborted with `files were modified by this hook`; review the changes, `git add` them and commit again.
+- `git push` runs `uv run --locked poe check`, the full definition of done.
+
+Run the stages on demand with `uv run prek run --all-files` (commit stage) and `uv run prek run --all-files --stage pre-push` (push stage). Hooks are a local convenience: the gate is CI, which runs the same `uv run --locked poe check` on every pull request.
+
 ## Acknowledgements
 
 Android-App-Graph is a fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE)

@@ -70,6 +70,10 @@ style.
 - GitHub Actions (`.github/workflows/ci.yml`): runs the whole definition of
   done, `uv run --locked poe check`, on every pull request and every push to
   `main`. Poe task: `check`.
+- Git hooks: prek (`uv run prek install --hook-type pre-commit --hook-type pre-push`
+  once per clone; `.pre-commit-config.yaml` runs `poe fix` then `poe check-fast`
+  on `git commit` and `poe check` on `git push`; no Poe task, hooks are not part
+  of `check`).
 
 ## Policies
 
@@ -170,3 +174,7 @@ when that range is bumped (a manual change, see Policies), update both in the
 same commit. The checkout, setup-uv and `uv python install` steps are the
 reference copy that every other workflow in `.github/workflows/` reproduces
 byte-for-byte.
+
+## Git hooks
+
+After cloning, run `uv run prek install --hook-type pre-commit --hook-type pre-push`. The pre-commit stage runs `poe fix` then `poe check-fast`; the pre-push stage runs `poe check`. Run a stage on demand with `uv run prek run --all-files` (commit stage) or `uv run prek run --all-files --stage pre-push` (push stage). Never bypass the hooks with `git commit --no-verify` or `git push --no-verify` to land a change; fix the cause. If a hook fails with `The lockfile at uv.lock needs to be updated, but --locked was provided`, run `uv lock` and stage `uv.lock`. Hooks are local; CI's `uv run --locked poe check` on every pull request is the gate.
