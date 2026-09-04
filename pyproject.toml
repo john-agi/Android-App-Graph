@@ -18,8 +18,7 @@ dependencies = [
     "rich",
     "dill",
     "aitk",
-    "pyvis>=0.3.2",
-    "matplotlib",
+    "httpx>=0.28.1",
 ]
 authors = [
     { name = "Yuxiang Chai" },
@@ -34,6 +33,12 @@ kobe-explore = "ui_kobe.cli:main"
 [project.urls]
 Homepage = "https://github.com/john-agi/Android-App-Graph"
 
+[project.optional-dependencies]
+viz = [
+    "matplotlib>=3.10.8",
+    "pyvis>=0.3.2",
+]
+
 [tool.uv]
 required-version = ">=0.12.9,<0.13"
 
@@ -42,6 +47,7 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 
 [dependency-groups]
 dev = [
+    "deptry>=0.25.1",
     "poethepoet>=0.48.0",
     "prek>=0.5.2",
     "ruff>=0.16.6",
@@ -97,6 +103,16 @@ allow-star-arg-any = true
 # Also format doctest and fenced code examples inside docstrings.
 docstring-code-format = true
 
+[tool.deptry]
+# Not inferable from the src/ layout; without it every `import ui_kobe` is DEP001.
+known_first_party = ["ui_kobe"]
+
+[tool.deptry.per_rule_ignores]
+# aw_files/ui_kobe_aw_agent.py is a copy-in adapter; android_world is not declared here.
+DEP001 = ["android_world"]
+# Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
+DEP002 = ["dill"]
+
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
@@ -107,6 +123,7 @@ _fix-lint = "ruff check --fix --exit-zero ."
 _format = "ruff format ."
 _format-check = "ruff format --check ."
 _lint = "ruff check ."
+_dependencies = "deptry ."
 _environment = "uv pip check"
 _build = "uv build --no-sources"
 
@@ -120,4 +137,4 @@ sequence = ["_format-check", "_lint"]
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_environment", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_build"]

@@ -180,9 +180,11 @@ For long runs, use the auto-resume wrapper:
 
 ## Visualize or Audit a Graph
 
-Create an HTML graph visualization:
+Create an HTML graph visualization. `scripts/plot_graph.py` needs the optional
+`viz` extra (`pyvis` and `matplotlib`), which `uv sync` does not install by default:
 
 ```bash
+uv sync --extra viz
 uv run python scripts/plot_graph.py graphs/<app_name>/<app_name>.json
 ```
 
