@@ -370,6 +370,12 @@ uv run --locked poe --help       # list every public task with its help text
 dependencies with `uv add` / `uv remove`, never by editing `uv.lock`, and
 commit `pyproject.toml` and `uv.lock` together.
 
+`uv run --locked poe check` also runs [zizmor](https://docs.zizmor.sh/) offline
+against every workflow under `.github/workflows/`, so a workflow change that
+unpins an action, widens `GITHUB_TOKEN` permissions or expands untrusted input
+inside `run:` fails the definition of done locally and in CI. There is no
+separate zizmor workflow; the CI `Quality` job runs `check`.
+
 ### Git hooks
 
 The repository ships a `.pre-commit-config.yaml` for [prek](https://prek.j178.dev/), which `uv sync` installs as a dev dependency. Install the git shims once per clone:
