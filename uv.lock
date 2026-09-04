@@ -800,6 +800,7 @@ wheels = [
 
 [[package]]
 name = "ui-kobe"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aitk" },
@@ -825,7 +826,6 @@ requires-dist = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-provides-extras = ["explore"]
 
 [[package]]
 name = "wcwidth"
