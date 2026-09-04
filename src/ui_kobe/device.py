@@ -12,7 +12,10 @@ from typing import Any, Protocol
 
 
 class DeviceController(Protocol):
-    """The subset of aitk's ADBController that ui_kobe depends on."""
+    """The subset of aitk's ADBController that ui_kobe depends on.
+
+    Arguments ui_kobe never passes (``exe_action``'s ``save_flag``) are omitted.
+    """
 
     w: int
     h: int
@@ -20,7 +23,7 @@ class DeviceController(Protocol):
 
     def get_state(self) -> dict[str, Any]: ...
 
-    def exe_action(self, action: dict[str, Any], save_flag: bool = True) -> None: ...
+    def exe_action(self, action: dict[str, Any]) -> None: ...
 
 
 class AvdManager(Protocol):

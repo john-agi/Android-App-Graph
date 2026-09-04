@@ -106,6 +106,9 @@ style.
   `UV_MALWARE_CHECK=1 uv sync --locked` for the OSV malware check, then
   `uv audit`; on dependency-changing pull requests, daily, and on demand; no
   Poe task, deliberately outside `poe check`; see "Dependency security").
+- Dead code: Vulture (`uv run --locked vulture src tests vulture_allowlist.py
+  --min-confidence 90`; `_dead-code` in `poe check`; `poe dead-code-review`
+  prints the 60% review queue; see "Dead code" below).
 - Mutation testing: mutmut (`uv run --locked --group mutation poe mutate`;
   `mutation` dependency group; not part of `poe check`; runs weekly in
   `.github/workflows/mutation.yml`; see "Mutation testing" below).
@@ -341,6 +344,32 @@ preview and may change; see https://docs.astral.sh/uv/concepts/preview/.
   check on `main`: it needs the network and its result changes over time.
 - Never hand-edit `uv.lock`; use `uv lock --upgrade-package`.
 
+## Dead code
+
+- `uv run --locked poe check` runs Vulture over `src/`, `tests/` and
+  `vulture_allowlist.py` at `--min-confidence 90`. Findings at 90% or above
+  (unused imports, unused function arguments, unreachable code) fail the
+  check.
+- Fix a blocking finding by deleting the code. An unused parameter whose
+  signature is imposed by a caller is renamed with a leading underscore
+  (`_source`), which Vulture and Ruff's `ARG` rules both ignore; a fixture
+  requested only for its side effect becomes `@pytest.mark.usefixtures`. Add
+  an entry to `vulture_allowlist.py` only when the name is used outside the
+  scanned paths (a parameter passed by keyword, a function or import consumed
+  by AITK or Android World through the copy-in adapters in `aitk_files/` and
+  `aw_files/`, or by `scripts/`). Every entry has the form `_.name  # reason`
+  and names its external caller. Remove entries whose reason stops being true.
+- `uv run --locked poe dead-code-review` lists findings at 60% confidence,
+  sorted by size ascending (largest last). That list is a review queue: a
+  person, or an agent with an explicit task issue naming the item, reads it
+  and decides. Findings under 90% are never deleted automatically and never
+  fail a check.
+- Never lower `min_confidence`, never add `exclude`, `ignore_names` or
+  `ignore_decorators` to `[tool.vulture]`, and never add `# noqa` to silence
+  Vulture. The allowlist is the only suppression mechanism. The
+  `"vulture_allowlist.py" = ["B018"]` entry in
+  `[tool.ruff.lint.per-file-ignores]` is the single sanctioned exception to
+  the fixed per-file-ignores table and covers only that file.
 ## Mutation testing
 
 - `uv run --locked --group mutation poe mutate` runs mutmut over `src/ui_kobe` using `tests/`

@@ -425,12 +425,13 @@ The engineering contract for humans and coding agents is in
 [AGENTS.md](AGENTS.md).
 
 ```bash
-uv sync --locked                 # create .venv from uv.lock (Python 3.14)
-uv run --locked poe fix          # apply safe Ruff autofixes and format (mutates files)
-uv run --locked poe check-fast   # fast checks: format, lint, types (no mutations)
-uv run --locked poe test-unit    # run the test suite without coverage
-uv run --locked poe check        # definition of done; must exit 0 before a PR
-uv run --locked poe --help       # list every public task with its help text
+uv sync --locked                      # create .venv from uv.lock (Python 3.14)
+uv run --locked poe fix               # apply safe Ruff autofixes and format (mutates files)
+uv run --locked poe check-fast        # fast checks: format, lint, types (no mutations)
+uv run --locked poe test-unit         # run the test suite without coverage
+uv run --locked poe check             # definition of done; must exit 0 before a PR
+uv run --locked poe dead-code-review  # 60% dead-code review queue (never a gate)
+uv run --locked poe --help            # list every public task with its help text
 ```
 
 `uv run --locked` refuses to run when `uv.lock` is stale. Add or remove
