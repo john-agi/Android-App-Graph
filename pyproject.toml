@@ -147,6 +147,31 @@ strict-generic-narrowing = true
 # Default, stated on purpose: the two "warn" rules above are blocking too.
 error-on-warning = true
 
+# pytest, configured through the native TOML table (pytest >= 9.0). Test rules:
+# see AGENTS.md.
+[tool.pytest]
+minversion = "9.0"
+# Enables strict_config, strict_markers, strict_parametrization_ids and strict_xfail.
+# New strictness options added by future pytest releases turn on automatically;
+# pytest is pinned by uv.lock so this is intentional.
+strict = true
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib", "-ra"]
+# Every warning is an error. Add narrow ignores below "error" only for warnings
+# raised by third-party packages; record package, version and message in the PR.
+filterwarnings = ["error"]
+
+# Branch coverage of the installed `ui_kobe` package, switched on by the `_test`
+# Poe task; `--cov-fail-under` never appears in addopts or in a task.
+[tool.coverage.run]
+branch = true
+source = ["ui_kobe"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+skip_empty = true
+
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
@@ -160,6 +185,7 @@ _lint = "ruff check ."
 _typecheck = "ty check"
 _dependencies = "deptry ."
 _environment = "uv pip check"
+_test = "pytest --cov=ui_kobe --cov-report=term-missing"
 _build = "uv build --no-sources"
 
 [tool.poe.tasks.fix]
@@ -170,6 +196,10 @@ sequence = ["_fix-lint", "_format"]
 help = "Fast checks: format, lint, types"
 sequence = ["_format-check", "_lint", "_typecheck"]
 
+[tool.poe.tasks.test-unit]
+help = "Run the test suite without coverage"
+cmd = "pytest"
+
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_dependencies", "_environment", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_test", "_build"]
