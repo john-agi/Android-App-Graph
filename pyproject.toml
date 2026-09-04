@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ui-kobe"
 dynamic = ["version"]
-description = "UI-KOBE: Knowledge Ontology Builder and Explorer for mobile GUI Agents"
+description = "Android-App-Graph: graph-based Android app exploration and runtime for mobile GUI agents, a fork of UI-KOBE by Yuxiang Chai"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -22,6 +22,9 @@ dependencies = [
 ]
 authors = [
     { name = "Yuxiang Chai" },
+]
+maintainers = [
+    { name = "John Park" },
 ]
 
 [project.scripts]
