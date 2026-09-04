@@ -276,7 +276,7 @@ def re_explore_issues(
         logger.warning("Graph is empty — nothing to re-explore")
         return results
 
-    def _relaunch_app():
+    def _relaunch_app() -> None:
         subprocess.run(
             [
                 "adb",
@@ -382,7 +382,7 @@ def re_explore_issues(
                 model=instruction_model,
             )
 
-            action, history_entry = predict_next_action(
+            action, _history_entry = predict_next_action(
                 client=action_client,
                 screenshot_b64=screenshot,
                 instruction=instruction + keyboard_hint,

@@ -59,7 +59,7 @@ class Kobe:
         max_steps: int = 20,
         coverage_checkpoint_steps: int = 50,
         coverage_checkpoint_top_k: int = 15,
-    ):
+    ) -> None:
         self.controller = controller
         self.app_name = app_name
         self.package_name = package_name
@@ -406,7 +406,7 @@ class Kobe:
                 # Step 2: Action agent executes ONE action per exploration step
                 left_app = False
 
-                action, history_entry = predict_next_action(
+                action, _history_entry = predict_next_action(
                     client=self.action_client,
                     screenshot_b64=screenshot,
                     instruction=instruction + keyboard_hint,

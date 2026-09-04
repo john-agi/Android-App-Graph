@@ -277,14 +277,20 @@ def plot_paper_graphviz(
 
     lines = [
         "digraph G {",
-        '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
-        'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
-        'fontname="Helvetica", fontsize="18", labelloc="t", '
-        f"label={q(f'UI-KOBE Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions')}];",
-        '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
-        'margin="0.10,0.07", penwidth="1.4", color="#2f3a4a"];',
-        '  edge [fontname="Helvetica", fontsize="8", color="#758195", '
-        'fontcolor="#475467", arrowsize="0.55", penwidth="1.15"];',
+        (
+            '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
+            'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
+            'fontname="Helvetica", fontsize="18", labelloc="t", '
+            f"label={q(f'UI-KOBE Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions')}];"
+        ),
+        (
+            '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
+            'margin="0.10,0.07", penwidth="1.4", color="#2f3a4a"];'
+        ),
+        (
+            '  edge [fontname="Helvetica", fontsize="8", color="#758195", '
+            'fontcolor="#475467", arrowsize="0.55", penwidth="1.15"];'
+        ),
     ]
 
     for node_id, data in G.nodes(data=True):
@@ -680,7 +686,7 @@ def plot_graphviz(G: nx.DiGraph, output_path: str) -> None:
 def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
     """Fallback: plot with matplotlib + networkx."""
 
-    fig, ax = plt.subplots(1, 1, figsize=(14, 10))
+    _fig, ax = plt.subplots(1, 1, figsize=(14, 10))
 
     pos = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
 
@@ -718,7 +724,7 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
     print(f"Graph image saved to {output_path}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Plot a UI-KOBE exploration graph")
     parser.add_argument("graph", type=str, help="Path to the graph JSON file")
     parser.add_argument(
@@ -805,7 +811,7 @@ def main():
         print(f"Error: {graph_path} not found")
         return
 
-    data, G = load_graph(str(graph_path))
+    _data, G = load_graph(str(graph_path))
 
     # Default output path
     if args.output:

@@ -104,7 +104,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         vlm_config: dict | None = None,
         name: str = "UI-KOBE",
         transition_pause: float | None = 1.0,
-    ):
+    ) -> None:
         super().__init__(env, name=name, transition_pause=transition_pause)
         self._runtime = UIKobeV2Translator(
             graph_dir=graph_dir,

@@ -129,7 +129,7 @@ class GraphManager:
         embedding_client: OpenAI | None = None,
         embedding_model: str = "text-embedding-3-small",
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
-    ):
+    ) -> None:
         self.graph = nx.DiGraph()
         self.page_detail_client = page_detail_client
         self.page_detail_model = page_detail_model
