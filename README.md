@@ -428,6 +428,7 @@ The engineering contract for humans and coding agents is in
 uv sync --locked                 # create .venv from uv.lock (Python 3.14)
 uv run --locked poe fix          # apply safe Ruff autofixes and format (mutates files)
 uv run --locked poe check-fast   # fast checks: format, lint, types (no mutations)
+uv run --locked poe test-unit    # run the test suite without coverage
 uv run --locked poe check        # definition of done; must exit 0 before a PR
 uv run --locked poe --help       # list every public task with its help text
 ```

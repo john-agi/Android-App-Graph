@@ -49,8 +49,12 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 [dependency-groups]
 dev = [
     "deptry>=0.25.1",
+    "hypothesis>=6.167.1",
     "poethepoet>=0.48.0",
     "prek>=0.5.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-randomly>=5.0.0",
     "ruff>=0.16.5",
     "ty>=0.0.77",
     "zizmor>=1.30.0",
@@ -148,6 +152,27 @@ strict-generic-narrowing = true
 # Default, stated on purpose: the two "warn" rules above are blocking too.
 error-on-warning = true
 
+# pytest, native TOML table (pytest >= 9.0). Test rules: see AGENTS.md.
+[tool.pytest]
+minversion = "9.0"
+# Turns on strict_config, strict_markers, strict_parametrization_ids, strict_xfail.
+strict = true
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib", "-ra"]
+# Every warning is an error; a third-party ignore goes after "error", with a reason.
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["ui_kobe"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+skip_empty = true
+# Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
+fail_under = 9
+
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
@@ -161,6 +186,7 @@ _lint = "ruff check ."
 _typecheck = "ty check"
 _dependencies = "deptry ."
 _environment = "uv pip check"
+_test = "pytest --cov=ui_kobe --cov-report=term-missing"
 _actions = "zizmor --offline ."
 _build = "uv build --no-sources"
 
@@ -172,6 +198,10 @@ sequence = ["_fix-lint", "_format"]
 help = "Fast checks: format, lint, types"
 sequence = ["_format-check", "_lint", "_typecheck"]
 
+[tool.poe.tasks.test-unit]
+help = "Run the test suite without coverage"
+cmd = "pytest"
+
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_dependencies", "_environment", "_actions", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_test", "_actions", "_build"]
