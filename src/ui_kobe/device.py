@@ -20,7 +20,10 @@ class DeviceController(Protocol):
 
     def get_state(self) -> dict[str, Any]: ...
 
-    def exe_action(self, action: dict[str, Any], save_flag: bool = True) -> None: ...
+    # aitk's ADBController also takes ``save_flag: bool = True``; ui_kobe never passes it,
+    # and a Protocol declares only the arguments its callers use. An implementation that
+    # takes the extra defaulted parameter still satisfies this signature.
+    def exe_action(self, action: dict[str, Any]) -> None: ...
 
 
 class AvdManager(Protocol):
