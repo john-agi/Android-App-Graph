@@ -50,30 +50,43 @@ ignored by git.
 
 ## Prerequisites
 
-- Python >= 3.10
-- [uv](https://docs.astral.sh/uv/) for the UI-KOBE development environment
-- [AITK](https://github.com/YuxiangChai/AITK), installed before UI-KOBE
+- Python >= 3.14. `.python-version` pins `3.14`; uv downloads a managed
+  interpreter automatically if none is installed.
+- [uv](https://docs.astral.sh/uv/) 0.12.9 or a newer 0.12.x release.
+  `pyproject.toml` enforces the range `>=0.12.9,<0.13` with `required-version`;
+  run `uv self update 0.12.9` if yours is outside it.
 - Android SDK with `adb` and `emulator` on `PATH`
 - An Android Virtual Device with the target app installed
 - VLM provider credentials exported as environment variables
 
 ## Install
 
-UI-KOBE depends on AITK. Install AITK first, then install UI-KOBE into the same
-Python environment.
-
-### Option 1: uv with sibling repositories
+### Option 1: uv (recommended)
 
 ```bash
-git clone https://github.com/YuxiangChai/AITK.git
-git clone https://github.com/YuxiangChai/UI-KOBE.git
-
-cd UI-KOBE
+git clone https://github.com/john-agi/Android-App-Graph.git
+cd Android-App-Graph
 uv sync
 ```
 
-The default `uv` setup expects `AITK` and `UI-KOBE` to be side by side because
-`pyproject.toml` points to `../AITK` as the editable AITK source.
+No sibling checkout of AITK is needed. `pyproject.toml` declares
+[AITK](https://github.com/YuxiangChai/AITK) as a git dependency pinned to a
+specific commit under `[tool.uv.sources]`, so `uv sync` clones and installs
+that commit automatically.
+
+Because there is no AITK checkout, the copy-in step under
+[Use UI-KOBE with AITK](#use-ui-kobe-with-aitk) targets the `aitk` package
+installed in `.venv`. Print its `translators/` directory, which is the
+`/path/to/AITK/aitk/translators/` of that section, with:
+
+```bash
+uv run python -c "import aitk, pathlib; print(pathlib.Path(aitk.__file__).parent / 'translators')"
+```
+
+uv does not track a file copied there. Recreating `.venv` (for example
+`rm -rf .venv && uv sync`) removes it; `uv sync --reinstall` and a changed
+`rev` reinstall `aitk` around it and leave it in place. After any change to
+`aitk`, check that the file is still present before running AITK.
 
 Run commands through `uv`:
 
@@ -81,23 +94,42 @@ Run commands through `uv`:
 uv run kobe-explore --help
 ```
 
+To move to a newer AITK commit, change the `rev` value under
+`[tool.uv.sources]` in `pyproject.toml`, then refresh the lockfile and the
+environment:
+
+```bash
+uv lock --upgrade-package aitk
+uv sync --locked
+```
+
+Commit `pyproject.toml` and `uv.lock` together.
+
 ### Option 2: Existing AITK conda environment
 
-If AITK runs from a conda environment, install UI-KOBE into that same
-environment:
+If you already run AITK from a conda environment with a local checkout
+installed in editable mode, keep that checkout: it is the directory the
+environment imports as `aitk`, so it is where the copy-in step under
+[Use UI-KOBE with AITK](#use-ui-kobe-with-aitk) puts the translator. Move the
+checkout to the commit UI-KOBE pins, reinstall it, then install UI-KOBE. The
+environment must run Python 3.14 or newer. Install AITK first: `pip` does not
+read `[tool.uv.sources]`, and an unrelated package named `aitk` exists on PyPI.
 
 ```bash
 conda activate <aitk-env>
 
 cd /path/to/AITK
+git fetch origin
+git checkout fd06a28e2286cbc1ae699401c1a6f894ba926c44
 pip install -e .
 
-cd /path/to/UI-KOBE
+cd /path/to/Android-App-Graph
 pip install -e .
 ```
 
-This makes `ui_kobe` importable to AITK translators copied into
-`AITK/aitk/translators/`.
+`git checkout` of a commit leaves the AITK checkout in detached HEAD state,
+which is what a pinned install wants. This makes `ui_kobe` importable to AITK
+translators copied into `/path/to/AITK/aitk/translators/`.
 
 ## Configure API Credentials
 
