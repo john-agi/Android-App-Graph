@@ -1,6 +1,3 @@
-# Deterministic definition-of-done gate.
-# Runs exactly what AGENTS.md requires locally: `uv run --locked poe check`.
-# Hardening rationale: https://docs.github.com/en/actions/reference/security/secure-use
 name: CI
 
 on:
@@ -9,10 +6,8 @@ on:
       - main
   pull_request:
 
-# No GITHUB_TOKEN permissions by default; each job opts in to the minimum it needs.
 permissions: {}
 
-# One run per workflow and ref; a newer push cancels the older run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -26,25 +21,20 @@ jobs:
       contents: read
     steps:
       - name: Check out the repository
-        # Full commit SHA of the latest release, resolved against GitHub at implementation time (see AGENTS.md).
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing in this job runs authenticated git, so do not store the token on disk.
           persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          # Identical to [tool.uv] required-version in pyproject.toml; bump both in the same commit.
           version: ">=0.12.9,<0.13"
           enable-cache: true
 
       - name: Install Python
-        # Installs the version listed in .python-version (3.14).
         run: uv python install
 
       - name: Sync the locked environment
-        # Fails if uv.lock is out of date; never updates it.
         run: uv sync --locked
 
       - name: Run the definition of done
