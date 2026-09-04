@@ -67,6 +67,9 @@ style.
   `ruff format .`).
 - Environment check: `uv pip check` (`_environment` in `poe check`).
 - Package build: `uv build --no-sources` (`_build` in `poe check`).
+- GitHub Actions (`.github/workflows/ci.yml`): runs the whole definition of
+  done, `uv run --locked poe check`, on every pull request and every push to
+  `main`. Poe task: `check`.
 - Dependency hygiene: deptry (`uv run --locked deptry .`; `_dependencies` in
   `poe check`, immediately after `check-fast`). Declared dependencies must
   match the imports in `src/`, `scripts/`, `aitk_files/` and `aw_files/`:
@@ -167,3 +170,14 @@ style.
   `sys.path` edits.
 - Generated graphs, logs, outputs and `dist/` are git-ignored; `.gitignore` is
   the authority on what is not tracked.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` defines one GitHub Actions job (job `Quality`) that
+checks out the repository, installs uv and Python, runs `uv sync --locked` and
+then `uv run --locked poe check`; a red `Quality` check means the change is not
+done. The setup-uv step passes `version:` equal to `[tool.uv] required-version`;
+when that range is bumped (a manual change, see Policies), update both in the
+same commit. The checkout, setup-uv and `uv python install` steps are the
+reference copy that every other workflow in `.github/workflows/` reproduces
+byte-for-byte.
