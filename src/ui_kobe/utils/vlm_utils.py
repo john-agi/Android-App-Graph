@@ -14,9 +14,15 @@ import httpx
 from openai import OpenAI, OpenAIError
 from PIL import Image
 
+from ui_kobe.payloads import as_float_list, as_int, as_str
+
 if TYPE_CHECKING:
     from openai.types import CompletionUsage
-    from openai.types.chat import ChatCompletion
+    from openai.types.chat import (
+        ChatCompletion,
+        ChatCompletionContentPartImageParam,
+        ChatCompletionMessageParam,
+    )
     from openai.types.create_embedding_response import Usage as EmbeddingUsage
 
 logger = logging.getLogger(__name__)
@@ -152,7 +158,7 @@ def _resize_screenshot(
     scale = math.sqrt(max_pixels / total)
     new_w = int(w * scale)
     new_h = int(h * scale)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     logger.debug(
         "Screenshot resized: %dx%d -> %dx%d (scale_back=%.3f)",
         w,
@@ -172,7 +178,7 @@ def _strip_json_fences(text: str) -> str:
     text = text.strip()
     m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
     if m:
-        return m.group(1).strip()
+        return as_str(m.group(1), text).strip()
     return text
 
 
@@ -521,7 +527,18 @@ DEFAULT_ACTION_MODEL = "qwen3.5-plus-2026-02-15"
 # ---------------------------------------------------------------------------
 
 
-def _build_image_message(screenshot_b64: str) -> dict:
+def _message_text(resp: ChatCompletion) -> str:
+    """Return the assistant text of a completion, stripped.
+
+    ``message.content`` is ``None`` when the model answered with tool calls or
+    with nothing at all; the callers all treat unparsable text as a parse
+    failure and fall back, so an empty string is the honest value here.
+    """
+    content = resp.choices[0].message.content
+    return content.strip() if content is not None else ""
+
+
+def _build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImageParam:
     """Build an OpenAI image_url message part from a base64 screenshot."""
     return {
         "type": "image_url",
@@ -591,30 +608,30 @@ def describe_page_and_state(
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
     )
+    messages: list[ChatCompletionMessageParam] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                _build_image_message(screenshot_b64),
+            ],
+        }
+    ]
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    _build_image_message(screenshot_b64),
-                ],
-            }
-        ],
+        messages=messages,
         temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("page_describe_and_state", model, resp.usage)
-    raw = resp.choices[0].message.content.strip()
-    raw = _strip_json_fences(raw)
+    raw = _strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Failed to parse page+state JSON. Raw:\n%s", raw)
         return raw[:100], {}, []
 
-    page_description = result.get("page_description", "unknown screen")
+    page_description = as_str(result.get("page_description"), "unknown screen")
     state = result.get("state", {})
     if not isinstance(state, dict):
         state = {}
@@ -633,7 +650,7 @@ def verify_same_node(
     screenshot_existing_b64: str,
     existing_description: str,
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
-) -> dict:
+) -> dict[str, Any]:
     """Compare two screenshots to decide if they are the same screen.
 
     If they are different, the verifier also provides more specific descriptions
@@ -669,8 +686,7 @@ def verify_same_node(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_verify", model, resp.usage)
-    raw = resp.choices[0].message.content.strip()
-    raw = _strip_json_fences(raw)
+    raw = _strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -686,7 +702,7 @@ def normalize_edge(
     instructions: list[str],
     target_observations: list[str] | None = None,
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
-) -> dict:
+) -> dict[str, Any]:
     """Normalize edge instructions into a reusable template.
 
     Takes one or more concrete instructions (e.g. "search for egg", "search for milk")
@@ -723,8 +739,7 @@ def normalize_edge(
         response_format={"type": "json_object"},
     )
     token_tracker.record("normalize_edge", model, resp.usage)
-    raw = resp.choices[0].message.content.strip()
-    raw = _strip_json_fences(raw)
+    raw = _strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -848,7 +863,7 @@ def audit_merge_nodes(
     graph_summary: str,
     app_name: str = "",
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
-) -> dict:
+) -> dict[str, Any]:
     """Ask a model only for duplicate-node merge candidates."""
     prompt = NODE_MERGE_AUDIT_PROMPT.format(
         app_name=app_name,
@@ -899,7 +914,7 @@ Return ONLY a JSON object:
 def select_exploration_target(
     client: OpenAI,
     app_name: str,
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
 ) -> str | None:
     """Select a node for periodic live exploration coverage balancing."""
@@ -934,7 +949,7 @@ def select_exploration_target(
     )
     token_tracker.record("exploration_target", model, resp.usage)
 
-    raw = _strip_json_fences(resp.choices[0].message.content.strip())
+    raw = _strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -943,7 +958,7 @@ def select_exploration_target(
 
     node_id = result.get("node_id")
     reason = result.get("reason", "")
-    if node_id in valid_ids:
+    if isinstance(node_id, str) and node_id in valid_ids:
         logger.info("Selected exploration target %s: %s", node_id, reason)
         return node_id
 
@@ -956,7 +971,7 @@ def audit_graph(
     graph_summary: str,
     app_name: str = "",
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
-) -> dict:
+) -> dict[str, Any]:
     """Ask a model to review the graph structure for anomalies.
 
     Args:
@@ -1009,7 +1024,9 @@ def get_image_embedding(
     shapes before surfacing the provider error.
     """
     data_url = f"data:image/png;base64,{screenshot_b64}"
-    attempts = [
+    # Deliberately open: these are provider-specific request shapes that the
+    # OpenAI SDK's own `input` type does not describe.
+    attempts: list[Any] = [
         [{"type": "image_url", "image_url": {"url": data_url}}],
         {"type": "image_url", "image_url": {"url": data_url}},
         [{"mime_type": "image/png", "data": screenshot_b64}],
@@ -1080,14 +1097,15 @@ def get_gemini_native_image_embedding(
     values = data.get("embedding", {}).get("values")
     if not values and data.get("embeddings"):
         values = data["embeddings"][0].get("values")
-    if not values:
+    embedding = as_float_list(values)
+    if not embedding:
         raise RuntimeError(
             f"Gemini native image embedding response missing embedding values: {data}"
         )
-    return values
+    return embedding
 
 
-def _parse_tool_call(raw: str) -> dict | None:
+def _parse_tool_call(raw: str) -> dict[str, Any] | None:
     """Extract the JSON arguments from a <tool_call>...</tool_call> block."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
     inner = m.group(1).strip() if m else ""
@@ -1117,7 +1135,9 @@ def _parse_tool_call(raw: str) -> dict | None:
     return parsed
 
 
-def _tool_call_to_aitk(args: dict, screen_w: int = 1080, screen_h: int = 1920) -> dict:
+def _tool_call_to_aitk(
+    args: dict[str, Any], screen_w: int = 1080, screen_h: int = 1920
+) -> dict[str, Any]:
     """Convert a mobile_use tool-call argument dict to AITK action format.
 
     Follows the same conversion logic as qwen3_vl.py's to_device() and the
@@ -1131,16 +1151,16 @@ def _tool_call_to_aitk(args: dict, screen_w: int = 1080, screen_h: int = 1920) -
 
     action = args.get("action", "")
 
-    def _scale(coord: list) -> tuple[int, int]:
+    def _scale(coord: list[Any]) -> tuple[int, int]:
         x = int(coord[0] / 1000 * screen_w)
         y = int(coord[1] / 1000 * screen_h)
         return x, y
 
     def _get_duration() -> int:
-        if args.get("time") is not None:
-            return args["time"]
-        if args.get("duration") is not None:
-            return args["duration"]
+        for key in ("time", "duration"):
+            duration = as_int(args.get(key))
+            if duration is not None:
+                return duration
         return 1000
 
     if action == "click":
@@ -1225,9 +1245,9 @@ def plan_next_action(
     client: OpenAI,
     screenshot_b64: str,
     page_description: str,
-    explored_edges: list[dict],
+    explored_edges: list[dict[str, Any]],
     app_name: str = "",
-    unexplored_elements: list[dict] | None = None,
+    unexplored_elements: list[dict[str, Any]] | None = None,
     input_status: str = "unknown from screenshot",
     model: str = DEFAULT_INSTRUCTION_MODEL,
 ) -> str:
@@ -1289,29 +1309,30 @@ def plan_next_action(
         unexplored_elements_section=unexplored_section,
     )
 
+    messages: list[ChatCompletionMessageParam] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                _build_image_message(screenshot_b64),
+            ],
+        }
+    ]
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    _build_image_message(screenshot_b64),
-                ],
-            }
-        ],
+        messages=messages,
         temperature=0.0,
     )
 
     token_tracker.record("instruction", model, resp.usage)
-    raw = resp.choices[0].message.content.strip()
+    raw = _message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
     raw_clean = _strip_json_fences(raw)
     try:
         result = json.loads(raw_clean)
         if isinstance(result, dict):
-            instruction = result.get("instruction", raw)
+            instruction = as_str(result.get("instruction"), raw)
         else:
             instruction = str(result)
     except json.JSONDecodeError:
@@ -1324,7 +1345,7 @@ def plan_next_action(
     return instruction
 
 
-def _parse_agent_response(resp: ChatCompletion) -> tuple[dict | None, str, str]:
+def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, str, str]:
     """Parse an action agent VLM response.
 
     Handles both XML <tool_call> responses and native tool calling.
@@ -1338,9 +1359,13 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict | None, str, str]:
         tool_calls = resp.choices[0].message.tool_calls
         if tool_calls:
             logger.info("  Agent used native tool calling")
+            tool_call = tool_calls[0]
+            if tool_call.type != "function":
+                logger.error("Action agent returned an unsupported %s tool call", tool_call.type)
+                return None, "", ""
             try:
-                tool_args = json.loads(tool_calls[0].function.arguments)
-            except json.JSONDecodeError, AttributeError:
+                tool_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
                 return None, "", ""
             return tool_args, "", str(tool_args)
         logger.error("Action agent returned empty response (no content, no tool_calls)")
@@ -1386,7 +1411,7 @@ def predict_next_action(
     action_history: list[str] | None = None,
     model: str = DEFAULT_ACTION_MODEL,
     overall_task: str = "",
-) -> tuple[dict, str]:
+) -> tuple[dict[str, Any], str]:
     """Call the action agent VLM for one step.
 
     The agent sees the instruction, action history, and current screenshot,
@@ -1430,18 +1455,19 @@ def predict_next_action(
         history_section=history_section,
     )
 
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_prompt},
+                _build_image_message(screenshot_b64),
+            ],
+        },
+    ]
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    _build_image_message(screenshot_b64),
-                ],
-            },
-        ],
+        messages=messages,
         temperature=0.0,
     )
 
