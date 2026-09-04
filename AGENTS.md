@@ -74,6 +74,17 @@ style.
   once per clone; `.pre-commit-config.yaml` runs `poe fix` then `poe check-fast`
   on `git commit` and `poe check` on `git push`; no Poe task, hooks are not part
   of `check`).
+- Dependency hygiene: deptry (`uv run --locked deptry .`; `_dependencies` in
+  `poe check`, immediately after `check-fast`). Declared dependencies must
+  match the imports in `src/`, `scripts/`, `aitk_files/` and `aw_files/`:
+  fix findings with `uv add`, `uv add --dev`, `uv add --optional <extra>` or
+  `uv remove`, never with `exclude`, `extend_exclude`, `ignore` or
+  `package_module_name_map`. Suppressions are `# deptry: ignore[DEPxxx]  # reason`
+  on the import line or a `[tool.deptry.per_rule_ignores]` entry with a TOML
+  comment naming the file that needs it; the two pre-approved entries are
+  `DEP001 = ["android_world"]` (copy-in Android World adapter) and
+  `DEP002 = ["dill"]` (imported by the git-pinned `aitk`, which declares no
+  dependencies).
 - Type checker: ty (`uv run --locked ty check`; `_typecheck` in
   `poe check-fast`, right after `_lint`; scope is `src/` and `tests/` only, the
   root adapters and scripts are not type-checked).
