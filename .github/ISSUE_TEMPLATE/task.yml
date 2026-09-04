@@ -1,0 +1,66 @@
+name: Task
+description: A scoped unit of work in the roadmap issue format, written so a coding agent can pick it up cold.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sections mirror the roadmap issue format. Goal, Official documentation, Steps and Acceptance criteria are required.
+        Cite only official documentation, give exact commands with their expected output, and keep the scope to one pull request.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: "One or two sentences stating what is true when this issue is closed."
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: "Why this matters, what exists today (quote file paths and line numbers), and which decisions are already made."
+  - type: textarea
+    id: official-documentation
+    attributes:
+      label: Official documentation
+      description: "Numbered list. Each entry is [n] Title, URL, one line on what it establishes. Official sources only."
+      placeholder: "[1] Title, https://..., one line on what it establishes"
+    validations:
+      required: true
+  - type: textarea
+    id: depends-on
+    attributes:
+      label: Depends on
+      description: "One line per prerequisite issue saying what it must have delivered. Write None if independent."
+      placeholder: "- #123: what it must have delivered"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: "Numbered steps. Each gives the exact commands or file content in a fenced block, the expected outcome, and a citation like [2]."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: "Checkbox items a reviewer can verify mechanically (a command and its expected result)."
+      placeholder: "- [ ] `command` exits 0 and prints ..."
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: "The exact commands that constitute the definition of done for this issue."
+      value: uv run --locked poe check
+      render: bash
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: "Items explicitly not part of this pull request, each pointing to the issue that covers it."
+  - type: textarea
+    id: notes-for-the-implementing-agent
+    attributes:
+      label: Notes for the implementing agent
+      description: "Guardrails: never weaken configuration to pass, allowed suppression syntax, commit hygiene, and when to stop and report."
