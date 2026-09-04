@@ -42,6 +42,7 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 
 [dependency-groups]
 dev = [
+    "poethepoet>=0.48.0",
     "ruff>=0.16.6",
 ]
 
