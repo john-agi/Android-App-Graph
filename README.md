@@ -61,8 +61,6 @@ Generated graphs, logs, and outputs are intentionally ignored by git.
 
 ## Install
 
-### Option 1: uv (recommended)
-
 ```bash
 git clone https://github.com/john-agi/Android-App-Graph.git
 cd Android-App-Graph
@@ -104,32 +102,6 @@ uv sync --locked
 ```
 
 Commit `pyproject.toml` and `uv.lock` together.
-
-### Option 2: Existing AITK conda environment
-
-If you already run AITK from a conda environment with a local checkout
-installed in editable mode, keep that checkout: it is the directory the
-environment imports as `aitk`, so it is where the copy-in step under
-[Use UI-KOBE with AITK](#use-ui-kobe-with-aitk) puts the translator. Move the
-checkout to the commit UI-KOBE pins, reinstall it, then install UI-KOBE. The
-environment must run Python 3.14 or newer. Install AITK first: `pip` does not
-read `[tool.uv.sources]`, and an unrelated package named `aitk` exists on PyPI.
-
-```bash
-conda activate <aitk-env>
-
-cd /path/to/AITK
-git fetch origin
-git checkout fd06a28e2286cbc1ae699401c1a6f894ba926c44
-pip install -e .
-
-cd /path/to/Android-App-Graph
-pip install -e .
-```
-
-`git checkout` of a commit leaves the AITK checkout in detached HEAD state,
-which is what a pinned install wants. This makes `ui_kobe` importable to AITK
-translators copied into `/path/to/AITK/aitk/translators/`.
 
 ## Configure API Credentials
 
