@@ -26,9 +26,28 @@ and CI alike. Run `uv run --locked poe fix` first if you want Ruff autofixes and
 formatting applied, then run `check`. `uv run --locked poe check-fast` is the
 quick subset (format check and lint today; type check and architecture check
 once those tools are adopted) and every commit must pass it.
-`uv run --locked poe --help` lists the public tasks; the canonical task order
-and the insertion rule for new tasks are the TOML comment above
-`[tool.poe.tasks]` in `pyproject.toml`.
+`uv run --locked poe --help` lists the public tasks.
+
+Task conventions in `pyproject.toml`. `executor = "simple"` runs commands
+directly on PATH: `uv run` has already activated `.venv`, so the default
+`auto` executor would nest a second `uv run` per task (it selects the uv
+executor whenever `uv.lock` exists). Private leaf tasks are inline strings and
+underscore-prefixed: hidden from `poe --help`, not runnable directly,
+referenced only from the sequences. Public leaf tasks that carry help text are
+tables with `help` and `cmd`. Composite tasks are tables with `help` and
+`sequence`. Never write an inline array next to an existing table (TOML
+rejects duplicate keys). The canonical final order is:
+
+- `check-fast`: `_format-check`, `_lint`, `_typecheck`, `_architecture`
+- `check`: `check-fast`, `_dependencies`, `_environment`, `_dead-code`,
+  `_test`, `_actions`, `_build`
+
+A tooling change inserts its task by position relative to the neighbours that
+already exist: `_typecheck` right after `_lint`; `_architecture` right after
+`_typecheck`; `_dependencies` right after `check-fast`; `_dead-code` right
+after `_environment`; `_test` right before `_actions` if present, otherwise
+right before `_build`; `_actions` right before `_build`. `_build` is always
+last. The help strings are fixed; do not edit them.
 
 ## Tooling
 
