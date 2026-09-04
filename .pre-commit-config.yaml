@@ -1,0 +1,26 @@
+# Git hooks managed by prek (https://prek.j178.dev/); setup in README.md.
+default_install_hook_types: [pre-commit, pre-push]
+repos:
+  - repo: local
+    hooks:
+      - id: project-precommit-fix
+        name: poe fix
+        entry: uv run --locked poe fix
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: project-precommit-check-fast
+        name: poe check-fast
+        entry: uv run --locked poe check-fast
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: project-prepush
+        name: poe check
+        entry: uv run --locked poe check
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

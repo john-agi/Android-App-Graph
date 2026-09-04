@@ -49,6 +49,7 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 dev = [
     "deptry>=0.25.1",
     "poethepoet>=0.48.0",
+    "prek>=0.5.2",
     "ruff>=0.16.6",
 ]
 
