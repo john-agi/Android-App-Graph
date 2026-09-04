@@ -146,6 +146,7 @@ _fix-lint = "ruff check --fix --exit-zero ."
 _format = "ruff format ."
 _format-check = "ruff format --check ."
 _lint = "ruff check ."
+_typecheck = "ty check"
 _environment = "uv pip check"
 _build = "uv build --no-sources"
 
@@ -155,7 +156,7 @@ sequence = ["_fix-lint", "_format"]
 
 [tool.poe.tasks.check-fast]
 help = "Fast checks: format, lint, types"
-sequence = ["_format-check", "_lint"]
+sequence = ["_format-check", "_lint", "_typecheck"]
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
