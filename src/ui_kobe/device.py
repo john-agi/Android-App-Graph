@@ -12,7 +12,10 @@ from typing import Any, Protocol
 
 
 class DeviceController(Protocol):
-    """The subset of aitk's ADBController that ui_kobe depends on."""
+    """The subset of aitk's ADBController that ui_kobe depends on.
+
+    Arguments ui_kobe never passes (``exe_action``'s ``save_flag``) are omitted.
+    """
 
     w: int
     h: int
@@ -20,9 +23,6 @@ class DeviceController(Protocol):
 
     def get_state(self) -> dict[str, Any]: ...
 
-    # aitk's ADBController also takes ``save_flag: bool = True``; ui_kobe never passes it,
-    # and a Protocol declares only the arguments its callers use. An implementation that
-    # takes the extra defaulted parameter still satisfies this signature.
     def exe_action(self, action: dict[str, Any]) -> None: ...
 
 
