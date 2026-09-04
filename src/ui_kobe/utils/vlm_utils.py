@@ -1024,8 +1024,7 @@ def get_image_embedding(
     shapes before surfacing the provider error.
     """
     data_url = f"data:image/png;base64,{screenshot_b64}"
-    # Deliberately open: these are provider-specific request shapes that the
-    # OpenAI SDK's own `input` type does not describe.
+    # Provider-specific shapes that the SDK's own `input` type does not describe.
     attempts: list[Any] = [
         [{"type": "image_url", "image_url": {"url": data_url}}],
         {"type": "image_url", "image_url": {"url": data_url}},

@@ -43,6 +43,7 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 [dependency-groups]
 dev = [
     "poethepoet>=0.48.0",
+    "prek>=0.5.2",
     "ruff>=0.16.6",
     "ty>=0.0.78",
 ]
@@ -97,20 +98,15 @@ allow-star-arg-any = true
 # Also format doctest and fenced code examples inside docstrings.
 docstring-code-format = true
 
-# ty type checker, invoked as `uv run --locked ty check` and as the private
-# `_typecheck` component of `poe check-fast`. Configuration reference:
-# https://docs.astral.sh/ty/reference/configuration/
+# ty type checker. Rationale and the suppression rule: see AGENTS.md.
 [tool.ty.src]
-# Only the package and its tests are type-checked. The root directories
-# aitk_files/, aw_files/ and scripts/ are copy-in adapters and operator
-# scripts: they import aitk internals, android_world and the optional plotting
-# libraries pyvis and matplotlib, none of which belong to the runtime
-# environment. They are linted by Ruff and deliberately excluded here.
+# The root adapters and operator scripts are linted by Ruff, not type-checked.
 include = ["src", "tests"]
 
 [tool.ty.rules]
-# Stricter tier from https://docs.astral.sh/ty/coming-from-mypy-or-pyright/
-# plus missing-override-decorator. All of these default to "ignore".
+# Stricter tier from ty's migration guide plus missing-override-decorator; all
+# default to "ignore". division-by-zero, possibly-missing-attribute and
+# possibly-missing-import stay off: the guide calls them false-positive-prone.
 blanket-ignore-comment = "error"
 dynamic-function-decorator-return = "error"
 missing-override-decorator = "error"
@@ -120,20 +116,15 @@ unsound-return-statement = "error"
 unsound-yield = "error"
 possibly-unresolved-reference = "warn"
 unsupported-dynamic-base = "warn"
-# Deliberately NOT enabled because the migration guide says they "are known to
-# have a significant number of false positives": division-by-zero,
-# possibly-missing-attribute, possibly-missing-import.
 
 [tool.ty.analysis]
-# `# type: ignore` is treated as an ordinary comment. The only suppression that
-# works is `# ty: ignore[rule]  # reason`.
+# `# ty: ignore[rule]  # reason` is the only suppression that works.
 respect-type-ignore-comments = false
 strict-equality-semantics = true
 strict-generic-narrowing = true
 
 [tool.ty.terminal]
-# Already the default (true): any warning-level diagnostic makes ty exit 1,
-# so the two "warn" rules above are blocking too. Stated explicitly on purpose.
+# Default, stated on purpose: the two "warn" rules above are blocking too.
 error-on-warning = true
 
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
