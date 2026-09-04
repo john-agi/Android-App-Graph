@@ -41,6 +41,7 @@ viz = [
 
 [tool.uv]
 required-version = ">=0.12.9,<0.13"
+exclude-newer = "3 days"
 
 [tool.uv.sources]
 aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae699401c1a6f894ba926c44" }
@@ -49,9 +50,10 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 dev = [
     "deptry>=0.25.1",
     "poethepoet>=0.48.0",
-    "prek>=0.5.2",
-    "ruff>=0.16.6",
-    "ty>=0.0.78",
+    "prek>=0.5.1",
+    "ruff>=0.16.5",
+    "ty>=0.0.77",
+    "zizmor>=1.30.0",
 ]
 
 [tool.ruff]
@@ -156,6 +158,7 @@ _lint = "ruff check ."
 _typecheck = "ty check"
 _dependencies = "deptry ."
 _environment = "uv pip check"
+_actions = "zizmor --offline ."
 _build = "uv build --no-sources"
 
 [tool.poe.tasks.fix]
@@ -168,4 +171,4 @@ sequence = ["_format-check", "_lint", "_typecheck"]
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_dependencies", "_environment", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_actions", "_build"]
