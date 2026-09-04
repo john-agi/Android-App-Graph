@@ -1,8 +1,9 @@
-# UI-KOBE
+# Android-App-Graph
 
-UI-KOBE is a graph-based exploration and runtime framework for mobile GUI agents.
-It explores Android apps, builds state-transition graphs, and lets downstream
-agents use those graphs to navigate apps more reliably.
+Android-App-Graph is a graph-based exploration and runtime framework for mobile
+GUI agents, forked from [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE) by
+Yuxiang Chai. It explores Android apps, builds state-transition graphs, and lets
+downstream agents use those graphs to navigate apps more reliably.
 
 The repository has two main uses:
 
@@ -336,3 +337,11 @@ maps its output into Android World's `JSONAction` format. For other tools, write
 an equivalent adapter that maps graph-guided decisions into that tool's action
 space.
 
+## Acknowledgements
+
+Android-App-Graph is a fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE)
+by [Yuxiang Chai](https://github.com/YuxiangChai), released under the
+[Apache License 2.0](LICENSE). Files from the original work have been modified
+in this repository; the attribution notice is in [NOTICE](NOTICE).
+[AITK](https://github.com/YuxiangChai/AITK), the agent framework this project
+plugs into, is by the same author.
