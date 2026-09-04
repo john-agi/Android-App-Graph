@@ -391,7 +391,7 @@ def plot_paper_matplotlib(
         for node, data in G.nodes(data=True)
     }
 
-    for category in palette:
+    for category, node_color in palette.items():
         nodes = [node for node, cat in categories.items() if cat == category]
         if not nodes:
             continue
@@ -402,7 +402,7 @@ def plot_paper_matplotlib(
             pos,
             nodelist=nodes,
             node_size=sizes,
-            node_color=palette[category],
+            node_color=node_color,
             edgecolors=borders[category],
             linewidths=1.4,
             ax=ax,

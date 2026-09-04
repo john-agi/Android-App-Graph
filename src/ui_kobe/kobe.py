@@ -696,9 +696,7 @@ class Kobe:
             return True
         # Heuristic: input method packages usually contain "inputmethod" or "keyboard"
         lower = package.lower()
-        if "inputmethod" in lower or "keyboard" in lower or "ime" in lower:
-            return True
-        return False
+        return "inputmethod" in lower or "keyboard" in lower or "ime" in lower
 
     def _handle_external_app(
         self,

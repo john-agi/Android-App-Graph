@@ -1457,7 +1457,6 @@ def predict_next_action(
     # Build history entry
     history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
 
-    # logger.info("  Agent thought: %s", thought)
     logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
 
     return action, history_entry

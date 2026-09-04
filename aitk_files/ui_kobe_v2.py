@@ -1024,7 +1024,7 @@ class UIKobeV2Translator(BaseTranslator):
         lines = []
         idx = 0
 
-        # Option: done
+        # The first option is always "done"
         letter = letters[idx]
         options.append({"letter": letter, "type": "done"})
         lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
