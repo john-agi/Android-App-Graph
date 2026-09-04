@@ -39,3 +39,58 @@ required-version = ">=0.12.9,<0.13"
 
 [tool.uv.sources]
 aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae699401c1a6f894ba926c44" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.6",
+]
+
+[tool.ruff]
+# Minimum Python to target. The project is 3.14 only (requires-python = ">=3.14").
+target-version = "py314"
+# Wrap target for the formatter and isort; the roadmap fixed 100.
+line-length = 100
+# First-party roots for import sorting. tests/ does not exist yet; Ruff does not need it to.
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# ty's migration guide asks for preview so PYI033 also checks .py files. Preview rules are
+# NOT pulled in by the prefixes below, nor by the preview default set, because
+# explicit-preview-rules requires exact codes.
+preview = true
+explicit-preview-rules = true
+# extend-select ADDS to the active default set (413 rules without preview; with lint.preview = true
+# Ruff 0.16.x activates a different default set of 494, see `ruff check --show-settings`).
+# `select` would replace it.
+extend-select = [
+    "I",       # isort (I001 is already default; this adds I002)
+    "ANN",     # flake8-annotations (ANN101/ANN102 no longer exist)
+    "PYI",     # flake8-pyi (47 rules are default; adds the rest)
+    "ARG",     # flake8-unused-arguments
+    "ERA",     # eradicate: commented-out code
+    "PT",      # flake8-pytest-style (tests arrive later)
+    "T20",     # flake8-print: T201 print, T203 pprint
+    "PLW0603", # Pylint: global statements
+    "PGH003",  # pygrep-hooks blanket-type-ignore: `# type: ignore` without a code
+    "PGH004",  # pygrep-hooks blanket-noqa: `# noqa` without a code
+    "INP001",  # every directory under src/ must be a package (__init__.py)
+]
+# No `ignore` list, by policy. FA100/FA102 are default rules that can never fire at py314
+# (annotations are deferred by PEP 649/749), so they need no ignore entry and no selection.
+
+[tool.ruff.lint.per-file-ignores]
+# This table is fixed by the roadmap. Operator scripts and copy-in adapters are not packages,
+# and printing is their user interface.
+"scripts/**" = ["T201", "T203", "INP001"]
+"aitk_files/**" = ["T201", "T203", "INP001"]
+"aw_files/**" = ["T201", "T203", "INP001"]
+# Tests are not a package. S101 is listed now so `assert` stays allowed if S is ever enabled.
+"tests/**" = ["INP001", "S101"]
+
+[tool.ruff.lint.flake8-annotations]
+# `**kwargs: Any` is the honest annotation for pass-through keyword arguments.
+allow-star-arg-any = true
+
+[tool.ruff.format]
+# Also format doctest and fenced code examples inside docstrings.
+docstring-code-format = true

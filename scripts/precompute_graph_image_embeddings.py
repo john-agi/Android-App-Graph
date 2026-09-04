@@ -40,7 +40,9 @@ def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) 
 
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
     selected = []
-    app_dirs = [graph_dir / app_name] if app_name else sorted(p for p in graph_dir.iterdir() if p.is_dir())
+    app_dirs = (
+        [graph_dir / app_name] if app_name else sorted(p for p in graph_dir.iterdir() if p.is_dir())
+    )
     for app_dir in app_dirs:
         if not app_dir.is_dir():
             continue
@@ -58,7 +60,7 @@ def load_graph_json(graph_path: Path) -> dict:
     with open(graph_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise ValueError(f"Graph JSON must be an object: {graph_path}")
+        raise TypeError(f"Graph JSON must be an object: {graph_path}")
     return data
 
 
@@ -90,7 +92,7 @@ def compute_embedding_with_retry(
         except Exception as exc:
             if attempt >= attempts - 1:
                 raise
-            delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+            delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
             logger.warning(
                 "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d). Error: %s",
                 app_name,
@@ -158,14 +160,13 @@ def precompute_graph_image_embeddings(
                     node_id,
                     time.perf_counter() - started,
                 )
-            except Exception as exc:
+            except Exception:
                 summary["skipped_failed"] += 1
-                logger.error(
+                logger.exception(
                     "Runtime image embedding failed for graph %s node %s after retries; "
-                    "continuing without this node embedding. Error: %s",
+                    "continuing without this node embedding.",
                     current_app_name,
                     node_id,
-                    exc,
                 )
 
     return summary
@@ -195,12 +196,8 @@ def load_image_embedding_settings(
         or resolve_env(image_embedding_cfg.get("model"))
         or "gemini-embedding-2"
     )
-    base_url_cfg = (
-        base_url_override
-        or resolve_env(
-            image_embedding_cfg.get("native_base_url")
-            or image_embedding_cfg.get("base_url")
-        )
+    base_url_cfg = base_url_override or resolve_env(
+        image_embedding_cfg.get("native_base_url") or image_embedding_cfg.get("base_url")
     )
     base_url = (
         base_url_cfg

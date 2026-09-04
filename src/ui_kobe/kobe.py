@@ -34,7 +34,7 @@ def _compute_schema_delta(before: dict, after: dict) -> dict | None:
         val_after = after.get(key)
         if val_before != val_after:
             delta[key] = {"before": val_before, "after": val_after}
-    return delta if delta else None
+    return delta or None
 
 
 class Kobe:
@@ -59,7 +59,7 @@ class Kobe:
         max_steps: int = 20,
         coverage_checkpoint_steps: int = 50,
         coverage_checkpoint_top_k: int = 15,
-    ):
+    ) -> None:
         self.controller = controller
         self.app_name = app_name
         self.package_name = package_name
@@ -77,15 +77,9 @@ class Kobe:
         vlm_config = vlm_config or {}
 
         # Create per-call clients
-        self.page_detail_client, self.page_detail_model = make_client(
-            vlm_config.get("page_detail")
-        )
-        self.embedding_client, self.embedding_model = make_client(
-            vlm_config.get("embedding")
-        )
-        self.instruction_client, self.instruction_model = make_client(
-            vlm_config.get("instruction")
-        )
+        self.page_detail_client, self.page_detail_model = make_client(vlm_config.get("page_detail"))
+        self.embedding_client, self.embedding_model = make_client(vlm_config.get("embedding"))
+        self.instruction_client, self.instruction_model = make_client(vlm_config.get("instruction"))
         self.action_client, self.action_model = make_client(vlm_config.get("action"))
 
         similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
@@ -100,18 +94,14 @@ class Kobe:
         )
 
         # Graph persistence path: graphs/{app_name}/{app_name}.json
-        base_graph_dir = (
-            Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
-        )
+        base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
         self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
 
         if self.graph_path.exists():
             self.graph.load_graph(self.graph_path)
             self.logger.info("Graph loaded from %s", self.graph_path)
         else:
-            self.logger.info(
-                "No existing graph at %s. Starting fresh.", self.graph_path
-            )
+            self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
 
     def _maybe_continue_from_coverage_checkpoint(
         self,
@@ -182,9 +172,9 @@ class Kobe:
             actual_node = self.navigate_to_node(selected)
         except Exception as exc:
             self.logger.warning(
-                "Coverage checkpoint navigation to %s failed: %s",
+                "Coverage checkpoint navigation to %s failed.",
                 selected,
-                exc,
+                exc_info=exc,
             )
             return None
         return actual_node
@@ -225,16 +215,14 @@ class Kobe:
 
         path = self.graph.find_path(start_node, target_node)
         if path is None:
-            raise ValueError(
-                f"No path from {start_node} to {target_node} in the graph."
-            )
+            raise ValueError(f"No path from {start_node} to {target_node} in the graph.")
 
         if len(path) <= 1:
             self.logger.info("Already at target node %s", target_node)
             device_state = self.controller.get_state()
             return self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
-                app_name=self.app_name,
+                device_state["activity"],
+                device_state["screenshot"],
             )
 
         self.logger.info(
@@ -275,8 +263,8 @@ class Kobe:
         # Verify we reached the expected state
         device_state = self.controller.get_state()
         actual_node = self.graph.identify_state(
-            device_state["activity"], device_state["screenshot"],
-            app_name=self.app_name,
+            device_state["activity"],
+            device_state["screenshot"],
         )
         if actual_node != target_node:
             self.logger.warning(
@@ -338,8 +326,8 @@ class Kobe:
                 )
                 device_state = self.controller.get_state()
                 current_node = self.graph.identify_state(
-                    device_state["activity"], device_state["screenshot"],
-                    app_name=self.app_name,
+                    device_state["activity"],
+                    device_state["screenshot"],
                 )
         elif start_step > 0:
             self.logger.info(
@@ -349,18 +337,17 @@ class Kobe:
             )
             device_state = self.controller.get_state()
             current_node = self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
-                app_name=self.app_name,
+                device_state["activity"],
+                device_state["screenshot"],
             )
         else:
             device_state = self.controller.get_state()
             current_node = self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
-                app_name=self.app_name,
+                device_state["activity"],
+                device_state["screenshot"],
             )
 
         step = start_step
-
 
         try:
             while step < max_steps:
@@ -385,7 +372,10 @@ class Kobe:
                 try:
                     kb_check = subprocess.run(
                         ["adb", "shell", "dumpsys", "input_method"],
-                        capture_output=True, text=True, timeout=3,
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                        check=False,
                     )
                     if "mInputShown=true" in kb_check.stdout:
                         keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
@@ -393,8 +383,8 @@ class Kobe:
                             "Soft keyboard is visible; a text field is focused "
                             "and ready for typing."
                         )
-                except Exception:
-                    pass
+                except (OSError, subprocess.SubprocessError) as exc:
+                    self.logger.debug("Soft keyboard probe failed: %s", exc)
 
                 # Step 1: Plan — decide WHAT to do (natural language)
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)
@@ -412,7 +402,7 @@ class Kobe:
                 # Step 2: Action agent executes ONE action per exploration step
                 left_app = False
 
-                action, history_entry = predict_next_action(
+                action, _history_entry = predict_next_action(
                     client=self.action_client,
                     screenshot_b64=screenshot,
                     instruction=instruction + keyboard_hint,
@@ -453,7 +443,10 @@ class Kobe:
                 # Handle external app
                 if left_app:
                     new_node = self._handle_external_app(
-                        current_node, action_sequence, current_package, device_state,
+                        current_node,
+                        action_sequence,
+                        current_package,
+                        device_state,
                         instruction=instruction,
                     )
                     device_state = self.controller.get_state()
@@ -462,8 +455,8 @@ class Kobe:
                     self.graph.maybe_normalize_node_edges(current_node)
                     self.save_graph()
                     current_node = self.graph.identify_state(
-                        device_state["activity"], device_state["screenshot"],
-                        app_name=self.app_name,
+                        device_state["activity"],
+                        device_state["screenshot"],
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,
@@ -475,8 +468,8 @@ class Kobe:
 
                 # Identify the new state node
                 new_node = self.graph.identify_state(
-                    device_state["activity"], device_state["screenshot"],
-                    app_name=self.app_name,
+                    device_state["activity"],
+                    device_state["screenshot"],
                 )
 
                 # Check for in-app WebView showing external content
@@ -496,8 +489,8 @@ class Kobe:
                     self.graph.total_steps_completed = step
                     self.save_graph()
                     current_node = self.graph.identify_state(
-                        device_state["activity"], device_state["screenshot"],
-                        app_name=self.app_name,
+                        device_state["activity"],
+                        device_state["screenshot"],
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,
@@ -555,8 +548,7 @@ class Kobe:
                     "action",
                 ]
                 step_tokens = {
-                    a: tokens_after.get(a, 0) - tokens_before.get(a, 0)
-                    for a in agent_names
+                    a: tokens_after.get(a, 0) - tokens_before.get(a, 0) for a in agent_names
                 }
                 step_total = sum(step_tokens.values())
                 cumulative = sum(tokens_after.values())
@@ -662,7 +654,8 @@ class Kobe:
         for pattern in self._WEBVIEW_ACTIVITY_PATTERNS:
             if pattern in activity_lower:
                 self.logger.info(
-                    "External web detected via activity: %s", activity,
+                    "External web detected via activity: %s",
+                    activity,
                 )
                 return True
 
@@ -703,9 +696,7 @@ class Kobe:
             return True
         # Heuristic: input method packages usually contain "inputmethod" or "keyboard"
         lower = package.lower()
-        if "inputmethod" in lower or "keyboard" in lower or "ime" in lower:
-            return True
-        return False
+        return "inputmethod" in lower or "keyboard" in lower or "ime" in lower
 
     def _handle_external_app(
         self,
@@ -750,7 +741,10 @@ class Kobe:
 
         # Record the edge that led to the external app
         self.graph.add_edge(
-            source_node, ext_node_id, action=action, instruction=instruction,
+            source_node,
+            ext_node_id,
+            action=action,
+            instruction=instruction,
             target_observation=f"[left app to {external_package}]",
         )
 
@@ -779,7 +773,7 @@ class Kobe:
             )
             ctrl_config = getattr(self.controller, "config", {})
             udid = ctrl_config.get("device", ctrl_config).get("udid", "emulator-5554")
-            subprocess.run(
+            relaunch = subprocess.run(
                 [
                     "adb",
                     "-s",
@@ -794,7 +788,14 @@ class Kobe:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                check=False,
             )
+            if relaunch.returncode != 0:
+                self.logger.warning(
+                    "Relaunch of %s exited with %d; continuing, the next state check will confirm",
+                    self.package_name,
+                    relaunch.returncode,
+                )
             time.sleep(3)
 
         return ext_node_id

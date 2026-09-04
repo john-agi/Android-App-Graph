@@ -3,14 +3,18 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from ui_kobe.kobe import Kobe
 from ui_kobe.utils.logging import setup_logging
 
+if TYPE_CHECKING:
+    from aitk.utils.avd_manager import AVDManager
 
-def check_avd(avd_manager, config: dict, logger: logging.Logger) -> None:
+
+def check_avd(avd_manager: AVDManager, config: dict, logger: logging.Logger) -> None:
     """Ensure an AVD is running. If not, duplicate the base AVD and launch it."""
     running_avd_list = avd_manager.get_running_avd_list()
     if running_avd_list:
@@ -55,6 +59,7 @@ def launch_app(config: dict, app: dict, logger: logging.Logger) -> None:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0:
             return
@@ -80,21 +85,30 @@ def launch_app(config: dict, app: dict, logger: logging.Logger) -> None:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=True,
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Explore Android app UI with UI-KOBE.")
     parser.add_argument(
-        "--config", "-c", type=Path, default="configs/explore.yaml",
+        "--config",
+        "-c",
+        type=Path,
+        default="configs/explore.yaml",
         help="Path to the YAML config file (default: configs/explore.yaml).",
     )
     parser.add_argument(
-        "--max-steps", type=int, default=None,
+        "--max-steps",
+        type=int,
+        default=None,
         help="Override max exploration steps from config.",
     )
     parser.add_argument(
-        "--resume-from", "-r", type=str, default=None,
+        "--resume-from",
+        "-r",
+        type=str,
+        default=None,
         help='Node ID to resume from, or "auto" for least-explored node.',
     )
     return parser

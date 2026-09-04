@@ -32,14 +32,18 @@ import logging
 import math
 import os
 import re
+import subprocess
 import time
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import networkx as nx
+from aitk.translators.base import BaseTranslator
 from openai import OpenAI
+
 from ui_kobe.utils import resolve_env
 from ui_kobe.utils.vlm_utils import (
     _strip_json_fences,
@@ -47,8 +51,6 @@ from ui_kobe.utils.vlm_utils import (
     get_gemini_native_image_embedding,
     predict_next_action,
 )
-
-from aitk.translators.base import BaseTranslator
 
 logger = logging.getLogger("AITK - UI-KOBE")
 
@@ -199,13 +201,13 @@ one-step instruction. No explanations."""
 # ---------------------------------------------------------------------------
 
 
-def _load_graph_from_json(path: Path):
+def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise ValueError(f"Runtime graph JSON must be an object: {path}")
+        raise TypeError(f"Runtime graph JSON must be an object: {path}")
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
-        raise ValueError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
+        raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
     screenshots_dir = path.parent / (path.stem + "_screenshots")
     if not screenshots_dir.exists() and path.stem.endswith("_audited"):
@@ -257,7 +259,7 @@ def _image_embeddings_path(graph_path: Path) -> Path:
     return graph_path.with_suffix(".image_emb.json")
 
 
-def _save_image_embeddings(graph_path: Path, G) -> None:
+def _save_image_embeddings(graph_path: Path, G: nx.DiGraph) -> None:
     embeddings = {
         node_id: data["image_embedding"]
         for node_id, data in G.nodes(data=True)
@@ -292,14 +294,14 @@ def _iter_runtime_graph_files(graph_dir: Path) -> list[tuple[str, Path]]:
 
 def _package_from_activity(activity: str) -> str:
     if "/" in activity:
-        activity = activity.split("/")[0]
+        activity = activity.split("/", maxsplit=1)[0]
     parts = activity.split(".")
     if len(parts) >= 3:
         return ".".join(parts[:3])
     return activity
 
 
-def _extract_packages_from_graph(G) -> set[str]:
+def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
     packages = set()
     for _, data in G.nodes(data=True):
         activity = data.get("activity", "")
@@ -324,7 +326,7 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
 
     think_end = answer.rfind("</THINK>")
     if think_end != -1:
-        post_think = answer[think_end + len("</THINK>"):].strip()
+        post_think = answer[think_end + len("</THINK>") :].strip()
         parsed = _parse_model_choice(post_think, valid_letters)
         if parsed:
             return parsed
@@ -356,15 +358,17 @@ def _parse_record_output(raw: str) -> str:
 
     think_end = text.lower().rfind("</think>")
     if think_end != -1:
-        text = text[think_end + len("</think>"):].strip()
+        text = text[think_end + len("</think>") :].strip()
 
     text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
-    final_matches = list(re.finditer(
-        r"(?im)^\s*(?:final\s+answer|answer|information)\s*:\s*(.+)$",
-        text,
-    ))
+    final_matches = list(
+        re.finditer(
+            r"(?im)^\s*(?:final\s+answer|answer|information)\s*:\s*(.+)$",
+            text,
+        )
+    )
     if final_matches:
-        text = text[final_matches[-1].start(1):].strip()
+        text = text[final_matches[-1].start(1) :].strip()
     else:
         markers = [
             "Thinking Process:",
@@ -394,15 +398,17 @@ def _parse_one_step_instruction(raw: str) -> str:
 
     think_end = text.lower().rfind("</think>")
     if think_end != -1:
-        text = text[think_end + len("</think>"):].strip()
+        text = text[think_end + len("</think>") :].strip()
 
     text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
-    final_matches = list(re.finditer(
-        r"(?im)^\s*(?:final\s+answer|answer|instruction|next\s+action)\s*:\s*(.+)$",
-        text,
-    ))
+    final_matches = list(
+        re.finditer(
+            r"(?im)^\s*(?:final\s+answer|answer|instruction|next\s+action)\s*:\s*(.+)$",
+            text,
+        )
+    )
     if final_matches:
-        text = text[final_matches[-1].start(1):].strip()
+        text = text[final_matches[-1].start(1) :].strip()
 
     text = text.strip().strip('"')
     if len(text) > 500:
@@ -437,7 +443,7 @@ def _parse_decide_output(raw: str) -> dict | None:
     text = _strip_json_fences((raw or "").strip())
     think_end = text.lower().rfind("</think>")
     if think_end != -1:
-        post_think = _strip_json_fences(text[think_end + len("</think>"):].strip())
+        post_think = _strip_json_fences(text[think_end + len("</think>") :].strip())
         try:
             parsed = json.loads(post_think)
         except json.JSONDecodeError:
@@ -452,7 +458,7 @@ def _parse_decide_output(raw: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _call_with_retry(label: str, func):
+def _call_with_retry[T](label: str, func: Callable[[], T]) -> T:
     """Run one API operation with up to three total attempts."""
     attempts = V2_API_RETRIES + 1
     for attempt in range(attempts):
@@ -461,7 +467,7 @@ def _call_with_retry(label: str, func):
         except Exception as exc:
             if attempt >= attempts - 1:
                 raise
-            delay = V2_API_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+            delay = V2_API_RETRY_BASE_DELAY_SECONDS * (2**attempt)
             logger.warning(
                 "[API] %s failed; retrying in %.1fs (%d/%d). Error: %s",
                 label,
@@ -474,7 +480,12 @@ def _call_with_retry(label: str, func):
     raise RuntimeError("unreachable")
 
 
-def _chat_completion_content(client, *, parse_retries: int = V2_PARSE_RETRIES, **kwargs):
+def _chat_completion_content(
+    client: OpenAI,
+    *,
+    parse_retries: int = V2_PARSE_RETRIES,
+    **kwargs: Any,
+) -> Iterator[tuple[int, str, bool]]:
     """Yield chat completion content, retrying at the caller's parse boundary."""
     for attempt in range(parse_retries + 1):
         resp = _call_with_retry(
@@ -520,8 +531,8 @@ class Memory:
     """Task memory that stores actions taken, observations, and extracted info."""
 
     def __init__(self) -> None:
-        self.actions: list[str] = []       # what has been done
-        self.info: list[str] = []          # extracted facts from screens
+        self.actions: list[str] = []  # what has been done
+        self.info: list[str] = []  # extracted facts from screens
         self.observations: list[str] = []  # model observations
 
     def add_action(self, action: str) -> None:
@@ -581,17 +592,11 @@ class UIKobeV2Translator(BaseTranslator):
         vlm_config = vlm_config or {}
 
         # Single model for all reasoning (planner/action share the same model)
-        self.model_client, self.model_name = _make_no_proxy_client(
-            vlm_config.get("action")
-        )
+        self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
         # Page detail client — used for describe+state and node verification
-        self.desc_client, self.desc_model = _make_no_proxy_client(
-            vlm_config.get("page_detail")
-        )
+        self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
         embedding_cfg = vlm_config.get("embedding") or {}
-        self.emb_model = (
-            resolve_env(embedding_cfg.get("model")) or "gemini-embedding-2-preview"
-        )
+        self.emb_model = resolve_env(embedding_cfg.get("model")) or "gemini-embedding-2-preview"
         image_embedding_cfg = vlm_config.get("image_embedding") or {}
         self.image_embedding_model = (
             resolve_env(image_embedding_cfg.get("model")) or "gemini-embedding-2"
@@ -657,10 +662,9 @@ class UIKobeV2Translator(BaseTranslator):
                 can_retry = attempt < attempts - 1
                 if not can_retry:
                     raise
-                delay = RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+                delay = RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
                 logger.warning(
-                    "[GRAPH] %s/%s: image embedding failed; "
-                    "retrying in %.1fs (%d/%d). Error: %s",
+                    "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d). Error: %s",
                     app_name,
                     node_id,
                     delay,
@@ -685,12 +689,10 @@ class UIKobeV2Translator(BaseTranslator):
                     if node_id in G:
                         G.nodes[node_id]["image_embedding"] = emb
                 ref_count = sum(
-                    1 for _, data in G.nodes(data=True)
-                    if data.get("reference_screenshot")
+                    1 for _, data in G.nodes(data=True) if data.get("reference_screenshot")
                 )
                 cached_count = sum(
-                    1 for _, data in G.nodes(data=True)
-                    if data.get("image_embedding")
+                    1 for _, data in G.nodes(data=True) if data.get("image_embedding")
                 )
                 logger.info(
                     "[GRAPH] %s: nodes=%d edges=%d reference_screenshots=%d cached_image_embeddings=%d",
@@ -719,13 +721,12 @@ class UIKobeV2Translator(BaseTranslator):
                             node_id,
                             time.perf_counter() - started,
                         )
-                    except Exception as exc:
-                        logger.error(
+                    except Exception:
+                        logger.exception(
                             "Runtime image embedding failed for graph %s node %s after retries; "
-                            "continuing without this node embedding. Error: %s",
+                            "continuing without this node embedding.",
                             app_name,
                             node_id,
-                            exc,
                         )
                 if updated_image_cache:
                     logger.info("[GRAPH] %s: image embedding cache updated", app_name)
@@ -737,8 +738,8 @@ class UIKobeV2Translator(BaseTranslator):
                     app_name,
                     sorted(_extract_packages_from_graph(G)),
                 )
-            except Exception as e:
-                logger.error("Failed to load graph %s: %s", graph_file, e)
+            except Exception:
+                logger.exception("Failed to load graph %s", graph_file)
 
     def _resolve_app_from_task(self, task: str) -> str | None:
         task_lower = task.lower()
@@ -747,7 +748,7 @@ class UIKobeV2Translator(BaseTranslator):
                 return app_name
         return None
 
-    def _get_graph_for_package(self, package: str):
+    def _get_graph_for_package(self, package: str) -> nx.DiGraph | None:
         app_name = self._package_to_app.get(package)
         if not app_name:
             app_name = self._package_to_app.get(_package_from_activity(package))
@@ -764,9 +765,7 @@ class UIKobeV2Translator(BaseTranslator):
     # Step 1: IDENTIFY — match screen to graph node
     # ------------------------------------------------------------------
 
-    def _identify_node(
-        self, activity: str, screenshot: str
-    ) -> tuple[str | None, str]:
+    def _identify_node(self, activity: str, screenshot: str) -> tuple[str | None, str]:
         """Match current screen to a graph node.
 
         1. Get page description via VLM.
@@ -817,7 +816,8 @@ class UIKobeV2Translator(BaseTranslator):
         page_desc, _detail_snapshot, _elements = _call_with_retry(
             "page describe and state",
             lambda: describe_page_and_state(
-                self.desc_client, screenshot,
+                self.desc_client,
+                screenshot,
                 existing_nodes=same_pkg_descriptions or None,
                 existing_keys=same_pkg_keys or None,
                 model=self.desc_model,
@@ -869,7 +869,8 @@ class UIKobeV2Translator(BaseTranslator):
                 )
             else:
                 missing_embeddings = sum(
-                    1 for _, data in G.nodes(data=True)
+                    1
+                    for _, data in G.nodes(data=True)
                     if _package_from_activity(data.get("activity", "")) == current_pkg
                     and not data.get("image_embedding")
                 )
@@ -884,7 +885,7 @@ class UIKobeV2Translator(BaseTranslator):
         top_k = candidates[:4]
         letters = "ABCDEFGH"
         candidate_text = "\n".join(
-            f"{letters[i]}) similarity={sim:.3f} node={nid}: \"{desc}\""
+            f'{letters[i]}) similarity={sim:.3f} node={nid}: "{desc}"'
             for i, (nid, sim, desc) in enumerate(top_k)
         )
 
@@ -894,20 +895,22 @@ class UIKobeV2Translator(BaseTranslator):
         for attempt, raw_answer, can_retry in _chat_completion_content(
             self.model_client,
             model=self.model_name,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                    },
-                ],
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
+                        },
+                    ],
+                }
+            ],
             max_tokens=V2_CHAT_MAX_TOKENS,
             temperature=0.0,
         ):
-            answer = _parse_model_choice(raw_answer, letters[:len(top_k)])
+            answer = _parse_model_choice(raw_answer, letters[: len(top_k)])
             if answer:
                 break
             if can_retry:
@@ -942,16 +945,18 @@ class UIKobeV2Translator(BaseTranslator):
         for attempt, raw_record, can_retry in _chat_completion_content(
             self.model_client,
             model=self.model_name,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                    },
-                ],
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
+                        },
+                    ],
+                }
+            ],
             max_tokens=V2_CHAT_MAX_TOKENS,
             temperature=0.0,
         ):
@@ -968,7 +973,7 @@ class UIKobeV2Translator(BaseTranslator):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _unpack_template(tmpl) -> tuple[str, str]:
+    def _unpack_template(tmpl: dict | str) -> tuple[str, str]:
         """Extract (instruction_text, observation_text) from a template entry."""
         if isinstance(tmpl, dict):
             return tmpl.get("template", ""), tmpl.get("observation_template", "")
@@ -1019,10 +1024,10 @@ class UIKobeV2Translator(BaseTranslator):
         lines = []
         idx = 0
 
-        # Option: done
+        # The first option is always "done"
         letter = letters[idx]
         options.append({"letter": letter, "type": "done"})
-        lines.append(f'{letter}) DONE — the task is fully complete, answer is in memory')
+        lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
         idx += 1
 
         # Self-loop actions
@@ -1037,13 +1042,15 @@ class UIKobeV2Translator(BaseTranslator):
                     letter = letters[idx]
                     tmpl_text, obs_text = self._unpack_template(tmpl)
                     effect = self._edge_effect_hint(edge_data)
-                    options.append({
-                        "letter": letter,
-                        "type": "self_loop",
-                        "node": node_id,
-                        "instruction": tmpl_text,
-                        "effect": effect,
-                    })
+                    options.append(
+                        {
+                            "letter": letter,
+                            "type": "self_loop",
+                            "node": node_id,
+                            "instruction": tmpl_text,
+                            "effect": effect,
+                        }
+                    )
                     hint = f'{letter}) Stay here — "{tmpl_text}"'
                     if obs_text:
                         hint += f" → {obs_text}"
@@ -1056,13 +1063,15 @@ class UIKobeV2Translator(BaseTranslator):
                 for i, instr in enumerate(edge_data.get("instructions", [])):
                     letter = letters[idx]
                     effect = self._edge_effect_hint(edge_data, i)
-                    options.append({
-                        "letter": letter,
-                        "type": "self_loop",
-                        "node": node_id,
-                        "instruction": instr,
-                        "effect": effect,
-                    })
+                    options.append(
+                        {
+                            "letter": letter,
+                            "type": "self_loop",
+                            "node": node_id,
+                            "instruction": instr,
+                            "effect": effect,
+                        }
+                    )
                     hint = f'{letter}) Stay here — "{instr}"'
                     if i < len(observations) and observations[i]:
                         hint += f" → {observations[i]}"
@@ -1093,14 +1102,16 @@ class UIKobeV2Translator(BaseTranslator):
 
             letter = letters[idx]
             effect = self._edge_effect_hint(edge_data, 0)
-            options.append({
-                "letter": letter,
-                "type": "neighbor",
-                "node": neighbor,
-                "instruction": instr,
-                "description": neighbor_desc,
-                "effect": effect,
-            })
+            options.append(
+                {
+                    "letter": letter,
+                    "type": "neighbor",
+                    "node": neighbor,
+                    "instruction": instr,
+                    "description": neighbor_desc,
+                    "effect": effect,
+                }
+            )
             edge_hint = f' — "{instr}"' if instr else ""
             if obs:
                 edge_hint += f" → {obs}"
@@ -1112,14 +1123,12 @@ class UIKobeV2Translator(BaseTranslator):
         # Free action (fallback)
         letter = letters[idx]
         options.append({"letter": letter, "type": "free"})
-        lines.append(f'{letter}) FREE — do something not listed above (describe it)')
+        lines.append(f"{letter}) FREE — do something not listed above (describe it)")
         idx += 1
 
         return "\n".join(lines), options
 
-    def _decide(
-        self, task: str, node_id: str, screenshot: str
-    ) -> dict:
+    def _decide(self, task: str, node_id: str, screenshot: str) -> dict:
         """Ask the model to pick the next action.
 
         Returns the chosen option dict with an added "instruction" key
@@ -1155,16 +1164,18 @@ class UIKobeV2Translator(BaseTranslator):
         for attempt, raw, can_retry in _chat_completion_content(
             self.model_client,
             model=self.model_name,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                    },
-                ],
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
+                        },
+                    ],
+                }
+            ],
             max_tokens=V2_CHAT_MAX_TOKENS,
             temperature=0.0,
         ):
@@ -1179,7 +1190,11 @@ class UIKobeV2Translator(BaseTranslator):
                 len(raw),
                 raw[:160],
             )
-            return {"type": "free", "instruction": "", "reason": "DECIDE response could not be parsed"}
+            return {
+                "type": "free",
+                "instruction": "",
+                "reason": "DECIDE response could not be parsed",
+            }
 
         choice_letter = result.get("choice", "").upper()
         instruction = result.get("instruction", "")
@@ -1218,7 +1233,9 @@ class UIKobeV2Translator(BaseTranslator):
         reason: str,
         action_history: list,
     ) -> str:
-        history_text = "\n".join(str(a) for a in action_history[-5:]) if action_history else "(none)"
+        history_text = (
+            "\n".join(str(a) for a in action_history[-5:]) if action_history else "(none)"
+        )
         prompt = FREE_ACTION_PLAN_PROMPT.format(
             task=task,
             reason=reason,
@@ -1229,16 +1246,18 @@ class UIKobeV2Translator(BaseTranslator):
         for attempt, raw_instruction, can_retry in _chat_completion_content(
             self.model_client,
             model=self.model_name,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                    },
-                ],
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
+                        },
+                    ],
+                }
+            ],
             max_tokens=V2_CHAT_MAX_TOKENS,
             temperature=0.0,
         ):
@@ -1256,21 +1275,26 @@ class UIKobeV2Translator(BaseTranslator):
         return "Wait briefly for the current screen to finish loading."
 
     def _call_action_agent(
-        self, task: str, action_history: list[str], screenshot: str,
+        self,
+        task: str,
+        action_history: list[str],
+        screenshot: str,
         overall_task: str = "",
     ) -> tuple[dict, str, str]:
         # Detect if soft keyboard is visible (text field is focused)
         keyboard_hint = ""
         try:
-            import subprocess
             kb_check = subprocess.run(
                 ["adb", "shell", "dumpsys", "input_method"],
-                capture_output=True, text=True, timeout=3,
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
             )
             if "mInputShown=true" in kb_check.stdout:
                 keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("Soft keyboard probe failed: %s", exc)
 
         aitk_action, history_entry = _call_with_retry(
             "action agent",
@@ -1292,8 +1316,8 @@ class UIKobeV2Translator(BaseTranslator):
         """Constrain graph fallback so the action agent still emits one local UI action."""
         app_context = (
             f"You are already inside the {self._app_name} app. "
-            if self._app_name else
-            "You are already inside the target app. "
+            if self._app_name
+            else "You are already inside the target app. "
         )
         return (
             f"{app_context}"
@@ -1385,7 +1409,11 @@ class UIKobeV2Translator(BaseTranslator):
             decision = self._decide(task, node_id, screenshot)
         else:
             # No graph or unrecognized screen — free action
-            reason = "no graph is loaded" if G is None else "the current screen did not match any graph node"
+            reason = (
+                "no graph is loaded"
+                if G is None
+                else "the current screen did not match any graph node"
+            )
             logger.warning("[DECIDE] Falling back to free action: %s", reason)
             fallback_instruction = self._plan_free_action(
                 task,
@@ -1398,7 +1426,9 @@ class UIKobeV2Translator(BaseTranslator):
         decision_type = decision.get("type", "free")
         instruction = decision.get("instruction", task)
         if decision_type == "free" and not instruction:
-            reason = decision.get("reason", "graph guidance did not produce an executable instruction")
+            reason = decision.get(
+                "reason", "graph guidance did not produce an executable instruction"
+            )
             instruction = self._plan_free_action(
                 task,
                 screenshot,
@@ -1459,10 +1489,12 @@ class UIKobeV2Translator(BaseTranslator):
 
     @staticmethod
     def _make_response(message: str, aitk_action: dict) -> str:
-        return json.dumps({
-            "message": f"[UI-KOBE] {message}",
-            "aitk_action": aitk_action,
-        })
+        return json.dumps(
+            {
+                "message": f"[UI-KOBE] {message}",
+                "aitk_action": aitk_action,
+            }
+        )
 
     # ------------------------------------------------------------------
     # BaseTranslator interface
@@ -1479,7 +1511,7 @@ class UIKobeV2Translator(BaseTranslator):
         try:
             data = json.loads(action)
             return data.get("aitk_action", {"action": "end", "answer": ""})
-        except (json.JSONDecodeError, KeyError):
+        except json.JSONDecodeError, KeyError:
             logger.warning("Failed to parse action: %s", action)
             return {"action": "end", "answer": "parse error"}
 

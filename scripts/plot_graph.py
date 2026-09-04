@@ -59,7 +59,6 @@ def load_graph(graph_path: str) -> tuple[dict, nx.DiGraph]:
     for edge in data["edges"]:
         templates = edge.get("instruction_templates", [])
         instructions = edge.get("instructions", [])
-        target_observations = edge.get("target_observations", [])
 
         # Prefer template for label, fall back to instructions
         if templates and isinstance(templates[0], dict) and templates[0].get("template"):
@@ -78,7 +77,7 @@ def load_graph(graph_path: str) -> tuple[dict, nx.DiGraph]:
             for delta in schema_deltas:
                 if delta:
                     for k, v in delta.items():
-                        delta_parts.append(f'{k}: {v.get("before")} → {v.get("after")}')
+                        delta_parts.append(f"{k}: {v.get('before')} → {v.get('after')}")
             if delta_parts:
                 delta_str = "\n[Δ " + ", ".join(delta_parts) + "]"
 
@@ -138,7 +137,9 @@ def _shorten_edge_label(text: str, max_words: int = 8, max_chars: int = 52) -> s
     text = re.sub(r"\[[^\]]*\]", " ", str(text or ""))
     text = re.sub(r"\{\{[^}]+\}\}", "value", text)
     text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(r"\b(?:the|a|an|to|on|in|with|button|icon|option)\b", " ", text, flags=re.I)
+    text = re.sub(
+        r"\b(?:the|a|an|to|on|in|with|button|icon|option)\b", " ", text, flags=re.IGNORECASE
+    )
     text = re.sub(r"\s+", " ", text).strip(" .,-")
     return _shorten_words(text, max_words=max_words, max_chars=max_chars)
 
@@ -197,10 +198,7 @@ def _trim_leaf_rounds(G: nx.DiGraph, rounds: int) -> nx.DiGraph:
     """Iteratively remove degree-0/1 leaves from a copy of the graph."""
     H = G.copy()
     for _ in range(max(0, rounds)):
-        leaves = [
-            node for node in H.nodes()
-            if H.in_degree(node) + H.out_degree(node) <= 1
-        ]
+        leaves = [node for node in H.nodes() if H.in_degree(node) + H.out_degree(node) <= 1]
         if not leaves or len(leaves) == H.number_of_nodes():
             break
         H.remove_nodes_from(leaves)
@@ -251,9 +249,7 @@ def plot_paper_graphviz(
     """Create a paper-friendly static graph using Graphviz."""
     dot_bin = shutil.which("dot")
     if not dot_bin:
-        print(
-            "Graphviz 'dot' command not found; using matplotlib paper fallback."
-        )
+        print("Graphviz 'dot' command not found; using matplotlib paper fallback.")
         plot_paper_matplotlib(
             G,
             output_path,
@@ -280,14 +276,20 @@ def plot_paper_graphviz(
 
     lines = [
         "digraph G {",
-        '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
-        'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
-        'fontname="Helvetica", fontsize="18", labelloc="t", '
-        f'label={q(f"UI-KOBE Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions")}];',
-        '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
-        'margin="0.10,0.07", penwidth="1.4", color="#2f3a4a"];',
-        '  edge [fontname="Helvetica", fontsize="8", color="#758195", '
-        'fontcolor="#475467", arrowsize="0.55", penwidth="1.15"];',
+        (
+            '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
+            'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
+            'fontname="Helvetica", fontsize="18", labelloc="t", '
+            f"label={q(f'UI-KOBE Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions')}];"
+        ),
+        (
+            '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
+            'margin="0.10,0.07", penwidth="1.4", color="#2f3a4a"];'
+        ),
+        (
+            '  edge [fontname="Helvetica", fontsize="8", color="#758195", '
+            'fontcolor="#475467", arrowsize="0.55", penwidth="1.15"];'
+        ),
     ]
 
     for node_id, data in G.nodes(data=True):
@@ -315,11 +317,13 @@ def plot_paper_graphviz(
             "penwidth": f"{1.0 + math.log1p(max(visits, 0)) * 0.45:.2f}",
         }
         if src == tgt or data.get("is_self_loop"):
-            edge_attrs.update({
-                "style": "dashed",
-                "color": "#9ca3af",
-                "fontcolor": "#6b7280",
-            })
+            edge_attrs.update(
+                {
+                    "style": "dashed",
+                    "color": "#9ca3af",
+                    "fontcolor": "#6b7280",
+                }
+            )
         else:
             edge_seen[(src, tgt)] += 1
             if edge_seen[(src, tgt)] > 1:
@@ -387,7 +391,7 @@ def plot_paper_matplotlib(
         for node, data in G.nodes(data=True)
     }
 
-    for category in palette:
+    for category, node_color in palette.items():
         nodes = [node for node, cat in categories.items() if cat == category]
         if not nodes:
             continue
@@ -398,7 +402,7 @@ def plot_paper_matplotlib(
             pos,
             nodelist=nodes,
             node_size=sizes,
-            node_color=palette[category],
+            node_color=node_color,
             edgecolors=borders[category],
             linewidths=1.4,
             ax=ax,
@@ -411,10 +415,7 @@ def plot_paper_matplotlib(
         pos,
         edgelist=non_self_edges,
         edge_color="#94a3b8",
-        width=[
-            0.8 + math.log1p(G.edges[e].get("visit_count", 0)) * 0.35
-            for e in non_self_edges
-        ],
+        width=[0.8 + math.log1p(G.edges[e].get("visit_count", 0)) * 0.35 for e in non_self_edges],
         arrows=True,
         arrowsize=9,
         connectionstyle="arc3,rad=0.10",
@@ -490,7 +491,6 @@ def plot_paper_matplotlib(
 def plot_pyvis(
     G: nx.DiGraph,
     output_path: str,
-    title: str = "",
     *,
     max_node_words: int = 5,
     max_edge_words: int = 6,
@@ -547,15 +547,22 @@ def plot_pyvis(
 
     # Pastel color palette for nodes
     palette = [
-        "#e3f2fd", "#e8f5e9", "#fff3e0", "#fce4ec", "#f3e5f5",
-        "#e0f7fa", "#fff9c4", "#efebe9", "#e8eaf6", "#f1f8e9",
+        "#e3f2fd",
+        "#e8f5e9",
+        "#fff3e0",
+        "#fce4ec",
+        "#f3e5f5",
+        "#e0f7fa",
+        "#fff9c4",
+        "#efebe9",
+        "#e8eaf6",
+        "#f1f8e9",
     ]
 
     for idx, (node_id, data) in enumerate(G.nodes(data=True)):
         desc = data.get("page_description", node_id)
         short_desc = _shorten_words(desc, max_node_words, 40)
         visits = data.get("visit_count", 0)
-        n_keys = data.get("num_keys", 0)
         state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
         bg = palette[idx % len(palette)]
@@ -588,8 +595,11 @@ def plot_pyvis(
             node_id,
             label=short_desc,
             title=tooltip,
-            color={"background": bg, "border": "#5c6bc0",
-                   "highlight": {"background": "#c5cae9", "border": "#1a237e"}},
+            color={
+                "background": bg,
+                "border": "#5c6bc0",
+                "highlight": {"background": "#c5cae9", "border": "#1a237e"},
+            },
             size=node_size,
             font={"size": node_font_size, "face": "Arial"},
             borderWidth=3,
@@ -612,7 +622,8 @@ def plot_pyvis(
         roundness = 0.15 + (edge_counts[pair] - 1) * 0.15
 
         net.add_edge(
-            src, tgt,
+            src,
+            tgt,
             label=short_label,
             title=tooltip,
             smooth={"type": "curvedCW", "roundness": roundness},
@@ -672,7 +683,7 @@ def plot_graphviz(G: nx.DiGraph, output_path: str) -> None:
 def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
     """Fallback: plot with matplotlib + networkx."""
 
-    fig, ax = plt.subplots(1, 1, figsize=(14, 10))
+    _fig, ax = plt.subplots(1, 1, figsize=(14, 10))
 
     pos = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
 
@@ -689,14 +700,17 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
     )
     nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=8)
     nx.draw_networkx_edges(
-        G, pos, ax=ax, edge_color="gray",
-        arrows=True, arrowsize=15, connectionstyle="arc3,rad=0.15",
+        G,
+        pos,
+        ax=ax,
+        edge_color="gray",
+        arrows=True,
+        arrowsize=15,
+        connectionstyle="arc3,rad=0.15",
     )
 
     # Edge labels
-    edge_labels = {
-        (s, t): d.get("label", "")[:30] for s, t, d in G.edges(data=True)
-    }
+    edge_labels = {(s, t): d.get("label", "")[:30] for s, t, d in G.edges(data=True)}
     nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, ax=ax, font_size=7)
 
     ax.set_title(f"UI-KOBE Graph ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
@@ -707,24 +721,33 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
     print(f"Graph image saved to {output_path}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Plot a UI-KOBE exploration graph")
     parser.add_argument("graph", type=str, help="Path to the graph JSON file")
     parser.add_argument(
-        "-o", "--output", type=str, default=None,
+        "-o",
+        "--output",
+        type=str,
+        default=None,
         help="Output file path (default: same dir as graph, .html for pyvis)",
     )
     parser.add_argument(
-        "--backend", type=str, default="pyvis",
+        "--backend",
+        type=str,
+        default="pyvis",
         choices=["pyvis", "graphviz", "matplotlib", "paper"],
         help="Visualization backend (default: pyvis)",
     )
     parser.add_argument(
-        "--max-node-words", type=int, default=5,
+        "--max-node-words",
+        type=int,
+        default=5,
         help="Maximum words shown in each paper node label.",
     )
     parser.add_argument(
-        "--max-edge-words", type=int, default=5,
+        "--max-edge-words",
+        type=int,
+        default=5,
         help="Maximum words shown in each paper edge label.",
     )
     parser.add_argument(
@@ -785,7 +808,7 @@ def main():
         print(f"Error: {graph_path} not found")
         return
 
-    data, G = load_graph(str(graph_path))
+    _data, G = load_graph(str(graph_path))
 
     # Default output path
     if args.output:
@@ -809,7 +832,6 @@ def main():
         plot_pyvis(
             G,
             output_path,
-            title=graph_path.stem,
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
             node_size=args.node_size,
