@@ -1,5 +1,3 @@
-# Issue form syntax: https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms
-# Element schema: https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-githubs-form-schema
 name: Task
 description: A scoped unit of work in the roadmap issue format, written so a coding agent can pick it up cold.
 body:

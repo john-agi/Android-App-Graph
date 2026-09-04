@@ -1,12 +1,8 @@
-<!-- Keep every section. Replace the placeholders; tick a box only when it is true. -->
-
 ## Linked issue
 
 Closes #
 
 ## Summary
-
-<!-- What changed and why, in one or two sentences. -->
 
 ## Definition of done
 
