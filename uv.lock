@@ -923,13 +923,18 @@ source = { editable = "." }
 dependencies = [
     { name = "aitk" },
     { name = "dill" },
-    { name = "matplotlib" },
+    { name = "httpx" },
     { name = "networkx" },
     { name = "openai" },
     { name = "pillow" },
-    { name = "pyvis" },
     { name = "pyyaml" },
     { name = "rich" },
+]
+
+[package.optional-dependencies]
+viz = [
+    { name = "matplotlib" },
+    { name = "pyvis" },
 ]
 
 [package.dev-dependencies]
@@ -943,14 +948,16 @@ dev = [
 requires-dist = [
     { name = "aitk", git = "https://github.com/YuxiangChai/AITK?rev=fd06a28e2286cbc1ae699401c1a6f894ba926c44" },
     { name = "dill" },
-    { name = "matplotlib" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10.8" },
     { name = "networkx" },
     { name = "openai" },
     { name = "pillow" },
-    { name = "pyvis", specifier = ">=0.3.2" },
+    { name = "pyvis", marker = "extra == 'viz'", specifier = ">=0.3.2" },
     { name = "pyyaml" },
     { name = "rich" },
 ]
+provides-extras = ["viz"]
 
 [package.metadata.requires-dev]
 dev = [

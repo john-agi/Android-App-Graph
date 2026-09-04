@@ -18,8 +18,7 @@ dependencies = [
     "rich",
     "dill",
     "aitk",
-    "pyvis>=0.3.2",
-    "matplotlib",
+    "httpx>=0.28.1",
 ]
 authors = [
     { name = "Yuxiang Chai" },
@@ -33,6 +32,12 @@ kobe-explore = "ui_kobe.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/john-agi/Android-App-Graph"
+
+[project.optional-dependencies]
+viz = [
+    "matplotlib>=3.10.8",
+    "pyvis>=0.3.2",
+]
 
 [tool.uv]
 required-version = ">=0.12.9,<0.13"
@@ -104,6 +109,8 @@ known_first_party = ["ui_kobe"]
 [tool.deptry.per_rule_ignores]
 # aw_files/ui_kobe_aw_agent.py is a copy-in adapter; android_world is not declared here.
 DEP001 = ["android_world"]
+# Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
+DEP002 = ["dill"]
 
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
