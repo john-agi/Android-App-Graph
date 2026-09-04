@@ -34,7 +34,7 @@ def _compute_schema_delta(before: dict, after: dict) -> dict | None:
         val_after = after.get(key)
         if val_before != val_after:
             delta[key] = {"before": val_before, "after": val_after}
-    return delta if delta else None
+    return delta or None
 
 
 class Kobe:
@@ -77,15 +77,9 @@ class Kobe:
         vlm_config = vlm_config or {}
 
         # Create per-call clients
-        self.page_detail_client, self.page_detail_model = make_client(
-            vlm_config.get("page_detail")
-        )
-        self.embedding_client, self.embedding_model = make_client(
-            vlm_config.get("embedding")
-        )
-        self.instruction_client, self.instruction_model = make_client(
-            vlm_config.get("instruction")
-        )
+        self.page_detail_client, self.page_detail_model = make_client(vlm_config.get("page_detail"))
+        self.embedding_client, self.embedding_model = make_client(vlm_config.get("embedding"))
+        self.instruction_client, self.instruction_model = make_client(vlm_config.get("instruction"))
         self.action_client, self.action_model = make_client(vlm_config.get("action"))
 
         similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
@@ -100,18 +94,14 @@ class Kobe:
         )
 
         # Graph persistence path: graphs/{app_name}/{app_name}.json
-        base_graph_dir = (
-            Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
-        )
+        base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
         self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
 
         if self.graph_path.exists():
             self.graph.load_graph(self.graph_path)
             self.logger.info("Graph loaded from %s", self.graph_path)
         else:
-            self.logger.info(
-                "No existing graph at %s. Starting fresh.", self.graph_path
-            )
+            self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
 
     def _maybe_continue_from_coverage_checkpoint(
         self,
@@ -225,15 +215,14 @@ class Kobe:
 
         path = self.graph.find_path(start_node, target_node)
         if path is None:
-            raise ValueError(
-                f"No path from {start_node} to {target_node} in the graph."
-            )
+            raise ValueError(f"No path from {start_node} to {target_node} in the graph.")
 
         if len(path) <= 1:
             self.logger.info("Already at target node %s", target_node)
             device_state = self.controller.get_state()
             return self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
+                device_state["activity"],
+                device_state["screenshot"],
                 app_name=self.app_name,
             )
 
@@ -275,7 +264,8 @@ class Kobe:
         # Verify we reached the expected state
         device_state = self.controller.get_state()
         actual_node = self.graph.identify_state(
-            device_state["activity"], device_state["screenshot"],
+            device_state["activity"],
+            device_state["screenshot"],
             app_name=self.app_name,
         )
         if actual_node != target_node:
@@ -338,7 +328,8 @@ class Kobe:
                 )
                 device_state = self.controller.get_state()
                 current_node = self.graph.identify_state(
-                    device_state["activity"], device_state["screenshot"],
+                    device_state["activity"],
+                    device_state["screenshot"],
                     app_name=self.app_name,
                 )
         elif start_step > 0:
@@ -349,18 +340,19 @@ class Kobe:
             )
             device_state = self.controller.get_state()
             current_node = self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
+                device_state["activity"],
+                device_state["screenshot"],
                 app_name=self.app_name,
             )
         else:
             device_state = self.controller.get_state()
             current_node = self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
+                device_state["activity"],
+                device_state["screenshot"],
                 app_name=self.app_name,
             )
 
         step = start_step
-
 
         try:
             while step < max_steps:
@@ -385,7 +377,9 @@ class Kobe:
                 try:
                     kb_check = subprocess.run(
                         ["adb", "shell", "dumpsys", "input_method"],
-                        capture_output=True, text=True, timeout=3,
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
                     )
                     if "mInputShown=true" in kb_check.stdout:
                         keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
@@ -453,7 +447,10 @@ class Kobe:
                 # Handle external app
                 if left_app:
                     new_node = self._handle_external_app(
-                        current_node, action_sequence, current_package, device_state,
+                        current_node,
+                        action_sequence,
+                        current_package,
+                        device_state,
                         instruction=instruction,
                     )
                     device_state = self.controller.get_state()
@@ -462,7 +459,8 @@ class Kobe:
                     self.graph.maybe_normalize_node_edges(current_node)
                     self.save_graph()
                     current_node = self.graph.identify_state(
-                        device_state["activity"], device_state["screenshot"],
+                        device_state["activity"],
+                        device_state["screenshot"],
                         app_name=self.app_name,
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
@@ -475,7 +473,8 @@ class Kobe:
 
                 # Identify the new state node
                 new_node = self.graph.identify_state(
-                    device_state["activity"], device_state["screenshot"],
+                    device_state["activity"],
+                    device_state["screenshot"],
                     app_name=self.app_name,
                 )
 
@@ -496,7 +495,8 @@ class Kobe:
                     self.graph.total_steps_completed = step
                     self.save_graph()
                     current_node = self.graph.identify_state(
-                        device_state["activity"], device_state["screenshot"],
+                        device_state["activity"],
+                        device_state["screenshot"],
                         app_name=self.app_name,
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
@@ -555,8 +555,7 @@ class Kobe:
                     "action",
                 ]
                 step_tokens = {
-                    a: tokens_after.get(a, 0) - tokens_before.get(a, 0)
-                    for a in agent_names
+                    a: tokens_after.get(a, 0) - tokens_before.get(a, 0) for a in agent_names
                 }
                 step_total = sum(step_tokens.values())
                 cumulative = sum(tokens_after.values())
@@ -662,7 +661,8 @@ class Kobe:
         for pattern in self._WEBVIEW_ACTIVITY_PATTERNS:
             if pattern in activity_lower:
                 self.logger.info(
-                    "External web detected via activity: %s", activity,
+                    "External web detected via activity: %s",
+                    activity,
                 )
                 return True
 
@@ -750,7 +750,10 @@ class Kobe:
 
         # Record the edge that led to the external app
         self.graph.add_edge(
-            source_node, ext_node_id, action=action, instruction=instruction,
+            source_node,
+            ext_node_id,
+            action=action,
+            instruction=instruction,
             target_observation=f"[left app to {external_package}]",
         )
 

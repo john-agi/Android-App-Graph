@@ -113,9 +113,8 @@ class _ColorHandler(logging.Handler):
             msg = record.getMessage()
             self._append_message(line, msg, component["text_style"])
 
-            if record.exc_info:
-                if not record.exc_text:
-                    record.exc_text = "".join(traceback.format_exception(*record.exc_info))
+            if record.exc_info and not record.exc_text:
+                record.exc_text = "".join(traceback.format_exception(*record.exc_info))
             if record.exc_text:
                 line.append("\n")
                 line.append(record.exc_text.rstrip(), style="bold red")

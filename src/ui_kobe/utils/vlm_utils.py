@@ -50,9 +50,7 @@ class TokenTracker:
                 "calls": 0,
             }
         self._usage[key]["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-        self._usage[key]["completion_tokens"] += (
-            getattr(usage, "completion_tokens", 0) or 0
-        )
+        self._usage[key]["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
         self._usage[key]["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
         self._usage[key]["calls"] += 1
 
@@ -523,7 +521,6 @@ def _build_image_message(screenshot_b64: str) -> dict:
     }
 
 
-
 def describe_page_and_state(
     client: OpenAI,
     screenshot_b64: str,
@@ -549,10 +546,9 @@ def describe_page_and_state(
 
     # Build existing nodes section
     if existing_nodes:
-        nodes_list = "\n".join(f"  - \"{d}\"" for d in existing_nodes)
+        nodes_list = "\n".join(f'  - "{d}"' for d in existing_nodes)
         existing_nodes_section = (
-            f"The following screens have already been discovered in this app:\n"
-            f"{nodes_list}"
+            f"The following screens have already been discovered in this app:\n{nodes_list}"
         )
         description_hint = (
             "If this screen is clearly the same type as one in the list, output the same "
@@ -700,9 +696,9 @@ def normalize_edge(
     input_text = "Instructions to normalize:\n"
     for i, inst in enumerate(instructions):
         obs = target_observations[i] if target_observations and i < len(target_observations) else ""
-        input_text += f"- Instruction: \"{inst}\""
+        input_text += f'- Instruction: "{inst}"'
         if obs:
-            input_text += f" → Observation: \"{obs}\""
+            input_text += f' → Observation: "{obs}"'
         input_text += "\n"
 
     resp = client.chat.completions.create(
@@ -862,10 +858,7 @@ def audit_merge_nodes(
         logger.warning("Failed to parse node merge audit JSON. Raw:\n%s", raw)
         return {"issues": [], "summary": "parse error"}
 
-    issues = [
-        issue for issue in result.get("issues", [])
-        if issue.get("type") == "merge_nodes"
-    ]
+    issues = [issue for issue in result.get("issues", []) if issue.get("type") == "merge_nodes"]
     return {
         "issues": issues,
         "summary": result.get("summary", ""),
@@ -909,14 +902,14 @@ def select_exploration_target(
         unexplored_desc = candidate.get("unexplored_element_descriptions", [])
         unexplored_text = ", ".join(d for d in unexplored_desc if d) or "none listed"
         candidate_lines.append(
-            f'{i}. node_id={candidate.get("node_id", "")} | '
+            f"{i}. node_id={candidate.get('node_id', '')} | "
             f'description="{candidate.get("page_description", "")}" | '
-            f'visits={candidate.get("visit_count", 0)} | '
-            f'out_edges={candidate.get("out_degree", 0)} | '
-            f'unexplored={candidate.get("unexplored_elements", 0)}/'
-            f'{candidate.get("total_elements", 0)} | '
-            f'score={candidate.get("score", 0)} | '
-            f'unexplored_elements=[{unexplored_text}]'
+            f"visits={candidate.get('visit_count', 0)} | "
+            f"out_edges={candidate.get('out_degree', 0)} | "
+            f"unexplored={candidate.get('unexplored_elements', 0)}/"
+            f"{candidate.get('total_elements', 0)} | "
+            f"score={candidate.get('score', 0)} | "
+            f"unexplored_elements=[{unexplored_text}]"
         )
 
     prompt = EXPLORATION_TARGET_PROMPT.format(
@@ -989,9 +982,7 @@ def audit_graph(
         return {"issues": [], "summary": "parse error"}
 
 
-def get_embedding(
-    client: OpenAI, text: str, model: str = DEFAULT_EMBEDDING_MODEL
-) -> list[float]:
+def get_embedding(client: OpenAI, text: str, model: str = DEFAULT_EMBEDDING_MODEL) -> list[float]:
     """Get an embedding vector for a text string."""
     resp = client.embeddings.create(model=model, input=text)
     token_tracker.record("embedding", model, resp.usage)
@@ -1015,8 +1006,18 @@ def get_image_embedding(
         {"mime_type": "image/png", "data": screenshot_b64},
         [{"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]}],
         {"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]},
-        [{"content": {"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]}}],
-        {"content": {"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]}},
+        [
+            {
+                "content": {
+                    "parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]
+                }
+            }
+        ],
+        {
+            "content": {
+                "parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]
+            }
+        },
     ]
 
     errors = []
@@ -1029,8 +1030,7 @@ def get_image_embedding(
             errors.append(f"{type(exc).__name__}: {exc}")
 
     raise RuntimeError(
-        "Image embedding request failed for all known payload formats: "
-        + " | ".join(errors)
+        "Image embedding request failed for all known payload formats: " + " | ".join(errors)
     )
 
 
@@ -1046,12 +1046,14 @@ def get_gemini_native_image_embedding(
     url = f"{base_url}/{model_name}:embedContent"
     payload = {
         "content": {
-            "parts": [{
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": screenshot_b64,
-                },
-            }],
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": screenshot_b64,
+                    },
+                }
+            ],
         },
     }
     headers = {
@@ -1070,8 +1072,7 @@ def get_gemini_native_image_embedding(
         values = data["embeddings"][0].get("values")
     if not values:
         raise RuntimeError(
-            "Gemini native image embedding response missing embedding values: "
-            f"{data}"
+            f"Gemini native image embedding response missing embedding values: {data}"
         )
     return values
 
@@ -1085,7 +1086,7 @@ def _parse_tool_call(raw: str) -> dict | None:
         start = raw.find("<tool_call>")
         if start == -1:
             return None
-        remainder = raw[start + len("<tool_call>"):].lstrip()
+        remainder = raw[start + len("<tool_call>") :].lstrip()
         decoder = json.JSONDecoder()
         try:
             parsed, _end = decoder.raw_decode(remainder)
@@ -1250,9 +1251,7 @@ def plan_next_action(
                 for action in edge.get("actions", []):
                     lines.append(f'- {json.dumps(action)} → led to: "{target_desc}"')
         instructions_str = (
-            "\n".join(lines)
-            if lines
-            else "(none — this screen has not been explored yet)"
+            "\n".join(lines) if lines else "(none — this screen has not been explored yet)"
         )
     else:
         instructions_str = "(none — this screen has not been explored yet)"
@@ -1331,7 +1330,7 @@ def _parse_agent_response(resp) -> tuple[dict | None, str, str]:
             logger.info("  Agent used native tool calling")
             try:
                 tool_args = json.loads(tool_calls[0].function.arguments)
-            except (json.JSONDecodeError, AttributeError):
+            except json.JSONDecodeError, AttributeError:
                 return None, "", ""
             return tool_args, "", str(tool_args)
         logger.error("Action agent returned empty response (no content, no tool_calls)")
@@ -1395,9 +1394,7 @@ def predict_next_action(
         - aitk_action: action dict in AITK format (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
-    screenshot_b64, resized_w, resized_h, _scale_back = _resize_screenshot(
-        screenshot_b64
-    )
+    screenshot_b64, resized_w, resized_h, _scale_back = _resize_screenshot(screenshot_b64)
 
     system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format(
         screen_w=resized_w,
@@ -1406,9 +1403,7 @@ def predict_next_action(
 
     # Build history section
     if action_history:
-        history_text = "\n".join(
-            f"Step {i+1}: {h}" for i, h in enumerate(action_history)
-        )
+        history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(action_history))
         history_section = f"Task progress (actions already taken):\n{history_text}\n\n"
     else:
         history_section = ""
@@ -1450,9 +1445,7 @@ def predict_next_action(
     action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
 
     # Build history entry
-    history_entry = (
-        f"{thought} | {action_desc}" if thought else (action_desc or str(action))
-    )
+    history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
 
     # logger.info("  Agent thought: %s", thought)
     logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)

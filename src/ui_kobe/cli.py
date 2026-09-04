@@ -86,15 +86,23 @@ def launch_app(config: dict, app: dict, logger: logging.Logger) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Explore Android app UI with UI-KOBE.")
     parser.add_argument(
-        "--config", "-c", type=Path, default="configs/explore.yaml",
+        "--config",
+        "-c",
+        type=Path,
+        default="configs/explore.yaml",
         help="Path to the YAML config file (default: configs/explore.yaml).",
     )
     parser.add_argument(
-        "--max-steps", type=int, default=None,
+        "--max-steps",
+        type=int,
+        default=None,
         help="Override max exploration steps from config.",
     )
     parser.add_argument(
-        "--resume-from", "-r", type=str, default=None,
+        "--resume-from",
+        "-r",
+        type=str,
+        default=None,
         help='Node ID to resume from, or "auto" for least-explored node.',
     )
     return parser

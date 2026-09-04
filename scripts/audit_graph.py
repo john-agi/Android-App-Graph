@@ -185,9 +185,7 @@ def verify_and_merge_nodes(
         screenshot_b = data_b.get("reference_screenshot")
 
         if not screenshot_a or not screenshot_b:
-            logger.warning(
-                "Skipping merge %s + %s — missing screenshot(s)", node_a, node_b
-            )
+            logger.warning("Skipping merge %s + %s — missing screenshot(s)", node_a, node_b)
             results.append({"issue": issue, "status": "skipped", "reason": "missing screenshot"})
             continue
 
@@ -200,7 +198,10 @@ def verify_and_merge_nodes(
 
         logger.info(
             "Verifying merge: %s ('%s') + %s ('%s')",
-            node_a, desc_a, node_b, desc_b,
+            node_a,
+            desc_a,
+            node_b,
+            desc_b,
         )
 
         verify_result = verify_same_node(
@@ -217,25 +218,33 @@ def verify_and_merge_nodes(
             graph.merge_nodes(keep, remove)
             logger.info(
                 "Merged %s into %s — reason: %s",
-                remove, keep, verify_result.get("reason", ""),
+                remove,
+                keep,
+                verify_result.get("reason", ""),
             )
-            results.append({
-                "issue": issue,
-                "status": "merged",
-                "kept": keep,
-                "removed": remove,
-                "reason": verify_result.get("reason", ""),
-            })
+            results.append(
+                {
+                    "issue": issue,
+                    "status": "merged",
+                    "kept": keep,
+                    "removed": remove,
+                    "reason": verify_result.get("reason", ""),
+                }
+            )
         else:
             logger.info(
                 "Kept separate: %s + %s — reason: %s",
-                node_a, node_b, verify_result.get("reason", ""),
+                node_a,
+                node_b,
+                verify_result.get("reason", ""),
             )
-            results.append({
-                "issue": issue,
-                "status": "kept_separate",
-                "reason": verify_result.get("reason", ""),
-            })
+            results.append(
+                {
+                    "issue": issue,
+                    "status": "kept_separate",
+                    "reason": verify_result.get("reason", ""),
+                }
+            )
 
     return results
 
@@ -269,10 +278,20 @@ def re_explore_issues(
 
     def _relaunch_app():
         subprocess.run(
-            ["adb", "-s", controller.config.get("device", controller.config).get("udid", "emulator-5554"),
-             "shell", "monkey", "-p", package_name,
-             "-c", "android.intent.category.LAUNCHER", "1"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [
+                "adb",
+                "-s",
+                controller.config.get("device", controller.config).get("udid", "emulator-5554"),
+                "shell",
+                "monkey",
+                "-p",
+                package_name,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         time.sleep(4)
 
@@ -297,13 +316,15 @@ def re_explore_issues(
         # Verify we arrived
         device_state = controller.get_state()
         actual = graph.identify_state(
-            device_state["activity"], device_state["screenshot"],
+            device_state["activity"],
+            device_state["screenshot"],
             app_name=app_name,
         )
         if actual != target_node:
             logger.warning(
                 "Expected to reach %s but arrived at %s",
-                target_node, actual,
+                target_node,
+                actual,
             )
         return actual
 
@@ -339,13 +360,14 @@ def re_explore_issues(
             try:
                 kb_check = subprocess.run(
                     ["adb", "shell", "dumpsys", "input_method"],
-                    capture_output=True, text=True, timeout=3,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
                 )
                 if "mInputShown=true" in kb_check.stdout:
                     keyboard_hint = " (Note: the soft keyboard is currently visible.)"
                     input_status = (
-                        "Soft keyboard is visible; a text field is focused "
-                        "and ready for typing."
+                        "Soft keyboard is visible; a text field is focused and ready for typing."
                     )
             except Exception:
                 pass
@@ -390,13 +412,15 @@ def re_explore_issues(
                 time.sleep(1)
                 device_state = controller.get_state()
                 current_node = graph.identify_state(
-                    device_state["activity"], device_state["screenshot"],
+                    device_state["activity"],
+                    device_state["screenshot"],
                     app_name=app_name,
                 )
                 continue
 
             new_node = graph.identify_state(
-                device_state["activity"], device_state["screenshot"],
+                device_state["activity"],
+                device_state["screenshot"],
                 app_name=app_name,
             )
 
@@ -405,24 +429,31 @@ def re_explore_issues(
             target_obs = new_node_data.get("page_description", "") if new_node_data else ""
 
             graph.add_edge(
-                current_node, new_node,
-                action=[action], instruction=instruction,
+                current_node,
+                new_node,
+                action=[action],
+                instruction=instruction,
                 target_observation=target_obs,
                 num_steps=1,
             )
 
-            step_results.append({
-                "step": step_i + 1,
-                "from": current_node,
-                "to": new_node,
-                "instruction": instruction,
-                "action": action,
-            })
+            step_results.append(
+                {
+                    "step": step_i + 1,
+                    "from": current_node,
+                    "to": new_node,
+                    "instruction": instruction,
+                    "action": action,
+                }
+            )
 
             logger.info(
                 "  Re-explore step %d: %s --[%s]--> %s (instruction: '%s')",
-                step_i + 1, current_node,
-                action.get("action", "?"), new_node, instruction,
+                step_i + 1,
+                current_node,
+                action.get("action", "?"),
+                new_node,
+                instruction,
             )
 
             graph.save_graph(graph_path)
@@ -446,7 +477,9 @@ def re_explore_issues(
 
             logger.info(
                 "Retrying edge: %s → %s (instruction: '%s')",
-                source, target, instr,
+                source,
+                target,
+                instr,
             )
 
             _relaunch_app()
@@ -456,7 +489,11 @@ def re_explore_issues(
                 continue
 
             # Get the target node's description for a vague hint
-            target_desc = graph.graph.nodes[target].get("page_description", target) if target in graph.graph else target
+            target_desc = (
+                graph.graph.nodes[target].get("page_description", target)
+                if target in graph.graph
+                else target
+            )
             hint = (
                 f"A previous attempt to reach '{target_desc}' from this screen may have "
                 f"gone to the wrong place. Check if any elements on this screen could lead "
@@ -464,12 +501,14 @@ def re_explore_issues(
             )
             step_results = _explore_steps(actual, steps_per_issue, hint=hint)
 
-            results.append({
-                "issue": issue,
-                "status": "retried",
-                "navigated_to": actual,
-                "steps": step_results,
-            })
+            results.append(
+                {
+                    "issue": issue,
+                    "status": "retried",
+                    "navigated_to": actual,
+                    "steps": step_results,
+                }
+            )
 
         elif itype == "explore_node":
             node = issue.get("node", "")
@@ -482,7 +521,8 @@ def re_explore_issues(
 
             logger.info(
                 "Exploring node: %s (expected actions: %s)",
-                node, expected,
+                node,
+                expected,
             )
 
             _relaunch_app()
@@ -499,12 +539,14 @@ def re_explore_issues(
             )
             step_results = _explore_steps(actual, steps_per_issue, hint=hint)
 
-            results.append({
-                "issue": issue,
-                "status": "explored",
-                "navigated_to": actual,
-                "steps": step_results,
-            })
+            results.append(
+                {
+                    "issue": issue,
+                    "status": "explored",
+                    "navigated_to": actual,
+                    "steps": step_results,
+                }
+            )
 
     return results
 
@@ -522,11 +564,14 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--re-explore", action="store_true",
+        "--re-explore",
+        action="store_true",
         help="Navigate to flagged nodes/edges on device and re-explore",
     )
     parser.add_argument(
-        "--steps-per-issue", type=int, default=5,
+        "--steps-per-issue",
+        type=int,
+        default=5,
         help="Number of exploration steps per flagged issue (default: 5)",
     )
     args = parser.parse_args()
@@ -554,6 +599,7 @@ if __name__ == "__main__":
     instruction_client = instruction_model = action_client = action_model = None
     if args.re_explore:
         from aitk.utils.adb_controller import ADBController
+
         controller = ADBController(config, logger)
         instruction_client, instruction_model = make_client(vlm_config.get("instruction"))
         action_client, action_model = make_client(vlm_config.get("action"))
@@ -579,7 +625,9 @@ if __name__ == "__main__":
         graph.load_graph(graph_path)
         logger.info(
             "Loaded graph for %s: %d nodes, %d edges",
-            app_name, graph.graph.number_of_nodes(), graph.graph.number_of_edges(),
+            app_name,
+            graph.graph.number_of_nodes(),
+            graph.graph.number_of_edges(),
         )
 
         # Phase 1: LLM audit
@@ -599,8 +647,10 @@ if __name__ == "__main__":
         if merge_issues:
             logger.info("Verifying %d merge candidates...", len(merge_issues))
             merge_results = verify_and_merge_nodes(
-                graph, merge_issues,
-                page_detail_client, page_detail_model,
+                graph,
+                merge_issues,
+                page_detail_client,
+                page_detail_model,
             )
             # Save merge results
             merge_path = graph_path.parent / f"{app_name}_merge.json"
@@ -612,7 +662,9 @@ if __name__ == "__main__":
             merged_count = sum(1 for r in merge_results if r["status"] == "merged")
             if merged_count:
                 graph.save_graph(audited_graph_path)
-                logger.info("Audited graph saved to %s (%d merge(s))", audited_graph_path, merged_count)
+                logger.info(
+                    "Audited graph saved to %s (%d merge(s))", audited_graph_path, merged_count
+                )
 
         # Phase 3: Re-explore (optional, requires device)
         if args.re_explore and controller and other_issues:
@@ -623,10 +675,16 @@ if __name__ == "__main__":
             time.sleep(4)
 
             re_results = re_explore_issues(
-                graph, other_issues, controller,
-                app_name, package_name, audited_graph_path,
-                instruction_client, instruction_model,
-                action_client, action_model,
+                graph,
+                other_issues,
+                controller,
+                app_name,
+                package_name,
+                audited_graph_path,
+                instruction_client,
+                instruction_model,
+                action_client,
+                action_model,
                 steps_per_issue=args.steps_per_issue,
             )
 

@@ -10,14 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from PIL import Image
-
-from android_world.agents import base_agent
-from android_world.env import adb_utils
-from android_world.env import interface
-from android_world.env import json_action
-
 from aitk.translators.ui_kobe_v2 import UIKobeV2Translator
+from android_world.agents import base_agent
+from android_world.env import adb_utils, interface, json_action
+from PIL import Image
 
 logger = logging.getLogger("ui_kobe.android_world")
 
@@ -122,7 +118,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         env: interface.AsyncEnv,
         config_path: str | Path,
         **kwargs,
-    ) -> "UIKobeAndroidWorldAgent":
+    ) -> UIKobeAndroidWorldAgent:
         graph_dir, vlm_config = load_agent_settings(Path(config_path))
         return cls(env, graph_dir=graph_dir, vlm_config=vlm_config, **kwargs)
 
@@ -137,9 +133,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
     ) -> tuple[bool, json_action.JSONAction | None]:
         action = aitk_action.get("action")
         if action == "type":
-            adb_utils.type_text(
-                aitk_action.get("text", ""), self.env.controller, timeout_sec=10
-            )
+            adb_utils.type_text(aitk_action.get("text", ""), self.env.controller, timeout_sec=10)
             return False, None
 
         android_world_action = _aitk_to_android_world_action(aitk_action)
