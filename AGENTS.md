@@ -88,6 +88,11 @@ style.
 - Type checker: ty (`uv run --locked ty check`; `_typecheck` in
   `poe check-fast`, right after `_lint`; scope is `src/` and `tests/` only, the
   root adapters and scripts are not type-checked).
+- Workflow audit: zizmor (`uv run --locked zizmor --offline .`; `_actions` in
+  `poe check`, immediately before `_build`; audits every workflow under
+  `.github/workflows/` for unpinned actions, broad `GITHUB_TOKEN`
+  permissions, persisted credentials, template injection and cache misuse;
+  audit reference https://docs.zizmor.sh/audits/).
 - Tests: pytest with pytest-cov (branch coverage of `ui_kobe`, floor
   `[tool.coverage.report] fail_under`), pytest-randomly and Hypothesis
   (`_test` in `poe check`; `poe test-unit` for a fast run without coverage).
@@ -224,6 +229,20 @@ The aitk device surface is typed through the `DeviceController` and
 `AvdManager` Protocols in `src/ui_kobe/device.py`. Tests and moved scripts
 take those Protocols, never the concrete `ADBController` and `AVDManager`
 classes, which is what lets a fake device stand in without adb or an emulator.
+
+## Workflow audit
+
+`uv run --locked poe check` runs zizmor offline (`_actions`) over every workflow
+under `.github/workflows/`; every finding at the default `regular` persona is
+blocking. Every `uses:` is pinned to a full commit SHA with the release tag in a
+trailing `# vX.Y.Z` comment, workflows set `permissions: {}` at the top level and
+grant scopes per job, and `actions/checkout` sets `persist-credentials: false`.
+A suppression is a last resort, one per verified false positive, listed in the
+pull request that adds it: `# zizmor: ignore[audit-id]  # reason` as a YAML
+comment inside the finding's span, or a `rules.<audit-id>.ignore` entry with a
+`file.yml:line` location plus a YAML comment in `.github/zizmor.yml` (zizmor
+does not read `pyproject.toml`). `disable`, `remap`, `--persona`,
+`--min-severity`, `--min-confidence` and `--no-exit-codes` are never used.
 
 ## Tests
 

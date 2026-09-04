@@ -41,6 +41,7 @@ viz = [
 
 [tool.uv]
 required-version = ">=0.12.9,<0.13"
+exclude-newer = "3 days"
 
 [tool.uv.sources]
 aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae699401c1a6f894ba926c44" }
@@ -50,12 +51,13 @@ dev = [
     "deptry>=0.25.1",
     "hypothesis>=6.167.1",
     "poethepoet>=0.48.0",
-    "prek>=0.5.2",
+    "prek>=0.5.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-randomly>=5.0.0",
-    "ruff>=0.16.6",
-    "ty>=0.0.78",
+    "ruff>=0.16.5",
+    "ty>=0.0.77",
+    "zizmor>=1.30.0",
 ]
 
 [tool.ruff]
@@ -147,22 +149,16 @@ strict-generic-narrowing = true
 # Default, stated on purpose: the two "warn" rules above are blocking too.
 error-on-warning = true
 
-# pytest, configured through the native TOML table (pytest >= 9.0). Test rules:
-# see AGENTS.md.
+# pytest, native TOML table (pytest >= 9.0). Test rules: see AGENTS.md.
 [tool.pytest]
 minversion = "9.0"
-# Enables strict_config, strict_markers, strict_parametrization_ids and strict_xfail.
-# New strictness options added by future pytest releases turn on automatically;
-# pytest is pinned by uv.lock so this is intentional.
+# Turns on strict_config, strict_markers, strict_parametrization_ids, strict_xfail.
 strict = true
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib", "-ra"]
-# Every warning is an error. Add narrow ignores below "error" only for warnings
-# raised by third-party packages; record package, version and message in the PR.
+# Every warning is an error; a third-party ignore goes after "error", with a reason.
 filterwarnings = ["error"]
 
-# Branch coverage of the installed `ui_kobe` package, switched on by the `_test`
-# Poe task; `--cov-fail-under` never appears in addopts or in a task.
 [tool.coverage.run]
 branch = true
 source = ["ui_kobe"]
@@ -188,6 +184,7 @@ _typecheck = "ty check"
 _dependencies = "deptry ."
 _environment = "uv pip check"
 _test = "pytest --cov=ui_kobe --cov-report=term-missing"
+_actions = "zizmor --offline ."
 _build = "uv build --no-sources"
 
 [tool.poe.tasks.fix]
@@ -204,4 +201,4 @@ cmd = "pytest"
 
 [tool.poe.tasks.check]
 help = "Definition of done: every non-mutating check"
-sequence = ["check-fast", "_dependencies", "_environment", "_test", "_build"]
+sequence = ["check-fast", "_dependencies", "_environment", "_test", "_actions", "_build"]

@@ -7,10 +7,8 @@ import os
 import pytest
 from hypothesis import settings
 
-# The built-in "default" profile runs 100 examples with a 200 ms deadline. The
-# built-in "ci" profile is deterministic, has no deadline and no example database,
-# prints reproduction blobs, and is selected automatically when the CI environment
-# variable is set; it is re-registered here with more examples.
+# The built-in "ci" profile (deterministic, no deadline, no example database) is
+# selected automatically when CI is set; re-registered here with more examples.
 settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
 
