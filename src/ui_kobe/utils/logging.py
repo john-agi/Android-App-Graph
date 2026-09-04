@@ -120,7 +120,7 @@ class _ColorHandler(logging.Handler):
                 line.append(record.exc_text.rstrip(), style="bold red")
 
             _console.print(line, highlight=False)
-        except Exception:  # noqa: BLE001  # Handler.emit must never raise; handleError is the logging contract
+        except Exception:  # noqa: BLE001  # required by the logging.Handler.handleError contract
             self.handleError(record)
 
 
