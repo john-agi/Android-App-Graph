@@ -6,8 +6,9 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
+from ui_kobe.device import DeviceController
 from ui_kobe.utils import make_client
 from ui_kobe.utils.graph_manager import GraphManager
 from ui_kobe.utils.vlm_utils import (
@@ -17,17 +18,16 @@ from ui_kobe.utils.vlm_utils import (
     token_tracker,
 )
 
-if TYPE_CHECKING:
-    from aitk.utils.adb_controller import ADBController
 
-
-def _compute_schema_delta(before: dict, after: dict) -> dict | None:
+def _compute_schema_delta(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, dict[str, Any]] | None:
     """Compute the schema delta between two detail snapshots.
 
     Returns a dict of changed keys: {"key": {"before": old, "after": new}}
     Returns None if nothing changed.
     """
-    delta = {}
+    delta: dict[str, dict[str, Any]] = {}
     all_keys = set(before.keys()) | set(after.keys())
     for key in all_keys:
         val_before = before.get(key)
@@ -50,11 +50,11 @@ class Kobe:
 
     def __init__(
         self,
-        controller: ADBController,
+        controller: DeviceController,
         app_name: str,
         package_name: str,
         logger: logging.Logger,
-        vlm_config: dict | None = None,
+        vlm_config: dict[str, Any] | None = None,
         graph_dir: str | Path | None = None,
         max_steps: int = 20,
         coverage_checkpoint_steps: int = 50,
@@ -179,13 +179,25 @@ class Kobe:
             return None
         return actual_node
 
+    def _require_node(self, node_id: str) -> dict[str, Any]:
+        """Return a node's attributes.
+
+        ``identify_state`` either matches an existing node or creates one, so a
+        missing node means the graph and the exploration state have diverged.
+        """
+        node_data = self.graph.get_node(node_id)
+        if node_data is None:
+            msg = f"Node {node_id!r} is missing from the graph"
+            raise RuntimeError(msg)
+        return node_data
+
     def _apply_coverage_checkpoint_after_step(
         self,
         step: int,
         max_steps: int,
         current_node: str,
-        device_state: dict,
-    ) -> tuple[str, dict]:
+        device_state: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
         """Apply periodic coverage continuation after any completed step."""
         checkpoint_node = self._maybe_continue_from_coverage_checkpoint(
             step,
@@ -355,7 +367,7 @@ class Kobe:
                 tokens_before = token_tracker.snapshot_by_type()
 
                 screenshot = device_state["screenshot"]
-                node_data = self.graph.get_node(current_node)
+                node_data = self._require_node(current_node)
 
                 # Capture schema snapshot before action (for delta computation)
                 detail_before = dict(node_data.get("last_detail_snapshot", {}))
@@ -473,7 +485,7 @@ class Kobe:
                 )
 
                 # Check for in-app WebView showing external content
-                new_node_data = self.graph.get_node(new_node)
+                new_node_data = self._require_node(new_node)
                 if self._is_external_web(
                     device_state.get("activity", ""),
                     new_node_data.get("page_description", ""),
@@ -503,7 +515,7 @@ class Kobe:
                 # Compute schema delta for self-loop edges
                 schema_delta = None
                 if new_node == current_node:
-                    new_data = self.graph.get_node(new_node)
+                    new_data = self._require_node(new_node)
                     detail_after = new_data.get("last_detail_snapshot", {})
                     schema_delta = _compute_schema_delta(detail_before, detail_after)
                     if schema_delta:
@@ -701,9 +713,9 @@ class Kobe:
     def _handle_external_app(
         self,
         source_node: str,
-        action: dict | list[dict],
+        action: dict[str, Any] | list[dict[str, Any]],
         external_package: str,
-        device_state: dict,
+        device_state: dict[str, Any],
         instruction: str | None = None,
     ) -> str:
         """Handle navigation to an external app.
@@ -771,7 +783,7 @@ class Kobe:
                 self.package_name,
                 state.get("package", ""),
             )
-            ctrl_config = getattr(self.controller, "config", {})
+            ctrl_config = self.controller.config
             udid = ctrl_config.get("device", ctrl_config).get("udid", "emulator-5554")
             relaunch = subprocess.run(
                 [

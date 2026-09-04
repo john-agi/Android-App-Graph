@@ -19,7 +19,7 @@ def resolve_env(value: str | None) -> str | None:
     return str(value)
 
 
-def make_client(cfg: dict | None) -> tuple[OpenAI, str]:
+def make_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
     """Create an OpenAI client from a per-call config block.
 
     Args:
