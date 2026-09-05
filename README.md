@@ -13,43 +13,43 @@ The repository has two main uses:
 
 ## How It Works
 
-1. **Explore an app.** UI-KOBE opens an Android app on an emulator, observes the
+1. **Explore an app.** Android-App-Graph opens an Android app on an emulator, observes the
    current screen, chooses an exploration action, and records the result.
 2. **Build a graph.** Each app state becomes a graph node. Actions that move the
    app between states become graph edges.
-3. **Run graph-guided agents.** The UI-KOBE v2 runtime loads the graph, matches
+3. **Run graph-guided agents.** The Android-App-Graph v2 runtime loads the graph, matches
    the current screen to a node, and chooses the next action from nearby graph
    edges or a free-form fallback action.
 
 ## Repository Layout
 
 ```text
-UI-KOBE/
+Android-App-Graph/
 ├── src/
-│   └── ui_kobe/                   # The installable package; the only directory in the wheel
-│       ├── cli.py                 # kobe-explore command
-│       ├── commands/              # kobe-audit, kobe-plot, kobe-embed
-│       ├── kobe.py                # Core app explorer
-│       └── utils/                 # Graph, VLM, and logging helpers
-├── scripts/                       # Operator scripts, not packaged
-│   └── run_explore.sh             # Auto-resume wrapper around kobe-explore
-├── aitk_files/                    # Copy-in adapter for AITK, not packaged
-│   └── ui_kobe_v2.py              # AITK translator to copy into AITK
-├── aw_files/                      # Copy-in adapter for Android World, not packaged
-│   └── ui_kobe_aw_agent.py        # Android World agent adapter
+│   └── android_app_graph/             # The installable package; the only directory in the wheel
+│       ├── cli.py                     # app-graph command
+│       ├── commands/                  # app-graph-audit, app-graph-plot, app-graph-embed
+│       ├── kobe.py                    # Core app explorer
+│       └── utils/                     # Graph, VLM, and logging helpers
+├── scripts/                           # Operator scripts, not packaged
+│   └── run_explore.sh                 # Auto-resume wrapper around app-graph
+├── aitk_files/                        # Copy-in adapter for AITK, not packaged
+│   └── android_app_graph_v2.py        # AITK translator to copy into AITK
+├── aw_files/                          # Copy-in adapter for Android World, not packaged
+│   └── android_app_graph_aw_agent.py  # Android World agent adapter
 └── configs/
-    └── explore.yaml               # Sanitized exploration demo config
+    └── explore.yaml                   # Sanitized exploration demo config
 ```
 
-`src/ui_kobe/` is the installable Python package: `uv build` produces a wheel
-that contains the `ui_kobe` import package and nothing else. Keep it installed
+`src/android_app_graph/` is the installable Python package: `uv build` produces a wheel
+that contains the `android_app_graph` import package and nothing else. Keep it installed
 in the same environment as AITK.
 
 `scripts/`, `aitk_files/`, `aw_files/` and `configs/` deliberately stay at the
 repository root and are not part of the wheel. `scripts/` holds only
-`run_explore.sh`, a shell wrapper around the `kobe-explore` console script; the
-`kobe-audit`, `kobe-plot` and `kobe-embed` commands live in
-`src/ui_kobe/commands/` and ship with the wheel. `aitk_files/` and `aw_files/`
+`run_explore.sh`, a shell wrapper around the `app-graph` console script; the
+`app-graph-audit`, `app-graph-plot` and `app-graph-embed` commands live in
+`src/android_app_graph/commands/` and ship with the wheel. `aitk_files/` and `aw_files/`
 are copy-in adapters that you copy into an AITK or Android World checkout (see
 the sections below). `configs/` holds example configuration.
 
@@ -80,7 +80,7 @@ specific commit under `[tool.uv.sources]`, so `uv sync` clones and installs
 that commit automatically.
 
 Because there is no AITK checkout, the copy-in step under
-[Use UI-KOBE with AITK](#use-ui-kobe-with-aitk) targets the `aitk` package
+[Use Android-App-Graph with AITK](#use-android-app-graph-with-aitk) targets the `aitk` package
 installed in `.venv`. Print its `translators/` directory, which is the
 `/path/to/AITK/aitk/translators/` of that section, with:
 
@@ -96,7 +96,7 @@ uv does not track a file copied there. Recreating `.venv` (for example
 Run commands through `uv`:
 
 ```bash
-uv run kobe-explore --help
+uv run app-graph --help
 ```
 
 To move to a newer AITK commit, change the `rev` value under
@@ -119,13 +119,13 @@ cp .env.example .env
 ```
 
 Edit `.env` and fill in your provider credentials. The template uses the
-previous UI-KOBE demo defaults:
+previous Android-App-Graph demo defaults:
 
 ```bash
-UI_KOBE_PAGE_DETAIL_MODEL=gpt-5.4
-UI_KOBE_EMBEDDING_MODEL=gemini-embedding-2-preview
-UI_KOBE_INSTRUCTION_MODEL=gpt-5.4
-UI_KOBE_ACTION_MODEL=qwen3.5-plus-2026-02-15
+APP_GRAPH_PAGE_DETAIL_MODEL=gpt-5.4
+APP_GRAPH_EMBEDDING_MODEL=gemini-embedding-2-preview
+APP_GRAPH_INSTRUCTION_MODEL=gpt-5.4
+APP_GRAPH_ACTION_MODEL=qwen3.5-plus-2026-02-15
 ```
 
 Load the file before running commands:
@@ -158,14 +158,14 @@ Run exploration:
 
 ```bash
 set -a && source .env && set +a
-uv run kobe-explore -c configs/explore.yaml
+uv run app-graph -c configs/explore.yaml
 ```
 
 Useful options:
 
 ```bash
-uv run kobe-explore -c configs/explore.yaml --max-steps 100
-uv run kobe-explore -c configs/explore.yaml --resume-from auto --max-steps 50
+uv run app-graph -c configs/explore.yaml --max-steps 100
+uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 ```
 
 Exploration writes graph files under `graphs/<app_name>/`.
@@ -178,28 +178,28 @@ For long runs, use the auto-resume wrapper:
 
 ## Visualize or Audit a Graph
 
-Create an HTML graph visualization. `kobe-plot` needs the optional `viz` extra
+Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra
 (`pyvis` and `matplotlib`), which `uv sync` does not install by default; outside
-this checkout, install it as `pip install "ui-kobe[viz]"`:
+this checkout, install it as `pip install "android-app-graph[viz]"`:
 
 ```bash
 uv sync --extra viz
-uv run --extra viz kobe-plot graphs/<app_name>/<app_name>.json
+uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 ```
 
 Run the graph audit utility:
 
 ```bash
-uv run kobe-audit -c configs/explore.yaml --app <app_name>
+uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 ```
 
 Precompute native Gemini image embeddings for a graph:
 
 ```bash
-uv run kobe-embed --config configs/explore.yaml --app <app_name>
+uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 ```
 
-## Use UI-KOBE with AITK
+## Use Android-App-Graph with AITK
 
 AITK loads a translator by module name: `register_translator()` in
 `aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
@@ -211,12 +211,12 @@ AITK checkout that the environment imports. Verified against AITK commit
 
 1. Set up AITK first, in its own environment, following AITK's `docs/setup.md`
    (`pip install -r requirements.txt` then `pip install -e .` inside the AITK
-   checkout). Create that environment with Python 3.14: UI-KOBE requires
+   checkout). Create that environment with Python 3.14: Android-App-Graph requires
    Python >= 3.14 and AITK accepts >= 3.10. AITK's `pyproject.toml` declares
    no dependencies of its own; its runtime needs come from its
-   `requirements.txt`, which is why AITK must be installed before UI-KOBE.
+   `requirements.txt`, which is why AITK must be installed before Android-App-Graph.
 
-2. Install UI-KOBE into that same environment, after AITK, from a checkout of
+2. Install Android-App-Graph into that same environment, after AITK, from a checkout of
    this repository:
 
    ```bash
@@ -226,50 +226,50 @@ AITK checkout that the environment imports. Verified against AITK commit
    `--no-sources` makes uv ignore this project's `[tool.uv.sources]` pin for
    `aitk`, so the editable AITK you installed in step 1 satisfies the `aitk`
    requirement and is kept. Order matters: the PyPI project named `aitk` is an
-   unrelated package, and installing UI-KOBE before AITK pulls it in.
+   unrelated package, and installing Android-App-Graph before AITK pulls it in.
 
-3. Verify that the environment imports the AITK checkout and UI-KOBE:
+3. Verify that the environment imports the AITK checkout and Android-App-Graph:
 
    ```bash
-   /path/to/aitk-env/bin/python -c "import aitk, aitk.translators as t, ui_kobe; print(aitk.__version__, aitk.__file__); print(t.__path__[0]); print(ui_kobe.__version__)"
+   /path/to/aitk-env/bin/python -c "import aitk, aitk.translators as t, android_app_graph; print(aitk.__version__, aitk.__file__); print(t.__path__[0]); print(android_app_graph.__version__)"
    ```
 
    Expected: `0.2.1 /path/to/AITK/aitk/__init__.py`, then
-   `/path/to/AITK/aitk/translators`, then the UI-KOBE version. If
+   `/path/to/AITK/aitk/translators`, then the Android-App-Graph version. If
    `aitk.__file__` points into `site-packages` or the version is not `0.2.1`,
    the wrong `aitk` is installed; fix that before continuing.
 
 4. Copy the translator into the directory printed on the second line:
 
    ```bash
-   cp /path/to/Android-App-Graph/aitk_files/ui_kobe_v2.py \
-     "$(/path/to/aitk-env/bin/python -c 'import aitk.translators as t; print(t.__path__[0])')/ui_kobe_v2.py"
+   cp /path/to/Android-App-Graph/aitk_files/android_app_graph_v2.py \
+     "$(/path/to/aitk-env/bin/python -c 'import aitk.translators as t; print(t.__path__[0])')/android_app_graph_v2.py"
    ```
 
-5. Register it in AITK's `configs/controller.yaml`: set `translator: ui_kobe_v2`
+5. Register it in AITK's `configs/controller.yaml`: set `translator: android_app_graph_v2`
    and pass the graph directory and VLM settings through `translator_args`:
 
    ```yaml
    translator_args:
-     graph_dir: /path/to/UI-KOBE/graphs
+     graph_dir: /path/to/Android-App-Graph/graphs
      vlm_config:
        similarity_threshold: 0.84
        page_detail:
-         model: ${UI_KOBE_PAGE_DETAIL_MODEL}
-         base_url: ${UI_KOBE_PAGE_DETAIL_BASE_URL}
-         api_key: ${UI_KOBE_PAGE_DETAIL_API_KEY}
+         model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
+         base_url: ${APP_GRAPH_PAGE_DETAIL_BASE_URL}
+         api_key: ${APP_GRAPH_PAGE_DETAIL_API_KEY}
        embedding:
-         model: ${UI_KOBE_EMBEDDING_MODEL}
-         base_url: ${UI_KOBE_EMBEDDING_BASE_URL}
-         api_key: ${UI_KOBE_EMBEDDING_API_KEY}
+         model: ${APP_GRAPH_EMBEDDING_MODEL}
+         base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
+         api_key: ${APP_GRAPH_EMBEDDING_API_KEY}
        instruction:
-         model: ${UI_KOBE_INSTRUCTION_MODEL}
-         base_url: ${UI_KOBE_INSTRUCTION_BASE_URL}
-         api_key: ${UI_KOBE_INSTRUCTION_API_KEY}
+         model: ${APP_GRAPH_INSTRUCTION_MODEL}
+         base_url: ${APP_GRAPH_INSTRUCTION_BASE_URL}
+         api_key: ${APP_GRAPH_INSTRUCTION_API_KEY}
        action:
-         model: ${UI_KOBE_ACTION_MODEL}
-         base_url: ${UI_KOBE_ACTION_BASE_URL}
-         api_key: ${UI_KOBE_ACTION_API_KEY}
+         model: ${APP_GRAPH_ACTION_MODEL}
+         base_url: ${APP_GRAPH_ACTION_BASE_URL}
+         api_key: ${APP_GRAPH_ACTION_API_KEY}
        image_embedding:
          model: models/gemini-embedding-exp-03-07
          native_base_url: https://generativelanguage.googleapis.com/v1beta
@@ -279,24 +279,24 @@ AITK checkout that the environment imports. Verified against AITK commit
 6. Smoke-test the import without a device:
 
    ```bash
-   /path/to/aitk-env/bin/python -c "import aitk.translators.ui_kobe_v2 as m; print(m.register)"
+   /path/to/aitk-env/bin/python -c "import aitk.translators.android_app_graph_v2 as m; print(m.register)"
    ```
 
    Expected: `<function register at 0x...>`. Then run AITK as its README
    describes (its own `interact.py` entry point with `configs/controller.yaml`).
 
-The copied translator imports helper functions from the installed `ui_kobe`
-package; that is why UI-KOBE must be installed in the AITK environment.
+The copied translator imports helper functions from the installed `android_app_graph`
+package; that is why Android-App-Graph must be installed in the AITK environment.
 
-## Use UI-KOBE with Android World
+## Use Android-App-Graph with Android World
 
 Android World is not published on PyPI and, at commit
 `3e50888527ef9f29b9157ecd537e408008bb1c85` (2026-07-10), requires Python
 >= 3.11 while pinning `numpy==1.26.3` and `pandas==2.1.4`, which publish no
 CPython 3.14 wheels; its `dm-env==1.6` dependency needs CMake to build
-`dm-tree`. UI-KOBE requires Python >= 3.14. There is therefore no single
+`dm-tree`. Android-App-Graph requires Python >= 3.14. There is therefore no single
 environment that can hold both this project and Android World today.
-`aw_files/ui_kobe_aw_agent.py` is kept as a reference implementation; it is
+`aw_files/android_app_graph_aw_agent.py` is kept as a reference implementation; it is
 not installed, type-checked or tested by this repository.
 
 To run it anyway, use an environment that Android World supports (Python
@@ -355,7 +355,7 @@ Android World `JSONAction` objects.
 ## Create Custom Agents
 
 The included AITK translator and Android World adapter are reference
-implementations for using a UI-KOBE graph inside an interactive agent loop. You
+implementations for using an Android-App-Graph graph inside an interactive agent loop. You
 do not need to copy their framework choices exactly. For a custom agent, reuse
 the graph workflow shown in these files and adapt it to your own runtime,
 benchmark, simulator, browser tool, desktop controller, or mobile automation
@@ -363,7 +363,7 @@ system.
 
 The core pattern is:
 
-1. Load a UI-KOBE graph for the target app.
+1. Load an Android-App-Graph graph for the target app.
 2. Match the current observation to a graph node.
 3. Read nearby edges and state metadata as action affordances.
 4. Choose either a graph-guided transition or a free-form fallback action.
@@ -392,8 +392,8 @@ def register(kargs: dict) -> MyTranslator:
     return MyTranslator(**kargs)
 ```
 
-Use `aitk_files/ui_kobe_v2.py` as the full graph-guided AITK example. It shows
-how to load a UI-KOBE graph, identify the current node, record task-relevant
+Use `aitk_files/android_app_graph_v2.py` as the full graph-guided AITK example. It shows
+how to load an Android-App-Graph graph, identify the current node, record task-relevant
 information, choose a graph edge, and convert the choice into a low-level AITK
 action. You can transfer the same graph usage to other agent frameworks by
 replacing only the final action-conversion layer.
@@ -408,8 +408,8 @@ implementing `step(goal)`. The step should:
 3. Execute the action with `self.env.execute_action(...)`.
 4. Return `AgentInteractionResult(done=<bool>, data=<dict>)`.
 
-Use `aw_files/ui_kobe_aw_agent.py` as an example of adapting the same graph
-runtime to another interactive system. It wraps the UI-KOBE AITK translator and
+Use `aw_files/android_app_graph_aw_agent.py` as an example of adapting the same graph
+runtime to another interactive system. It wraps the Android-App-Graph AITK translator and
 maps its output into Android World's `JSONAction` format. For other tools, write
 an equivalent adapter that maps graph-guided decisions into that tool's action
 space.
