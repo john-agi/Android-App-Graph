@@ -1736,7 +1736,6 @@ def test_run_node_merge_audit_skips_a_self_pair(
     assert result["results"][0]["reason"] == "same node"
     assert list(gm.graph.nodes) == ["s0_home"]
     assert gm.graph.nodes["s0_home"]["visit_count"] == 3
-    # The pair is dropped before the verifier is consulted.
     assert vlm.kinds() == []
 
 

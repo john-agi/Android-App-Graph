@@ -528,9 +528,8 @@ class GraphManager:
             logger.warning("merge_nodes: missing node(s) — keep=%s, remove=%s", keep_id, remove_id)
             return False
 
+        # Falling through is not a harmless no-op: it deletes the node.  See #48.
         if keep_id == remove_id:
-            # Merging a node into itself would double its visit count and then
-            # delete it, taking its edges with it.  Nothing to merge.
             logger.warning("merge_nodes: refusing to merge node %s into itself", keep_id)
             return False
 
@@ -1540,9 +1539,7 @@ class GraphManager:
                 )
                 continue
 
-            # The auditor can name the same node twice.  Verifying it against
-            # its own screenshot would always say "same", so skip the pair
-            # before spending a VLM call on it.
+            # An auditor can name one node twice, and it would verify as "same".
             if node_a == node_b:
                 logger.warning("Skipping merge candidate %s + itself", node_a)
                 results.append(
