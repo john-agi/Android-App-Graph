@@ -44,7 +44,7 @@ import networkx as nx
 from aitk.translators.base import BaseTranslator
 from openai import OpenAI
 
-from android_app_graph.payloads import as_float_list, as_str, as_str_dict
+from android_app_graph.payloads import as_float_list, as_list, as_str, as_str_dict
 from android_app_graph.utils import resolve_env
 from android_app_graph.utils.vlm_utils import (
     describe_page_and_state,
@@ -219,32 +219,43 @@ def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict[str, Any]]:
             screenshots_dir = base_screenshots_dir
     G = nx.DiGraph()
     for node_data in data.get("nodes", []):
-        node_id = str(node_data["id"])
+        if not isinstance(node_data.get("id"), str):
+            raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
+        node_id = node_data["id"]
         ref_screenshot = None
         img_path = screenshots_dir / f"{node_id}.png"
         if img_path.exists():
             ref_screenshot = base64.b64encode(img_path.read_bytes()).decode("ascii")
+        # `.get(key, default)` does not apply `default` to a present-but-null value, so
+        # every field a downstream reader iterates or indexes into is narrowed here, once,
+        # rather than at every read site.
         G.add_node(
             node_id,
-            activity=node_data.get("activity", ""),
-            page_description=node_data.get("page_description", ""),
-            state_schema=node_data.get("state_schema", {}),
-            last_detail_snapshot=node_data.get("last_detail_snapshot", {}),
+            activity=as_str(node_data.get("activity"), ""),
+            page_description=as_str(node_data.get("page_description"), ""),
+            state_schema=as_str_dict(node_data.get("state_schema")),
+            last_detail_snapshot=as_str_dict(node_data.get("last_detail_snapshot")),
             reference_screenshot=ref_screenshot,
             visit_count=node_data.get("visit_count", 0),
         )
     for edge_data in data.get("edges", []):
+        if not isinstance(edge_data.get("source"), str) or not isinstance(
+            edge_data.get("target"), str
+        ):
+            raise TypeError(
+                f"Runtime graph edge endpoints must be strings: {edge_data!r} in {path}"
+            )
         edge_attrs = {
             "actions": edge_data.get("actions", []),
-            "instructions": edge_data.get("instructions", []),
-            "instruction_templates": edge_data.get("instruction_templates", []),
-            "target_observations": edge_data.get("target_observations", []),
+            "instructions": as_list(edge_data.get("instructions")),
+            "instruction_templates": as_list(edge_data.get("instruction_templates")),
+            "target_observations": as_list(edge_data.get("target_observations")),
             "num_steps": edge_data.get("num_steps", []),
             "visit_count": edge_data.get("visit_count", 0),
         }
         if edge_data.get("schema_deltas"):
-            edge_attrs["schema_deltas"] = edge_data["schema_deltas"]
-        G.add_edge(str(edge_data["source"]), str(edge_data["target"]), **edge_attrs)
+            edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
+        G.add_edge(edge_data["source"], edge_data["target"], **edge_attrs)
 
     return G, data
 
@@ -253,13 +264,21 @@ def _load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
     emb_path = _image_embeddings_path(graph_path)
     if not emb_path.exists():
         return {}
-    with open(emb_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    try:
+        with open(emb_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError:
+        logger.warning("Corrupt image embedding cache %s; treating it as empty", emb_path)
+        return {}
     embeddings: dict[str, list[float]] = {}
     for node_id, vector in as_str_dict(raw).items():
         numbers = as_float_list(vector)
         if numbers:
             embeddings[node_id] = numbers
+        else:
+            logger.warning(
+                "Dropping malformed image embedding for node %s in %s", node_id, emb_path
+            )
     return embeddings
 
 
@@ -329,7 +348,7 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     answer = (raw or "").strip().upper()
     if answer == "NONE":
         return "NONE"
-    if answer in valid_letters:
+    if len(answer) == 1 and answer in valid_letters:
         return answer
 
     think_end = answer.rfind("</THINK>")
@@ -762,6 +781,8 @@ class UIKobeV2Translator(BaseTranslator):
         return None
 
     def _get_graph_for_package(self, package: str) -> nx.DiGraph | None:
+        if not package:
+            return None
         app_name = self._package_to_app.get(package)
         if not app_name:
             app_name = self._package_to_app.get(_package_from_activity(package))
@@ -860,11 +881,14 @@ class UIKobeV2Translator(BaseTranslator):
         for node_id, data in G.nodes(data=True):
             if _package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
-            node_image_emb = as_float_list(data.get("image_embedding"))
+            # Vectors only ever enter this attribute already narrowed to list[float]
+            # (via _load_image_embeddings or get_gemini_native_image_embedding), so
+            # re-validating and copying every one of them on every step is wasted work.
+            node_image_emb = data.get("image_embedding")
             if not node_image_emb:
                 continue
             sim = _cosine_similarity(query_image_emb, node_image_emb)
-            candidates.append((str(node_id), sim, as_str(data.get("page_description", ""), "")))
+            candidates.append((str(node_id), sim, data.get("page_description", "")))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
 
@@ -954,30 +978,29 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
         )
 
-        result = "nothing"
-        for attempt, raw_record, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            result = _parse_record_output(raw_record)
-            if result:
-                break
-            if can_retry:
-                logger.warning("[RECORD] parse failed on attempt %d; retrying", attempt + 1)
+        # _parse_record_output always returns a truthy string ("nothing" at worst), so a
+        # parse-retry loop here would never retry. Take a single completion.
+        _attempt, raw_record, _can_retry = next(
+            _chat_completion_content(
+                self.model_client,
+                model=self.model_name,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{screenshot}"},
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=V2_CHAT_MAX_TOKENS,
+                temperature=0.0,
+            )
+        )
+        result = _parse_record_output(raw_record)
         logger.info("[RECORD] parsed=%s", result)
         self._memory.add_info(result)
 
@@ -1101,7 +1124,7 @@ class UIKobeV2Translator(BaseTranslator):
             neighbor = str(raw_neighbor)
             if neighbor == node_id:
                 continue
-            neighbor_desc = as_str(G.nodes[neighbor].get("page_description", neighbor), neighbor)
+            neighbor_desc = G.nodes[neighbor].get("page_description", neighbor)
             templates = edge_data.get("instruction_templates", [])
             observations = edge_data.get("target_observations", [])
 
@@ -1151,12 +1174,12 @@ class UIKobeV2Translator(BaseTranslator):
         Returns the chosen option dict with an added "instruction" key
         (the refined instruction from the model).
         """
-        current_desc = as_str(G.nodes[node_id].get("page_description", ""), "")
+        current_desc = G.nodes[node_id].get("page_description", "")
         today = datetime.now()
 
         # Show state keys (from schema) so the model knows what parameters this screen has.
         # Values are omitted — the model can read them from the screenshot directly.
-        state_schema = as_str_dict(G.nodes[node_id].get("state_schema", {}))
+        state_schema = G.nodes[node_id].get("state_schema", {})
         if state_schema:
             keys_str = ", ".join(state_schema.keys())
             state_context = f"State parameters: [{keys_str}]\n"
@@ -1532,7 +1555,7 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("Failed to parse action: %s", action)
             return {"action": "end", "answer": "parse error"}
         aitk_action = as_str_dict(data).get("aitk_action")
-        if not isinstance(aitk_action, dict):
+        if not isinstance(aitk_action, dict) or "action" not in aitk_action:
             return {"action": "end", "answer": ""}
         return as_str_dict(aitk_action)
 

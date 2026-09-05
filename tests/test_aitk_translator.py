@@ -160,13 +160,18 @@ def test_parse_model_choice(raw: str, expected: str | None) -> None:
     assert aitk_translator._parse_model_choice(raw, "ABCD") == expected
 
 
-def test_parse_model_choice_returns_a_falsy_answer_for_an_empty_reply() -> None:
-    """Current behaviour: ``"" in valid_letters`` is true, so an empty reply echoes back.
+def test_parse_model_choice_rejects_an_empty_reply() -> None:
+    assert aitk_translator._parse_model_choice("", "ABCD") is None
 
-    Every caller tests the result for truthiness before using it, so an empty reply
-    still triggers a parse retry and then the "no match" path.
+
+def test_parse_model_choice_rejects_multiple_letters() -> None:
+    """``"BC" in "ABCD"`` is a true substring test, not membership of a single letter.
+
+    A multi-letter reply must not be accepted verbatim: it has to fall through to the
+    later parsing (which finds no single trailing letter here) and end as ``None``,
+    which triggers the existing retry path rather than being silently used as a pick.
     """
-    assert aitk_translator._parse_model_choice("", "ABCD") == ""
+    assert aitk_translator._parse_model_choice("BC", "ABCD") is None
 
 
 def test_parse_model_choice_rejects_letters_outside_the_valid_set() -> None:
@@ -404,6 +409,70 @@ def test_load_graph_from_json_rejects_a_malformed_document(tmp_path: Path, paylo
         aitk_translator._load_graph_from_json(path)
 
 
+def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
+    tmp_path: Path,
+) -> None:
+    """``.get(key, default)`` never applies ``default`` to a stored ``null``.
+
+    A node/edge with an explicit JSON ``null`` for a field that downstream code
+    iterates or indexes into must load as the field's empty default, not ``None``.
+    """
+    path = _write_graph(
+        tmp_path,
+        nodes=[
+            {
+                "id": "n1",
+                "activity": None,
+                "page_description": None,
+                "state_schema": None,
+                "last_detail_snapshot": None,
+            },
+            {"id": "n2"},
+        ],
+        edges=[
+            {
+                "source": "n1",
+                "target": "n2",
+                "instructions": None,
+                "instruction_templates": None,
+                "target_observations": None,
+                "schema_deltas": None,
+            }
+        ],
+    )
+    G, _ = aitk_translator._load_graph_from_json(path)
+
+    assert G.nodes["n1"]["activity"] == ""
+    assert G.nodes["n1"]["page_description"] == ""
+    assert G.nodes["n1"]["state_schema"] == {}
+    assert G.nodes["n1"]["last_detail_snapshot"] == {}
+    assert G.edges["n1", "n2"]["instructions"] == []
+    assert G.edges["n1", "n2"]["instruction_templates"] == []
+    assert G.edges["n1", "n2"]["target_observations"] == []
+    assert "schema_deltas" not in G.edges["n1", "n2"]
+
+
+def test_load_graph_from_json_rejects_a_non_string_node_id(tmp_path: Path) -> None:
+    path = _write_graph(tmp_path, nodes=[{"id": None}])
+    with pytest.raises(TypeError, match="node id must be a string"):
+        aitk_translator._load_graph_from_json(path)
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [
+        {"source": None, "target": "n2"},
+        {"source": "n1", "target": None},
+    ],
+)
+def test_load_graph_from_json_rejects_a_non_string_edge_endpoint(
+    tmp_path: Path, edge: dict[str, Any]
+) -> None:
+    path = _write_graph(tmp_path, nodes=[{"id": "n1"}, {"id": "n2"}], edges=[edge])
+    with pytest.raises(TypeError, match="edge endpoints must be strings"):
+        aitk_translator._load_graph_from_json(path)
+
+
 # ---------------------------------------------------------------------------
 # image embedding sidecars
 # ---------------------------------------------------------------------------
@@ -437,6 +506,36 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert aitk_translator._load_image_embeddings(graph_path) == {"n1": [1.0, 2.0]}
+
+
+def test_load_image_embeddings_warns_about_each_dropped_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    graph_path = tmp_path / "demo.json"
+    aitk_translator._image_embeddings_path(graph_path).write_text(
+        json.dumps({"n1": [1.0, 2.0], "n2": "not a vector"}), encoding="utf-8"
+    )
+    with caplog.at_level("WARNING"):
+        aitk_translator._load_image_embeddings(graph_path)
+    assert "n2" in caplog.text
+
+
+def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A truncated ``.image_emb.json`` must not raise: it is treated as an empty cache."""
+    graph_path = tmp_path / "demo.json"
+    aitk_translator._image_embeddings_path(graph_path).write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert aitk_translator._load_image_embeddings(graph_path) == {}
+    assert "demo.image_emb.json" in caplog.text
+
+
+def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) -> None:
+    """A corrupt cache file must not take down the whole app graph it caches for."""
+    (graph_dir / "demo" / "demo.image_emb.json").write_text("{not json", encoding="utf-8")
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
+    assert set(built._graphs) == {"demo"}
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +911,14 @@ def test_get_graph_for_unknown_package(translator: aitk_translator.UIKobeV2Trans
     assert translator._get_graph_for_package("org.other.thing") is None
 
 
+def test_get_graph_for_an_empty_package_matches_nothing(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    """An empty package must not bind the first loaded graph via a vacuous prefix match."""
+    assert translator._get_graph_for_package("") is None
+    assert translator._app_name == ""
+
+
 def test_reset_task_state_clears_the_previous_task(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
@@ -973,9 +1080,10 @@ def test_record_info_stores_what_the_model_read(
     assert translator._memory.info == ["The total is 9 EUR"]
 
 
-def test_record_info_retries_then_keeps_nothing(
+def test_record_info_keeps_nothing_out_of_memory_in_a_single_call(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
+    """RECORD takes exactly one completion: a "nothing" reply is never retried."""
     client = _use_model(monkeypatch, translator, "nothing", "nothing")
     translator._record_info("buy shoes", "screenshot")
     assert translator._memory.info == []
@@ -1213,6 +1321,16 @@ def test_identify_node_retries_an_unparseable_pick(
     assert len(client.completions.calls) == 2
 
 
+def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
+    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+) -> None:
+    """A "BC"-shaped reply must not be silently mapped to a candidate by substring luck."""
+    client = _use_model(monkeypatch, identifiable, "BC", "B")
+    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    assert node_id == "results"
+    assert len(client.completions.calls) == 2
+
+
 def test_identify_node_without_candidates_in_the_current_package(
     identifiable: aitk_translator.UIKobeV2Translator,
 ) -> None:
@@ -1229,6 +1347,57 @@ def test_identify_node_without_cached_embeddings(
         None,
         "a home screen",
     )
+
+
+def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A graph loaded with present-but-null fields must not crash IDENTIFY or DECIDE.
+
+    Before the loader narrowed these fields, ``for k in data.get("state_schema", {})``
+    and ``enumerate(edge_data.get("instructions", []))`` raised ``TypeError`` whenever the
+    JSON stored an explicit ``null`` rather than omitting the key.
+    """
+    _write_graph(
+        tmp_path,
+        app="demo",
+        nodes=[
+            {
+                "id": "home",
+                "activity": None,
+                "page_description": "home screen",
+                "state_schema": None,
+            }
+        ],
+        edges=[
+            {
+                "source": "home",
+                "target": "home",
+                "instructions": None,
+                "instruction_templates": None,
+                "target_observations": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        aitk_translator, "describe_page_and_state", lambda *_a, **_kw: ("home screen", {}, [])
+    )
+    monkeypatch.setattr(
+        aitk_translator, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+    )
+    translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
+    G = translator._graphs["demo"]
+    G.nodes["home"]["image_embedding"] = [1.0, 0.0]
+    translator._current_graph = G
+    translator._app_name = "demo"
+
+    _text, options = translator._build_options(G, "home")
+    assert [opt["type"] for opt in options] == ["done", "free"]
+
+    _use_model(monkeypatch, translator, "A")
+    node_id, page_desc = translator._identify_node("", "shot")
+    assert node_id == "home"
+    assert page_desc == "home screen"
 
 
 def test_identify_node_propagates_an_embedding_failure(
@@ -1329,7 +1498,16 @@ def test_to_device_on_unparseable_json(translator: aitk_translator.UIKobeV2Trans
     }
 
 
-@pytest.mark.parametrize("action", ['{"message": "no action"}', '"a string"', "[1, 2]"])
+@pytest.mark.parametrize(
+    "action",
+    [
+        '{"message": "no action"}',
+        '"a string"',
+        "[1, 2]",
+        '{"aitk_action": {}}',
+        '{"aitk_action": {"answer": "no action key"}}',
+    ],
+)
 def test_to_device_without_an_action_object(
     translator: aitk_translator.UIKobeV2Translator, action: str
 ) -> None:

@@ -65,3 +65,17 @@ def as_str_dict(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {k: v for k, v in value.items() if isinstance(k, str)}
+
+
+def as_list(value: object) -> list[Any]:
+    """Return ``value`` when it is a ``list``, else ``[]``.
+
+    Unlike ``as_int_list``/``as_float_list`` this does not narrow item types: it
+    exists for the JSON payloads (a runtime graph's ``instructions``,
+    ``instruction_templates``, ``target_observations``, ``schema_deltas``) whose
+    items are read one at a time by callers that already narrow each item
+    themselves. Its job is only to guarantee the container is a list, so a
+    present-but-``null`` JSON field never reaches ``enumerate()``/``len()`` as
+    ``None``.
+    """
+    return value if isinstance(value, list) else []
