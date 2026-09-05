@@ -6,14 +6,13 @@
 # Usage:
 #   ./scripts/run_explore.sh                    # defaults
 #   ./scripts/run_explore.sh -c configs/explore.yaml --max-steps 200
-#   MAX_RETRIES=10 RETRY_DELAY=15 ./scripts/run_explore.sh
+#   MAX_RETRIES=10 RETRY_DELAY=15 ./scripts/run_explore.sh   # RETRY_DELAY in seconds
 
 set -euo pipefail
 
 MAX_RETRIES="${MAX_RETRIES:-10}"
-RETRY_DELAY="${RETRY_DELAY:-60}"  # seconds between retries
+RETRY_DELAY="${RETRY_DELAY:-60}"
 
-# Parse -c / --config from args to find config file
 CONFIG_FILE="configs/explore.yaml"
 ARGS=("$@")
 for i in "${!ARGS[@]}"; do
@@ -23,7 +22,6 @@ for i in "${!ARGS[@]}"; do
     fi
 done
 
-# Extract app name from config YAML
 APP_NAME=$(uv run python3 -c "
 import yaml
 with open('$CONFIG_FILE') as f:
@@ -31,12 +29,10 @@ with open('$CONFIG_FILE') as f:
 print(cfg['apps'][0]['name'])
 ")
 
-# Create logs directory
 mkdir -p logs
 
 LOG_FILE="logs/explore_${APP_NAME}.log"
 
-# Helper: format seconds as HH:MM:SS
 fmt_duration() {
     local secs=$1
     printf "%02d:%02d:%02d" $((secs/3600)) $(( (secs%3600)/60 )) $((secs%60))
@@ -58,8 +54,6 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
     echo "[run_explore] Attempt $attempt / $MAX_RETRIES  ($(date))" | tee -a "$LOG_FILE"
     echo "==========================================" | tee -a "$LOG_FILE"
 
-    # Run exploration with auto-resume; pass through any extra args
-    # Pipe both stdout and stderr to log file AND terminal
     if uv run app-graph --resume-from auto "$@" 2>&1 | tee -a "$LOG_FILE"; then
         TOTAL_ELAPSED=$((SECONDS - START_TIME))
         echo "==========================================" | tee -a "$LOG_FILE"
