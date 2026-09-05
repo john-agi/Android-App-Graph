@@ -1,4 +1,4 @@
-"""Vulture allowlist for the 90% blocking run (see AGENTS.md, "Dead code").
+"""Vulture allowlist for the 90% blocking run.
 
 Every entry names code that Vulture cannot see a use for inside src/ and
 tests/ but that is used elsewhere. Each entry carries a one-line reason.

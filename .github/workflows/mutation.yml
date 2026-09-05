@@ -1,6 +1,5 @@
 # Scheduled because it is slow and its output needs human judgement, so it
-# gates nothing. Policy: AGENTS.md, "Mutation testing".
-# Checkout, setup-uv and Python are byte-for-byte copies of ci.yml.
+# gates nothing. Checkout, setup-uv and Python are byte-for-byte copies of ci.yml.
 name: Mutation
 
 on:

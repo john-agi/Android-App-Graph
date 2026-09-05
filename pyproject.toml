@@ -74,11 +74,8 @@ mutation = [
 ]
 
 [tool.ruff]
-# Minimum Python to target. The project is 3.14 only (requires-python = ">=3.14").
 target-version = "py314"
-# Wrap target for the formatter and isort; the roadmap fixed 100.
 line-length = 100
-# First-party roots for import sorting. tests/ does not exist yet; Ruff does not need it to.
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -87,28 +84,25 @@ src = ["src", "tests"]
 # explicit-preview-rules requires exact codes.
 preview = true
 explicit-preview-rules = true
-# extend-select ADDS to the active default set (413 rules without preview; with lint.preview = true
-# Ruff 0.16.x activates a different default set of 494, see `ruff check --show-settings`).
-# `select` would replace it.
+# extend-select adds to Ruff's default set; `select` would replace it.
 extend-select = [
-    "I",       # isort (I001 is already default; this adds I002)
-    "ANN",     # flake8-annotations (ANN101/ANN102 no longer exist)
-    "PYI",     # flake8-pyi (47 rules are default; adds the rest)
-    "ARG",     # flake8-unused-arguments
-    "ERA",     # eradicate: commented-out code
-    "PT",      # flake8-pytest-style (tests arrive later)
-    "T20",     # flake8-print: T201 print, T203 pprint
-    "PLW0603", # Pylint: global statements
-    "PGH003",  # pygrep-hooks blanket-type-ignore: `# type: ignore` without a code
-    "PGH004",  # pygrep-hooks blanket-noqa: `# noqa` without a code
-    "INP001",  # every directory under src/ must be a package (__init__.py)
+    "I",
+    "ANN",
+    "PYI",
+    "ARG",
+    "ERA",
+    "PT",
+    "T20",
+    "PLW0603",
+    "PGH003",
+    "PGH004",
+    "INP001",
 ]
-# No `ignore` list, by policy. FA100/FA102 are default rules that can never fire at py314
-# (annotations are deferred by PEP 649/749), so they need no ignore entry and no selection.
+# FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
+# they need no `ignore` entry.
 
 [tool.ruff.lint.per-file-ignores]
-# This table is fixed by the roadmap. Operator scripts and copy-in adapters are not packages,
-# and printing is their user interface.
+# Operator scripts and copy-in adapters are not packages, and printing is their user interface.
 "scripts/**" = ["T201", "T203", "INP001"]
 "aitk_files/**" = ["T201", "T203", "INP001"]
 "aw_files/**" = ["T201", "T203", "INP001"]
@@ -122,7 +116,6 @@ extend-select = [
 allow-star-arg-any = true
 
 [tool.ruff.format]
-# Also format doctest and fenced code examples inside docstrings.
 docstring-code-format = true
 
 [tool.deptry]
@@ -136,19 +129,15 @@ DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
 DEP002 = ["dill"]
 
-# Vulture dead-code detection. Policy and the allowlist rule: see AGENTS.md.
 [tool.vulture]
-# https://github.com/jendrikseipp/vulture#configuration
 # Positional paths on the command line REPLACE this list (verified with 2.16),
 # so every Poe task repeats it, allowlist included.
 paths = ["src", "tests", "vulture_allowlist.py"]
 min_confidence = 90
 
-# ty type checker. Rationale and the suppression rule: see AGENTS.md.
 [tool.ty.src]
-# The root adapters and operator scripts are linted by Ruff, not type-checked.
-# They are copy-in files, not package code; aw_files/ imports android_world, which is not
-# installable on Python 3.14. aitk_files/ moves into src/android_app_graph/adapters in the follow-up to #19.
+# The copy-in adapters and operator scripts are not package code, and aw_files/ imports
+# android_world, which does not install on Python 3.14.
 include = ["src", "tests"]
 
 [tool.ty.rules]
@@ -175,14 +164,11 @@ strict-generic-narrowing = true
 # Default, stated on purpose: the two "warn" rules above are blocking too.
 error-on-warning = true
 
-# pytest, native TOML table (pytest >= 9.0). Test rules: see AGENTS.md.
 [tool.pytest]
 minversion = "9.0"
-# Turns on strict_config, strict_markers, strict_parametrization_ids, strict_xfail.
 strict = true
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib", "-ra", "-p", "no:tach"]
-# Every warning is an error; a third-party ignore goes after "error", with a reason.
 filterwarnings = ["error"]
 
 [tool.coverage.run]
@@ -193,10 +179,9 @@ source = ["android_app_graph"]
 show_missing = true
 skip_covered = true
 skip_empty = true
-# Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
+# Ratchet: set from the measured baseline, only ever raised.
 fail_under = 53
 
-# Mutation testing. Policy and triage: see AGENTS.md, "Mutation testing".
 [tool.mutmut]
 # scripts/, aitk_files/ and aw_files/ are copy-in adapters, not package code.
 source_paths = ["src/android_app_graph/"]
@@ -205,9 +190,9 @@ pytest_add_cli_args_test_selection = ["tests/"]
 # fail_under would abort it.
 pytest_add_cli_args = ["--no-cov"]
 
-# Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
-# conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
+# `uv run` has already activated .venv; the default `auto` executor would nest a second
+# `uv run` per task because uv.lock exists.
 executor = "simple"
 
 [tool.poe.tasks]
@@ -241,7 +226,7 @@ help = "Definition of done: every non-mutating check"
 sequence = ["check-fast", "_dependencies", "_environment", "_dead-code", "_test", "_actions", "_build"]
 
 [tool.poe.tasks.dead-code-review]
-help = "Review queue: likely-dead code at 60% confidence, sorted by size, smallest first (largest last). Never deleted automatically; see AGENTS.md."
+help = "Review queue: likely-dead code at 60% confidence, sorted by size, smallest first (largest last). Never deleted automatically."
 cmd = "vulture src tests vulture_allowlist.py --min-confidence 60 --sort-by-size"
 
 [tool.poe.tasks.mutate]
