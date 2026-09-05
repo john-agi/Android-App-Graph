@@ -205,12 +205,7 @@ def test_reference_screenshot_b64(tmp_path: Path) -> None:
 # Retry behaviour
 
 
-@pytest.fixture
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(embed.time, "sleep", lambda _seconds: None)
-
-
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
 def test_compute_embedding_with_retry_returns_on_first_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,7 +221,7 @@ def test_compute_embedding_with_retry_returns_on_first_success(
     assert calls == [("key", "shot")]
 
 
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
 def test_compute_embedding_with_retry_recovers_after_a_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -245,7 +240,7 @@ def test_compute_embedding_with_retry_recovers_after_a_failure(
     assert len(attempts) == 2
 
 
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
 def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,7 +282,7 @@ def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:
     )
 
 
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_computes_caches_and_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -308,7 +303,7 @@ def test_precompute_computes_caches_and_skips(
     assert _precompute(tmp_path)["already_cached"] == 1
 
 
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_keeps_going_when_a_node_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

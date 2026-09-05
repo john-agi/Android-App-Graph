@@ -322,10 +322,10 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
 
 
 @pytest.fixture
-def _fake_device(monkeypatch: pytest.MonkeyPatch) -> None:
+def _fake_device(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
     """Silence every side effect re_explore_issues has outside the graph."""
+    del no_sleep  # requested for its side effect: no_sleep patches time.sleep
     monkeypatch.setattr(audit.subprocess, "run", _fake_run)
-    monkeypatch.setattr(audit.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(audit, "plan_next_action", lambda **_kwargs: "tap the first button")
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "end"}, ""))
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -278,9 +279,28 @@ def test_parse_decide_output_falls_back_to_the_whole_text() -> None:
     assert aitk_translator._parse_decide_output(raw) == {"choice": "A"}
 
 
-@given(st.dictionaries(st.text(max_size=10), st.integers(), max_size=5))
+_key_without_backtick = st.text(alphabet=st.characters(exclude_characters="`"), max_size=10)
+
+
+@given(st.dictionaries(_key_without_backtick, st.integers(), max_size=5))
 def test_parse_decide_output_round_trips_json_objects(payload: dict[str, int]) -> None:
+    """A key alphabet that excludes the backtick: ``strip_json_fences`` fences on ```.
+
+    A key containing two triple-backtick runs (see the documented limitation below)
+    makes fence-stripping eat part of the serialized JSON, which is not a property
+    of arbitrary JSON round-tripping.
+    """
     assert aitk_translator._parse_decide_output(json.dumps(payload)) == payload
+
+
+def test_parse_decide_output_documented_limitation_backtick_fences_in_a_key() -> None:
+    """A key containing ```-fences is stripped along with any real markdown fence.
+
+    ``strip_json_fences`` cannot tell a fence embedded inside serialized JSON from
+    a real markdown code fence around it, so this input is not round-tripped.
+    """
+    payload = {"```a```": 1}
+    assert aitk_translator._parse_decide_output(json.dumps(payload)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +361,6 @@ def test_load_graph_from_json_embeds_reference_screenshots(tmp_path: Path) -> No
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
     G, _ = aitk_translator._load_graph_from_json(path)
-    import base64
 
     assert G.nodes["n1"]["reference_screenshot"] == base64.b64encode(_SCREENSHOT).decode("ascii")
     assert G.nodes["n2"]["reference_screenshot"] is None
@@ -618,14 +637,6 @@ class _FakeClient:
         self.chat = _FakeChat(self.completions)
 
 
-@pytest.fixture
-def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Record retry back-off delays instead of waiting for them."""
-    delays: list[float] = []
-    monkeypatch.setattr(aitk_translator.time, "sleep", delays.append)
-    return delays
-
-
 def test_call_with_retry_returns_the_first_success() -> None:
     calls: list[int] = []
 
@@ -665,14 +676,27 @@ def test_call_with_retry_reraises_after_the_last_attempt(no_sleep: list[float]) 
 
 
 def test_chat_completion_content_stops_when_the_caller_breaks() -> None:
+    """Breaking out of the loop must not pull (or pay for) a second completion."""
     client = _FakeClient("first", "second")
-    seen = [
-        (attempt, content, can_retry)
-        for attempt, content, can_retry in aitk_translator._chat_completion_content(
+    seen = []
+    for attempt, content, can_retry in aitk_translator._chat_completion_content(
+        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        model="m",
+    ):
+        seen.append((attempt, content, can_retry))
+        break
+    assert seen == [(0, "first", True)]
+    assert len(client.completions.calls) == 1
+
+
+def test_chat_completion_content_yields_every_attempt_when_the_caller_exhausts_it() -> None:
+    client = _FakeClient("first", "second")
+    seen = list(
+        aitk_translator._chat_completion_content(
             client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
             model="m",
         )
-    ]
+    )
     assert seen == [(0, "first", True), (1, "second", False)]
     assert len(client.completions.calls) == 2
 
@@ -1359,6 +1383,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     assert page_desc == "home screen"
 
 
+@pytest.mark.usefixtures("no_sleep")
 def test_identify_node_propagates_an_embedding_failure(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
@@ -1366,7 +1391,6 @@ def test_identify_node_propagates_an_embedding_failure(
         raise RuntimeError("embedding down")
 
     monkeypatch.setattr(aitk_translator, "get_gemini_native_image_embedding", _always_fails)
-    monkeypatch.setattr(aitk_translator.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="embedding down"):
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
