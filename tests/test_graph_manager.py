@@ -1,4 +1,4 @@
-"""Tests for ui_kobe.utils.graph_manager.
+"""Tests for android_app_graph.utils.graph_manager.
 
 All VLM and embedding calls are replaced by scripted fakes patched onto the
 graph_manager module namespace; no test needs a device, the network or keys.
@@ -19,8 +19,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 from openai import OpenAI
 
-from ui_kobe.utils import graph_manager as gm_module
-from ui_kobe.utils.graph_manager import (
+from android_app_graph.utils import graph_manager as gm_module
+from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
     NORMALIZE_EVERY_N_VISITS,
     GraphManager,

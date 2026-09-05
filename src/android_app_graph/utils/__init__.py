@@ -1,4 +1,4 @@
-"""UI-KOBE utilities."""
+"""Android-App-Graph utilities."""
 
 from __future__ import annotations
 

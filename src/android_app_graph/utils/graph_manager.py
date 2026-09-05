@@ -1,4 +1,4 @@
-"""Graph manager for UI-KOBE exploration graphs.
+"""Graph manager for Android-App-Graph exploration graphs.
 
 A node represents a unique app state defined by:
   - Level 1: App package (derived from Android activity name)
@@ -31,8 +31,8 @@ from typing import Any
 import networkx as nx
 from openai import OpenAI
 
-from ui_kobe.payloads import as_float_list, as_int_list, as_str_dict
-from ui_kobe.utils.vlm_utils import (
+from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
+from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
     describe_page_and_state,

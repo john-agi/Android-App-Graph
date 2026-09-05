@@ -2,13 +2,13 @@
 
 Usage:
     # Audit only (no device needed) — logs issues and saves report
-    uv run kobe-audit -c configs/explore.yaml
+    uv run app-graph-audit -c configs/explore.yaml
 
     # Audit + re-explore flagged issues on device
-    uv run kobe-audit -c configs/explore.yaml --re-explore
+    uv run app-graph-audit -c configs/explore.yaml --re-explore
 
     # Re-explore with custom step budget per issue
-    uv run kobe-audit -c configs/explore.yaml --re-explore --steps-per-issue 10
+    uv run app-graph-audit -c configs/explore.yaml --re-explore --steps-per-issue 10
 
 The auditor finds two types of issues:
 
@@ -34,12 +34,12 @@ from typing import Any, NamedTuple
 import yaml
 from openai import OpenAI
 
-from ui_kobe.cli import launch_app
-from ui_kobe.device import DeviceController
-from ui_kobe.utils import make_client
-from ui_kobe.utils.graph_manager import GraphManager
-from ui_kobe.utils.logging import setup_logging
-from ui_kobe.utils.vlm_utils import (
+from android_app_graph.cli import launch_app
+from android_app_graph.device import DeviceController
+from android_app_graph.utils import make_client
+from android_app_graph.utils.graph_manager import GraphManager
+from android_app_graph.utils.logging import setup_logging
+from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
     token_tracker,
@@ -536,7 +536,7 @@ def _open_re_explore_session(
     except ImportError:
         parser.exit(
             1,
-            "kobe-audit --re-explore requires the 'aitk' dependency. "
+            "app-graph-audit --re-explore requires the 'aitk' dependency. "
             "Install it first, then rerun the command.\n",
         )
 
@@ -553,7 +553,7 @@ def _open_re_explore_session(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kobe-audit",
+        prog="app-graph-audit",
         description="Audit an explored graph for anomalies.",
     )
     parser.add_argument(

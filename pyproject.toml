@@ -3,9 +3,9 @@ requires = ["uv_build>=0.12.9,<0.13"]
 build-backend = "uv_build"
 
 [project]
-name = "ui-kobe"
+name = "android-app-graph"
 version = "0.1.0"
-description = "Android-App-Graph: graph-based Android app exploration and runtime for mobile GUI agents, a fork of UI-KOBE by Yuxiang Chai"
+description = "Android-App-Graph: graph-based Android app exploration and runtime for mobile GUI agents, a fork of YuxiangChai/UI-KOBE by Yuxiang Chai"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -28,10 +28,10 @@ maintainers = [
 ]
 
 [project.scripts]
-kobe-explore = "ui_kobe.cli:main"
-kobe-audit = "ui_kobe.commands.audit:main"
-kobe-plot = "ui_kobe.commands.plot:main"
-kobe-embed = "ui_kobe.commands.embed:main"
+app-graph = "android_app_graph.cli:main"
+app-graph-audit = "android_app_graph.commands.audit:main"
+app-graph-plot = "android_app_graph.commands.plot:main"
+app-graph-embed = "android_app_graph.commands.embed:main"
 
 [project.urls]
 Homepage = "https://github.com/john-agi/Android-App-Graph"
@@ -55,7 +55,7 @@ dev = [
     "hypothesis>=6.167.1",
     # matplotlib and pyvis repeat the `viz` extra on purpose: uv has no documented way for a
     # dependency group to include the project's own extra and never syncs extras by default,
-    # while ty (unresolved-import) and the kobe-plot tests need both installed.
+    # while ty (unresolved-import) and the app-graph-plot tests need both installed.
     "matplotlib>=3.10.8",
     "poethepoet>=0.48.0",
     "prek>=0.5.1",
@@ -125,11 +125,11 @@ allow-star-arg-any = true
 docstring-code-format = true
 
 [tool.deptry]
-# Not inferable from the src/ layout; without it every `import ui_kobe` is DEP001.
-known_first_party = ["ui_kobe"]
+# Not inferable from the src/ layout; without it every `import android_app_graph` is DEP001.
+known_first_party = ["android_app_graph"]
 
 [tool.deptry.per_rule_ignores]
-# aw_files/ui_kobe_aw_agent.py is a copy-in adapter; android_world is not declared here.
+# aw_files/android_app_graph_aw_agent.py is a copy-in adapter; android_world is not declared here.
 # It is not on PyPI and not installable on Python 3.14, so it cannot be declared (decision in #19).
 DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
@@ -147,7 +147,7 @@ min_confidence = 90
 [tool.ty.src]
 # The root adapters and operator scripts are linted by Ruff, not type-checked.
 # They are copy-in files, not package code; aw_files/ imports android_world, which is not
-# installable on Python 3.14. aitk_files/ moves into src/ui_kobe/adapters in the follow-up to #19.
+# installable on Python 3.14. aitk_files/ moves into src/android_app_graph/adapters in the follow-up to #19.
 include = ["src", "tests"]
 
 [tool.ty.rules]
@@ -186,7 +186,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["ui_kobe"]
+source = ["android_app_graph"]
 
 [tool.coverage.report]
 show_missing = true
@@ -198,7 +198,7 @@ fail_under = 53
 # Mutation testing. Policy and triage: see AGENTS.md, "Mutation testing".
 [tool.mutmut]
 # scripts/, aitk_files/ and aw_files/ are copy-in adapters, not package code.
-source_paths = ["src/ui_kobe/"]
+source_paths = ["src/android_app_graph/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Guards the clean stats run should --cov ever move into addopts, where
 # fail_under would abort it.
@@ -217,7 +217,7 @@ _lint = "ruff check ."
 _typecheck = "ty check"
 _dependencies = "deptry ."
 _environment = "uv pip check"
-_test = "pytest --cov=ui_kobe --cov-report=term-missing"
+_test = "pytest --cov=android_app_graph --cov-report=term-missing"
 _actions = "zizmor --offline ."
 _build = "uv build --no-sources"
 _dead-code = "vulture src tests vulture_allowlist.py --min-confidence 90"
@@ -243,7 +243,7 @@ help = "Review queue: likely-dead code at 60% confidence, sorted by size, smalle
 cmd = "vulture src tests vulture_allowlist.py --min-confidence 60 --sort-by-size"
 
 [tool.poe.tasks.mutate]
-help = "Mutation testing of src/ui_kobe with tests/ (review queue, never a gate); state in mutants/"
+help = "Mutation testing of src/android_app_graph with tests/ (review queue, never a gate); state in mutants/"
 cmd = "mutmut run"
 # deadline=None, so a slow mutant cannot be killed by a spurious DeadlineExceeded.
 env = { HYPOTHESIS_PROFILE = "ci" }

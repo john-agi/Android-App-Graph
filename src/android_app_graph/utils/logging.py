@@ -1,4 +1,4 @@
-"""Rich-based colored logging for UI-KOBE.
+"""Rich-based colored logging for Android-App-Graph.
 
 Each subsystem gets a consistent visual identity so the exploration trace is
 easy to scan in real time:
@@ -31,22 +31,22 @@ _LOGGER_CONFIG: dict[str, dict[str, str]] = {
         "badge_style": "bold white on cyan",
         "text_style": "cyan",
     },
-    "ui_kobe.explorer": {
+    "android_app_graph.explorer": {
         "label": "Explorer",
         "badge_style": "bold white on cyan",
         "text_style": "cyan",
     },
-    "ui_kobe.kobe": {
+    "android_app_graph.kobe": {
         "label": "Kobe",
         "badge_style": "bold white on magenta",
         "text_style": "magenta",
     },
-    "ui_kobe.utils.graph_manager": {
+    "android_app_graph.utils.graph_manager": {
         "label": "Graph",
         "badge_style": "bold white on green",
         "text_style": "green",
     },
-    "ui_kobe.utils.vlm_utils": {
+    "android_app_graph.utils.vlm_utils": {
         "label": "VLM",
         "badge_style": "bold black on yellow",
         "text_style": "yellow",

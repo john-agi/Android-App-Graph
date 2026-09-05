@@ -1,4 +1,4 @@
-"""kobe-audit parsing and pure helpers, exercised without AITK, adb or an emulator."""
+"""app-graph-audit parsing and pure helpers, exercised without AITK, adb or an emulator."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 from openai import OpenAI
 
-from ui_kobe.commands import audit
-from ui_kobe.utils.graph_manager import GraphManager
+from android_app_graph.commands import audit
+from android_app_graph.utils.graph_manager import GraphManager
 
 
 @pytest.fixture

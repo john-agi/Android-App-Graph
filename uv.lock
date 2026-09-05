@@ -12,6 +12,80 @@ version = "0.2.1"
 source = { git = "https://github.com/YuxiangChai/AITK?rev=fd06a28e2286cbc1ae699401c1a6f894ba926c44#fd06a28e2286cbc1ae699401c1a6f894ba926c44" }
 
 [[package]]
+name = "android-app-graph"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aitk" },
+    { name = "dill" },
+    { name = "httpx" },
+    { name = "networkx" },
+    { name = "openai" },
+    { name = "pillow" },
+    { name = "pyyaml" },
+    { name = "rich" },
+]
+
+[package.optional-dependencies]
+viz = [
+    { name = "matplotlib" },
+    { name = "pyvis" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "deptry" },
+    { name = "hypothesis" },
+    { name = "matplotlib" },
+    { name = "poethepoet" },
+    { name = "prek" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-randomly" },
+    { name = "pyvis" },
+    { name = "ruff" },
+    { name = "ty" },
+    { name = "vulture" },
+    { name = "zizmor" },
+]
+mutation = [
+    { name = "mutmut" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aitk", git = "https://github.com/YuxiangChai/AITK?rev=fd06a28e2286cbc1ae699401c1a6f894ba926c44" },
+    { name = "dill" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10.8" },
+    { name = "networkx" },
+    { name = "openai" },
+    { name = "pillow" },
+    { name = "pyvis", marker = "extra == 'viz'", specifier = ">=0.3.2" },
+    { name = "pyyaml" },
+    { name = "rich" },
+]
+provides-extras = ["viz"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "deptry", specifier = ">=0.25.1" },
+    { name = "hypothesis", specifier = ">=6.167.1" },
+    { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "poethepoet", specifier = ">=0.48.0" },
+    { name = "prek", specifier = ">=0.5.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-randomly", specifier = ">=5.0.0" },
+    { name = "pyvis", specifier = ">=0.3.2" },
+    { name = "ruff", specifier = ">=0.16.5" },
+    { name = "ty", specifier = ">=0.0.77" },
+    { name = "vulture", specifier = ">=2.16" },
+    { name = "zizmor", specifier = ">=1.30.0" },
+]
+mutation = [{ name = "mutmut", specifier = ">=3.7.0" }]
+
+[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1309,80 +1383,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/55/e3/70399cb7dd41c10ac
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7", size = 14611, upload-time = "2025-10-01T02:14:40.154Z" },
 ]
-
-[[package]]
-name = "ui-kobe"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aitk" },
-    { name = "dill" },
-    { name = "httpx" },
-    { name = "networkx" },
-    { name = "openai" },
-    { name = "pillow" },
-    { name = "pyyaml" },
-    { name = "rich" },
-]
-
-[package.optional-dependencies]
-viz = [
-    { name = "matplotlib" },
-    { name = "pyvis" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "deptry" },
-    { name = "hypothesis" },
-    { name = "matplotlib" },
-    { name = "poethepoet" },
-    { name = "prek" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-randomly" },
-    { name = "pyvis" },
-    { name = "ruff" },
-    { name = "ty" },
-    { name = "vulture" },
-    { name = "zizmor" },
-]
-mutation = [
-    { name = "mutmut" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aitk", git = "https://github.com/YuxiangChai/AITK?rev=fd06a28e2286cbc1ae699401c1a6f894ba926c44" },
-    { name = "dill" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10.8" },
-    { name = "networkx" },
-    { name = "openai" },
-    { name = "pillow" },
-    { name = "pyvis", marker = "extra == 'viz'", specifier = ">=0.3.2" },
-    { name = "pyyaml" },
-    { name = "rich" },
-]
-provides-extras = ["viz"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "deptry", specifier = ">=0.25.1" },
-    { name = "hypothesis", specifier = ">=6.167.1" },
-    { name = "matplotlib", specifier = ">=3.10.8" },
-    { name = "poethepoet", specifier = ">=0.48.0" },
-    { name = "prek", specifier = ">=0.5.1" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "pytest-randomly", specifier = ">=5.0.0" },
-    { name = "pyvis", specifier = ">=0.3.2" },
-    { name = "ruff", specifier = ">=0.16.5" },
-    { name = "ty", specifier = ">=0.0.77" },
-    { name = "vulture", specifier = ">=2.16" },
-    { name = "zizmor", specifier = ">=1.30.0" },
-]
-mutation = [{ name = "mutmut", specifier = ">=3.7.0" }]
 
 [[package]]
 name = "vulture"

@@ -11,4 +11,4 @@ from typing import Any
 
 _: Any = None  # placeholder for the ``_.name`` form written by --make-whitelist
 
-# _.example_method  # called by keyword from AITK through aitk_files/ui_kobe_v2.py
+# _.example_method  # called by keyword from AITK through aitk_files/android_app_graph_v2.py
