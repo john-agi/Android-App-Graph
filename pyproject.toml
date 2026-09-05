@@ -148,7 +148,8 @@ min_confidence = 90
 [tool.ty.src]
 # The root adapters and operator scripts are linted by Ruff, not type-checked.
 # They are copy-in files, not package code; aw_files/ imports android_world, which is not
-# installable on Python 3.14. aitk_files/ moves into src/android_app_graph/adapters in the follow-up to #19.
+# installable on Python 3.14. aitk_files/android_app_graph_v2.py is a shim over
+# android_app_graph.adapters.aitk_translator, which is inside the checked set.
 include = ["src", "tests"]
 
 [tool.ty.rules]
@@ -194,7 +195,7 @@ show_missing = true
 skip_covered = true
 skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
-fail_under = 53
+fail_under = 70
 
 # Mutation testing. Policy and triage: see AGENTS.md, "Mutation testing".
 [tool.mutmut]
