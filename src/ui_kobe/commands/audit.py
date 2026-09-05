@@ -617,9 +617,12 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    session = _open_re_explore_session(parser, config, vlm_config) if args.re_explore else None
-
+    # After argument validation (so --help and the parser.error paths above never
+    # touch the root logger) but before the device controller, which logs while it
+    # connects.
     setup_logging(level=logging.INFO)
+
+    session = _open_re_explore_session(parser, config, vlm_config) if args.re_explore else None
 
     page_detail_client, page_detail_model = make_client(vlm_config.get("page_detail"))
     embedding_client, embedding_model = make_client(vlm_config.get("embedding"))
