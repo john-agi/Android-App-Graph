@@ -202,10 +202,13 @@ style.
   them; the type checker, once adopted, does not check them; the dependency
   checker, once adopted, does not treat their `android_world` imports as
   runtime dependencies. `aitk_files/android_app_graph_v2.py` and
-  `aw_files/android_app_graph_aw_agent.py` are copied into other repositories: keep them
-  self-contained, importing `android_app_graph` and their host framework and nothing
-  from `scripts/`. `scripts/` holds only `run_explore.sh`; the `app-graph-*`
-  commands live in `src/android_app_graph/commands/`.
+  `aw_files/android_app_graph_aw_agent.py` are copied into other repositories:
+  they import `android_app_graph` and their host framework and nothing from
+  `scripts/`. `aitk_files/android_app_graph_v2.py` is a shim that re-exports
+  `register` and `UIKobeV2Translator` from
+  `android_app_graph.adapters.aitk_translator`; the translator itself is package
+  code and is type-checked and tested. `scripts/` holds only `run_explore.sh`;
+  the `app-graph-*` commands live in `src/android_app_graph/commands/`.
 - Generated graphs, logs, outputs and `dist/` are git-ignored; `.gitignore` is
   the authority on what is not tracked.
 
