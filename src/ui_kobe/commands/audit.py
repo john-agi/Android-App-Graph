@@ -131,7 +131,7 @@ def verify_and_merge_nodes(
         node_a = issue.get("node_a", "")
         node_b = issue.get("node_b", "")
 
-        # Check both nodes still exist (earlier merge may have removed one)
+        # An earlier merge in this loop may already have removed one of the pair.
         if node_a not in graph.graph or node_b not in graph.graph:
             logger.info("Skipping merge %s + %s — node already removed", node_a, node_b)
             results.append({"issue": issue, "status": "skipped", "reason": "node removed"})
@@ -147,7 +147,7 @@ def verify_and_merge_nodes(
             results.append({"issue": issue, "status": "skipped", "reason": "missing screenshot"})
             continue
 
-        # Use the description of the node with more visits as the reference
+        # The more-visited node has the better-established description.
         desc_a = data_a.get("page_description", "")
         desc_b = data_b.get("page_description", "")
         visits_a = data_a.get("visit_count", 0)
@@ -171,7 +171,7 @@ def verify_and_merge_nodes(
         )
 
         if verify_result.get("same", False):
-            # Keep the lower-numbered node (earlier discovered)
+            # The lower-numbered node was discovered first.
             keep, remove = (node_a, node_b) if node_a < node_b else (node_b, node_a)
             graph.merge_nodes(keep, remove)
             logger.info(
@@ -278,7 +278,6 @@ def re_explore_issues(
                 controller.exe_action(action)
             time.sleep(1)
 
-        # Verify we arrived
         device_state = controller.get_state()
         actual = graph.identify_state(
             device_state["activity"],
@@ -310,7 +309,6 @@ def re_explore_issues(
 
             explored_edges = graph.get_all_edges_from_node(current_node)
 
-            # Inject hint into page description for the planner
             page_desc = node_data["page_description"]
             if hint:
                 page_desc = f"{page_desc}\n[AUDIT HINT: {hint}]"
@@ -369,7 +367,6 @@ def re_explore_issues(
             time.sleep(0.5)
             device_state = controller.get_state()
 
-            # Check if left app
             current_package = device_state.get("package", "").strip()
             if current_package and current_package != package_name:
                 logger.warning("Left app during re-explore, pressing back")
@@ -387,7 +384,6 @@ def re_explore_issues(
                 device_state["screenshot"],
             )
 
-            # Build target observation
             new_node_data = graph.get_node(new_node)
             target_obs = new_node_data.get("page_description", "") if new_node_data else ""
 
@@ -424,7 +420,6 @@ def re_explore_issues(
 
         return step_results
 
-    # Process each issue
     for issue in issues:
         itype = issue.get("type", "")
 
@@ -451,7 +446,6 @@ def re_explore_issues(
                 results.append({"issue": issue, "status": "skipped", "reason": "unreachable"})
                 continue
 
-            # Get the target node's description for a vague hint
             target_desc = (
                 graph.graph.nodes[target].get("page_description", target)
                 if target in graph.graph
@@ -494,7 +488,6 @@ def re_explore_issues(
                 results.append({"issue": issue, "status": "skipped", "reason": "unreachable"})
                 continue
 
-            # Build vague hints about what pages might be reachable
             expected_pages = ", ".join(f"'{a}'" for a in expected)
             hint = (
                 f"This screen might be able to lead to pages like {expected_pages}. "
@@ -617,9 +610,8 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    # After argument validation (so --help and the parser.error paths above never
-    # touch the root logger) but before the device controller, which logs while it
-    # connects.
+    # After argument validation, so --help and the parser.error paths above never
+    # touch the root logger; before the controller, which logs while it connects.
     setup_logging(level=logging.INFO)
 
     session = _open_re_explore_session(parser, config, vlm_config) if args.re_explore else None
@@ -653,7 +645,6 @@ def main(argv: list[str] | None = None) -> int:
             graph.graph.number_of_edges(),
         )
 
-        # Phase 1: LLM audit
         report_path = graph_path.parent / f"{app_name}_audit.json"
         audit_result = run_audit(graph, app_name, report_path)
 
@@ -663,7 +654,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             logger.info("Found %d issues for %s", len(issues), app_name)
 
-        # Phase 2: Verify and merge duplicate nodes (no device needed)
         merge_issues = [i for i in issues if i.get("type") == "merge_nodes"]
         other_issues = [i for i in issues if i.get("type") != "merge_nodes"]
 
@@ -675,13 +665,12 @@ def main(argv: list[str] | None = None) -> int:
                 page_detail_client,
                 page_detail_model,
             )
-            # Save merge results
             merge_path = graph_path.parent / f"{app_name}_merge.json"
             with merge_path.open("w", encoding="utf-8") as f:
                 json.dump(merge_results, f, indent=2, ensure_ascii=False)
             logger.info("Merge results saved to %s", merge_path)
 
-            # Save updated graph after merges to a NEW file (preserve original)
+            # A separate file, so the pre-audit graph stays intact.
             merged_count = sum(1 for r in merge_results if r["status"] == "merged")
             if merged_count:
                 graph.save_graph(audited_graph_path)
@@ -689,11 +678,9 @@ def main(argv: list[str] | None = None) -> int:
                     "Audited graph saved to %s (%d merge(s))", audited_graph_path, merged_count
                 )
 
-        # Phase 3: Re-explore (optional, requires device)
         if session is not None and other_issues:
             logger.info("Starting re-exploration for %d issues...", len(other_issues))
 
-            # Launch the app
             launch_app(config, app, logger)
             time.sleep(4)
 
@@ -711,15 +698,12 @@ def main(argv: list[str] | None = None) -> int:
                 steps_per_issue=args.steps_per_issue,
             )
 
-            # Save results
             results_path = graph_path.parent / f"{app_name}_re_explore.json"
             with results_path.open("w", encoding="utf-8") as f:
                 json.dump(re_results, f, indent=2, ensure_ascii=False)
             logger.info("Re-exploration results saved to %s", results_path)
 
-        # Phase 4: Final edge-template normalization.
-        # This runs after audit merge/re-explore modifications and also runs
-        # when the auditor reports no structural issues.
+        # Runs even when the auditor reported no structural issues.
         normalize_and_save_audited_graph(graph, audited_graph_path)
 
     token_tracker.print_summary()

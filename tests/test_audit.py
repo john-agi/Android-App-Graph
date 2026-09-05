@@ -41,9 +41,7 @@ def _graph_with_nodes(*nodes: tuple[str, dict[str, Any]]) -> GraphManager:
     return graph
 
 
-# ---------------------------------------------------------------------------
 # Argument parsing
-# ---------------------------------------------------------------------------
 
 
 def test_audit_parser_defaults() -> None:
@@ -83,9 +81,7 @@ def test_audit_main_rejects_app_with_re_explore(
     assert "--app can only be used for basic audit" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------------
 # select_apps_for_audit
-# ---------------------------------------------------------------------------
 
 
 def test_select_apps_without_app_returns_config_apps(tmp_path: Path) -> None:
@@ -116,9 +112,7 @@ def test_select_apps_finds_graph_folder_by_name(tmp_path: Path) -> None:
     ]
 
 
-# ---------------------------------------------------------------------------
 # run_audit and normalize_and_save_audited_graph
-# ---------------------------------------------------------------------------
 
 
 def test_run_audit_writes_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,9 +152,7 @@ def test_normalize_and_save_audited_graph(tmp_path: Path, monkeypatch: pytest.Mo
     assert saved == [audited_path]
 
 
-# ---------------------------------------------------------------------------
 # verify_and_merge_nodes
-# ---------------------------------------------------------------------------
 
 
 def _merge_issue(node_a: str = "s0_home", node_b: str = "s1_home") -> dict[str, Any]:
@@ -241,9 +233,7 @@ def test_verify_and_merge_nodes_skips_removed_node(
     assert result["reason"] == "node removed"
 
 
-# ---------------------------------------------------------------------------
 # re_explore_issues, driven through a fake device
-# ---------------------------------------------------------------------------
 
 
 class FakeController:

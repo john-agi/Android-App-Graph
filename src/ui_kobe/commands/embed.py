@@ -33,10 +33,15 @@ def image_embeddings_path(graph_path: Path) -> Path:
 
 
 def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
+    """Return the cached embeddings for a graph, or ``{}`` when none were written.
+
+    The payload is narrowed the way ``GraphManager.load_graph`` narrows its own
+    companion embeddings file: a malformed vector becomes ``[]`` rather than
+    propagating ``Any`` into the caller.
+    """
     emb_path = image_embeddings_path(graph_path)
     if emb_path.exists():
         with emb_path.open("r", encoding="utf-8") as f:
-            # Same narrowing as GraphManager.load_graph does for its companion file.
             return {
                 node_id: as_float_list(vector)
                 for node_id, vector in as_str_dict(json.load(f)).items()
@@ -101,8 +106,8 @@ def compute_embedding_with_retry(
                 model=model,
                 base_url=base_url,
             )
-        # A retry loop is a boundary (AGENTS.md): this one re-raises on the last
-        # attempt and logs the traceback on every earlier one.
+        # A retry loop is a boundary (AGENTS.md): re-raise on the last attempt,
+        # log the traceback on every earlier one.
         except Exception:
             if attempt >= attempts - 1:
                 raise

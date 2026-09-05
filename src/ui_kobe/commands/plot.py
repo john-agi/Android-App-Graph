@@ -74,7 +74,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
 
     screenshots_dir = path.parent / (path.stem + "_screenshots")
     if not screenshots_dir.exists():
-        # Fall back to original graph's screenshots (e.g. app_audited → app)
+        # An audited graph reuses the screenshots of the graph it was derived from.
         base_stem = path.stem.removesuffix("_audited")
         screenshots_dir = path.parent / (base_stem + "_screenshots")
 
@@ -101,7 +101,6 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         templates = edge.get("instruction_templates", [])
         instructions = edge.get("instructions", [])
 
-        # Prefer template for label, fall back to instructions
         if templates and isinstance(templates[0], dict) and templates[0].get("template"):
             label = templates[0]["template"]
         elif instructions:
@@ -109,7 +108,6 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         else:
             label = _summarize_actions(edge["actions"])
 
-        # Append schema delta info for self-loop edges
         is_self_loop = edge["source"] == edge["target"]
         schema_deltas = edge.get("schema_deltas", [])
         delta_str = ""
@@ -122,7 +120,6 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
             if delta_parts:
                 delta_str = "\n[Δ " + ", ".join(delta_parts) + "]"
 
-        # Edge weight = minimum num_steps (fewest action steps to traverse)
         num_steps_list = edge.get("num_steps", [])
         weight = min(num_steps_list) if num_steps_list else len(edge["actions"])
         weight_str = f"\n[{weight} step{'s' if weight != 1 else ''}]"
@@ -155,7 +152,7 @@ def _summarize_actions(actions: list[Any]) -> str:
             return f"swipe ({a.get('x1')},{a.get('y1')})→({a.get('x2')},{a.get('y2')})"
         return act
 
-    # actions is a list of action-sequences; take the first one
+    # An entry may be a whole action sequence rather than a single action.
     first = actions[0]
     if isinstance(first, list):
         return " → ".join(_describe_action(a) for a in first)
@@ -555,7 +552,7 @@ def plot_pyvis(
         cdn_resources="remote",
     )
 
-    # Physics settings — spread nodes far apart for readability
+    # Spread nodes far apart: these graphs are dense and the labels are long.
     net.set_options("""
     {
       "physics": {
@@ -591,7 +588,6 @@ def plot_pyvis(
     }
     """)
 
-    # Pastel color palette for nodes
     palette = [
         "#e3f2fd",
         "#e8f5e9",
@@ -624,7 +620,6 @@ def plot_pyvis(
             f"State keys: {keys_str}<br>"
             f"Elements: {n_explored}/{n_total} explored"
         )
-        # List unexplored elements
         unexplored = [e for e in elements if not e.get("explored", False)]
         if unexplored:
             tooltip += "<br><b>Unexplored:</b> "
@@ -651,7 +646,6 @@ def plot_pyvis(
             borderWidth=3,
         )
 
-    # Track edge count between same pair for offset
     edge_counts: Counter[tuple[str, str]] = Counter()
 
     for src, tgt, data in G.edges(data=True):
@@ -732,7 +726,6 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
 
     pos = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
 
-    # Node labels
     labels = {
         n: f"{d.get('page_description', n)}\n({d.get('visit_count', 0)} visits)"
         for n, d in G.nodes(data=True)
@@ -754,7 +747,6 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
         connectionstyle="arc3,rad=0.15",
     )
 
-    # Edge labels
     edge_labels = {(s, t): d.get("label", "")[:30] for s, t, d in G.edges(data=True)}
     nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, ax=ax, font_size=7)
 
@@ -874,7 +866,6 @@ def main(argv: list[str] | None = None) -> int:
 
     _data, G = load_graph(str(graph_path))
 
-    # Default output path
     if args.output:
         output_path = args.output
     else:
@@ -917,7 +908,6 @@ def main(argv: list[str] | None = None) -> int:
             show_edge_labels=not args.hide_edge_labels,
         )
 
-    # Open the output in the default browser
     if not args.no_open:
         webbrowser.open(Path(output_path).resolve().as_uri())
 

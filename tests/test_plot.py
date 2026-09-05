@@ -12,9 +12,7 @@ import pytest
 
 from ui_kobe.commands import plot
 
-# ---------------------------------------------------------------------------
 # Argument parsing and the missing-extra message
-# ---------------------------------------------------------------------------
 
 
 def test_plot_parser_defaults() -> None:
@@ -36,9 +34,9 @@ def test_plot_rejects_unknown_backend(capsys: pytest.CaptureFixture[str]) -> Non
 def test_plot_reports_missing_viz_extra(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Null the submodules as well as the packages: importlib.import_module
-    # returns a cached submodule without consulting the parent entry, and the
-    # suite runs in random order, so a pyvis-importing test may have run first.
+    # The submodules too, not just the packages: import_module returns a cached
+    # submodule without consulting its parent, and under random ordering a
+    # pyvis-importing test may already have populated that cache.
     for name in ("pyvis", "pyvis.network", "matplotlib", "matplotlib.pyplot"):
         monkeypatch.setitem(sys.modules, name, None)
     with pytest.raises(SystemExit) as excinfo:
@@ -59,9 +57,7 @@ def test_plot_reports_missing_graph_file(
     assert "graph file not found" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------------
 # Label helpers
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -129,9 +125,7 @@ def test_summarize_actions(actions: list[Any], expected: str) -> None:
     assert plot._summarize_actions(actions) == expected
 
 
-# ---------------------------------------------------------------------------
 # Graph filters
-# ---------------------------------------------------------------------------
 
 
 def _paper_graph() -> nx.DiGraph:
@@ -203,9 +197,7 @@ def test_as_digraph_rejects_other_types() -> None:
         plot._as_digraph(object())
 
 
-# ---------------------------------------------------------------------------
 # load_graph and the renderers
-# ---------------------------------------------------------------------------
 
 
 def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:

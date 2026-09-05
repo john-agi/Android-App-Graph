@@ -29,9 +29,7 @@ def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = Fals
     return app_dir / f"{stem}.json"
 
 
-# ---------------------------------------------------------------------------
 # Argument parsing and settings
-# ---------------------------------------------------------------------------
 
 
 def test_embed_parser_defaults() -> None:
@@ -147,9 +145,7 @@ def test_embed_settings_read_the_api_key_from_the_environment(
     assert api_key == "from-env"
 
 
-# ---------------------------------------------------------------------------
 # Pure file helpers
-# ---------------------------------------------------------------------------
 
 
 def test_image_embeddings_path() -> None:
@@ -210,9 +206,7 @@ def test_reference_screenshot_b64(tmp_path: Path) -> None:
     assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
 
 
-# ---------------------------------------------------------------------------
 # Retry behaviour
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -284,9 +278,7 @@ def _retry(api_key: str, screenshot_b64: str) -> list[float]:
     )
 
 
-# ---------------------------------------------------------------------------
 # precompute_graph_image_embeddings, end to end on a temporary graph tree
-# ---------------------------------------------------------------------------
 
 
 def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:
@@ -317,7 +309,6 @@ def test_precompute_computes_caches_and_skips(
     }
     assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.1, 0.2]}
 
-    # A second run reuses the cache written by the first.
     assert _precompute(tmp_path)["already_cached"] == 1
 
 
