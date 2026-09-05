@@ -1,0 +1,76 @@
+# tach.toml: import direction for src/ui_kobe. See "Module map" in README.md.
+# Never run `tach sync` to make `tach check` pass (AGENTS.md).
+source_roots = ["src"]
+exact = true
+forbid_circular_dependencies = true
+ignore_type_checking_imports = true
+root_module = "forbid"
+
+[rules]
+unused_ignore_directives = "error"
+require_ignore_directive_reasons = "error"
+
+# Root package: only re-exports the explorer.
+[[modules]]
+path = "ui_kobe"
+depends_on = ["ui_kobe.kobe"]
+
+# Console scripts kobe-audit, kobe-plot and kobe-embed: the top of the package.
+# They reuse the CLI's launch_app, the device Protocols and the core helpers;
+# nothing in the package imports them.
+[[modules]]
+path = "ui_kobe.commands"
+depends_on = [
+    "ui_kobe.cli",
+    "ui_kobe.device",
+    "ui_kobe.payloads",
+    "ui_kobe.utils",
+    "ui_kobe.utils.graph_manager",
+    "ui_kobe.utils.logging",
+    "ui_kobe.utils.vlm_utils",
+]
+
+# Entry point kobe-explore: may use everything below it, and is imported only by
+# ui_kobe.commands (launch_app). Uses the AvdManager Protocol from ui_kobe.device.
+[[modules]]
+path = "ui_kobe.cli"
+depends_on = ["ui_kobe.device", "ui_kobe.kobe", "ui_kobe.utils.logging"]
+
+# Explorer: orchestrates the graph and VLM helpers; typed against the
+# DeviceController Protocol.
+[[modules]]
+path = "ui_kobe.kobe"
+depends_on = [
+    "ui_kobe.device",
+    "ui_kobe.utils",
+    "ui_kobe.utils.graph_manager",
+    "ui_kobe.utils.vlm_utils",
+]
+
+# Core helpers: must never import ui_kobe.kobe, ui_kobe.cli or ui_kobe.commands.
+[[modules]]
+path = "ui_kobe.utils"
+depends_on = []
+
+[[modules]]
+path = "ui_kobe.utils.graph_manager"
+depends_on = ["ui_kobe.payloads", "ui_kobe.utils.vlm_utils"]
+
+[[modules]]
+path = "ui_kobe.utils.vlm_utils"
+depends_on = ["ui_kobe.payloads"]
+
+[[modules]]
+path = "ui_kobe.utils.logging"
+depends_on = []
+
+# Protocols for the aitk device surface (DeviceController, AvdManager):
+# imports nothing from the package.
+[[modules]]
+path = "ui_kobe.device"
+depends_on = []
+
+# Narrowing helpers for untyped payloads: the bottom of the graph.
+[[modules]]
+path = "ui_kobe.payloads"
+depends_on = []
