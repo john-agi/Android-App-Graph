@@ -29,6 +29,9 @@ maintainers = [
 
 [project.scripts]
 kobe-explore = "ui_kobe.cli:main"
+kobe-audit = "ui_kobe.commands.audit:main"
+kobe-plot = "ui_kobe.commands.plot:main"
+kobe-embed = "ui_kobe.commands.embed:main"
 
 [project.urls]
 Homepage = "https://github.com/john-agi/Android-App-Graph"
@@ -50,11 +53,16 @@ aitk = { git = "https://github.com/YuxiangChai/AITK", rev = "fd06a28e2286cbc1ae6
 dev = [
     "deptry>=0.25.1",
     "hypothesis>=6.167.1",
+    # matplotlib and pyvis repeat the `viz` extra on purpose: uv has no documented way for a
+    # dependency group to include the project's own extra and never syncs extras by default,
+    # while ty (unresolved-import) and the kobe-plot tests need both installed.
+    "matplotlib>=3.10.8",
     "poethepoet>=0.48.0",
     "prek>=0.5.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-randomly>=5.0.0",
+    "pyvis>=0.3.2",  # see the matplotlib comment above
     "ruff>=0.16.5",
     "ty>=0.0.77",
     "vulture>=2.16",

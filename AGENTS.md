@@ -197,8 +197,8 @@ style.
   runtime dependencies. `aitk_files/ui_kobe_v2.py` and
   `aw_files/ui_kobe_aw_agent.py` are copied into other repositories: keep them
   self-contained, importing `ui_kobe` and their host framework and nothing
-  from `scripts/`. `scripts/` import `ui_kobe` as an installed package; no
-  `sys.path` edits.
+  from `scripts/`. `scripts/` holds only `run_explore.sh`; the `kobe-*`
+  commands live in `src/ui_kobe/commands/`.
 - Generated graphs, logs, outputs and `dist/` are git-ignored; `.gitignore` is
   the authority on what is not tracked.
 

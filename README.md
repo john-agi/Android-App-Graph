@@ -28,14 +28,11 @@ UI-KOBE/
 ├── src/
 │   └── ui_kobe/                   # The installable package; the only directory in the wheel
 │       ├── cli.py                 # kobe-explore command
+│       ├── commands/              # kobe-audit, kobe-plot, kobe-embed
 │       ├── kobe.py                # Core app explorer
 │       └── utils/                 # Graph, VLM, and logging helpers
 ├── scripts/                       # Operator scripts, not packaged
-│   ├── audit_graph.py             # Optional graph audit utility
-│   ├── explore.py                 # Script entry point for exploration
-│   ├── plot_graph.py              # Graph visualization utility
-│   ├── precompute_graph_image_embeddings.py
-│   └── run_explore.sh             # Auto-resume wrapper
+│   └── run_explore.sh             # Auto-resume wrapper around kobe-explore
 ├── aitk_files/                    # Copy-in adapter for AITK, not packaged
 │   └── ui_kobe_v2.py              # AITK translator to copy into AITK
 ├── aw_files/                      # Copy-in adapter for Android World, not packaged
@@ -49,11 +46,12 @@ that contains the `ui_kobe` import package and nothing else. Keep it installed
 in the same environment as AITK.
 
 `scripts/`, `aitk_files/`, `aw_files/` and `configs/` deliberately stay at the
-repository root and are not part of the wheel. `scripts/` holds operator
-scripts that import `ui_kobe` as an installed package and are run with
-`uv run python scripts/<name>.py`. `aitk_files/` and `aw_files/` are copy-in
-adapters that you copy into an AITK or Android World checkout (see the
-sections below). `configs/` holds example configuration.
+repository root and are not part of the wheel. `scripts/` holds only
+`run_explore.sh`, a shell wrapper around the `kobe-explore` console script; the
+`kobe-audit`, `kobe-plot` and `kobe-embed` commands live in
+`src/ui_kobe/commands/` and ship with the wheel. `aitk_files/` and `aw_files/`
+are copy-in adapters that you copy into an AITK or Android World checkout (see
+the sections below). `configs/` holds example configuration.
 
 Generated graphs, logs, and outputs are intentionally ignored by git.
 
@@ -180,26 +178,25 @@ For long runs, use the auto-resume wrapper:
 
 ## Visualize or Audit a Graph
 
-Create an HTML graph visualization. `scripts/plot_graph.py` needs the optional
-`viz` extra (`pyvis` and `matplotlib`), which `uv sync` does not install by default:
+Create an HTML graph visualization. `kobe-plot` needs the optional `viz` extra
+(`pyvis` and `matplotlib`), which `uv sync` does not install by default; outside
+this checkout, install it as `pip install "ui-kobe[viz]"`:
 
 ```bash
 uv sync --extra viz
-uv run python scripts/plot_graph.py graphs/<app_name>/<app_name>.json
+uv run --extra viz kobe-plot graphs/<app_name>/<app_name>.json
 ```
 
 Run the graph audit utility:
 
 ```bash
-uv run python scripts/audit_graph.py -c configs/explore.yaml --app <app_name>
+uv run kobe-audit -c configs/explore.yaml --app <app_name>
 ```
 
 Precompute native Gemini image embeddings for a graph:
 
 ```bash
-uv run python scripts/precompute_graph_image_embeddings.py \
-  --config configs/explore.yaml \
-  --graph graphs/<app_name>/<app_name>.json
+uv run kobe-embed --config configs/explore.yaml --app <app_name>
 ```
 
 ## Use UI-KOBE with AITK
@@ -286,7 +283,7 @@ AITK checkout that the environment imports. Verified against AITK commit
    ```
 
    Expected: `<function register at 0x...>`. Then run AITK as its README
-   describes (`scripts/interact.py` with `configs/controller.yaml`).
+   describes (its own `interact.py` entry point with `configs/controller.yaml`).
 
 The copied translator imports helper functions from the installed `ui_kobe`
 package; that is why UI-KOBE must be installed in the AITK environment.

@@ -1,4 +1,8 @@
-"""Precompute runtime image embeddings for every graph under a root folder."""
+"""Precompute runtime image embeddings for every graph under a root folder.
+
+Usage:
+    uv run kobe-embed --config configs/explore.yaml --app <app_name>
+"""
 
 from __future__ import annotations
 
@@ -9,13 +13,16 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import yaml
 
+from ui_kobe.payloads import as_float_list, as_str_dict
 from ui_kobe.utils import resolve_env
+from ui_kobe.utils.logging import setup_logging
 from ui_kobe.utils.vlm_utils import get_gemini_native_image_embedding
 
-logger = logging.getLogger("ui_kobe.precompute_graph_image_embeddings")
+logger = logging.getLogger(__name__)
 
 IMAGE_EMBEDDING_RETRIES = 2
 IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
@@ -26,20 +33,29 @@ def image_embeddings_path(graph_path: Path) -> Path:
 
 
 def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
+    """Return the cached embeddings for a graph, or ``{}`` when none were written.
+
+    The payload is narrowed the way ``GraphManager.load_graph`` narrows its own
+    companion embeddings file: a malformed vector becomes ``[]`` rather than
+    propagating ``Any`` into the caller.
+    """
     emb_path = image_embeddings_path(graph_path)
     if emb_path.exists():
-        with open(emb_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with emb_path.open("r", encoding="utf-8") as f:
+            return {
+                node_id: as_float_list(vector)
+                for node_id, vector in as_str_dict(json.load(f)).items()
+            }
     return {}
 
 
 def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) -> None:
-    with open(image_embeddings_path(graph_path), "w", encoding="utf-8") as f:
+    with image_embeddings_path(graph_path).open("w", encoding="utf-8") as f:
         json.dump(embeddings, f, ensure_ascii=False)
 
 
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
-    selected = []
+    selected: list[tuple[str, Path]] = []
     app_dirs = (
         [graph_dir / app_name] if app_name else sorted(p for p in graph_dir.iterdir() if p.is_dir())
     )
@@ -56,11 +72,12 @@ def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple
     return selected
 
 
-def load_graph_json(graph_path: Path) -> dict:
-    with open(graph_path, "r", encoding="utf-8") as f:
+def load_graph_json(graph_path: Path) -> dict[str, Any]:
+    with graph_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise TypeError(f"Graph JSON must be an object: {graph_path}")
+        msg = f"Graph JSON must be an object: {graph_path}"
+        raise TypeError(msg)
     return data
 
 
@@ -89,21 +106,24 @@ def compute_embedding_with_retry(
                 model=model,
                 base_url=base_url,
             )
-        except Exception as exc:
+        # A retry loop is a boundary (AGENTS.md): re-raise on the last attempt,
+        # log the traceback on every earlier one.
+        except Exception:
             if attempt >= attempts - 1:
                 raise
             delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
             logger.warning(
-                "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d). Error: %s",
+                "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d).",
                 app_name,
                 node_id,
                 delay,
                 attempt + 1,
                 attempts - 1,
-                exc,
+                exc_info=True,
             )
             time.sleep(delay)
-    raise RuntimeError("unreachable")
+    msg = "compute_embedding_with_retry exhausted its attempts without raising"
+    raise RuntimeError(msg)
 
 
 def precompute_graph_image_embeddings(
@@ -114,7 +134,7 @@ def precompute_graph_image_embeddings(
     base_url: str,
     app_name: str | None = None,
 ) -> dict[str, int]:
-    summary = {
+    summary: dict[str, int] = {
         "graphs": 0,
         "reference_screenshots": 0,
         "already_cached": 0,
@@ -180,7 +200,7 @@ def load_image_embedding_settings(
     model_override: str | None,
     base_url_override: str | None,
 ) -> tuple[Path, str | None, str, str]:
-    with open(config_path, "r", encoding="utf-8") as f:
+    with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
     exp_config = config.get("experiment") or {}
@@ -215,7 +235,8 @@ def load_image_embedding_settings(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Precompute Gemini image embeddings for graph screenshots."
+        prog="kobe-embed",
+        description="Precompute Gemini image embeddings for graph screenshots.",
     )
     parser.add_argument(
         "--config",
@@ -252,10 +273,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    args = parser.parse_args(argv)
+
+    if not args.config.expanduser().is_file():
+        parser.error(f"config file not found: {args.config}")
 
     graph_dir, api_key, model, base_url = load_image_embedding_settings(
         args.config.expanduser(),
@@ -270,6 +293,8 @@ def main() -> None:
 
     if not api_key:
         parser.error("missing API key: pass --api-key or set GEMINI_API_KEY/GOOGLE_API_KEY")
+
+    setup_logging(level=logging.INFO)
 
     summary = precompute_graph_image_embeddings(
         graph_dir,
@@ -288,7 +313,4 @@ def main() -> None:
         summary["skipped_missing_screenshot"],
         summary["skipped_failed"],
     )
-
-
-if __name__ == "__main__":
-    main()
+    return 0
