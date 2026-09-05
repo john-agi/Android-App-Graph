@@ -323,7 +323,7 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
         ],
         edges=[{"source": "n1", "target": "n2", "instructions": ["tap"], "visit_count": 2}],
     )
-    G, data = aitk_translator._load_graph_from_json(path)
+    G = aitk_translator._load_graph_from_json(path)
 
     assert set(G.nodes) == {"n1", "n2"}
     assert G.nodes["n1"]["page_description"] == "home"
@@ -333,7 +333,6 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
     assert G.nodes["n2"]["activity"] == ""
     assert G.edges["n1", "n2"]["instructions"] == ["tap"]
     assert "schema_deltas" not in G.edges["n1", "n2"]
-    assert data["nodes"][1] == {"id": "n2"}
 
 
 def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> None:
@@ -349,7 +348,7 @@ def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> N
             {"source": "n2", "target": "n1", "schema_deltas": []},
         ],
     )
-    G, _ = aitk_translator._load_graph_from_json(path)
+    G = aitk_translator._load_graph_from_json(path)
     assert G.edges["n1", "n2"]["schema_deltas"] == [{"cart": {"before": 0, "after": 1}}]
     assert "schema_deltas" not in G.edges["n2", "n1"]
 
@@ -360,7 +359,7 @@ def test_load_graph_from_json_embeds_reference_screenshots(tmp_path: Path) -> No
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
-    G, _ = aitk_translator._load_graph_from_json(path)
+    G = aitk_translator._load_graph_from_json(path)
 
     assert G.nodes["n1"]["reference_screenshot"] == base64.b64encode(_SCREENSHOT).decode("ascii")
     assert G.nodes["n2"]["reference_screenshot"] is None
@@ -372,7 +371,7 @@ def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_pat
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
-    G, _ = aitk_translator._load_graph_from_json(path)
+    G = aitk_translator._load_graph_from_json(path)
     assert G.nodes["n1"]["reference_screenshot"] is not None
 
 
@@ -418,7 +417,7 @@ def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
             }
         ],
     )
-    G, _ = aitk_translator._load_graph_from_json(path)
+    G = aitk_translator._load_graph_from_json(path)
 
     assert G.nodes["n1"]["activity"] == ""
     assert G.nodes["n1"]["page_description"] == ""
@@ -552,7 +551,7 @@ def test_iter_runtime_graph_files_sorts_apps_and_skips_side_files(tmp_path: Path
 
 def test_memory_starts_empty() -> None:
     memory = aitk_translator.Memory()
-    assert memory.has_content() is False
+    assert memory.actions == memory.info == memory.observations == []
     assert memory.format() == "(empty)"
 
 
@@ -561,7 +560,6 @@ def test_memory_ignores_empty_and_nothing_info(info: str) -> None:
     memory = aitk_translator.Memory()
     memory.add_info(info)
     assert memory.info == []
-    assert memory.has_content() is False
 
 
 def test_memory_ignores_an_empty_observation() -> None:
@@ -576,7 +574,6 @@ def test_memory_records_and_formats_every_section() -> None:
     memory.add_info("the total is 9 EUR")
     memory.add_observation("a dialog appeared")
 
-    assert memory.has_content() is True
     assert memory.format() == (
         "Actions completed:\n"
         "  1. tapped Search\n"
@@ -763,7 +760,6 @@ def test_make_no_proxy_client_prefers_the_timeout_alias() -> None:
 _VLM_CONFIG: dict[str, Any] = {
     "action": {"api_key": "test-key", "model": "action-model"},
     "page_detail": {"api_key": "test-key", "model": "detail-model"},
-    "embedding": {"model": "emb-model"},
     "image_embedding": {"api_key": "image-key", "model": "img-model"},
 }
 
@@ -822,7 +818,6 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator._package_to_app == {"com.demo.app": "demo"}
     assert translator.model_name == "action-model"
     assert translator.desc_model == "detail-model"
-    assert translator.emb_model == "emb-model"
     assert translator.image_embedding_model == "img-model"
 
 
@@ -906,17 +901,15 @@ def test_reset_task_state_clears_the_previous_task(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
     translator._app_opened = True
-    translator._current_node = "home"
     translator._step_count = 7
     translator._memory.add_action("tapped Search")
 
     translator._reset_task_state()
 
     assert translator._app_opened is False
-    assert translator._current_node is None
     assert translator._current_graph is None
     assert translator._step_count == 0
-    assert translator._memory.has_content() is False
+    assert translator._memory.actions == []
 
 
 # ---------------------------------------------------------------------------
@@ -1102,23 +1095,6 @@ def test_plan_free_action_falls_back_when_the_planner_is_generic(
     _use_model(monkeypatch, translator, "Take the best action", "Take the best action")
     instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
     assert instruction == "Wait briefly for the current screen to finish loading."
-
-
-@pytest.mark.parametrize(
-    ("app_name", "expected_prefix"),
-    [
-        ("demo", "You are already inside the demo app. "),
-        ("", "You are already inside the target app. "),
-    ],
-)
-def test_make_free_instruction(
-    translator: aitk_translator.UIKobeV2Translator, app_name: str, expected_prefix: str
-) -> None:
-    translator._app_name = app_name
-    instruction = translator._make_free_instruction("buy shoes", "no graph is loaded")
-    assert instruction.startswith(expected_prefix)
-    assert "no graph is loaded" in instruction
-    assert "buy shoes" in instruction
 
 
 # --- _decide ---------------------------------------------------------------
@@ -1546,7 +1522,6 @@ def test_to_agent_runs_the_loop(
 
     assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
     assert response["message"] == "[Android-App-Graph] Action: tapped the result | on home"
-    assert stepping._current_node == "home"
     assert stepping._step_count == 1
     assert stepping._memory.actions == ["tap the shoes result"]
     assert stepping._memory.info == ["The total is 9 EUR"]
@@ -1589,7 +1564,8 @@ def test_step_plans_a_free_action_when_no_node_matches(
     state, history = _step_payload()
 
     json.loads(stepping._step("buy shoes", state, history))
-    assert stepping._current_node is None
+    # A free-action instruction from the planner (rather than a DECIDE choice) is only
+    # reached when IDENTIFY found no matching node.
     assert stepping._memory.actions == ["Tap the cart icon"]
 
 

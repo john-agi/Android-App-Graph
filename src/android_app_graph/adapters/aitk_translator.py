@@ -202,7 +202,7 @@ one-step instruction. No explanations."""
 # ---------------------------------------------------------------------------
 
 
-def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict[str, Any]]:
+def _load_graph_from_json(path: Path) -> nx.DiGraph:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     if not isinstance(raw, dict):
@@ -257,7 +257,7 @@ def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict[str, Any]]:
             edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         G.add_edge(edge_data["source"], edge_data["target"], **edge_attrs)
 
-    return G, data
+    return G
 
 
 def _load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
@@ -507,18 +507,16 @@ def _call_with_retry[T](label: str, func: Callable[[], T]) -> T:
 
 def _chat_completion_content(
     client: OpenAI,
-    *,
-    parse_retries: int = V2_PARSE_RETRIES,
     **kwargs: Any,
 ) -> Iterator[tuple[int, str, bool]]:
     """Yield chat completion content, retrying at the caller's parse boundary."""
-    for attempt in range(parse_retries + 1):
+    for attempt in range(V2_PARSE_RETRIES + 1):
         resp = _call_with_retry(
             "chat completion",
             lambda: client.chat.completions.create(**kwargs),
         )
         content = as_str(resp.choices[0].message.content, "")
-        yield attempt, content, attempt < parse_retries
+        yield attempt, content, attempt < V2_PARSE_RETRIES
 
 
 def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
@@ -591,9 +589,6 @@ class Memory:
                 lines.append(f"  {i}. {obs}")
         return "\n".join(lines) if lines else "(empty)"
 
-    def has_content(self) -> bool:
-        return bool(self.actions or self.info or self.observations)
-
 
 # ---------------------------------------------------------------------------
 # UIKobeV2Translator
@@ -620,8 +615,6 @@ class UIKobeV2Translator(BaseTranslator):
         self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
         # Page detail client — used for describe+state and node verification
         self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
-        embedding_cfg = vlm_config.get("embedding") or {}
-        self.emb_model = resolve_env(embedding_cfg.get("model")) or "gemini-embedding-2-preview"
         image_embedding_cfg = vlm_config.get("image_embedding") or {}
         self.image_embedding_model = (
             resolve_env(image_embedding_cfg.get("model")) or "gemini-embedding-2"
@@ -650,7 +643,6 @@ class UIKobeV2Translator(BaseTranslator):
 
     def _reset_task_state(self) -> None:
         self._current_graph: nx.DiGraph | None = None
-        self._current_node: str | None = None
         self._app_name: str = ""
         self._app_opened = False
         self._screen_w = 1080
@@ -708,7 +700,7 @@ class UIKobeV2Translator(BaseTranslator):
         for app_name, graph_file in _iter_runtime_graph_files(self.graph_dir):
             try:
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
-                G, _ = _load_graph_from_json(graph_file)
+                G = _load_graph_from_json(graph_file)
                 image_embeddings = _load_image_embeddings(graph_file)
                 for node_id, emb in image_embeddings.items():
                     if node_id in G:
@@ -1344,20 +1336,6 @@ class UIKobeV2Translator(BaseTranslator):
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
 
-    def _make_free_instruction(self, task: str, reason: str) -> str:
-        """Constrain graph fallback so the action agent still emits one local UI action."""
-        app_context = (
-            f"You are already inside the {self._app_name} app. "
-            if self._app_name
-            else "You are already inside the target app. "
-        )
-        return (
-            f"{app_context}"
-            f"Graph guidance is unavailable because {reason}. "
-            f"Take exactly one immediate visible UI action that moves toward this goal: {task}. "
-            "Do not press Home, do not open the app, and do not leave the app unless the screenshot clearly shows you are outside it."
-        )
-
     # ------------------------------------------------------------------
     # Generate final answer
     # ------------------------------------------------------------------
@@ -1429,7 +1407,6 @@ class UIKobeV2Translator(BaseTranslator):
 
         # --- 1. IDENTIFY ---
         node_id, page_desc = self._identify_node(activity, screenshot)
-        self._current_node = node_id
         logger.info('[IDENTIFY] Node: %s — "%s"', node_id, page_desc)
 
         # --- 2. RECORD ---
