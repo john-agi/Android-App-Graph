@@ -60,6 +60,9 @@ dev = [
     "vulture>=2.16",
     "zizmor>=1.30.0",
 ]
+mutation = [
+    "mutmut>=3.7.0",
+]
 
 [tool.ruff]
 # Minimum Python to target. The project is 3.14 only (requires-python = ">=3.14").
@@ -184,6 +187,15 @@ skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
 fail_under = 53
 
+# Mutation testing. Policy and triage: see AGENTS.md, "Mutation testing".
+[tool.mutmut]
+# scripts/, aitk_files/ and aw_files/ are copy-in adapters, not package code.
+source_paths = ["src/ui_kobe/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# Guards the clean stats run should --cov ever move into addopts, where
+# fail_under would abort it.
+pytest_add_cli_args = ["--no-cov"]
+
 # Poe the Poet task runner, invoked as `uv run --locked poe <task>`. Task
 # conventions, the canonical order and the insertion rule: see AGENTS.md.
 [tool.poe]
@@ -221,3 +233,9 @@ sequence = ["check-fast", "_dependencies", "_environment", "_dead-code", "_test"
 [tool.poe.tasks.dead-code-review]
 help = "Review queue: likely-dead code at 60% confidence, sorted by size, smallest first (largest last). Never deleted automatically; see AGENTS.md."
 cmd = "vulture src tests vulture_allowlist.py --min-confidence 60 --sort-by-size"
+
+[tool.poe.tasks.mutate]
+help = "Mutation testing of src/ui_kobe with tests/ (review queue, never a gate); state in mutants/"
+cmd = "mutmut run"
+# deadline=None, so a slow mutant cannot be killed by a spurious DeadlineExceeded.
+env = { HYPOTHESIS_PROFILE = "ci" }
