@@ -162,7 +162,7 @@ def _summarize_actions(actions: list[Any]) -> str:
     return _describe_action(first)
 
 
-def _shorten_words(text: str, max_words: int = 6, max_chars: int = 42) -> str:
+def _shorten_words(text: str | None, max_words: int = 6, max_chars: int = 42) -> str:
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     if not text:
         return ""
@@ -174,7 +174,7 @@ def _shorten_words(text: str, max_words: int = 6, max_chars: int = 42) -> str:
     return text
 
 
-def _shorten_edge_label(text: str, max_words: int = 8, max_chars: int = 52) -> str:
+def _shorten_edge_label(text: str | None, max_words: int = 8, max_chars: int = 52) -> str:
     text = re.sub(r"\[[^\]]*\]", " ", str(text or ""))
     text = re.sub(r"\{\{[^}]+\}\}", "value", text)
     text = re.sub(r"\([^)]*\)", " ", text)
@@ -185,7 +185,7 @@ def _shorten_edge_label(text: str, max_words: int = 8, max_chars: int = 52) -> s
     return _shorten_words(text, max_words=max_words, max_chars=max_chars)
 
 
-def _wrap_label(text: str, width: int = 18) -> str:
+def _wrap_label(text: str | None, width: int = 18) -> str:
     words = str(text or "").split()
     lines = []
     current = ""
