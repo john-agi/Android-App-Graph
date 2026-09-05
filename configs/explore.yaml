@@ -22,24 +22,24 @@ vlm:
   similarity_threshold: 0.84
 
   page_detail:
-    model: ${UI_KOBE_PAGE_DETAIL_MODEL}
-    base_url: ${UI_KOBE_PAGE_DETAIL_BASE_URL}
-    api_key: ${UI_KOBE_PAGE_DETAIL_API_KEY}
+    model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
+    base_url: ${APP_GRAPH_PAGE_DETAIL_BASE_URL}
+    api_key: ${APP_GRAPH_PAGE_DETAIL_API_KEY}
 
   embedding:
-    model: ${UI_KOBE_EMBEDDING_MODEL}
-    base_url: ${UI_KOBE_EMBEDDING_BASE_URL}
-    api_key: ${UI_KOBE_EMBEDDING_API_KEY}
+    model: ${APP_GRAPH_EMBEDDING_MODEL}
+    base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
+    api_key: ${APP_GRAPH_EMBEDDING_API_KEY}
 
   instruction:
-    model: ${UI_KOBE_INSTRUCTION_MODEL}
-    base_url: ${UI_KOBE_INSTRUCTION_BASE_URL}
-    api_key: ${UI_KOBE_INSTRUCTION_API_KEY}
+    model: ${APP_GRAPH_INSTRUCTION_MODEL}
+    base_url: ${APP_GRAPH_INSTRUCTION_BASE_URL}
+    api_key: ${APP_GRAPH_INSTRUCTION_API_KEY}
 
   action:
-    model: ${UI_KOBE_ACTION_MODEL}
-    base_url: ${UI_KOBE_ACTION_BASE_URL}
-    api_key: ${UI_KOBE_ACTION_API_KEY}
+    model: ${APP_GRAPH_ACTION_MODEL}
+    base_url: ${APP_GRAPH_ACTION_BASE_URL}
+    api_key: ${APP_GRAPH_ACTION_API_KEY}
 
   # Optional native Gemini image embedding settings used by the v2 runtime.
   image_embedding:

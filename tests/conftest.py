@@ -15,7 +15,7 @@ from hypothesis import settings
 settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
 
-_CREDENTIAL_PREFIXES = ("UI_KOBE_",)
+_CREDENTIAL_PREFIXES = ("APP_GRAPH_",)
 _CREDENTIAL_NAMES = frozenset({"GEMINI_API_KEY", "OPENAI_API_KEY"})
 
 

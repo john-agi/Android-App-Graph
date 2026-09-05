@@ -1,4 +1,4 @@
-"""kobe-embed settings, retry and end-to-end helpers, exercised without network or keys."""
+"""app-graph-embed settings, retry and end-to-end helpers, exercised without network or keys."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from ui_kobe.commands import embed
+from android_app_graph.commands import embed
 
 _SCREENSHOT = b"not-really-a-png"
 

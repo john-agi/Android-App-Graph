@@ -1,4 +1,4 @@
-"""UI-KOBE v2 translator for AITK.
+"""Android-App-Graph v2 translator for AITK.
 
 Loop-based architecture with a single small model (7-9B):
 
@@ -44,15 +44,15 @@ import networkx as nx
 from aitk.translators.base import BaseTranslator
 from openai import OpenAI
 
-from ui_kobe.utils import resolve_env
-from ui_kobe.utils.vlm_utils import (
+from android_app_graph.utils import resolve_env
+from android_app_graph.utils.vlm_utils import (
     _strip_json_fences,
     describe_page_and_state,
     get_gemini_native_image_embedding,
     predict_next_action,
 )
 
-logger = logging.getLogger("AITK - UI-KOBE")
+logger = logging.getLogger("AITK - Android-App-Graph")
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
@@ -1491,7 +1491,7 @@ class UIKobeV2Translator(BaseTranslator):
     def _make_response(message: str, aitk_action: dict) -> str:
         return json.dumps(
             {
-                "message": f"[UI-KOBE] {message}",
+                "message": f"[Android-App-Graph] {message}",
                 "aitk_action": aitk_action,
             }
         )

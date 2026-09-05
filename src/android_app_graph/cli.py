@@ -7,9 +7,9 @@ from typing import Any
 
 import yaml
 
-from ui_kobe.device import AvdManager
-from ui_kobe.kobe import Kobe
-from ui_kobe.utils.logging import setup_logging
+from android_app_graph.device import AvdManager
+from android_app_graph.kobe import Kobe
+from android_app_graph.utils.logging import setup_logging
 
 
 def check_avd(avd_manager: AvdManager, config: dict[str, Any], logger: logging.Logger) -> None:
@@ -88,7 +88,7 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Explore Android app UI with UI-KOBE.")
+    parser = argparse.ArgumentParser(description="Explore Android app UI with Android-App-Graph.")
     parser.add_argument(
         "--config",
         "-c",
@@ -122,15 +122,14 @@ def main() -> None:
     except ImportError:
         parser.exit(
             1,
-            "kobe-explore requires the 'aitk' dependency. "
-            "Install it first, then rerun the command.\n",
+            "app-graph requires the 'aitk' dependency. Install it first, then rerun the command.\n",
         )
 
     with args.config.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     setup_logging(level=logging.INFO)
-    logger = logging.getLogger("ui_kobe.explorer")
+    logger = logging.getLogger("android_app_graph.explorer")
 
     avd_manager = AVDManager(logger)
     check_avd(avd_manager, config, logger)

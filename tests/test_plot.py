@@ -1,4 +1,4 @@
-"""kobe-plot argument handling and its pure helpers, exercised without a browser."""
+"""app-graph-plot argument handling and its pure helpers, exercised without a browser."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 import networkx as nx
 import pytest
 
-from ui_kobe.commands import plot
+from android_app_graph.commands import plot
 
 # Argument parsing and the missing-extra message
 
@@ -43,7 +43,7 @@ def test_plot_reports_missing_viz_extra(
         plot.main(["graph.json", "--no-open"])
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
-    assert "ui-kobe[viz]" in err
+    assert "android-app-graph[viz]" in err
     assert "missing module: pyvis.network" in err
 
 

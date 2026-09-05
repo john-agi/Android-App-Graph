@@ -1,4 +1,4 @@
-"""Visualize a UI-KOBE exploration graph as an interactive HTML or static image.
+"""Visualize an Android-App-Graph exploration graph as an interactive HTML or static image.
 
 The plotting libraries live in the optional ``viz`` extra, so every import of
 ``matplotlib`` and ``pyvis`` is local to the renderer that needs it: ``--help``
@@ -23,14 +23,14 @@ from typing import Any
 
 import networkx as nx
 
-from ui_kobe.utils.logging import setup_logging
+from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
 _VIZ_HINT = (
-    "kobe-plot needs the optional plotting dependencies. "
+    "app-graph-plot needs the optional plotting dependencies. "
     "Install them with `uv sync --extra viz` in this checkout "
-    "or `pip install 'ui-kobe[viz]'` elsewhere."
+    "or `pip install 'android-app-graph[viz]'` elsewhere."
 )
 
 
@@ -67,7 +67,7 @@ def _load_screenshot_b64(screenshots_dir: Path, node_id: str) -> str | None:
 
 
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
-    """Load a UI-KOBE JSON graph and return (raw_data, nx.DiGraph)."""
+    """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph)."""
     path = Path(graph_path)
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -320,7 +320,7 @@ def plot_paper_graphviz(
             '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
             'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
             'fontname="Helvetica", fontsize="18", labelloc="t", '
-            f"label={q(f'UI-KOBE Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions')}];"
+            f"label={q(f'Android-App-Graph Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions')}];"
         ),
         (
             '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
@@ -518,7 +518,7 @@ def plot_paper_matplotlib(
         )
 
     ax.set_title(
-        f"UI-KOBE Runtime Graph: {G.number_of_nodes()} states, {G.number_of_edges()} transitions",
+        f"Android-App-Graph Runtime Graph: {G.number_of_nodes()} states, {G.number_of_edges()} transitions",
         fontsize=15,
         fontweight="bold",
         pad=16,
@@ -750,7 +750,9 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
     edge_labels = {(s, t): d.get("label", "")[:30] for s, t, d in G.edges(data=True)}
     nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, ax=ax, font_size=7)
 
-    ax.set_title(f"UI-KOBE Graph ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
+    ax.set_title(
+        f"Android-App-Graph Graph ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)"
+    )
     ax.axis("off")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -760,8 +762,8 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kobe-plot",
-        description="Plot a UI-KOBE exploration graph.",
+        prog="app-graph-plot",
+        description="Plot an Android-App-Graph exploration graph.",
     )
     parser.add_argument("graph", type=str, help="Path to the graph JSON file")
     parser.add_argument(

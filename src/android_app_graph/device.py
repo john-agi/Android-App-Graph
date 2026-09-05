@@ -1,8 +1,8 @@
-"""Structural types for the aitk device surface that ui_kobe depends on.
+"""Structural types for the aitk device surface that android_app_graph depends on.
 
 ``aitk`` is an unannotated dependency, so everything read back from its
 ``ADBController`` and ``AVDManager`` is ``Unknown``. These Protocols pin down
-the subset ui_kobe actually uses, which keeps the device boundary explicit and
+the subset android_app_graph actually uses, which keeps the device boundary explicit and
 lets tests pass a fake without adb or an emulator.
 """
 
@@ -12,9 +12,9 @@ from typing import Any, Protocol
 
 
 class DeviceController(Protocol):
-    """The subset of aitk's ADBController that ui_kobe depends on.
+    """The subset of aitk's ADBController that android_app_graph depends on.
 
-    Arguments ui_kobe never passes (``exe_action``'s ``save_flag``) are omitted.
+    Arguments android_app_graph never passes (``exe_action``'s ``save_flag``) are omitted.
     """
 
     w: int

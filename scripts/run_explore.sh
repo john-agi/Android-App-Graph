@@ -60,7 +60,7 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
 
     # Run exploration with auto-resume; pass through any extra args
     # Pipe both stdout and stderr to log file AND terminal
-    if uv run kobe-explore --resume-from auto "$@" 2>&1 | tee -a "$LOG_FILE"; then
+    if uv run app-graph --resume-from auto "$@" 2>&1 | tee -a "$LOG_FILE"; then
         TOTAL_ELAPSED=$((SECONDS - START_TIME))
         echo "==========================================" | tee -a "$LOG_FILE"
         echo "[run_explore] Exploration finished successfully." | tee -a "$LOG_FILE"

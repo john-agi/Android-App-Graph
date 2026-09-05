@@ -1,4 +1,4 @@
-"""UI-KOBE: Knowledge Ontology Builder and Explorer for mobile GUI Agents."""
+"""Android-App-Graph: Knowledge Ontology Builder and Explorer for mobile GUI Agents."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ui_kobe.device import DeviceController
-from ui_kobe.utils import make_client
-from ui_kobe.utils.graph_manager import GraphManager
-from ui_kobe.utils.vlm_utils import (
+from android_app_graph.device import DeviceController
+from android_app_graph.utils import make_client
+from android_app_graph.utils.graph_manager import GraphManager
+from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
     select_exploration_target,
@@ -64,11 +64,11 @@ class Kobe:
         self.app_name = app_name
         self.package_name = package_name
         logger_name = getattr(logger, "name", "")
-        if logger_name.startswith("ui_kobe"):
-            self.logger = logging.getLogger("ui_kobe.kobe")
+        if logger_name.startswith("android_app_graph"):
+            self.logger = logging.getLogger("android_app_graph.kobe")
         else:
             self.logger = logging.getLogger(
-                f"{logger_name}.kobe" if logger_name else "ui_kobe.kobe"
+                f"{logger_name}.kobe" if logger_name else "android_app_graph.kobe"
             )
         self.max_steps = max_steps
         self.coverage_checkpoint_steps = coverage_checkpoint_steps

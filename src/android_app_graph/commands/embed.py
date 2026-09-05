@@ -1,7 +1,7 @@
 """Precompute runtime image embeddings for every graph under a root folder.
 
 Usage:
-    uv run kobe-embed --config configs/explore.yaml --app <app_name>
+    uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from typing import Any
 
 import yaml
 
-from ui_kobe.payloads import as_float_list, as_str_dict
-from ui_kobe.utils import resolve_env
-from ui_kobe.utils.logging import setup_logging
-from ui_kobe.utils.vlm_utils import get_gemini_native_image_embedding
+from android_app_graph.payloads import as_float_list, as_str_dict
+from android_app_graph.utils import resolve_env
+from android_app_graph.utils.logging import setup_logging
+from android_app_graph.utils.vlm_utils import get_gemini_native_image_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +235,7 @@ def load_image_embedding_settings(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kobe-embed",
+        prog="app-graph-embed",
         description="Precompute Gemini image embeddings for graph screenshots.",
     )
     parser.add_argument(
