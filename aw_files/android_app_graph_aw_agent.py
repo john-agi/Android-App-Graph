@@ -1,4 +1,4 @@
-"""Android World adapter for the UI-KOBE v2 runtime agent."""
+"""Android World adapter for the Android-App-Graph v2 runtime agent."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from aitk.translators.ui_kobe_v2 import UIKobeV2Translator
+from aitk.translators.android_app_graph_v2 import UIKobeV2Translator
 from android_world.agents import base_agent
 from android_world.env import adb_utils, interface, json_action
 from PIL import Image
@@ -18,7 +18,7 @@ from PIL import Image
 if TYPE_CHECKING:
     import numpy as np
 
-logger = logging.getLogger("ui_kobe.android_world")
+logger = logging.getLogger("android_app_graph.android_world")
 
 
 def _pixels_to_png_b64(pixels: np.ndarray) -> str:
@@ -97,7 +97,7 @@ def load_agent_settings(config_path: Path) -> tuple[str, dict]:
 
 
 class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
-    """Runs the UI-KOBE v2 runtime loop inside Android World."""
+    """Runs the Android-App-Graph v2 runtime loop inside Android World."""
 
     def __init__(
         self,
@@ -105,7 +105,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         *,
         graph_dir: str = "graphs",
         vlm_config: dict | None = None,
-        name: str = "UI-KOBE",
+        name: str = "Android-App-Graph",
         transition_pause: float | None = 1.0,
     ) -> None:
         super().__init__(env, name=name, transition_pause=transition_pause)
@@ -183,7 +183,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
             "ui_elements": state.ui_elements,
             "activity": activity,
             "package": package,
-            "ui_kobe_message": message,
+            "android_app_graph_message": message,
             "aitk_action": aitk_action,
             "android_world_action": aw_action,
         }

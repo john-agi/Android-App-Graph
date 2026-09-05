@@ -14,7 +14,7 @@ import httpx
 from openai import OpenAI, OpenAIError
 from PIL import Image
 
-from ui_kobe.payloads import as_float_list, as_int, as_str
+from android_app_graph.payloads import as_float_list, as_int, as_str
 
 if TYPE_CHECKING:
     from openai.types import CompletionUsage

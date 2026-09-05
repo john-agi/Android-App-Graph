@@ -99,7 +99,7 @@ style.
   blocks direct pushes, force pushes and deletion of `main` and requires the
   `Quality` check on an up-to-date pull request. Enforced by GitHub at push and
   merge time; no Poe task.
-- Tests: pytest with pytest-cov (branch coverage of `ui_kobe`, floor
+- Tests: pytest with pytest-cov (branch coverage of `android_app_graph`, floor
   `[tool.coverage.report] fail_under`), pytest-randomly and Hypothesis
   (`_test` in `poe check`; `poe test-unit` for a fast run without coverage).
 - Dependency security: uv (`.github/workflows/security.yml` runs
@@ -112,9 +112,9 @@ style.
 - Mutation testing: mutmut (`uv run --locked --group mutation poe mutate`;
   `mutation` dependency group; not part of `poe check`; runs weekly in
   `.github/workflows/mutation.yml`; see "Mutation testing" below).
-- Tach: import direction between the modules of `src/ui_kobe/`, as declared in
-  `tach.toml`; `_architecture` (`tach check`), run by `check-fast` and therefore
-  by `check`.
+- Tach: import direction between the modules of `src/android_app_graph/`, as
+  declared in `tach.toml`; `_architecture` (`tach check`), run by `check-fast`
+  and therefore by `check`.
 
 ## Policies
 
@@ -174,7 +174,7 @@ style.
   checker. No `except Exception` unless it sits at a boundary (a CLI entry
   point, an adapter callback, a retry loop) and either logs the traceback or
   re-raises. No global mutable state. No `utils/` or `helpers/` dumping
-  grounds: new modules are named for what they do, and `ui_kobe/utils/` does
+  grounds: new modules are named for what they do, and `android_app_graph/utils/` does
   not grow further. Delete dead code instead of commenting it out.
 - This file: a tooling change appends its bullet at the end of "Tooling" and,
   if it adds a section, appends that section after the last existing `## `
@@ -184,10 +184,14 @@ style.
 
 ## Repository layout
 
-- Distribution `ui-kobe`, import package `ui_kobe` in `src/ui_kobe/`, console
-  script `kobe-explore`, static version in `pyproject.toml`. This is a fork of
-  YuxiangChai/UI-KOBE that diverges freely; upstream compatibility is not a
-  constraint.
+- Distribution `android-app-graph`, import package `android_app_graph` in
+  `src/android_app_graph/`, console scripts `app-graph`, `app-graph-audit`,
+  `app-graph-plot` and `app-graph-embed`, static version in `pyproject.toml`,
+  credential variables prefixed `APP_GRAPH_`. These names are final; the
+  former names survive only in `LICENSE`, `NOTICE`, the README attribution
+  text and the README's references to the upstream project's own files. This
+  is a fork of YuxiangChai/UI-KOBE that diverges freely; upstream
+  compatibility is not a constraint.
 - Python 3.14 only: `requires-python = ">=3.14"`, `.python-version` is `3.14`.
 - `aitk` is a Git dependency pinned to a commit in `[tool.uv.sources]`. There is
   no sibling checkout. `uv run --locked` refuses to run when `uv.lock` is
@@ -197,11 +201,11 @@ style.
   operator scripts and copy-in adapters, not part of the package. Ruff lints
   them; the type checker, once adopted, does not check them; the dependency
   checker, once adopted, does not treat their `android_world` imports as
-  runtime dependencies. `aitk_files/ui_kobe_v2.py` and
-  `aw_files/ui_kobe_aw_agent.py` are copied into other repositories: keep them
-  self-contained, importing `ui_kobe` and their host framework and nothing
-  from `scripts/`. `scripts/` holds only `run_explore.sh`; the `kobe-*`
-  commands live in `src/ui_kobe/commands/`.
+  runtime dependencies. `aitk_files/android_app_graph_v2.py` and
+  `aw_files/android_app_graph_aw_agent.py` are copied into other repositories: keep them
+  self-contained, importing `android_app_graph` and their host framework and nothing
+  from `scripts/`. `scripts/` holds only `run_explore.sh`; the `app-graph-*`
+  commands live in `src/android_app_graph/commands/`.
 - Generated graphs, logs, outputs and `dist/` are git-ignored; `.gitignore` is
   the authority on what is not tracked.
 
@@ -240,12 +244,12 @@ it. `# type: ignore` is inert because `respect-type-ignore-comments = false`,
 and a suppression that stops matching is reported by `unused-ignore-comment`
 and must be deleted.
 
-`src/ui_kobe/py.typed` marks the package as typed, so consumers of the wheel
+`src/android_app_graph/py.typed` marks the package as typed, so consumers of the wheel
 see these annotations. Untyped payloads are narrowed at the boundary with the
-helpers in `src/ui_kobe/payloads.py` rather than with `cast`.
+helpers in `src/android_app_graph/payloads.py` rather than with `cast`.
 
 The aitk device surface is typed through the `DeviceController` and
-`AvdManager` Protocols in `src/ui_kobe/device.py`. Tests and moved scripts
+`AvdManager` Protocols in `src/android_app_graph/device.py`. Tests and moved scripts
 take those Protocols, never the concrete `ADBController` and `AVDManager`
 classes, which is what lets a fake device stand in without adb or an emulator.
 
@@ -298,14 +302,14 @@ does not read `pyproject.toml`). `disable`, `remap`, `--persona`,
   two seeds are independent because pytest-randomly does not reseed Hypothesis.
   `-p no:randomly` disables shuffling for one run only; never put it in
   configuration.
-- Coverage is branch coverage of `ui_kobe`, measured by `_test`
-  (`pytest --cov=ui_kobe --cov-report=term-missing`).
+- Coverage is branch coverage of `android_app_graph`, measured by `_test`
+  (`pytest --cov=android_app_graph --cov-report=term-missing`).
   `[tool.coverage.report] fail_under` is a ratchet: it was set from the measured
   baseline, it is raised when coverage grows, and it is never lowered.
   `--cov-fail-under` never appears in `addopts` or a task. A PR that lowers the
   floor is rejected.
 - Tests must never need adb, an emulator, network access or API keys.
-  `tests/conftest.py` deletes every `UI_KOBE_*`, `GEMINI_API_KEY` and
+  `tests/conftest.py` deletes every `APP_GRAPH_*`, `GEMINI_API_KEY` and
   `OPENAI_API_KEY` variable before each test; do not work around it.
 - Hypothesis profiles live in `tests/conftest.py`: `default` locally, `ci`
   (500 examples, deterministic) when `CI` is set or `HYPOTHESIS_PROFILE=ci`.
@@ -375,7 +379,7 @@ preview and may change; see https://docs.astral.sh/uv/concepts/preview/.
   the fixed per-file-ignores table and covers only that file.
 ## Mutation testing
 
-- `uv run --locked --group mutation poe mutate` runs mutmut over `src/ui_kobe` using `tests/`
+- `uv run --locked --group mutation poe mutate` runs mutmut over `src/android_app_graph` using `tests/`
   (`[tool.mutmut]` in `pyproject.toml`). It is not part of `poe check` and never gates a
   merge. `.github/workflows/mutation.yml` runs it every Monday and on demand
   (`gh workflow run mutation.yml`); the log and the `mutmut-results` artifact list the
@@ -395,7 +399,7 @@ preview and may change; see https://docs.astral.sh/uv/concepts/preview/.
 
 ## Architecture boundaries
 
-- `tach.toml` is the declared import direction for `src/ui_kobe/`;
+- `tach.toml` is the declared import direction for `src/android_app_graph/`;
   `uv run --locked poe check-fast` (and so `poe check`, the pre-commit hook and
   CI) runs `tach check` against it.
 - Never run `tach sync` (with or without `--add`) to make `tach check` pass. It

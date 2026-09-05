@@ -1,4 +1,4 @@
-# tach.toml: import direction for src/ui_kobe. See "Module map" in README.md.
+# Import direction for src/android_app_graph. See "Module map" in README.md.
 # Never run `tach sync` to make `tach check` pass (AGENTS.md).
 source_roots = ["src"]
 exact = true
@@ -10,67 +10,59 @@ root_module = "forbid"
 unused_ignore_directives = "error"
 require_ignore_directive_reasons = "error"
 
-# Root package: only re-exports the explorer.
 [[modules]]
-path = "ui_kobe"
-depends_on = ["ui_kobe.kobe"]
+path = "android_app_graph"
+depends_on = ["android_app_graph.kobe"]
 
-# Console scripts kobe-audit, kobe-plot and kobe-embed: the top of the package.
-# They reuse the CLI's launch_app, the device Protocols and the core helpers;
-# nothing in the package imports them.
 [[modules]]
-path = "ui_kobe.commands"
+path = "android_app_graph.commands"
 depends_on = [
-    "ui_kobe.cli",
-    "ui_kobe.device",
-    "ui_kobe.payloads",
-    "ui_kobe.utils",
-    "ui_kobe.utils.graph_manager",
-    "ui_kobe.utils.logging",
-    "ui_kobe.utils.vlm_utils",
+    "android_app_graph.cli",
+    "android_app_graph.device",
+    "android_app_graph.payloads",
+    "android_app_graph.utils",
+    "android_app_graph.utils.graph_manager",
+    "android_app_graph.utils.logging",
+    "android_app_graph.utils.vlm_utils",
 ]
 
-# Entry point kobe-explore: may use everything below it, and is imported only by
-# ui_kobe.commands (launch_app). Uses the AvdManager Protocol from ui_kobe.device.
 [[modules]]
-path = "ui_kobe.cli"
-depends_on = ["ui_kobe.device", "ui_kobe.kobe", "ui_kobe.utils.logging"]
-
-# Explorer: orchestrates the graph and VLM helpers; typed against the
-# DeviceController Protocol.
-[[modules]]
-path = "ui_kobe.kobe"
+path = "android_app_graph.cli"
 depends_on = [
-    "ui_kobe.device",
-    "ui_kobe.utils",
-    "ui_kobe.utils.graph_manager",
-    "ui_kobe.utils.vlm_utils",
+    "android_app_graph.device",
+    "android_app_graph.kobe",
+    "android_app_graph.utils.logging",
 ]
 
-# Core helpers: must never import ui_kobe.kobe, ui_kobe.cli or ui_kobe.commands.
 [[modules]]
-path = "ui_kobe.utils"
+path = "android_app_graph.kobe"
+depends_on = [
+    "android_app_graph.device",
+    "android_app_graph.utils",
+    "android_app_graph.utils.graph_manager",
+    "android_app_graph.utils.vlm_utils",
+]
+
+[[modules]]
+path = "android_app_graph.utils"
 depends_on = []
 
 [[modules]]
-path = "ui_kobe.utils.graph_manager"
-depends_on = ["ui_kobe.payloads", "ui_kobe.utils.vlm_utils"]
+path = "android_app_graph.utils.graph_manager"
+depends_on = ["android_app_graph.payloads", "android_app_graph.utils.vlm_utils"]
 
 [[modules]]
-path = "ui_kobe.utils.vlm_utils"
-depends_on = ["ui_kobe.payloads"]
+path = "android_app_graph.utils.vlm_utils"
+depends_on = ["android_app_graph.payloads"]
 
 [[modules]]
-path = "ui_kobe.utils.logging"
+path = "android_app_graph.utils.logging"
 depends_on = []
 
-# Protocols for the aitk device surface (DeviceController, AvdManager):
-# imports nothing from the package.
 [[modules]]
-path = "ui_kobe.device"
+path = "android_app_graph.device"
 depends_on = []
 
-# Narrowing helpers for untyped payloads: the bottom of the graph.
 [[modules]]
-path = "ui_kobe.payloads"
+path = "android_app_graph.payloads"
 depends_on = []

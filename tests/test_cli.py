@@ -1,4 +1,4 @@
-"""kobe-explore argument parsing, exercised without AITK, adb or an emulator."""
+"""app-graph argument parsing, exercised without AITK, adb or an emulator."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from ui_kobe.cli import build_parser, main
+from android_app_graph.cli import build_parser, main
 
 
 def test_help_exits_zero(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """argparse handles --help inside parse_args() and exits 0 before aitk is imported."""
-    monkeypatch.setattr(sys, "argv", ["kobe-explore", "--help"])
+    monkeypatch.setattr(sys, "argv", ["app-graph", "--help"])
     with pytest.raises(SystemExit) as excinfo:
         main()
     assert excinfo.value.code == 0

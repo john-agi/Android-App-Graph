@@ -1,4 +1,4 @@
-"""Help and packaging tests shared by the kobe-* console scripts."""
+"""Help and packaging tests shared by the app-graph-* console scripts."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from importlib.metadata import entry_points
 
 import pytest
 
-from ui_kobe.commands import audit, embed, plot
+from android_app_graph.commands import audit, embed, plot
 
 Main = Callable[[list[str] | None], int]
 
 COMMANDS: dict[str, Main] = {
-    "kobe-audit": audit.main,
-    "kobe-embed": embed.main,
-    "kobe-plot": plot.main,
+    "app-graph-audit": audit.main,
+    "app-graph-embed": embed.main,
+    "app-graph-plot": plot.main,
 }
 
 
