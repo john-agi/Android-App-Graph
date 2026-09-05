@@ -1,15 +1,11 @@
-# Scheduled mutation testing with mutmut. Not part of `poe check` and never a
-# required status check: it is slow and its output is a review queue (see
-# AGENTS.md, section "Mutation testing").
-# The checkout, setup-uv and Python steps below are byte-for-byte copies of
-# the ones in ci.yml.
+# Scheduled because it is slow and its output needs human judgement, so it
+# gates nothing. Policy: AGENTS.md, "Mutation testing".
+# Checkout, setup-uv and Python are byte-for-byte copies of ci.yml.
 name: Mutation
 
 on:
   schedule:
-    # Weekly, Monday 06:23 UTC. Off the top of the hour because runs queued at
-    # :00 are delayed. Runs against the latest commit on main and is
-    # auto-disabled after 60 days without repository activity.
+    # Off the top of the hour: runs queued at :00 are delayed.
     - cron: "23 6 * * 1"
   workflow_dispatch:
 
@@ -38,16 +34,14 @@ jobs:
         run: uv python install
 
       - name: Sync the locked environment with the mutation group
-        # Fails if uv.lock is out of date; never updates it. dev is synced by default.
         run: uv sync --locked --group mutation
 
       - name: Run mutation testing
         run: uv run --locked --group mutation poe mutate
 
       - name: Report mutation counts and surviving mutants
-        # export-cicd-stats is documented; `mutmut results` is not (it exists only
-        # in mutmut's source) and is used as a best-effort listing. If a mutmut
-        # release removes it, delete the last two lines and keep the JSON.
+        # `mutmut results` is undocumented; if a release drops it, delete the
+        # last two lines and keep the JSON.
         run: |
           uv run --locked --group mutation mutmut export-cicd-stats
           cat mutants/mutmut-cicd-stats.json
