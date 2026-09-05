@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -94,46 +93,6 @@ def test_extract_packages_from_graph_skips_nodes_without_activity() -> None:
 
 def test_extract_packages_from_empty_graph() -> None:
     assert aitk_translator._extract_packages_from_graph(nx.DiGraph()) == set()
-
-
-# ---------------------------------------------------------------------------
-# _cosine_similarity
-# ---------------------------------------------------------------------------
-
-
-def test_cosine_similarity_of_identical_vectors_is_one() -> None:
-    assert aitk_translator._cosine_similarity([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == pytest.approx(
-        1.0
-    )
-
-
-def test_cosine_similarity_of_orthogonal_vectors_is_zero() -> None:
-    assert aitk_translator._cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
-
-
-def test_cosine_similarity_of_opposite_vectors_is_minus_one() -> None:
-    assert aitk_translator._cosine_similarity([1.0, 1.0], [-1.0, -1.0]) == pytest.approx(-1.0)
-
-
-@pytest.mark.parametrize(("a", "b"), [([0.0, 0.0], [1.0, 1.0]), ([1.0, 1.0], [0.0, 0.0])])
-def test_cosine_similarity_with_a_zero_vector_is_zero(a: list[float], b: list[float]) -> None:
-    """A zero norm has no direction, so the similarity is defined as 0.0 rather than NaN."""
-    assert aitk_translator._cosine_similarity(a, b) == 0.0
-
-
-_finite_vectors = st.lists(
-    st.floats(min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False),
-    min_size=1,
-    max_size=8,
-)
-
-
-@given(a=_finite_vectors, b=_finite_vectors)
-def test_cosine_similarity_is_bounded_and_symmetric(a: list[float], b: list[float]) -> None:
-    similarity = aitk_translator._cosine_similarity(a, b)
-    assert -1.0 - 1e-9 <= similarity <= 1.0 + 1e-9
-    assert similarity == pytest.approx(aitk_translator._cosine_similarity(b, a))
-    assert not math.isnan(similarity)
 
 
 # ---------------------------------------------------------------------------

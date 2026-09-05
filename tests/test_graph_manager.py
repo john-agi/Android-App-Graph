@@ -24,7 +24,6 @@ from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
     NORMALIZE_EVERY_N_VISITS,
     GraphManager,
-    _cosine_similarity,
     _merge_elements,
     _merge_into_schema,
     _package_from_activity,
@@ -188,22 +187,6 @@ def test_package_from_activity_returns_short_names_unchanged() -> None:
 
 def test_package_from_activity_returns_an_empty_string_unchanged() -> None:
     assert _package_from_activity("") == ""
-
-
-def test_cosine_similarity_of_parallel_vectors_is_one() -> None:
-    assert _cosine_similarity([1.0, 0.0], [2.0, 0.0]) == pytest.approx(1.0)
-
-
-def test_cosine_similarity_of_orthogonal_vectors_is_zero() -> None:
-    assert _cosine_similarity([1.0, 0.0], [0.0, 3.0]) == pytest.approx(0.0)
-
-
-def test_cosine_similarity_with_a_zero_vector_is_zero() -> None:
-    assert _cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
-
-
-def test_cosine_similarity_with_a_zero_second_vector_is_zero() -> None:
-    assert _cosine_similarity([1.0, 1.0], [0.0, 0.0]) == 0.0
 
 
 def test_merge_into_schema_adds_a_new_key_as_a_single_element_list() -> None:

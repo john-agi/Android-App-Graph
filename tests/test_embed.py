@@ -60,10 +60,7 @@ def test_embed_main_rejects_missing_graph_root(
     assert "graph root does not exist" in capsys.readouterr().err
 
 
-def test_embed_main_requires_an_api_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)  # conftest removes GEMINI_API_KEY
+def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text(f"experiment:\n  graph_dir: {tmp_path}\n", encoding="utf-8")
     with pytest.raises(SystemExit) as excinfo:
@@ -72,8 +69,7 @@ def test_embed_main_requires_an_api_key(
     assert "missing API key" in capsys.readouterr().err
 
 
-def test_embed_settings_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)  # conftest removes GEMINI_API_KEY
+def test_embed_settings_from_config(tmp_path: Path) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("experiment:\n  graph_dir: my_graphs\n", encoding="utf-8")
     graph_dir, api_key, model, base_url = embed.load_image_embedding_settings(

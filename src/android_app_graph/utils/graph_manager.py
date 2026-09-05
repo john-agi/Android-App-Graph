@@ -24,7 +24,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import math
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +34,7 @@ from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
+    cosine_similarity,
     describe_page_and_state,
     get_embedding,
     normalize_edge,
@@ -74,15 +74,6 @@ def _node_id(value: object) -> str:
     the one place that says so.
     """
     return value if isinstance(value, str) else str(value)
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _merge_into_schema(
@@ -245,7 +236,7 @@ class GraphManager:
             existing_emb = data.get("description_embedding")
             if existing_emb is None:
                 continue
-            sim = _cosine_similarity(description_embedding, existing_emb)
+            sim = cosine_similarity(description_embedding, existing_emb)
             if sim > best_similarity:
                 best_similarity = sim
                 best_node_id = _node_id(node_id)
@@ -1357,7 +1348,7 @@ class GraphManager:
             emb = data.get("description_embedding")
             if emb is None:
                 continue
-            sim = _cosine_similarity(query_emb, emb)
+            sim = cosine_similarity(query_emb, emb)
             results.append((_node_id(node_id), sim))
         results.sort(key=lambda x: x[1], reverse=True)
         return results

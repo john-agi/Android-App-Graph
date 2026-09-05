@@ -319,8 +319,9 @@ does not read `pyproject.toml`). `disable`, `remap`, `--persona`,
   `--cov-fail-under` never appears in `addopts` or a task. A PR that lowers the
   floor is rejected.
 - Tests must never need adb, an emulator, network access or API keys.
-  `tests/conftest.py` deletes every `APP_GRAPH_*`, `GEMINI_API_KEY` and
-  `OPENAI_API_KEY` variable before each test; do not work around it.
+  `tests/conftest.py` deletes every `APP_GRAPH_*`, `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY` and `OPENAI_API_KEY` variable before each test; do not work
+  around it.
 - Hypothesis profiles live in `tests/conftest.py`: `default` locally, `ci`
   (500 examples, deterministic) when `CI` is set or `HYPOTHESIS_PROFILE=ci`.
 - `tests/` has no `__init__.py`; test modules cannot import each other, so

@@ -29,7 +29,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import math
 import os
 import re
 import subprocess
@@ -47,6 +46,7 @@ from openai import OpenAI
 from android_app_graph.payloads import as_float_list, as_list, as_str, as_str_dict
 from android_app_graph.utils import resolve_env
 from android_app_graph.utils.vlm_utils import (
+    cosine_similarity,
     describe_page_and_state,
     get_gemini_native_image_embedding,
     predict_next_action,
@@ -335,13 +335,6 @@ def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
         if activity:
             packages.add(_package_from_activity(activity))
     return packages
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
 
 
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
@@ -887,7 +880,7 @@ class UIKobeV2Translator(BaseTranslator):
             node_image_emb = data.get("image_embedding")
             if not node_image_emb:
                 continue
-            sim = _cosine_similarity(query_image_emb, node_image_emb)
+            sim = cosine_similarity(query_image_emb, node_image_emb)
             candidates.append((str(node_id), sim, data.get("page_description", "")))
 
         candidates.sort(key=lambda x: x[1], reverse=True)

@@ -30,6 +30,23 @@ logger = logging.getLogger(__name__)
 MAX_PIXELS = 1_000_000
 
 
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Return the cosine similarity of ``a`` and ``b``, clamped to ``[-1.0, 1.0]``.
+
+    A zero-norm vector has no direction, so the similarity is defined as ``0.0``
+    rather than raising a division error. Subnormal floats can otherwise push the
+    unclamped ratio slightly outside ``[-1.0, 1.0]`` (a violation of
+    Cauchy-Schwarz that is a floating-point rounding artifact, not a real
+    similarity), so the result is clamped before it is returned.
+    """
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if not norm_a or not norm_b:
+        return 0.0
+    return max(-1.0, min(1.0, dot / (norm_a * norm_b)))
+
+
 # ---------------------------------------------------------------------------
 # Token usage tracker
 # ---------------------------------------------------------------------------
