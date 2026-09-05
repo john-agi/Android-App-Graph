@@ -155,7 +155,14 @@ style.
   `uv.lock` by hand. Commit `pyproject.toml` and `uv.lock` together, in the
   same commit. `[tool.uv] required-version = ">=0.12.9,<0.13"` is a range that
   matches the `uv_build` bound; bumping it is a deliberate manual change made
-  in its own pull request, and Renovate does not update it.
+  in its own pull request, and Renovate does not update it. A declared version
+  floor must be at least 3 days old: `[tool.uv] exclude-newer = "3 days"` hides
+  registry releases published inside that window, so a floor pointing at a
+  younger release asks for a version uv is not allowed to see and makes
+  `uv lock` unsatisfiable. `uv add` always writes `>=<latest>`; when that
+  release is younger than 3 days, lower the floor by hand to the newest release
+  that predates the cutoff, and let Renovate raise it once the newer release
+  ages out. Never remove or shorten `exclude-newer` to make a floor resolve.
 - Tests: every behaviour change comes with tests, and every bug fix starts
   with a failing regression test. Tests live in `tests/`, are committed, and
   never need adb, an emulator, network access or API keys. Until the test
