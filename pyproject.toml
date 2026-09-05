@@ -29,6 +29,7 @@ maintainers = [
 
 [project.scripts]
 kobe-explore = "ui_kobe.cli:main"
+kobe-audit = "ui_kobe.commands.audit:main"
 
 [project.urls]
 Homepage = "https://github.com/john-agi/Android-App-Graph"

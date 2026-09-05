@@ -1,14 +1,14 @@
 """Audit an explored graph and optionally re-explore flagged issues on device.
 
 Usage:
-    # Audit only (no device needed) — prints issues and saves report
-    uv run python scripts/audit_graph.py -c configs/explore.yaml
+    # Audit only (no device needed) — logs issues and saves report
+    uv run kobe-audit -c configs/explore.yaml
 
     # Audit + re-explore flagged issues on device
-    uv run python scripts/audit_graph.py -c configs/explore.yaml --re-explore
+    uv run kobe-audit -c configs/explore.yaml --re-explore
 
     # Re-explore with custom step budget per issue
-    uv run python scripts/audit_graph.py -c configs/explore.yaml --re-explore --steps-per-issue 10
+    uv run kobe-audit -c configs/explore.yaml --re-explore --steps-per-issue 10
 
 The auditor finds two types of issues:
 
@@ -21,17 +21,21 @@ The auditor finds two types of issues:
    The planner is told what actions to try.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, NamedTuple
 
 import yaml
 from openai import OpenAI
 
+from ui_kobe.cli import launch_app
+from ui_kobe.device import DeviceController
 from ui_kobe.utils import make_client
 from ui_kobe.utils.graph_manager import GraphManager
 from ui_kobe.utils.logging import setup_logging
@@ -42,18 +46,15 @@ from ui_kobe.utils.vlm_utils import (
     verify_same_node,
 )
 
-if TYPE_CHECKING:
-    from aitk.utils.adb_controller import ADBController
-
-logger = logging.getLogger("ui_kobe.audit")
+logger = logging.getLogger(__name__)
 
 
-def run_audit(graph: GraphManager, app_name: str, report_path: Path) -> dict:
+def run_audit(graph: GraphManager, app_name: str, report_path: Path) -> dict[str, Any]:
     """Run the LLM audit and save the report."""
     result = graph.run_audit(app_name=app_name)
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
+    with report_path.open("w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     logger.info("Audit report saved to %s", report_path)
 
@@ -83,64 +84,12 @@ def normalize_and_save_audited_graph(graph: GraphManager, audited_graph_path: Pa
     return normalized_count
 
 
-def launch_app(config: dict, app: dict) -> None:
-    """Launch an app using an explicit activity when configured."""
-    udid = config["device"]["udid"]
-    app_name = app["name"]
-    package_name = app["package_name"]
-    launch_activity = app.get("launch_activity")
-
-    if launch_activity:
-        logger.info("Launching app %s via activity %s ...", app_name, launch_activity)
-        result = subprocess.run(
-            [
-                "adb",
-                "-s",
-                udid,
-                "shell",
-                "am",
-                "start",
-                "-n",
-                launch_activity,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        logger.warning(
-            "Activity launch failed for %s; falling back to package launch. error=%s",
-            app_name,
-            (result.stderr or result.stdout or "").strip(),
-        )
-
-    logger.info("Launching app %s (%s) ...", app_name, package_name)
-    subprocess.run(
-        [
-            "adb",
-            "-s",
-            udid,
-            "shell",
-            "monkey",
-            "-p",
-            package_name,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    )
-
-
 def select_apps_for_audit(
-    config: dict,
+    config: dict[str, Any],
     graph_dir: Path,
     app_name: str | None = None,
     re_explore: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return app entries to audit.
 
     In basic audit mode, ``--app`` selects a graph folder by name and does not
@@ -152,21 +101,23 @@ def select_apps_for_audit(
         return list(config.get("apps", []))
 
     if re_explore:
-        raise ValueError("--app can only be used for basic audit without --re-explore")
+        msg = "--app can only be used for basic audit without --re-explore"
+        raise ValueError(msg)
 
     graph_path = graph_dir / app_name / f"{app_name}.json"
     if not graph_path.exists():
-        raise FileNotFoundError(f"No graph found at {graph_path}")
+        msg = f"No graph found at {graph_path}"
+        raise FileNotFoundError(msg)
 
     return [{"name": app_name, "package_name": ""}]
 
 
 def verify_and_merge_nodes(
     graph: GraphManager,
-    merge_issues: list[dict],
+    merge_issues: list[dict[str, Any]],
     page_detail_client: OpenAI,
     page_detail_model: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Verify merge candidates using screenshot comparison, then merge confirmed pairs.
 
     For each merge_nodes issue, the verifier compares the reference screenshots
@@ -175,7 +126,7 @@ def verify_and_merge_nodes(
 
     Returns a list of result dicts with status "merged" or "kept_separate".
     """
-    results = []
+    results: list[dict[str, Any]] = []
     for issue in merge_issues:
         node_a = issue.get("node_a", "")
         node_b = issue.get("node_b", "")
@@ -258,8 +209,8 @@ def verify_and_merge_nodes(
 
 def re_explore_issues(
     graph: GraphManager,
-    issues: list[dict],
-    controller: ADBController,
+    issues: list[dict[str, Any]],
+    controller: DeviceController,
     app_name: str,
     package_name: str,
     graph_path: Path,
@@ -268,7 +219,7 @@ def re_explore_issues(
     action_client: OpenAI,
     action_model: str,
     steps_per_issue: int = 5,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Re-explore flagged issues on device.
 
     For retry_edge: navigates to source node, re-runs the exploration step
@@ -277,7 +228,7 @@ def re_explore_issues(
     For explore_node: navigates to the node and explores with hints about
     expected missing actions.
     """
-    results = []
+    results: list[dict[str, Any]] = []
     start_node = graph.get_start_node()
     if start_node is None:
         logger.warning("Graph is empty — nothing to re-explore")
@@ -345,10 +296,10 @@ def re_explore_issues(
         start_from: str,
         num_steps: int,
         hint: str = "",
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Run exploration steps from a node with an optional hint for the planner."""
         current_node = start_from
-        step_results = []
+        step_results: list[dict[str, Any]] = []
 
         for step_i in range(num_steps):
             device_state = controller.get_state()
@@ -563,58 +514,115 @@ def re_explore_issues(
     return results
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Audit an explored graph for anomalies")
-    parser.add_argument("--config", "-c", type=str, default="configs/explore.yaml")
+class ReExploreSession(NamedTuple):
+    """Device controller and VLM clients needed by ``--re-explore``.
+
+    Built as a unit so ``re_explore_issues`` takes non-optional arguments: the
+    audit-only path never constructs one and never imports ``aitk``.
+    """
+
+    controller: DeviceController
+    instruction_client: OpenAI
+    instruction_model: str
+    action_client: OpenAI
+    action_model: str
+
+
+def _open_re_explore_session(
+    parser: argparse.ArgumentParser,
+    config: dict[str, Any],
+    vlm_config: dict[str, Any],
+) -> ReExploreSession:
+    """Build the device session for ``--re-explore``, or exit with guidance.
+
+    The ``aitk`` import stays inside this function so a plain audit runs without
+    the device dependency installed.
+    """
+    try:
+        from aitk.utils.adb_controller import ADBController
+    except ImportError:
+        parser.exit(
+            1,
+            "kobe-audit --re-explore requires the 'aitk' dependency. "
+            "Install it first, then rerun the command.\n",
+        )
+
+    instruction_client, instruction_model = make_client(vlm_config.get("instruction"))
+    action_client, action_model = make_client(vlm_config.get("action"))
+    return ReExploreSession(
+        controller=ADBController(config, logger),
+        instruction_client=instruction_client,
+        instruction_model=instruction_model,
+        action_client=action_client,
+        action_model=action_model,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="kobe-audit",
+        description="Audit an explored graph for anomalies.",
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        default=Path("configs/explore.yaml"),
+        help="Path to the YAML config file (default: configs/explore.yaml).",
+    )
     parser.add_argument(
         "--app",
         type=str,
         default=None,
         help=(
             "Basic audit only: audit one app graph folder under graph_dir by "
-            "folder/app name, e.g. --app citymapper"
+            "folder/app name, e.g. --app citymapper."
         ),
     )
     parser.add_argument(
         "--re-explore",
         action="store_true",
-        help="Navigate to flagged nodes/edges on device and re-explore",
+        help="Navigate to flagged nodes/edges on device and re-explore.",
     )
     parser.add_argument(
         "--steps-per-issue",
         type=int,
         default=5,
-        help="Number of exploration steps per flagged issue (default: 5)",
+        help="Number of exploration steps per flagged issue (default: 5).",
     )
-    args = parser.parse_args()
+    return parser
 
-    with open(args.config, "r") as f:
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.config.is_file():
+        parser.error(f"config file not found: {args.config}")
+
+    with args.config.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-
-    setup_logging(level=logging.INFO)
 
     exp_config = config.get("experiment", {})
     vlm_config = config.get("vlm", {})
-    graph_dir = exp_config.get("graph_dir", "graphs")
-    selected_apps = select_apps_for_audit(
-        config,
-        Path(graph_dir),
-        app_name=args.app,
-        re_explore=args.re_explore,
-    )
+    graph_dir = Path(exp_config.get("graph_dir", "graphs"))
+
+    try:
+        selected_apps = select_apps_for_audit(
+            config,
+            graph_dir,
+            app_name=args.app,
+            re_explore=args.re_explore,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
+
+    session = _open_re_explore_session(parser, config, vlm_config) if args.re_explore else None
+
+    setup_logging(level=logging.INFO)
 
     page_detail_client, page_detail_model = make_client(vlm_config.get("page_detail"))
     embedding_client, embedding_model = make_client(vlm_config.get("embedding"))
-
-    # Only needed for --re-explore
-    controller = None
-    instruction_client = instruction_model = action_client = action_model = None
-    if args.re_explore:
-        from aitk.utils.adb_controller import ADBController
-
-        controller = ADBController(config, logger)
-        instruction_client, instruction_model = make_client(vlm_config.get("instruction"))
-        action_client, action_model = make_client(vlm_config.get("action"))
 
     for app in selected_apps:
         app_name = app["name"]
@@ -628,8 +636,8 @@ if __name__ == "__main__":
             similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
         )
 
-        graph_path = Path(graph_dir) / app_name / f"{app_name}.json"
-        audited_graph_path = Path(graph_dir) / app_name / f"{app_name}_audited.json"
+        graph_path = graph_dir / app_name / f"{app_name}.json"
+        audited_graph_path = graph_dir / app_name / f"{app_name}_audited.json"
         if not graph_path.exists():
             logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
             continue
@@ -666,7 +674,7 @@ if __name__ == "__main__":
             )
             # Save merge results
             merge_path = graph_path.parent / f"{app_name}_merge.json"
-            with open(merge_path, "w", encoding="utf-8") as f:
+            with merge_path.open("w", encoding="utf-8") as f:
                 json.dump(merge_results, f, indent=2, ensure_ascii=False)
             logger.info("Merge results saved to %s", merge_path)
 
@@ -679,30 +687,30 @@ if __name__ == "__main__":
                 )
 
         # Phase 3: Re-explore (optional, requires device)
-        if args.re_explore and controller and other_issues:
+        if session is not None and other_issues:
             logger.info("Starting re-exploration for %d issues...", len(other_issues))
 
             # Launch the app
-            launch_app(config, app)
+            launch_app(config, app, logger)
             time.sleep(4)
 
             re_results = re_explore_issues(
                 graph,
                 other_issues,
-                controller,
+                session.controller,
                 app_name,
                 package_name,
                 audited_graph_path,
-                instruction_client,
-                instruction_model,
-                action_client,
-                action_model,
+                session.instruction_client,
+                session.instruction_model,
+                session.action_client,
+                session.action_model,
                 steps_per_issue=args.steps_per_issue,
             )
 
             # Save results
             results_path = graph_path.parent / f"{app_name}_re_explore.json"
-            with open(results_path, "w", encoding="utf-8") as f:
+            with results_path.open("w", encoding="utf-8") as f:
                 json.dump(re_results, f, indent=2, ensure_ascii=False)
             logger.info("Re-exploration results saved to %s", results_path)
 
@@ -713,3 +721,4 @@ if __name__ == "__main__":
 
     token_tracker.print_summary()
     logger.info("Audit complete.")
+    return 0
