@@ -32,7 +32,6 @@ UI-KOBE/
 │       ├── kobe.py                # Core app explorer
 │       └── utils/                 # Graph, VLM, and logging helpers
 ├── scripts/                       # Operator scripts, not packaged
-│   ├── plot_graph.py              # Graph visualization utility
 │   ├── precompute_graph_image_embeddings.py
 │   └── run_explore.sh             # Auto-resume wrapper
 ├── aitk_files/                    # Copy-in adapter for AITK, not packaged
@@ -179,12 +178,13 @@ For long runs, use the auto-resume wrapper:
 
 ## Visualize or Audit a Graph
 
-Create an HTML graph visualization. `scripts/plot_graph.py` needs the optional
-`viz` extra (`pyvis` and `matplotlib`), which `uv sync` does not install by default:
+Create an HTML graph visualization. `kobe-plot` needs the optional `viz` extra
+(`pyvis` and `matplotlib`), which `uv sync` does not install by default; outside
+this checkout, install it as `pip install "ui-kobe[viz]"`:
 
 ```bash
 uv sync --extra viz
-uv run python scripts/plot_graph.py graphs/<app_name>/<app_name>.json
+uv run --extra viz kobe-plot graphs/<app_name>/<app_name>.json
 ```
 
 Run the graph audit utility:
