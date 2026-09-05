@@ -55,6 +55,34 @@ the sections below). `configs/` holds example configuration.
 
 Generated graphs, logs, and outputs are intentionally ignored by git.
 
+### Module map
+
+Import direction inside `src/android_app_graph/` is enforced by `tach check`
+(part of `uv run --locked poe check-fast` and `poe check`) from `tach.toml`.
+Arrows point from importer to imported module; anything not drawn is forbidden.
+
+```mermaid
+graph TD;
+    pkg["android_app_graph"] --> kobe["android_app_graph.kobe"];
+    cmd["android_app_graph.commands"] --> cli["android_app_graph.cli"];
+    cmd --> dev["android_app_graph.device"];
+    cmd --> pay["android_app_graph.payloads"];
+    cmd --> utils["android_app_graph.utils"];
+    cmd --> gm["android_app_graph.utils.graph_manager"];
+    cmd --> logging["android_app_graph.utils.logging"];
+    cmd --> vlm["android_app_graph.utils.vlm_utils"];
+    cli --> dev;
+    cli --> kobe;
+    cli --> logging;
+    kobe --> dev;
+    kobe --> utils;
+    kobe --> gm;
+    kobe --> vlm;
+    gm --> pay;
+    gm --> vlm;
+    vlm --> pay;
+```
+
 ## Prerequisites
 
 - Python >= 3.14. `.python-version` pins `3.14`; uv downloads a managed

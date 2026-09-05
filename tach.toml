@@ -1,0 +1,68 @@
+# Import direction for src/android_app_graph. See "Module map" in README.md.
+# Never run `tach sync` to make `tach check` pass (AGENTS.md).
+source_roots = ["src"]
+exact = true
+forbid_circular_dependencies = true
+ignore_type_checking_imports = true
+root_module = "forbid"
+
+[rules]
+unused_ignore_directives = "error"
+require_ignore_directive_reasons = "error"
+
+[[modules]]
+path = "android_app_graph"
+depends_on = ["android_app_graph.kobe"]
+
+[[modules]]
+path = "android_app_graph.commands"
+depends_on = [
+    "android_app_graph.cli",
+    "android_app_graph.device",
+    "android_app_graph.payloads",
+    "android_app_graph.utils",
+    "android_app_graph.utils.graph_manager",
+    "android_app_graph.utils.logging",
+    "android_app_graph.utils.vlm_utils",
+]
+
+[[modules]]
+path = "android_app_graph.cli"
+depends_on = [
+    "android_app_graph.device",
+    "android_app_graph.kobe",
+    "android_app_graph.utils.logging",
+]
+
+[[modules]]
+path = "android_app_graph.kobe"
+depends_on = [
+    "android_app_graph.device",
+    "android_app_graph.utils",
+    "android_app_graph.utils.graph_manager",
+    "android_app_graph.utils.vlm_utils",
+]
+
+[[modules]]
+path = "android_app_graph.utils"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.utils.graph_manager"
+depends_on = ["android_app_graph.payloads", "android_app_graph.utils.vlm_utils"]
+
+[[modules]]
+path = "android_app_graph.utils.vlm_utils"
+depends_on = ["android_app_graph.payloads"]
+
+[[modules]]
+path = "android_app_graph.utils.logging"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.device"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.payloads"
+depends_on = []

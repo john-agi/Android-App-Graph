@@ -64,6 +64,7 @@ dev = [
     "pytest-randomly>=5.0.0",
     "pyvis>=0.3.2",  # see the matplotlib comment above
     "ruff>=0.16.5",
+    "tach>=0.35.0",
     "ty>=0.0.77",
     "vulture>=2.16",
     "zizmor>=1.30.0",
@@ -180,7 +181,7 @@ minversion = "9.0"
 # Turns on strict_config, strict_markers, strict_parametrization_ids, strict_xfail.
 strict = true
 testpaths = ["tests"]
-addopts = ["--import-mode=importlib", "-ra"]
+addopts = ["--import-mode=importlib", "-ra", "-p", "no:tach"]
 # Every warning is an error; a third-party ignore goes after "error", with a reason.
 filterwarnings = ["error"]
 
@@ -221,6 +222,7 @@ _test = "pytest --cov=android_app_graph --cov-report=term-missing"
 _actions = "zizmor --offline ."
 _build = "uv build --no-sources"
 _dead-code = "vulture src tests vulture_allowlist.py --min-confidence 90"
+_architecture = "tach check"
 
 [tool.poe.tasks.fix]
 help = "Apply safe autofixes and format"
@@ -228,7 +230,7 @@ sequence = ["_fix-lint", "_format"]
 
 [tool.poe.tasks.check-fast]
 help = "Fast checks: format, lint, types"
-sequence = ["_format-check", "_lint", "_typecheck"]
+sequence = ["_format-check", "_lint", "_typecheck", "_architecture"]
 
 [tool.poe.tasks.test-unit]
 help = "Run the test suite without coverage"
