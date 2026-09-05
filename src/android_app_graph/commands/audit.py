@@ -137,6 +137,12 @@ def verify_and_merge_nodes(
             results.append({"issue": issue, "status": "skipped", "reason": "node removed"})
             continue
 
+        # An auditor can name one node twice, and it would verify as "same".
+        if node_a == node_b:
+            logger.warning("Skipping merge %s + itself — same node", node_a)
+            results.append({"issue": issue, "status": "skipped", "reason": "same node"})
+            continue
+
         data_a = graph.graph.nodes[node_a]
         data_b = graph.graph.nodes[node_b]
         screenshot_a = data_a.get("reference_screenshot")

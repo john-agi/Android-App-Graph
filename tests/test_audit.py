@@ -221,6 +221,24 @@ def test_verify_and_merge_nodes_skips_missing_screenshot(
     assert result["reason"] == "missing screenshot"
 
 
+def test_verify_and_merge_nodes_skips_a_self_pair(
+    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for #48: an auditor naming one node twice used to delete it."""
+    graph = _graph_with_nodes(
+        ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
+    )
+    monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
+
+    issue = _merge_issue(node_a="s0_home", node_b="s0_home")
+    (result,) = audit.verify_and_merge_nodes(graph, [issue], client, "gpt-test")
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "same node"
+    assert set(graph.graph) == {"s0_home"}
+    assert graph.graph.nodes["s0_home"]["visit_count"] == 3
+
+
 def test_verify_and_merge_nodes_skips_removed_node(
     client: OpenAI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
