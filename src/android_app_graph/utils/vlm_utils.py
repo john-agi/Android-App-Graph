@@ -173,7 +173,7 @@ def _resize_screenshot(
     return base64.b64encode(buf.getvalue()).decode("ascii"), new_w, new_h, 1.0 / scale
 
 
-def _strip_json_fences(text: str) -> str:
+def strip_json_fences(text: str) -> str:
     """Remove ```json ... ``` markdown fences if present."""
     text = text.strip()
     m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
@@ -624,7 +624,7 @@ def describe_page_and_state(
         response_format={"type": "json_object"},
     )
     token_tracker.record("page_describe_and_state", model, resp.usage)
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -686,7 +686,7 @@ def verify_same_node(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_verify", model, resp.usage)
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -739,7 +739,7 @@ def normalize_edge(
         response_format={"type": "json_object"},
     )
     token_tracker.record("normalize_edge", model, resp.usage)
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -876,7 +876,7 @@ def audit_merge_nodes(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_merge_audit", model, resp.usage)
-    raw = _strip_json_fences((resp.choices[0].message.content or "").strip())
+    raw = strip_json_fences((resp.choices[0].message.content or "").strip())
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -949,7 +949,7 @@ def select_exploration_target(
     )
     token_tracker.record("exploration_target", model, resp.usage)
 
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -994,7 +994,7 @@ def audit_graph(
     choice = resp.choices[0]
     finish_reason = getattr(choice, "finish_reason", "")
     raw_original = (choice.message.content or "").strip()
-    raw = _strip_json_fences(raw_original)
+    raw = strip_json_fences(raw_original)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -1123,7 +1123,7 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
             return parsed["arguments"]
         return parsed
 
-    inner = _strip_json_fences(inner)
+    inner = strip_json_fences(inner)
     try:
         parsed = json.loads(inner)
     except json.JSONDecodeError:
@@ -1327,7 +1327,7 @@ def plan_next_action(
     raw = _message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
-    raw_clean = _strip_json_fences(raw)
+    raw_clean = strip_json_fences(raw)
     try:
         result = json.loads(raw_clean)
         if isinstance(result, dict):
@@ -1390,7 +1390,7 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
         return tool_args, thought, action_desc
 
     # Fallback: try parsing whole response as JSON
-    raw_json = _strip_json_fences(raw)
+    raw_json = strip_json_fences(raw)
     try:
         parsed = json.loads(raw_json)
         if "arguments" in parsed:

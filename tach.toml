@@ -15,6 +15,14 @@ path = "android_app_graph"
 depends_on = ["android_app_graph.kobe"]
 
 [[modules]]
+path = "android_app_graph.adapters"
+depends_on = [
+    "android_app_graph.payloads",
+    "android_app_graph.utils",
+    "android_app_graph.utils.vlm_utils",
+]
+
+[[modules]]
 path = "android_app_graph.commands"
 depends_on = [
     "android_app_graph.cli",
