@@ -7,12 +7,13 @@ from importlib.metadata import entry_points
 
 import pytest
 
-from ui_kobe.commands import audit, plot
+from ui_kobe.commands import audit, embed, plot
 
 Main = Callable[[list[str] | None], int]
 
 COMMANDS: dict[str, Main] = {
     "kobe-audit": audit.main,
+    "kobe-embed": embed.main,
     "kobe-plot": plot.main,
 }
 
