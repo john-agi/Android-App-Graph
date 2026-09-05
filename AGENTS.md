@@ -112,6 +112,9 @@ style.
 - Mutation testing: mutmut (`uv run --locked --group mutation poe mutate`;
   `mutation` dependency group; not part of `poe check`; runs weekly in
   `.github/workflows/mutation.yml`; see "Mutation testing" below).
+- Tach: import direction between the modules of `src/ui_kobe/`, as declared in
+  `tach.toml`; `_architecture` (`tach check`), run by `check-fast` and therefore
+  by `check`.
 
 ## Policies
 
@@ -389,3 +392,18 @@ preview and may change; see https://docs.astral.sh/uv/concepts/preview/.
 - Never run `mutmut apply`; it writes mutations into real source files.
 - mutmut needs `fork`: Linux and macOS work; on Windows run inside WSL.
 - `mutants/` is a git-ignored local cache; delete it to force a complete rerun.
+
+## Architecture boundaries
+
+- `tach.toml` is the declared import direction for `src/ui_kobe/`;
+  `uv run --locked poe check-fast` (and so `poe check`, the pre-commit hook and
+  CI) runs `tach check` against it.
+- Never run `tach sync` (with or without `--add`) to make `tach check` pass. It
+  rewrites `tach.toml` from whatever the code currently imports, which defeats
+  the check.
+- When `tach check` fails, either fix the import or, if the dependency is
+  genuinely intended, edit `depends_on` by hand and state the architectural
+  justification in the pull request body. A pull request that touches
+  `tach.toml` without that justification is not mergeable.
+- `# tach-ignore(reason) name` is the only allowed suppression and must carry a
+  reason; `tach check` rejects directives without one.

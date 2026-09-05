@@ -55,6 +55,34 @@ the sections below). `configs/` holds example configuration.
 
 Generated graphs, logs, and outputs are intentionally ignored by git.
 
+### Module map
+
+Import direction inside `src/ui_kobe/` is enforced by `tach check` (part of
+`uv run --locked poe check-fast` and `poe check`) from `tach.toml`. Arrows point
+from importer to imported module; anything not drawn is forbidden.
+
+```mermaid
+graph TD;
+    pkg["ui_kobe"] --> kobe["ui_kobe.kobe"];
+    cmd["ui_kobe.commands"] --> cli["ui_kobe.cli"];
+    cmd --> dev["ui_kobe.device"];
+    cmd --> pay["ui_kobe.payloads"];
+    cmd --> utils["ui_kobe.utils"];
+    cmd --> gm["ui_kobe.utils.graph_manager"];
+    cmd --> logging["ui_kobe.utils.logging"];
+    cmd --> vlm["ui_kobe.utils.vlm_utils"];
+    cli --> dev;
+    cli --> kobe;
+    cli --> logging;
+    kobe --> dev;
+    kobe --> utils;
+    kobe --> gm;
+    kobe --> vlm;
+    gm --> pay;
+    gm --> vlm;
+    vlm --> pay;
+```
+
 ## Prerequisites
 
 - Python >= 3.14. `.python-version` pins `3.14`; uv downloads a managed
