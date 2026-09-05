@@ -6,7 +6,6 @@ Closes #
 
 ## Definition of done
 
-- [ ] The branch is `issue/<number>-<slug>` (with a `-<part>` suffix only for issues that explicitly allow several PRs) and the body names the issue with `Closes #` or `Part of #`
 - [ ] `uv run --locked poe check-fast` passed on every commit on the branch; `git commit --no-verify` was never used
 - [ ] `uv run --locked poe check` (the definition of done) passed locally on the final commit
 - [ ] No configuration was weakened to make a check pass: no rule removed, no threshold lowered, no `per-file-ignores` or `[tool.ruff.lint] ignore` entry beyond the ones `AGENTS.md` sanctions

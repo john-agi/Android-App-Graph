@@ -209,7 +209,9 @@ __marimo__/
 graphs/
 outputs/
 
-.claude/
+# Claude Code keeps per-user state here; only the shared skills symlink is tracked.
+.claude/*
+!.claude/skills
 
 logs/
 .venv/
