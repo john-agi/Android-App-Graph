@@ -28,11 +28,10 @@ UI-KOBE/
 ├── src/
 │   └── ui_kobe/                   # The installable package; the only directory in the wheel
 │       ├── cli.py                 # kobe-explore command
+│       ├── commands/              # kobe-audit, kobe-plot, kobe-embed
 │       ├── kobe.py                # Core app explorer
 │       └── utils/                 # Graph, VLM, and logging helpers
 ├── scripts/                       # Operator scripts, not packaged
-│   ├── audit_graph.py             # Optional graph audit utility
-│   ├── explore.py                 # Script entry point for exploration
 │   ├── plot_graph.py              # Graph visualization utility
 │   ├── precompute_graph_image_embeddings.py
 │   └── run_explore.sh             # Auto-resume wrapper
@@ -191,7 +190,7 @@ uv run python scripts/plot_graph.py graphs/<app_name>/<app_name>.json
 Run the graph audit utility:
 
 ```bash
-uv run python scripts/audit_graph.py -c configs/explore.yaml --app <app_name>
+uv run kobe-audit -c configs/explore.yaml --app <app_name>
 ```
 
 Precompute native Gemini image embeddings for a graph:
