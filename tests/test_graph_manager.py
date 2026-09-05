@@ -802,6 +802,23 @@ def test_merge_nodes_returns_false_when_a_node_is_missing() -> None:
     assert gm.graph.number_of_nodes() == 1
 
 
+def test_merge_nodes_is_a_no_op_when_both_ids_name_the_same_node() -> None:
+    """Regression for #48: a self-merge used to double visit_count, then delete."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", visit_count=3, state_schema={"tab": ["home"]})
+    add_screen(gm, "s1_search", "Search screen")
+    gm.add_edge("s1_search", "s0_home", {"action_type": "tap", "target": "Back"})
+
+    assert gm.merge_nodes("s0_home", "s0_home") is False
+
+    node = gm.get_node("s0_home")
+    assert node is not None
+    assert node["visit_count"] == 3
+    assert node["state_schema"] == {"tab": ["home"]}
+    assert "s0_home" in gm.graph
+    assert gm.graph.has_edge("s1_search", "s0_home")
+
+
 def test_merge_nodes_unions_activities_schemas_elements_and_visits() -> None:
     gm = make_manager()
     add_screen(
@@ -1703,6 +1720,26 @@ def test_run_node_merge_audit_skips_a_missing_node(monkeypatch: pytest.MonkeyPat
     assert result["results"][0]["reason"] == "node missing"
 
 
+def test_run_node_merge_audit_skips_a_self_pair(
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+) -> None:
+    """Regression for #48: an auditor naming one node twice used to delete it."""
+    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
+    monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_A, visit_count=3)
+
+    result = gm.run_node_merge_audit()
+
+    assert result["merged_count"] == 0
+    assert result["results"][0]["status"] == "skipped"
+    assert result["results"][0]["reason"] == "same node"
+    assert list(gm.graph.nodes) == ["s0_home"]
+    assert gm.graph.nodes["s0_home"]["visit_count"] == 3
+    # The pair is dropped before the verifier is consulted.
+    assert vlm.kinds() == []
+
+
 def test_run_node_merge_audit_skips_a_missing_screenshot(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
 ) -> None:
@@ -1941,7 +1978,7 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
         for kind, a, b, text in ops:
             if kind == "edge" and a in gm.graph and b in gm.graph:
                 gm.add_edge(a, b, {"action_type": "tap", "target": text})
-            elif kind == "merge" and a != b:  # merge_nodes(x, x) deletes the node: see #48
+            elif kind == "merge":
                 merged = gm.merge_nodes(a, b)
                 if merged:
                     assert a in gm.graph

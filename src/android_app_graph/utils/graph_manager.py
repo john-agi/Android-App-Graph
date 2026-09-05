@@ -521,10 +521,17 @@ class GraphManager:
         - The kept node retains its description, screenshot, and embedding.
         - The removed node is deleted from the graph.
 
-        Returns True if the merge was performed, False if either node is missing.
+        Returns True if the merge was performed, False if either node is missing
+        or if *keep_id* and *remove_id* name the same node.
         """
         if keep_id not in self.graph or remove_id not in self.graph:
             logger.warning("merge_nodes: missing node(s) — keep=%s, remove=%s", keep_id, remove_id)
+            return False
+
+        if keep_id == remove_id:
+            # Merging a node into itself would double its visit count and then
+            # delete it, taking its edges with it.  Nothing to merge.
+            logger.warning("merge_nodes: refusing to merge node %s into itself", keep_id)
             return False
 
         keep_data = self.graph.nodes[keep_id]
@@ -1529,6 +1536,20 @@ class GraphManager:
                         "issue": issue,
                         "status": "skipped",
                         "reason": "node missing",
+                    }
+                )
+                continue
+
+            # The auditor can name the same node twice.  Verifying it against
+            # its own screenshot would always say "same", so skip the pair
+            # before spending a VLM call on it.
+            if node_a == node_b:
+                logger.warning("Skipping merge candidate %s + itself", node_a)
+                results.append(
+                    {
+                        "issue": issue,
+                        "status": "skipped",
+                        "reason": "same node",
                     }
                 )
                 continue
