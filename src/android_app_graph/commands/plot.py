@@ -656,7 +656,7 @@ def plot_pyvis(
         tooltip = f"Visits: {visits}<br>Action sequences: {n_actions}<br>{label}"
         short_label = _shorten_edge_label(label, max_edge_words, 54)
 
-        # Vary curvature for parallel edges
+        # Parallel edges get different curvatures so they stay distinguishable.
         pair = (min(src, tgt), max(src, tgt))
         edge_counts[pair] += 1
         roundness = 0.15 + (edge_counts[pair] - 1) * 0.15

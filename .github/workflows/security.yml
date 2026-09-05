@@ -1,34 +1,15 @@
-# Dependency security: `uv audit` plus uv's on-sync OSV malware check.
+# Deliberately outside `poe check` and not a required status check: it needs
+# network access to OSV, its result changes as advisories are published, and a
+# path-filtered required check would block every PR that does not touch
+# dependencies.
 #
-# Policy (the same text lives in AGENTS.md, section "Dependency security"):
-# - Pull requests that change pyproject.toml, uv.lock or this file: a red
-#   run is blocking. Fix the dependency (uv lock --upgrade-package <name>)
-#   or record a reviewed exception in [tool.uv.audit] with a comment and a
-#   linked issue before merging. Reviewers do not merge over a red run.
-# - Scheduled and manual runs: a red run means a new advisory against a
-#   locked dependency, or OSV was unreachable. Triage it the same day.
-#   Never silence it by disabling the workflow, this job, or the check.
-# - If the only error is "Malware check failed due to an error from OSV"
-#   (uv sync exits 2) or a network error from `uv audit`, rerun the job:
-#   gh run rerun <run-id>. Do not set UV_MALWARE_CHECK=0 to get green.
-# - This workflow is deliberately not part of `poe check` and not a
-#   required status check: it needs network access to OSV, its result
-#   changes as advisories are published, and a path-filtered required
-#   check would block every PR that does not touch dependencies.
-#
-# Both uv features are preview (https://docs.astral.sh/uv/concepts/preview/):
-# `uv audit` is the "audit-command" preview feature and the malware check is
-# the "malware-check" preview feature, enabled by UV_MALWARE_CHECK=1
-# (https://docs.astral.sh/uv/concepts/projects/sync/#malware-checks).
-# The checkout, setup-uv and Python steps below are byte-for-byte copies of
-# the ones in ci.yml: uv is pinned to the [tool.uv] required-version range,
-# passed to setup-uv as `version:`. Preview features are exempt from uv's
-# stability promise, so a patch release inside the range can still change
-# them; whenever a new uv release changes these preview features, re-read
-# its release notes and this file. A green run proves the malware check ran
-# only if the sync step's log contains "Malware checks are experimental";
-# the "experimental" warnings both steps print are expected and are left
-# visible on purpose.
+# `uv audit` and the malware check (UV_MALWARE_CHECK=1) are uv preview
+# features (https://docs.astral.sh/uv/concepts/preview/), exempt from uv's
+# stability promise, so a patch release inside the required-version range can
+# change them. A green run proves the malware check ran only if the sync step's
+# log contains "Malware checks are experimental"; the "experimental" warnings
+# both steps print are expected.
+# The checkout, setup-uv and Python steps are byte-for-byte copies of ci.yml.
 name: Security
 
 on:
