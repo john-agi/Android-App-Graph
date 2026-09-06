@@ -744,9 +744,9 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Rewriting the sidecar after every computed node is O(N^2) for a cold
-    cache; it must be written once, after the whole node loop, inside a
-    try/finally so a node whose embedding call fails persistently still
-    leaves the nodes computed around it persisted and the graph still loads.
+    cache; it must be written once, after the whole node loop, so a node whose
+    embedding call fails persistently still leaves the nodes computed around
+    it persisted and the graph still loads.
     """
     path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}])
     screenshots = path.parent / "demo_screenshots"
@@ -781,6 +781,37 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     assert len(save_calls) == 1
     assert save_calls[0] == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
     assert embedding_cache.load_image_embeddings(path) == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_load_all_graphs_survives_a_sidecar_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cache write failure is a cache failure, never a reason to drop a graph
+    that loaded and computed its embeddings fine: the graph stays registered
+    with the freshly computed vectors on its nodes, and only the write is logged.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}])
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(b"shot-n1")
+
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+    )
+
+    def _raise_permission_error(_graph_file: Path, _embeddings: dict[str, list[float]]) -> None:
+        msg = "Permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(aitk_translator, "save_image_embeddings", _raise_permission_error)
+
+    with caplog.at_level("ERROR"):
+        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert set(built._graphs) == {"demo"}
+    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [1.0, 0.0]
+    assert "demo" in caplog.text
 
 
 @pytest.mark.parametrize(

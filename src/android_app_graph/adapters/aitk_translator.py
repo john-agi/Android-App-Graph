@@ -611,39 +611,39 @@ class UIKobeV2Translator(BaseTranslator):
     ) -> None:
         """Compute an image embedding for every node with a screenshot but no cached vector.
 
-        The sidecar is written once, after the whole loop, inside ``finally``:
-        rewriting it after every node is O(N^2) for a cold cache, but a single
-        write at the end must not cost the nodes computed before a later one's
-        embedding call fails persistently — they are still in ``finally``'s snapshot.
+        The sidecar is written once, after the whole loop, since rewriting it after
+        every node is O(N^2) for a cold cache; a failed write is logged and never
+        propagated, since a cache write failure must not drop a graph that loaded
+        and computed its embeddings fine.
         """
         updated_image_cache = False
-        try:
-            for node_id, data in G.nodes(data=True):
-                if data.get("image_embedding") or not data.get("reference_screenshot"):
-                    continue
-                try:
-                    started = time.perf_counter()
-                    data["image_embedding"] = self._compute_runtime_image_embedding_with_retry(
-                        data["reference_screenshot"],
-                        app_name,
-                        node_id,
-                    )
-                    updated_image_cache = True
-                    logger.info(
-                        "[GRAPH] %s/%s: computed image embedding in %.1fs",
-                        app_name,
-                        node_id,
-                        time.perf_counter() - started,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Runtime image embedding failed for graph %s node %s after retries; "
-                        "continuing without this node embedding.",
-                        app_name,
-                        node_id,
-                    )
-        finally:
-            if updated_image_cache:
+        for node_id, data in G.nodes(data=True):
+            if data.get("image_embedding") or not data.get("reference_screenshot"):
+                continue
+            try:
+                started = time.perf_counter()
+                data["image_embedding"] = self._compute_runtime_image_embedding_with_retry(
+                    data["reference_screenshot"],
+                    app_name,
+                    node_id,
+                )
+                updated_image_cache = True
+                logger.info(
+                    "[GRAPH] %s/%s: computed image embedding in %.1fs",
+                    app_name,
+                    node_id,
+                    time.perf_counter() - started,
+                )
+            except Exception:
+                logger.exception(
+                    "Runtime image embedding failed for graph %s node %s after retries; "
+                    "continuing without this node embedding.",
+                    app_name,
+                    node_id,
+                )
+
+        if updated_image_cache:
+            try:
                 save_image_embeddings(
                     graph_file,
                     {
@@ -653,6 +653,12 @@ class UIKobeV2Translator(BaseTranslator):
                     },
                 )
                 logger.info("[GRAPH] %s: image embedding cache updated", app_name)
+            except OSError:
+                logger.exception(
+                    "Failed to write image embedding cache for graph %s at %s",
+                    app_name,
+                    graph_file,
+                )
 
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
