@@ -48,9 +48,10 @@ def _no_network() -> Iterator[None]:
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record retry back-off delays instead of waiting for them.
 
-    Every production module that retries with a back-off (adapters.aitk_translator,
-    commands.embed, commands.audit) does ``import time`` and calls ``time.sleep(...)``,
-    so patching the shared stdlib module here covers all of them.
+    The retry-with-backoff policy (android_app_graph.retrying, used by
+    adapters.aitk_translator and embedding_cache) does ``import time`` and calls
+    ``time.sleep(...)``, so patching the shared stdlib module here covers every
+    caller of it without a per-caller fixture.
     """
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
