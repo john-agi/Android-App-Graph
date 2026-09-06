@@ -65,6 +65,69 @@ def test_load_image_embeddings_drops_a_vector_for_a_node_not_in_node_ids(
     assert "dropping 1 vector" in caplog.text
 
 
+def test_load_image_embeddings_writes_the_pruned_cache_back_immediately(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The prune must not wait for a compute loop's ``finally`` to persist it:
+    on a fully cached graph nothing is computed, so a prune that only the
+    compute loop wrote back would never reach disk, and every later run --
+    every startup, every ``app-graph-embed`` invocation -- would drop and
+    re-log the same stale id forever instead of once.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.save_image_embeddings(
+        graph_path, {"n1": [0.1, 0.2], "gone": [0.3, 0.4]}, model="gemini-embedding-2"
+    )
+
+    with caplog.at_level("INFO"):
+        result = embedding_cache.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"n1"}
+        )
+    assert result == {"n1": [0.1, 0.2]}
+
+    sidecar = json.loads(
+        embedding_cache.image_embeddings_path(graph_path).read_text(encoding="utf-8")
+    )
+    assert sidecar == {"model": "gemini-embedding-2", "embeddings": {"n1": [0.1, 0.2]}}
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        second = embedding_cache.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"n1"}
+        )
+    assert second == {"n1": [0.1, 0.2]}
+    assert "dropping" not in caplog.text
+
+
+def test_load_image_embeddings_logs_a_failed_prune_write_and_still_returns_the_pruned_dict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed cache write is a cache failure, never a reason to drop what
+    was already loaded fine: the same boundary compute_missing_image_embeddings
+    uses for its own failed cache write (catch OSError, log it).
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.save_image_embeddings(
+        graph_path, {"n1": [0.1, 0.2], "gone": [0.3, 0.4]}, model="gemini-embedding-2"
+    )
+
+    def _raise_permission_error(
+        _graph_path: Path, _embeddings: dict[str, list[float]], **_kwargs: object
+    ) -> None:
+        msg = "Permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(embedding_cache, "save_image_embeddings", _raise_permission_error)
+
+    with caplog.at_level("ERROR"):
+        result = embedding_cache.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"n1"}
+        )
+
+    assert result == {"n1": [0.1, 0.2]}
+    assert "demo.image_emb.json" in caplog.text
+
+
 def test_load_image_embeddings_returns_empty_for_a_different_model(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

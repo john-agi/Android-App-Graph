@@ -104,6 +104,15 @@ def load_image_embeddings(
     vanished from the graph since it was cached must not survive the rewrite
     in either one. Required, not defaulted, so a caller cannot forget to pass
     the graph's current node ids and silently keep every stale entry forever.
+
+    A prune is written straight back to the sidecar here, rather than left
+    for a caller's later compute loop to persist: on a fully cached graph
+    nothing is computed, so a caller that only writes after computing would
+    never persist the prune, and this same "dropping" line would fire again
+    on every future load instead of once. A failed write here is logged and
+    swallowed, the same boundary ``compute_missing_image_embeddings`` uses
+    for its own cache write, since a write failure must not undo a load that
+    otherwise succeeded.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():
@@ -162,6 +171,17 @@ def load_image_embeddings(
         )
         for node_id in stale_ids:
             del embeddings[node_id]
+        # Written back here, not left for the compute loop's own write: on a fully
+        # cached graph nothing is computed, so a prune that only the compute loop
+        # persisted would never reach disk, and this same "dropping" line would
+        # repeat on every future load instead of firing once. A failed write is
+        # the same boundary compute_missing_image_embeddings uses for its own
+        # cache write: caught, logged, and no reason to return anything but the
+        # pruned dict this call already has in memory.
+        try:
+            save_image_embeddings(graph_path, embeddings, model=model)
+        except OSError:
+            logger.exception("Failed to write pruned image embedding cache to %s", emb_path)
     return embeddings
 
 
