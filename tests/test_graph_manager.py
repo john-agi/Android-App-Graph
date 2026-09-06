@@ -1705,15 +1705,10 @@ def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: 
     assert list(gm.graph.nodes) == ["s9_stale"]
 
 
-def test_load_graph_still_raises_a_bare_key_error_for_a_node_without_an_id(
-    tmp_path: Path,
-) -> None:
-    """Documents pre-existing behaviour on main, left unchanged here: load_graph
-    indexes ``node_data["id"]`` directly, so a node missing it still raises a
-    bare KeyError, now from that line instead of from
-    require_known_edge_endpoints -- fixing the latter's bare KeyError (see
-    graph_files.require_known_edge_endpoints) does not give this loader a
-    path-bearing error of its own.
+def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path) -> None:
+    """A node missing "id" must surface as this loader's own path-bearing error,
+    the same invariant the runtime loader gives, not a bare KeyError('id') from
+    indexing the node dict.
     """
     path = tmp_path / "graph.json"
     path.write_text(
@@ -1721,8 +1716,9 @@ def test_load_graph_still_raises_a_bare_key_error_for_a_node_without_an_id(
     )
     gm = make_manager()
 
-    with pytest.raises(KeyError, match="id"):
+    with pytest.raises(TypeError, match="node id is missing") as excinfo:
         gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
 
 
 def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:

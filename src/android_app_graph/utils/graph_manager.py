@@ -1229,7 +1229,9 @@ class GraphManager:
         self.graph.clear()
 
         for node_data in data.get("nodes", []):
-            node_id = node_data["id"]
+            node_id = node_data.get("id")
+            if node_id is None:
+                raise TypeError(f"Graph node id is missing: {node_data!r} in {path}")
             # Prefer companion file; fall back to inline (backwards compat)
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             # Backwards compat: old graphs have "activity" only, new ones have "activities" list
