@@ -395,3 +395,21 @@ def test_resolve_image_embedding_settings_falls_back_for_an_unresolved_or_non_go
         {}, base_url_override="${GEMINI_BASE_URL}"
     )
     assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+
+
+def test_load_image_embeddings_keeps_a_legacy_node_named_model(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The tagged form is recognised by a string tag plus an embeddings object,
+    not by the presence of a "model" key alone: a legacy bare dict may hold a
+    node called "model", and that node's vector must load, not be misread as
+    a mismatched tag that empties the cache.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.image_embeddings_path(graph_path).write_text(
+        json.dumps({"model": [1.0, 0.0], "n1": [0.0, 1.0]}), encoding="utf-8"
+    )
+    with caplog.at_level("INFO"):
+        loaded = embedding_cache.load_image_embeddings(graph_path, model="img-model")
+    assert loaded == {"model": [1.0, 0.0], "n1": [0.0, 1.0]}
+    assert "predates model tagging" in caplog.text

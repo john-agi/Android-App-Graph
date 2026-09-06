@@ -111,8 +111,10 @@ def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[flo
         )
         return {}
 
-    if "model" in raw:
-        sidecar_model = raw.get("model")
+    sidecar_model = raw.get("model")
+    # A legacy bare dict may hold a node called "model", so the tagged form is
+    # recognised by its shape (string tag plus an embeddings object), not by the key.
+    if isinstance(sidecar_model, str) and isinstance(raw.get("embeddings"), dict):
         if sidecar_model != model:
             logger.warning(
                 "Image embedding cache %s was written by model %r, not the current model %r; "
