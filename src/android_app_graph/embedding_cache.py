@@ -9,6 +9,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 from android_app_graph.payloads import as_float_list, as_str_dict
@@ -59,9 +61,21 @@ def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
 
 
 def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) -> None:
-    """Write ``embeddings`` to the graph's sidecar file."""
-    with image_embeddings_path(graph_path).open("w", encoding="utf-8") as f:
-        json.dump(embeddings, f, ensure_ascii=False)
+    """Write ``embeddings`` to the graph's sidecar file.
+
+    Dumped to a temporary file in the same directory and moved into place with
+    ``os.replace``, so a crash mid-dump leaves the sidecar as either the
+    previous complete file or the new one -- never a truncated mix of both.
+    """
+    target = image_embeddings_path(graph_path)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(embeddings, f, ensure_ascii=False)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    os.replace(tmp_name, target)
 
 
 def compute_embedding_with_retry(

@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pytest
 
@@ -28,6 +28,32 @@ def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
     assert embedding_cache.load_image_embeddings(graph_path) == {}
     embedding_cache.save_image_embeddings(graph_path, {"n1": [0.5, 0.25]})
     assert embedding_cache.load_image_embeddings(graph_path) == {"n1": [0.5, 0.25]}
+
+
+def test_save_image_embeddings_is_atomic_on_a_failed_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-dump must leave the sidecar as either the previous complete
+    file or the new complete file, never a truncated mix of the two, and must
+    not leave a stray temporary file behind.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0, 2.0]})
+    sidecar = embedding_cache.image_embeddings_path(graph_path)
+    original = sidecar.read_text(encoding="utf-8")
+
+    def _dump_then_blow_up(_obj: object, fp: IO[str], **_kwargs: object) -> None:
+        fp.write('{"n9": [0.0')  # a partial write, as a real crash mid-dump would leave
+        msg = "boom"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(embedding_cache.json, "dump", _dump_then_blow_up)
+
+    with pytest.raises(ValueError, match="boom"):
+        embedding_cache.save_image_embeddings(graph_path, {"n1": [9.9]})
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert list(tmp_path.iterdir()) == [sidecar]
 
 
 def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:

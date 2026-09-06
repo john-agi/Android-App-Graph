@@ -21,6 +21,10 @@ _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
 
 
+class _Interrupted(BaseException):
+    """Stand-in for KeyboardInterrupt/SystemExit that stays clear of pytest's own."""
+
+
 def _write_graph(
     tmp_path: Path,
     *,
@@ -794,6 +798,39 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     assert len(save_calls) == 1
     assert save_calls[0] == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
     assert embedding_cache.load_image_embeddings(path) == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeyboardInterrupt/SystemExit partway through the node loop must not discard
+    the embeddings computed before it -- those are paid API calls. The node loop
+    runs inside a ``finally`` so whatever was computed is written to the sidecar
+    before the interrupt keeps propagating, and it does keep propagating: this
+    is not a reason to drop or swallow it.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}])
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    shots = {node_id: f"shot-{node_id}".encode() for node_id in ("n1", "n2", "n3")}
+    for node_id, data in shots.items():
+        (screenshots / f"{node_id}.png").write_bytes(data)
+    b64_by_node = {
+        node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
+    }
+
+    def _interrupted_at_n3(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+        if screenshot_b64 == b64_by_node["n3"]:
+            raise _Interrupted
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _interrupted_at_n3)
+
+    with pytest.raises(_Interrupted):
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert embedding_cache.load_image_embeddings(path) == {"n1": [1.0, 0.0], "n2": [1.0, 0.0]}
 
 
 @pytest.mark.usefixtures("no_sleep")

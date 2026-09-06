@@ -610,53 +610,57 @@ class UIKobeV2Translator(BaseTranslator):
         """Compute an image embedding for every node with a screenshot but no cached vector.
 
         The sidecar is written once, after the whole loop, since rewriting it after
-        every node is O(N^2) for a cold cache; a failed write is logged and never
-        propagated, since a cache write failure must not drop a graph that loaded
-        and computed its embeddings fine.
+        every node is O(N^2) for a cold cache. The write runs in a ``finally`` so a
+        ``KeyboardInterrupt`` or ``SystemExit`` partway through the loop still
+        persists every embedding computed before it -- those are paid API calls,
+        and the interrupt itself keeps propagating. A failed write is caught as
+        ``OSError`` and only logged, since a cache write failure must not drop a
+        graph that loaded and computed its embeddings fine.
         """
         updated_image_cache = False
-        for node_id, data in G.nodes(data=True):
-            if data.get("image_embedding") or not data.get("reference_screenshot"):
-                continue
-            try:
-                started = time.perf_counter()
-                data["image_embedding"] = self._compute_runtime_image_embedding_with_retry(
-                    data["reference_screenshot"],
-                    app_name,
-                    node_id,
-                )
-                updated_image_cache = True
-                logger.info(
-                    "[GRAPH] %s/%s: computed image embedding in %.1fs",
-                    app_name,
-                    node_id,
-                    time.perf_counter() - started,
-                )
-            except Exception:
-                logger.exception(
-                    "Runtime image embedding failed for graph %s node %s after retries; "
-                    "continuing without this node embedding.",
-                    app_name,
-                    node_id,
-                )
-
-        if updated_image_cache:
-            try:
-                save_image_embeddings(
-                    graph_file,
-                    {
-                        nid: ndata["image_embedding"]
-                        for nid, ndata in G.nodes(data=True)
-                        if ndata.get("image_embedding")
-                    },
-                )
-                logger.info("[GRAPH] %s: image embedding cache updated", app_name)
-            except OSError:
-                logger.exception(
-                    "Failed to write image embedding cache for graph %s at %s",
-                    app_name,
-                    graph_file,
-                )
+        try:
+            for node_id, data in G.nodes(data=True):
+                if data.get("image_embedding") or not data.get("reference_screenshot"):
+                    continue
+                try:
+                    started = time.perf_counter()
+                    data["image_embedding"] = self._compute_runtime_image_embedding_with_retry(
+                        data["reference_screenshot"],
+                        app_name,
+                        node_id,
+                    )
+                    updated_image_cache = True
+                    logger.info(
+                        "[GRAPH] %s/%s: computed image embedding in %.1fs",
+                        app_name,
+                        node_id,
+                        time.perf_counter() - started,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Runtime image embedding failed for graph %s node %s after retries; "
+                        "continuing without this node embedding.",
+                        app_name,
+                        node_id,
+                    )
+        finally:
+            if updated_image_cache:
+                try:
+                    save_image_embeddings(
+                        graph_file,
+                        {
+                            nid: ndata["image_embedding"]
+                            for nid, ndata in G.nodes(data=True)
+                            if ndata.get("image_embedding")
+                        },
+                    )
+                    logger.info("[GRAPH] %s: image embedding cache updated", app_name)
+                except OSError:
+                    logger.exception(
+                        "Failed to write image embedding cache for graph %s at %s",
+                        app_name,
+                        graph_file,
+                    )
 
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
