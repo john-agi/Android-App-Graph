@@ -30,7 +30,9 @@ def test_write_json_atomically_fsyncs_the_temp_file_before_the_replace(
     """The "either the previous complete file or the new one" guarantee only
     survives a power loss, not just a process crash, if the temp file's data
     reached disk before the rename -- os.fsync must run once, on the temp
-    file's own descriptor, before os.replace runs.
+    file's own descriptor, before os.replace runs -- and if the rename itself
+    reached disk too, which needs a second os.fsync, on the containing
+    directory's descriptor, after os.replace runs.
     """
     path = tmp_path / "data.json"
     calls: list[str] = []
@@ -63,7 +65,7 @@ def test_write_json_atomically_fsyncs_the_temp_file_before_the_replace(
 
     graph_files.write_json_atomically(path, {"n1": [1.0]})
 
-    assert calls == ["fsync", "replace"]
+    assert calls == ["fsync", "replace", "fsync"]
     assert fsynced_fds == opened_fds
 
 

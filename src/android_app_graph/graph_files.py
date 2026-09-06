@@ -52,6 +52,12 @@ def write_json_atomically(
     file and the replace happen next to that file: ``os.replace`` over a
     symlink replaces the link itself, leaving whatever it pointed to
     untouched and turning ``path`` into a plain file.
+
+    The rename itself is fsync'd too, on the containing directory's own
+    descriptor after ``os.replace`` returns: a file-only fsync guarantees the
+    new content reached disk, but not that the directory entry now pointing
+    at it did, so without this a power loss right after the rename could
+    still resurrect the old file.
     """
     if path.is_symlink():
         path = path.resolve()
@@ -78,6 +84,11 @@ def write_json_atomically(
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
