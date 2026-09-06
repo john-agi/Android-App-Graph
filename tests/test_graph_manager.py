@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -767,6 +768,31 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
     assert data["instructions"] == ["sort by price"]
     assert data["target_observations"] == ["sorted by price"]
     assert data["schema_deltas"] == [{"sort": {"after": "price"}}]
+
+
+def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression for #62: a typo'd endpoint used to become an attribute-less node."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+
+    with caplog.at_level(logging.WARNING, logger=gm_module.__name__):
+        gm.add_edge("s0_home", "s0_hmoe", {"action_type": "tap", "target": "Settings"})
+        gm.add_edge("s9_missing", "s0_home", {"action_type": "tap", "target": "Back"})
+
+    assert list(gm.graph.nodes) == ["s0_home"]
+    assert gm.graph.number_of_edges() == 0
+    assert caplog.text.count("add_edge: missing node(s)") == 2
+
+
+def test_add_edge_ignores_a_self_loop_on_an_unknown_node() -> None:
+    """The self-loop branch must not create the node it loops on either."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+
+    gm.add_edge("s9_missing", "s9_missing", {"action_type": "tap", "target": "Sort"})
+
+    assert list(gm.graph.nodes) == ["s0_home"]
+    assert gm.graph.number_of_edges() == 0
 
 
 def test_merge_nodes_returns_false_when_a_node_is_missing() -> None:
@@ -1552,6 +1578,27 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     assert list(target.graph.nodes) == ["s0_home"]
 
 
+def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
+    """Regression for #62: such an edge used to grow a phantom node on load."""
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}],
+                "edges": [{"source": "s0_home", "target": "s1_missing", "actions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+    add_screen(gm, "s9_stale", "Stale screen")
+
+    with pytest.raises(ValueError, match="s1_missing"):
+        gm.load_graph(path)
+
+    assert list(gm.graph.nodes) == ["s9_stale"]
+
+
 def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -1934,7 +1981,7 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(gm_module, "get_embedding", fake_get_embedding)
         for kind, a, b, text in ops:
-            if kind == "edge" and a in gm.graph and b in gm.graph:
+            if kind == "edge":
                 gm.add_edge(a, b, {"action_type": "tap", "target": text})
             elif kind == "merge":
                 merged = gm.merge_nodes(a, b)
