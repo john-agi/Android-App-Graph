@@ -924,14 +924,14 @@ def test_load_all_graphs_opens_no_screenshot_when_the_sidecar_covers_every_node(
     )
 
     calls = 0
-    original_encode = aitk_translator.encode_screenshot_b64
+    original_encode = embedding_cache.encode_screenshot_b64
 
     def counting_encode(screenshot_path: Path) -> str:
         nonlocal calls
         calls += 1
         return original_encode(screenshot_path)
 
-    monkeypatch.setattr(aitk_translator, "encode_screenshot_b64", counting_encode)
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", counting_encode)
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -954,14 +954,14 @@ def test_load_all_graphs_streams_screenshot_reads_lazily(
         (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
 
     reads_so_far = 0
-    original_encode = aitk_translator.encode_screenshot_b64
+    original_encode = embedding_cache.encode_screenshot_b64
 
     def counting_encode(screenshot_path: Path) -> str:
         nonlocal reads_so_far
         reads_so_far += 1
         return original_encode(screenshot_path)
 
-    monkeypatch.setattr(aitk_translator, "encode_screenshot_b64", counting_encode)
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", counting_encode)
 
     reads_at_call: list[int] = []
 

@@ -15,7 +15,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from android_app_graph.graph_files import write_json_atomically
+from android_app_graph.graph_files import encode_screenshot_b64, write_json_atomically
 from android_app_graph.payloads import as_float_list, as_str_dict
 from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import resolve_env
@@ -210,7 +210,6 @@ def iter_screenshot_candidates(
     pending: Iterable[tuple[str, Path]],
     *,
     app_name: str,
-    encode: Callable[[Path], str],
     on_failed: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Encode each pending node's screenshot lazily, one at a time.
@@ -228,13 +227,11 @@ def iter_screenshot_candidates(
     ``except``, so an uncaught ``OSError`` here would abort the whole run --
     every remaining node and every remaining app -- rather than skip one
     node. Caught and logged here instead, a boundary this generator forms on
-    behalf of its caller. ``encode`` is taken as a parameter, not imported
-    directly, so each caller's own module-level name stays the one tests
-    monkeypatch.
+    behalf of its caller.
     """
     for node_id, screenshot_path in pending:
         try:
-            screenshot_b64 = encode(screenshot_path)
+            screenshot_b64 = encode_screenshot_b64(screenshot_path)
         except OSError:
             logger.exception(
                 "[GRAPH] %s/%s: reference screenshot could not be read; skipping",

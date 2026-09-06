@@ -50,7 +50,6 @@ from android_app_graph.embedding_cache import (
     resolve_image_embedding_settings,
 )
 from android_app_graph.graph_files import (
-    encode_screenshot_b64,
     iter_graph_files,
     reference_screenshot_path,
     require_known_edge_endpoints,
@@ -688,9 +687,7 @@ class UIKobeV2Translator(BaseTranslator):
         # Encoded lazily, one screenshot at a time, the same as offline
         # precomputation: at most one base64 payload resident, never every
         # uncached node's at once.
-        candidates = iter_screenshot_candidates(
-            pending, app_name=app_name, encode=encode_screenshot_b64
-        )
+        candidates = iter_screenshot_candidates(pending, app_name=app_name)
         compute_missing_image_embeddings(
             graph_file,
             embeddings,

@@ -454,7 +454,7 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
     for node_id in ("n1", "n2", "n3"):
         (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
 
-    original_encode = embed.encode_screenshot_b64
+    original_encode = embedding_cache.encode_screenshot_b64
 
     def flaky_encode(path: Path) -> str:
         if path.stem == "n2":
@@ -463,7 +463,7 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
             raise OSError(msg)
         return original_encode(path)
 
-    monkeypatch.setattr(embed, "encode_screenshot_b64", flaky_encode)
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", flaky_encode)
     monkeypatch.setattr(
         embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
     )
@@ -585,14 +585,14 @@ def test_precompute_streams_screenshot_reads_lazily(
         (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
 
     reads_so_far = 0
-    original_encode = embed.encode_screenshot_b64
+    original_encode = embedding_cache.encode_screenshot_b64
 
     def counting_encode(path: Path) -> str:
         nonlocal reads_so_far
         reads_so_far += 1
         return original_encode(path)
 
-    monkeypatch.setattr(embed, "encode_screenshot_b64", counting_encode)
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", counting_encode)
 
     reads_at_call: list[int] = []
 
@@ -626,14 +626,14 @@ def test_precompute_never_reads_an_already_cached_screenshot(
     screenshot_file.mkdir()
 
     reads = 0
-    original_encode = embed.encode_screenshot_b64
+    original_encode = embedding_cache.encode_screenshot_b64
 
     def counting_encode(path: Path) -> str:
         nonlocal reads
         reads += 1
         return original_encode(path)
 
-    monkeypatch.setattr(embed, "encode_screenshot_b64", counting_encode)
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", counting_encode)
 
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 1

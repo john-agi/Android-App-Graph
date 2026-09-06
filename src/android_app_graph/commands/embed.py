@@ -22,11 +22,7 @@ from android_app_graph.embedding_cache import (
     resolve_image_embedding_settings,
     save_image_embeddings,
 )
-from android_app_graph.graph_files import (
-    encode_screenshot_b64,
-    iter_graph_files,
-    reference_screenshot_path,
-)
+from android_app_graph.graph_files import iter_graph_files, reference_screenshot_path
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -52,9 +48,7 @@ def _pending_candidates(
     def _count_failed(_node_id: str) -> None:
         summary["skipped_failed"] += 1
 
-    yield from iter_screenshot_candidates(
-        pending, app_name=app_name, encode=encode_screenshot_b64, on_failed=_count_failed
-    )
+    yield from iter_screenshot_candidates(pending, app_name=app_name, on_failed=_count_failed)
 
 
 def precompute_graph_image_embeddings(
@@ -79,19 +73,12 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
-        # A model switch, or a sidecar that predates model tagging, is now
-        # detected automatically (load_image_embeddings returns {} for either),
-        # so --recompute is only needed for what that cannot cover: a
-        # hand-edited sidecar or a deliberate refresh. Either way it discards
-        # the existing sidecar up
-        # front, through the same save_image_embeddings writer every other
-        # sidecar write goes through -- unlink() on a symlinked sidecar only
-        # detaches the link, leaving the shared target it points at untouched,
-        # so the rebuilt vectors would land in a fresh plain file shadowing
-        # the stale target instead of replacing it. Writing an empty tagged
-        # payload also means a run where every call then fails still leaves
-        # the sidecar discarded, since it is otherwise only rewritten when at
-        # least one vector succeeds.
+        # --recompute discards the sidecar by writing an empty tagged payload
+        # through the same writer as every other sidecar write, not by unlinking
+        # it: unlink() on a symlinked sidecar detaches the link and leaves the
+        # shared target it points at stale. Writing it up front also keeps the
+        # discard when every call afterwards fails, since the loop only rewrites
+        # the sidecar once a vector succeeds.
         node_ids = {node.get("id") for node in graph_data.get("nodes", []) if node.get("id")}
 
         embeddings: dict[str, list[float]]
