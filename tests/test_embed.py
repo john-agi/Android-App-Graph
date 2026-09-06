@@ -345,6 +345,48 @@ def test_precompute_keeps_going_when_a_node_fails(
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``reference_screenshot_path`` saw the file, but by the time the lazy
+    generator encodes it the file may be unreadable or gone. That ``OSError``
+    must be caught per candidate inside the generator, not propagate out of
+    the ``for`` line in ``compute_missing_image_embeddings`` -- outside its own
+    per-node ``except`` -- and abort every remaining node and app.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    graph_path.write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+
+    original_encode = embed.encode_screenshot_b64
+
+    def flaky_encode(path: Path) -> str:
+        if path.stem == "n2":
+            path.unlink()
+            msg = "screenshot vanished"
+            raise OSError(msg)
+        return original_encode(path)
+
+    monkeypatch.setattr(embed, "encode_screenshot_b64", flaky_encode)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+    )
+
+    summary = _precompute(tmp_path)
+
+    assert summary["computed"] == 2
+    assert summary["skipped_failed"] == 1
+    assert embed.load_image_embeddings(graph_path) == {"n1": [0.1, 0.2], "n3": [0.1, 0.2]}
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
