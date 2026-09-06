@@ -351,6 +351,11 @@ that old copy imports a private helper name that no longer exists, so it
 fails to import after the `uv pip install` upgrade until the shim is
 re-copied once.
 
+`UIKobeV2Translator` also no longer accepts a `history_window` constructor
+argument, so a `controller.yaml` upgraded from an older release must drop
+`translator_args.history_window`, or AITK's `register()` call fails with a
+`TypeError`.
+
 ## Use Android-App-Graph with Android World
 
 Android World is not published on PyPI and, at commit
