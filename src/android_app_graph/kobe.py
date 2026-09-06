@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from android_app_graph.device import DeviceController, soft_keyboard_hint
+from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
 from android_app_graph.utils import make_client
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
@@ -368,14 +368,7 @@ class Kobe:
 
                 # Check before planning so the planner can choose type vs tap.
                 keyboard_hint = soft_keyboard_hint()
-                input_status = (
-                    "Soft keyboard is visible; a text field is focused and ready for typing."
-                    if keyboard_hint
-                    else (
-                        "No OS keyboard signal detected. Still inspect the screenshot: "
-                        "a bottom input/keyboard bar can mean a text field is active."
-                    )
-                )
+                input_status = keyboard_status(keyboard_hint)
 
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)
                 instruction = plan_next_action(

@@ -40,3 +40,16 @@ def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(device.subprocess, "run", _no_adb)
     assert device.soft_keyboard_hint() == ""
+
+
+def test_keyboard_status_when_the_keyboard_is_shown() -> None:
+    assert device.keyboard_status(" (Note: the soft keyboard is visible.)") == (
+        "Soft keyboard is visible; a text field is focused and ready for typing."
+    )
+
+
+def test_keyboard_status_when_the_keyboard_is_hidden() -> None:
+    assert device.keyboard_status("") == (
+        "No OS keyboard signal detected. Still inspect the screenshot: "
+        "a bottom input/keyboard bar can mean a text field is active."
+    )
