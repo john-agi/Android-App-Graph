@@ -234,24 +234,9 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
-    G = nx.DiGraph()
-    for node_data in data.get("nodes", []):
-        if not isinstance(node_data.get("id"), str):
-            raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
-        node_id = node_data["id"]
-        ref_screenshot = reference_screenshot_b64(path, node_id)
-        # `.get(key, default)` keeps a present-but-null value, so every field a reader
-        # iterates or indexes is narrowed here once rather than at each read site.
-        G.add_node(
-            node_id,
-            activity=as_str(node_data.get("activity"), ""),
-            page_description=as_str(node_data.get("page_description"), ""),
-            state_schema=as_str_dict(node_data.get("state_schema")),
-            last_detail_snapshot=as_str_dict(node_data.get("last_detail_snapshot")),
-            reference_screenshot=ref_screenshot,
-            visit_count=node_data.get("visit_count", 0),
-        )
-
+    # Built before the node loop below reads and base64-encodes every reference
+    # screenshot, and before require_known_edge_endpoints, so a malformed edge's
+    # own TypeError still takes priority over the endpoint-existence check.
     edge_specs: list[tuple[str, str, dict[str, Any]]] = []
     for edge_data in data.get("edges", []):
         if not isinstance(edge_data.get("source"), str) or not isinstance(
@@ -274,10 +259,29 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         edge_specs.append((source, target, edge_attrs))
 
-    # Checked before any edge is added: networkx's add_edge silently creates an
-    # attribute-less node for an undefined endpoint, so a graph with one bad edge
-    # must load none of its edges rather than a partially-formed graph.
+    # Checked before any node is read: networkx's add_edge would otherwise
+    # silently create an attribute-less node for an undefined endpoint, so a
+    # graph with one bad edge must reject before the node loop's per-node
+    # screenshot I/O runs, not after paying for all of it.
     require_known_edge_endpoints(data, path)
+
+    G = nx.DiGraph()
+    for node_data in data.get("nodes", []):
+        if not isinstance(node_data.get("id"), str):
+            raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
+        node_id = node_data["id"]
+        ref_screenshot = reference_screenshot_b64(path, node_id)
+        # `.get(key, default)` keeps a present-but-null value, so every field a reader
+        # iterates or indexes is narrowed here once rather than at each read site.
+        G.add_node(
+            node_id,
+            activity=as_str(node_data.get("activity"), ""),
+            page_description=as_str(node_data.get("page_description"), ""),
+            state_schema=as_str_dict(node_data.get("state_schema")),
+            last_detail_snapshot=as_str_dict(node_data.get("last_detail_snapshot")),
+            reference_screenshot=ref_screenshot,
+            visit_count=node_data.get("visit_count", 0),
+        )
 
     for source, target, edge_attrs in edge_specs:
         G.add_edge(source, target, **edge_attrs)

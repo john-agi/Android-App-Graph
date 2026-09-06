@@ -557,6 +557,33 @@ def test_load_graph_from_json_rejects_an_edge_before_adding_any_edge(tmp_path: P
         aitk_translator._load_graph_from_json(path)
 
 
+def test_load_graph_from_json_rejects_a_bad_edge_before_reading_any_screenshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graph rejected for one bad edge must not first pay for every reference
+    screenshot's base64 I/O: edge-endpoint validation runs before the node loop
+    reads any of them, not after.
+    """
+    path = _write_graph(
+        tmp_path,
+        nodes=[{"id": "n1"}],
+        edges=[{"source": "n1", "target": "ghost"}],
+    )
+    calls = 0
+    original = aitk_translator.reference_screenshot_b64
+
+    def counting_wrapper(graph_path: Path, node_id: str) -> str | None:
+        nonlocal calls
+        calls += 1
+        return original(graph_path, node_id)
+
+    monkeypatch.setattr(aitk_translator, "reference_screenshot_b64", counting_wrapper)
+
+    with pytest.raises(ValueError, match="ghost"):
+        aitk_translator._load_graph_from_json(path)
+    assert calls == 0
+
+
 def test_load_all_graphs_skips_a_graph_with_an_edge_to_an_undefined_node(tmp_path: Path) -> None:
     _write_graph(
         tmp_path,
