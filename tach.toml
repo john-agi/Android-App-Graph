@@ -46,6 +46,7 @@ depends_on = [
 [[modules]]
 path = "android_app_graph.embedding_cache"
 depends_on = [
+    "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.retrying",
     "android_app_graph.utils",

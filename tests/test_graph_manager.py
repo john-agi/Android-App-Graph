@@ -12,7 +12,7 @@ import logging
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import networkx as nx
 import pytest
@@ -1540,6 +1540,39 @@ def test_save_graph_omits_an_empty_activity_list_and_embedding(tmp_path: Path) -
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["nodes"][0]["activity"] == ""
     assert json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8")) == {}
+
+
+def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash partway through json.dump must leave the previous complete graph
+    file and its embeddings companion in place, never a truncated mix of the
+    old and new content, and must not leave a stray temp file behind -- the
+    same atomicity save_image_embeddings already had for the sidecar, now
+    shared with the more valuable graph file and its embeddings companion
+    through graph_files.write_json_atomically.
+    """
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    emb_path = tmp_path / "graph.emb.json"
+    original_graph = path.read_text(encoding="utf-8")
+    original_emb = emb_path.read_text(encoding="utf-8")
+
+    def _dump_then_blow_up(_obj: object, fp: IO[str], **_kwargs: object) -> None:
+        fp.write('{"broken"')  # a partial write, as a real crash mid-dump would leave
+        msg = "boom"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(gm_module.json, "dump", _dump_then_blow_up)
+
+    with pytest.raises(ValueError, match="boom"):
+        gm.save_graph(path)
+
+    assert path.read_text(encoding="utf-8") == original_graph
+    assert emb_path.read_text(encoding="utf-8") == original_emb
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["graph.emb.json", "graph.json"]
 
 
 def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:

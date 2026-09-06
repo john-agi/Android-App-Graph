@@ -31,7 +31,11 @@ import networkx as nx
 from openai import OpenAI
 
 from android_app_graph.android_packages import package_from_activity
-from android_app_graph.graph_files import reference_screenshot_b64, require_known_edge_endpoints
+from android_app_graph.graph_files import (
+    reference_screenshot_b64,
+    require_known_edge_endpoints,
+    write_json_atomically,
+)
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -1180,12 +1184,10 @@ class GraphManager:
                 edge_data["schema_deltas"] = schema_deltas
             data["edges"].append(edge_data)
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        write_json_atomically(path, data, indent=2, ensure_ascii=False)
 
         emb_path = self._embeddings_path(path)
-        with open(emb_path, "w", encoding="utf-8") as f:
-            json.dump(embeddings, f, ensure_ascii=False)
+        write_json_atomically(emb_path, embeddings, ensure_ascii=False)
 
         if self._dirty_screenshots:
             screenshots_dir = path.parent / (path.stem + "_screenshots")

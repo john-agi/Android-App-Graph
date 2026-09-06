@@ -1,15 +1,111 @@
 """Tests for android_app_graph.graph_files.
 
-Graph-file discovery, per-node reference-screenshot lookup, and
-graph-structure validation shared by every loader.
+Graph-file discovery, per-node reference-screenshot lookup, atomic JSON
+writing, and graph-structure validation shared by every loader.
 """
 
 from __future__ import annotations
 
 import base64
+import json
+import stat
 from pathlib import Path
+from typing import IO
+
+import pytest
 
 from android_app_graph import graph_files
+
+
+def test_write_json_atomically_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"a": 1})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_write_json_atomically_honours_indent_and_ensure_ascii(tmp_path: Path) -> None:
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"name": "café"}, indent=2, ensure_ascii=False)
+    assert path.read_text(encoding="utf-8") == '{\n  "name": "café"\n}'
+
+
+def test_write_json_atomically_is_atomic_on_a_failed_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-dump must leave the file as either the previous complete
+    version or the new one, never a truncated mix of the two, and must not
+    leave a stray temporary file behind.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0, 2.0]})
+    original = path.read_text(encoding="utf-8")
+
+    def _dump_then_blow_up(_obj: object, fp: IO[str], **_kwargs: object) -> None:
+        fp.write('{"n9": [0.0')  # a partial write, as a real crash mid-dump would leave
+        msg = "boom"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(graph_files.json, "dump", _dump_then_blow_up)
+
+    with pytest.raises(ValueError, match="boom"):
+        graph_files.write_json_atomically(path, {"n1": [9.9]})
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_unlinks_the_temp_file_when_the_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``os.replace`` (EPERM, EBUSY, target is a directory, ...) must not
+    orphan the temp file in the target directory: an unguarded replace leaves a
+    stray ``data.json.<random>.tmp`` behind, and every later run adds another one.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0, 2.0]})
+    original = path.read_text(encoding="utf-8")
+
+    def _raise_replace(_src: object, _dst: object) -> None:
+        msg = "Device or resource busy"
+        raise OSError(msg)
+
+    monkeypatch.setattr(graph_files.os, "replace", _raise_replace)
+
+    with pytest.raises(OSError, match="Device or resource busy"):
+        graph_files.write_json_atomically(path, {"n1": [9.9]})
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_gives_a_fresh_file_the_umask_mode(tmp_path: Path) -> None:
+    """A fresh file must get exactly the mode ``open(path, "w")`` would give,
+    not mkstemp's hardcoded 0600 -- otherwise a graph file written by one user
+    (or a CI job) becomes unreadable to another process reading the same
+    shared graph directory as a different user.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+
+    sibling = tmp_path / "sibling.txt"
+    with sibling.open("w", encoding="utf-8") as f:
+        f.write("x")
+
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(sibling.stat().st_mode)
+
+
+def test_write_json_atomically_preserves_an_existing_files_mode(tmp_path: Path) -> None:
+    """A rewrite must keep the file's current mode, matching what in-place
+    truncation (the pre-atomic-write behaviour) did, so an operator's chmod on
+    a shared graph directory survives a rewrite.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+    path.chmod(0o600)
+
+    graph_files.write_json_atomically(path, {"n1": [2.0]})
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_iter_graph_files_without_a_graph_dir(tmp_path: Path) -> None:

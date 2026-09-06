@@ -10,13 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
-import shutil
 import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from android_app_graph.graph_files import write_json_atomically
 from android_app_graph.payloads import as_float_list, as_str_dict
 from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import resolve_env
@@ -113,45 +112,14 @@ def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
 
 
 def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) -> None:
-    """Write ``embeddings`` to the graph's sidecar file.
+    """Write ``embeddings`` to the graph's sidecar file, replacing it atomically.
 
-    Dumped to a temporary file in the same directory and moved into place with
-    ``os.replace``, so a crash mid-dump -- or a failed rename -- leaves the
-    sidecar as either the previous complete file or the new one, never a
-    truncated mix of both and never an orphaned temp file: the replace runs
-    inside the same cleanup that unlinks the temp file on any other failure.
-
-    A fresh sidecar gets exactly the mode ``open(path, "w")`` would give (0o666
-    with the process umask applied by the kernel); a sidecar that already
-    exists keeps its current mode across the rewrite, matching what in-place
-    truncation used to do, so an operator's chmod on a shared graph directory
-    survives a rewrite.
-
-    Unlike the in-place truncation this replaced, which needed write
-    permission only on the sidecar file itself, an atomic replace needs write
-    permission on the graph directory too (to create and rename the temp
-    file) -- the accepted cost of never leaving a truncated sidecar behind. A
-    directory the process cannot write into makes ``compute_missing_image_embeddings``
-    log the failed cache write and keep the computed vectors in memory for
-    the run, rather than persisting them.
+    See ``graph_files.write_json_atomically`` for the write mechanism. A
+    directory the process cannot write into makes
+    ``compute_missing_image_embeddings`` log the failed cache write and keep
+    the computed vectors in memory for the run, rather than persisting them.
     """
-    target = image_embeddings_path(graph_path)
-    tmp_path = target.parent / f"{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    # tempfile.mkstemp hardcodes mode 0600, which would make a sidecar precomputed
-    # by one user (or a CI job) unreadable to another process -- e.g. an AITK
-    # runtime -- reading the same shared graph directory as a different user.
-    # os.open lets the kernel apply the umask the way open(path, "w") does; never
-    # os.umask, which is process-global state.
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(embeddings, f, ensure_ascii=False)
-        if target.exists():
-            shutil.copymode(target, tmp_path)
-        os.replace(tmp_path, target)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    write_json_atomically(image_embeddings_path(graph_path), embeddings, ensure_ascii=False)
 
 
 def compute_embedding_with_retry(

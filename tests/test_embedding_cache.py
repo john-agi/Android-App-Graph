@@ -8,9 +8,8 @@ precomputation) so they cannot drift.
 from __future__ import annotations
 
 import json
-import stat
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 import pytest
 
@@ -30,88 +29,30 @@ def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
     assert embedding_cache.load_image_embeddings(graph_path) == {"n1": [0.5, 0.25]}
 
 
-def test_save_image_embeddings_is_atomic_on_a_failed_dump(
+def test_save_image_embeddings_goes_through_write_json_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A crash mid-dump must leave the sidecar as either the previous complete
-    file or the new complete file, never a truncated mix of the two, and must
-    not leave a stray temporary file behind.
+    """save_image_embeddings must delegate the write to
+    graph_files.write_json_atomically rather than duplicating its mechanism --
+    that mechanism's own behaviour (temp-file-and-replace, mode preservation,
+    cleanup on failure) is covered once, in tests/test_graph_files.py.
     """
     graph_path = tmp_path / "demo.json"
-    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0, 2.0]})
-    sidecar = embedding_cache.image_embeddings_path(graph_path)
-    original = sidecar.read_text(encoding="utf-8")
+    calls: list[tuple[Path, object, bool]] = []
+    original = embedding_cache.write_json_atomically
 
-    def _dump_then_blow_up(_obj: object, fp: IO[str], **_kwargs: object) -> None:
-        fp.write('{"n9": [0.0')  # a partial write, as a real crash mid-dump would leave
-        msg = "boom"
-        raise ValueError(msg)
+    def _tracking(
+        path: Path, payload: object, *, indent: int | None = None, ensure_ascii: bool = True
+    ) -> None:
+        calls.append((path, payload, ensure_ascii))
+        original(path, payload, indent=indent, ensure_ascii=ensure_ascii)
 
-    monkeypatch.setattr(embedding_cache.json, "dump", _dump_then_blow_up)
+    monkeypatch.setattr(embedding_cache, "write_json_atomically", _tracking)
 
-    with pytest.raises(ValueError, match="boom"):
-        embedding_cache.save_image_embeddings(graph_path, {"n1": [9.9]})
+    embedding_cache.save_image_embeddings(graph_path, {"n1": [0.5]})
 
-    assert sidecar.read_text(encoding="utf-8") == original
-    assert list(tmp_path.iterdir()) == [sidecar]
-
-
-def test_save_image_embeddings_unlinks_the_temp_file_when_the_replace_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed ``os.replace`` (EPERM, EBUSY, target is a directory, ...) must not
-    orphan the temp file in the graph directory: an unguarded replace leaves a
-    stray ``demo.image_emb.json.<random>.tmp`` behind, and every later run adds
-    another one.
-    """
-    graph_path = tmp_path / "demo.json"
-    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0, 2.0]})
-    sidecar = embedding_cache.image_embeddings_path(graph_path)
-    original = sidecar.read_text(encoding="utf-8")
-
-    def _raise_replace(_src: object, _dst: object) -> None:
-        msg = "Device or resource busy"
-        raise OSError(msg)
-
-    monkeypatch.setattr(embedding_cache.os, "replace", _raise_replace)
-
-    with pytest.raises(OSError, match="Device or resource busy"):
-        embedding_cache.save_image_embeddings(graph_path, {"n1": [9.9]})
-
-    assert sidecar.read_text(encoding="utf-8") == original
-    assert list(tmp_path.iterdir()) == [sidecar]
-
-
-def test_save_image_embeddings_gives_a_fresh_sidecar_the_umask_mode(tmp_path: Path) -> None:
-    """A fresh sidecar must get exactly the mode ``open(path, "w")`` would give,
-    not mkstemp's hardcoded 0600 -- otherwise a graph directory precomputed by
-    one user (or a CI job) becomes unreadable to another process reading the
-    same shared graph directory as a different user.
-    """
-    graph_path = tmp_path / "demo.json"
-    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0]})
-    sidecar = embedding_cache.image_embeddings_path(graph_path)
-
-    sibling = tmp_path / "sibling.txt"
-    with sibling.open("w", encoding="utf-8") as f:
-        f.write("x")
-
-    assert stat.S_IMODE(sidecar.stat().st_mode) == stat.S_IMODE(sibling.stat().st_mode)
-
-
-def test_save_image_embeddings_preserves_an_existing_sidecars_mode(tmp_path: Path) -> None:
-    """A rewrite must keep the sidecar's current mode, matching what in-place
-    truncation (the pre-atomic-write behaviour) did, so an operator's chmod on
-    a shared graph directory survives a rewrite.
-    """
-    graph_path = tmp_path / "demo.json"
-    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0]})
-    sidecar = embedding_cache.image_embeddings_path(graph_path)
-    sidecar.chmod(0o600)
-
-    embedding_cache.save_image_embeddings(graph_path, {"n1": [2.0]})
-
-    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+    assert calls == [(embedding_cache.image_embeddings_path(graph_path), {"n1": [0.5]}, False)]
+    assert embedding_cache.load_image_embeddings(graph_path) == {"n1": [0.5]}
 
 
 def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:

@@ -1,12 +1,60 @@
-"""Graph-file discovery, per-node reference-screenshot lookup, and
-graph-structure validation shared by every loader.
+"""Graph-file discovery, per-node reference-screenshot lookup, atomic JSON
+writing, and graph-structure validation shared by every loader.
 """
 
 from __future__ import annotations
 
 import base64
+import json
+import os
+import secrets
+import shutil
 from pathlib import Path
 from typing import Any
+
+
+def write_json_atomically(
+    path: Path,
+    payload: object,
+    *,
+    indent: int | None = None,
+    ensure_ascii: bool = True,
+) -> None:
+    """Write ``payload`` as JSON to ``path``, replacing it atomically.
+
+    Dumped to a temporary file in the same directory and moved into place with
+    ``os.replace``, so a crash mid-dump -- or a failed rename -- leaves ``path``
+    as either the previous complete file or the new one, never a truncated mix
+    of both and never an orphaned temp file: the replace runs inside the same
+    cleanup that unlinks the temp file on any other failure.
+
+    A fresh file gets exactly the mode ``open(path, "w")`` would give (0o666
+    with the process umask applied by the kernel); a file that already exists
+    keeps its current mode across the rewrite, matching what in-place
+    truncation used to do, so an operator's chmod on a shared graph directory
+    survives a rewrite.
+
+    Unlike the in-place truncation this replaced, which needed write
+    permission only on the target file itself, an atomic replace needs write
+    permission on the containing directory too (to create and rename the temp
+    file) -- the accepted cost of never leaving a truncated file behind.
+    """
+    tmp_path = path.parent / f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    # tempfile.mkstemp hardcodes mode 0600, which would make a file written by
+    # one user (or a CI job) unreadable to another process -- e.g. an AITK
+    # runtime -- reading the same shared graph directory as a different user.
+    # os.open lets the kernel apply the umask the way open(path, "w") does; never
+    # os.umask, which is process-global state.
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=indent, ensure_ascii=ensure_ascii)
+        if path.exists():
+            shutil.copymode(path, tmp_path)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
