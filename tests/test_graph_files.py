@@ -10,7 +10,7 @@ import base64
 import json
 import stat
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 import pytest
 
@@ -305,14 +305,53 @@ def test_require_known_edge_endpoints_raises_for_an_unknown_endpoint() -> None:
         )
 
 
-def test_require_known_edge_endpoints_skips_a_node_without_an_id(tmp_path: Path) -> None:
-    """This runs before each loader's own per-node id check (see #62/#63), so a
-    node missing "id" entirely must not raise a bare KeyError here -- the
-    loader that runs next reports it instead, with the path.
+def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: Path) -> None:
+    """require_string_ids runs first, so a node missing "id" entirely is
+    reported here too, with the path, rather than silently skipped and left
+    for a loader that runs later to report as a bare KeyError.
     """
-    graph_files.require_known_edge_endpoints(
-        {"nodes": [{"page_description": "x"}], "edges": []}, tmp_path / "demo.json"
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_known_edge_endpoints(
+            {"nodes": [{"page_description": "x"}], "edges": []}, path
+        )
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_string_ids_accepts_string_ids_and_endpoints() -> None:
+    assert (
+        graph_files.require_string_ids(
+            {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}, Path()
+        )
+        is None
     )
+
+
+def test_require_string_ids_rejects_a_non_string_node_id(tmp_path: Path) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_string_ids({"nodes": [{"id": 5}]}, path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_string_ids_rejects_a_node_without_an_id(tmp_path: Path) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_string_ids({"nodes": [{"page_description": "x"}]}, path)
+    assert str(path) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [{"source": None, "target": "n2"}, {"source": "n1", "target": None}],
+)
+def test_require_string_ids_rejects_a_non_string_edge_endpoint(
+    tmp_path: Path, edge: dict[str, Any]
+) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
+        graph_files.require_string_ids({"nodes": [], "edges": [edge]}, path)
+    assert str(path) in str(excinfo.value)
 
 
 def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:

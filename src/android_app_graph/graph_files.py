@@ -116,6 +116,23 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     return encode_screenshot_b64(screenshot_path)
 
 
+def require_string_ids(data: dict[str, Any], path: Path) -> None:
+    """Raise when a node id, or an edge endpoint, is present but not a string.
+
+    Shared by both graph loaders (runtime ``aitk_translator`` and
+    ``GraphManager``) so the check and its message cannot drift between them.
+    A missing id/endpoint fails here too (``dict.get`` returns ``None``,
+    which is not a ``str``), naming the path rather than surfacing later as a
+    bare ``KeyError``.
+    """
+    for node in data.get("nodes", []):
+        if not isinstance(node.get("id"), str):
+            raise TypeError(f"Graph node id must be a string: {node!r} in {path}")
+    for edge in data.get("edges", []):
+        if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
+            raise TypeError(f"Graph edge endpoint must be a string: {edge!r} in {path}")
+
+
 def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
     """Raise when an edge names a node id absent from ``data["nodes"]``.
 
@@ -124,18 +141,18 @@ def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
     undefined endpoint, so a hand-edited or truncated file would load
     quietly. See #62/#63.
 
-    Reads every id with ``.get`` rather than indexing: this runs before each
-    loader's own per-node id check, so a node without one must fail there,
-    where the error names the path, not here as a bare KeyError.
+    ``require_string_ids`` runs first, so every id and endpoint read below is
+    already confirmed to be a string -- a missing or non-string one is
+    reported there, before this ever builds the node id set.
     """
-    node_ids = {str(node["id"]) for node in data.get("nodes", []) if node.get("id") is not None}
-    missing_ids: set[str] = set()
-    for edge in data.get("edges", []):
-        missing_ids.update(
-            str(endpoint)
-            for endpoint in (edge.get("source"), edge.get("target"))
-            if str(endpoint) not in node_ids
-        )
+    require_string_ids(data, path)
+    node_ids = {node["id"] for node in data.get("nodes", [])}
+    missing_ids = {
+        endpoint
+        for edge in data.get("edges", [])
+        for endpoint in (edge["source"], edge["target"])
+        if endpoint not in node_ids
+    }
     if missing_ids:
         msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
         raise ValueError(msg)

@@ -235,16 +235,16 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
-    # Built before require_known_edge_endpoints, so a malformed edge's own
-    # TypeError still takes priority over the endpoint-existence check.
+    # require_known_edge_endpoints (graph_files) validates every node id and
+    # edge endpoint is a string, then every edge endpoint against the node id
+    # set -- the single shared check GraphManager.load_graph uses too, so the
+    # two loaders cannot drift on it. Run before anything else below: a graph
+    # with one bad node or edge must reject before the node loop's per-node
+    # screenshot path lookup, and before any edge is added.
+    require_known_edge_endpoints(data, path)
+
     edge_specs: list[tuple[str, str, dict[str, Any]]] = []
     for edge_data in data.get("edges", []):
-        if not isinstance(edge_data.get("source"), str) or not isinstance(
-            edge_data.get("target"), str
-        ):
-            raise TypeError(
-                f"Runtime graph edge endpoints must be strings: {edge_data!r} in {path}"
-            )
         source = edge_data["source"]
         target = edge_data["target"]
         edge_attrs: dict[str, Any] = {
@@ -259,16 +259,8 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         edge_specs.append((source, target, edge_attrs))
 
-    # Checked before any node is read: networkx's add_edge would otherwise
-    # silently create an attribute-less node for an undefined endpoint, so a
-    # graph with one bad edge must reject before the node loop's per-node
-    # screenshot I/O runs, not after paying for all of it.
-    require_known_edge_endpoints(data, path)
-
     G = nx.DiGraph()
     for node_data in data.get("nodes", []):
-        if not isinstance(node_data.get("id"), str):
-            raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
         node_id = node_data["id"]
         # A path, not the screenshot itself: reading and base64-encoding every
         # node's screenshot at load time kept every one of them resident for the
