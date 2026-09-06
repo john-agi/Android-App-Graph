@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, override
+from typing import Any, Literal, NotRequired, TypedDict, override
 
 import httpx
 import networkx as nx
@@ -70,6 +70,42 @@ V2_API_RETRIES = 2
 V2_API_RETRY_BASE_DELAY_SECONDS = 2.0
 RUNTIME_IMAGE_EMBEDDING_RETRIES = 2
 RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
+
+_OptionType = Literal["done", "self_loop", "neighbor", "free"]
+
+
+class _Option(TypedDict):
+    """One DECIDE menu entry, as built by ``_build_options``.
+
+    ``letter`` and ``type`` are set on every entry; the rest depend on the
+    option's type ("done" and "free" carry neither ``node`` nor
+    ``instruction``, a self-loop carries no ``description``, and so on).
+    """
+
+    letter: str
+    type: _OptionType
+    node: NotRequired[str]
+    instruction: NotRequired[str]
+    description: NotRequired[str]
+    effect: NotRequired[str]
+
+
+class _Decision(TypedDict):
+    """The outcome of ``_decide`` (and its free-action fallbacks in ``_step``).
+
+    ``type`` and ``instruction`` are set on every return path: a chosen option's
+    fields (which is where ``letter``/``node``/``description``/``effect`` come
+    from) plus a possibly-updated ``instruction``, or a "free" fallback with a
+    ``reason`` explaining why graph guidance was not used.
+    """
+
+    type: _OptionType
+    instruction: str
+    letter: NotRequired[str]
+    node: NotRequired[str]
+    description: NotRequired[str]
+    effect: NotRequired[str]
+    reason: NotRequired[str]
 
 
 # ---------------------------------------------------------------------------
@@ -995,15 +1031,10 @@ class UIKobeV2Translator(BaseTranslator):
                     merged.setdefault(key, change)
         return self._format_schema_delta(merged)
 
-    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[dict[str, str]]]:
-        """Build the option list for the DECIDE prompt.
-
-        Returns (formatted_text, option_list) where each option is:
-        {"letter": "A", "type": "self_loop"|"neighbor"|"done"|"free",
-         "node": node_id, "instruction": str, ...}
-        """
+    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
+        """Build the option list for the DECIDE prompt."""
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        options: list[dict[str, str]] = []
+        options: list[_Option] = []
         lines: list[str] = []
         idx = 0
 
@@ -1113,7 +1144,7 @@ class UIKobeV2Translator(BaseTranslator):
 
         return "\n".join(lines), options
 
-    def _decide(self, G: nx.DiGraph, task: str, node_id: str, screenshot: str) -> dict[str, str]:
+    def _decide(self, G: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
         """Ask the model to pick the next action.
 
         Returns the chosen option dict with an added "instruction" key
@@ -1162,11 +1193,18 @@ class UIKobeV2Translator(BaseTranslator):
         # Find matching option
         for opt in options_list:
             if opt["letter"] == choice_letter:
-                chosen = {**opt}
-                if instruction:
-                    chosen["instruction"] = instruction
-                elif not chosen.get("instruction"):
-                    chosen["instruction"] = task
+                resolved_instruction = instruction or opt.get("instruction") or task
+                chosen: _Decision = {
+                    "type": opt["type"],
+                    "letter": opt["letter"],
+                    "instruction": resolved_instruction,
+                }
+                if "node" in opt:
+                    chosen["node"] = opt["node"]
+                if "description" in opt:
+                    chosen["description"] = opt["description"]
+                if "effect" in opt:
+                    chosen["effect"] = opt["effect"]
                 return chosen
 
         # Fallback
@@ -1303,6 +1341,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[RECORD] Memory: %s", self._memory.format())
 
         # --- 3. DECIDE ---
+        decision: _Decision
         if node_id is not None and G is not None:
             decision = self._decide(G, task, node_id, screenshot)
         else:
@@ -1321,8 +1360,8 @@ class UIKobeV2Translator(BaseTranslator):
             )
             decision = {"type": "free", "instruction": fallback_instruction}
 
-        decision_type = decision.get("type", "free")
-        instruction = decision.get("instruction", task)
+        decision_type = decision["type"]
+        instruction = decision["instruction"]
         if decision_type == "free" and not instruction:
             reason = decision.get(
                 "reason", "graph guidance did not produce an executable instruction"
