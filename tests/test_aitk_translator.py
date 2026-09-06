@@ -47,11 +47,6 @@ def _write_graph(
     return path
 
 
-# ---------------------------------------------------------------------------
-# _extract_packages_from_graph
-# ---------------------------------------------------------------------------
-
-
 def test_extract_packages_from_graph_skips_nodes_without_activity() -> None:
     G = nx.DiGraph()
     G.add_node("a", activity="com.example.app/.Main")
@@ -67,11 +62,6 @@ def test_extract_packages_from_graph_skips_nodes_without_activity() -> None:
 
 def test_extract_packages_from_empty_graph() -> None:
     assert aitk_translator._extract_packages_from_graph(nx.DiGraph()) == set()
-
-
-# ---------------------------------------------------------------------------
-# _parse_model_choice
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -117,11 +107,6 @@ def test_parse_model_choice_accepts_any_bare_valid_letter(letter: str, padding: 
     assert aitk_translator._parse_model_choice(raw, _LETTERS) == letter
 
 
-# ---------------------------------------------------------------------------
-# _parse_record_output
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -161,11 +146,6 @@ def test_parse_record_output_is_never_empty(raw: str) -> None:
     assert aitk_translator._parse_record_output(raw) != ""
 
 
-# ---------------------------------------------------------------------------
-# _parse_one_step_instruction
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -203,11 +183,6 @@ def test_parse_one_step_instruction_rejects_an_overlong_plan() -> None:
 )
 def test_parse_one_step_instruction_rejects_generic_restatements(raw: str) -> None:
     assert aitk_translator._parse_one_step_instruction(raw) == ""
-
-
-# ---------------------------------------------------------------------------
-# _extract_json_object, _parse_json_object and _parse_decide_output
-# ---------------------------------------------------------------------------
 
 
 def test_extract_json_object_finds_an_embedded_object() -> None:
@@ -263,11 +238,6 @@ def test_parse_decide_output_round_trips_json_objects(payload: dict[str, int]) -
     the serialized JSON, which is not a property of arbitrary JSON round-tripping.
     """
     assert aitk_translator._parse_decide_output(json.dumps(payload)) == payload
-
-
-# ---------------------------------------------------------------------------
-# _load_graph_from_json
-# ---------------------------------------------------------------------------
 
 
 def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
@@ -412,10 +382,8 @@ def test_load_graph_from_json_rejects_a_non_string_edge_endpoint(
         aitk_translator._load_graph_from_json(path)
 
 
-# ---------------------------------------------------------------------------
 # image embedding sidecars: pure logic is owned by tests/test_embedding_cache.py;
 # this is the integration point with _load_all_graphs.
-# ---------------------------------------------------------------------------
 
 
 def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) -> None:
@@ -423,11 +391,6 @@ def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) 
     (graph_dir / "demo" / "demo.image_emb.json").write_text("{not json", encoding="utf-8")
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
     assert set(built._graphs) == {"demo"}
-
-
-# ---------------------------------------------------------------------------
-# Memory
-# ---------------------------------------------------------------------------
 
 
 def test_memory_starts_empty() -> None:
@@ -470,11 +433,6 @@ def test_memory_numbers_repeated_entries() -> None:
     memory.add_action("first")
     memory.add_action("second")
     assert "  1. first\n  2. second" in memory.format()
-
-
-# ---------------------------------------------------------------------------
-# API call helpers
-# ---------------------------------------------------------------------------
 
 
 class _FakeMessage:
@@ -592,11 +550,6 @@ def test_chat_completion_content_turns_a_missing_body_into_an_empty_string() -> 
     assert first == (0, "", True)
 
 
-# ---------------------------------------------------------------------------
-# _make_no_proxy_client
-# ---------------------------------------------------------------------------
-
-
 def test_make_no_proxy_client_defaults() -> None:
     client, model = aitk_translator._make_no_proxy_client({"api_key": "test-key"})
     assert model == "gpt-4o"
@@ -623,11 +576,6 @@ def test_make_no_proxy_client_reads_the_config() -> None:
 def test_make_no_proxy_client_prefers_the_timeout_alias() -> None:
     client, _ = aitk_translator._make_no_proxy_client({"api_key": "test-key", "timeout": 5})
     assert client.timeout == 5.0
-
-
-# ---------------------------------------------------------------------------
-# Translator fixtures
-# ---------------------------------------------------------------------------
 
 
 _VLM_CONFIG: dict[str, Any] = {
@@ -678,11 +626,6 @@ def graph_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def translator(graph_dir: Path) -> aitk_translator.UIKobeV2Translator:
     return aitk_translator.register({"graph_dir": str(graph_dir), "vlm_config": _VLM_CONFIG})
-
-
-# ---------------------------------------------------------------------------
-# Construction and graph loading
-# ---------------------------------------------------------------------------
 
 
 def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
@@ -739,11 +682,6 @@ def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
     assert "gone" not in built._graphs["demo"]
 
 
-# ---------------------------------------------------------------------------
-# Task and package resolution
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("task", "expected"),
     [("Open Demo and search for shoes", "demo"), ("Check the weather", None)],
@@ -790,11 +728,6 @@ def test_reset_task_state_clears_the_previous_task(
     assert translator._current_graph is None
     assert translator._step_count == 0
     assert translator._memory.actions == []
-
-
-# ---------------------------------------------------------------------------
-# Option formatting
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -912,11 +845,6 @@ def test_build_options_skips_the_self_loop_when_listing_neighbours(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Model-driven steps, with every provider call replaced by a fake
-# ---------------------------------------------------------------------------
-
-
 def _use_model(
     monkeypatch: pytest.MonkeyPatch,
     translator: aitk_translator.UIKobeV2Translator,
@@ -975,9 +903,6 @@ def test_plan_free_action_falls_back_when_the_planner_is_generic(
     _use_model(monkeypatch, translator, "Take the best action", "Take the best action")
     instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
     assert instruction == "Wait briefly for the current screen to finish loading."
-
-
-# --- _decide ---------------------------------------------------------------
 
 
 def test_decide_returns_the_chosen_option(
@@ -1057,9 +982,6 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     assert (
         "State parameters" not in client.completions.calls[0]["messages"][0]["content"][0]["text"]
     )
-
-
-# --- image embeddings and _identify_node -----------------------------------
 
 
 def test_runtime_image_embedding_requires_a_key(graph_dir: Path) -> None:
@@ -1231,8 +1153,6 @@ def test_identify_node_propagates_an_embedding_failure(
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
 
-# --- _call_action_agent ----------------------------------------------------
-#
 # The soft-keyboard probe itself (adb call, missing-adb handling) is owned by
 # tests/test_device.py; these tests only check that _call_action_agent appends
 # whatever device.soft_keyboard_hint() returns.
@@ -1277,11 +1197,6 @@ def test_call_action_agent_without_a_keyboard_hint(
     assert action == {"action": "back"}
     assert observation == ""
     assert entry == "went back"
-
-
-# ---------------------------------------------------------------------------
-# BaseTranslator interface
-# ---------------------------------------------------------------------------
 
 
 def test_make_response_wraps_the_action() -> None:

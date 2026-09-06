@@ -137,7 +137,8 @@ min_confidence = 90
 
 [tool.ty.src]
 # The copy-in adapters and operator scripts are not package code, and aw_files/ imports
-# android_world, which does not install on Python 3.14.
+# android_world, which does not install on Python 3.14. aitk_files/android_app_graph_v2.py
+# is a shim over android_app_graph.adapters.aitk_translator, which is checked.
 include = ["src", "tests"]
 
 [tool.ty.rules]
