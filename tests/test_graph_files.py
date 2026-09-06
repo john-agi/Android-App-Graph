@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import stat
 from pathlib import Path
 from typing import IO, Any
@@ -149,6 +150,51 @@ def test_write_json_atomically_preserves_an_existing_files_mode(tmp_path: Path) 
     graph_files.write_json_atomically(path, {"n1": [2.0]})
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root passes os.access for every file regardless of mode, the same as root's "
+    "in-place write succeeding, so a 0o444 target denies nothing to run as root here",
+)
+def test_write_json_atomically_rejects_a_read_only_target(tmp_path: Path) -> None:
+    """``os.replace`` needs only directory write permission, so without this
+    guard an operator's ``chmod 444`` freeze on a shared graph directory is
+    silently defeated by a rewrite -- the in-place ``open(path, "w")`` this
+    replaced would have raised ``PermissionError`` instead.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+    path.chmod(0o444)
+
+    with pytest.raises(PermissionError) as excinfo:
+        graph_files.write_json_atomically(path, {"n1": [2.0]})
+
+    assert str(path) in str(excinfo.value)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"n1": [1.0]}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_rejects_a_read_only_target_by_os_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard itself, exercised independently of the privilege level the
+    test happens to run under: real ``os.access`` always passes for root
+    regardless of a file's mode (see the skipped chmod-based sibling test
+    above), so a container running the suite as root must not lose coverage
+    of the guard's own behaviour once ``os.access`` reports it unwritable.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+
+    monkeypatch.setattr(graph_files.os, "access", lambda *_a, **_kw: False)
+
+    with pytest.raises(PermissionError) as excinfo:
+        graph_files.write_json_atomically(path, {"n1": [2.0]})
+
+    assert str(path) in str(excinfo.value)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"n1": [1.0]}
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:

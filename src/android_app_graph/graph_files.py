@@ -5,6 +5,7 @@ writing, and graph-structure validation shared by every loader.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import secrets
@@ -39,7 +40,13 @@ def write_json_atomically(
     Unlike the in-place truncation this replaced, which needed write
     permission only on the target file itself, an atomic replace needs write
     permission on the containing directory too (to create and rename the temp
-    file) -- the accepted cost of never leaving a truncated file behind.
+    file) -- the accepted cost of never leaving a truncated file behind. But
+    ``os.replace`` does not otherwise care whether ``path`` itself is
+    writable, so without an explicit check a directory-writable rewrite would
+    silently defeat an operator's ``chmod 444`` freeze on the file, where the
+    in-place write this replaced would have raised ``PermissionError``. The
+    check runs before the temp file is created, so a read-only target leaves
+    nothing to clean up.
 
     A symlinked ``path`` is resolved to its real target first, so the temp
     file and the replace happen next to that file: ``os.replace`` over a
@@ -48,6 +55,11 @@ def write_json_atomically(
     """
     if path.is_symlink():
         path = path.resolve()
+    if path.exists() and not os.access(path, os.W_OK):
+        # A privileged (real-uid-0) process passes this for every file
+        # regardless of its mode, matching root's in-place write succeeding
+        # too -- the freeze only ever bound an unprivileged writer.
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
     tmp_path = path.parent / f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     # tempfile.mkstemp hardcodes mode 0600, which would make a file written by
     # one user (or a CI job) unreadable to another process -- e.g. an AITK
