@@ -81,6 +81,27 @@ def compute_embedding_with_retry(
     )
 
 
+def reference_screenshots_dir(graph_path: Path) -> Path:
+    """Return the directory holding a graph's per-node reference screenshots.
+
+    ``GraphManager.save_graph`` writes re-explored screenshots under
+    ``<stem>_screenshots`` (``demo_audited_screenshots`` for an audited graph),
+    so that directory is preferred; a graph nobody has re-explored keeps its
+    screenshots under the app directory's own name instead. Both runtime graph
+    loading and offline precomputation must resolve to the same directory, or
+    one sees screenshots the other reports missing.
+    """
+    stem_dir = graph_path.parent / f"{graph_path.stem}_screenshots"
+    if stem_dir.exists():
+        return stem_dir
+    return graph_path.parent / f"{graph_path.parent.name}_screenshots"
+
+
+def reference_screenshot_path(graph_path: Path, node_id: str) -> Path:
+    """Return one node's reference screenshot path under ``reference_screenshots_dir``."""
+    return reference_screenshots_dir(graph_path) / f"{node_id}.png"
+
+
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
     """Return one graph JSON per app, preferring the audited graph.
 

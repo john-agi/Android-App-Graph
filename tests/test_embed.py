@@ -155,6 +155,24 @@ def test_reference_screenshot_b64(tmp_path: Path) -> None:
     assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
 
 
+def test_reference_screenshot_b64_finds_the_audited_stem_directory(tmp_path: Path) -> None:
+    """GraphManager.save_graph writes re-explored screenshots to ``<stem>_screenshots``
+    (``demo_audited_screenshots`` for an audited graph); offline precompute must look
+    there too, matching what the runtime translator's loader finds.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    graph_path.write_text(json.dumps({"nodes": [{"id": "s0_home"}]}), encoding="utf-8")
+    screenshots = app_dir / "demo_audited_screenshots"
+    screenshots.mkdir()
+    (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
+
+    assert embed.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
+        _SCREENSHOT
+    ).decode("ascii")
+
+
 def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:
     return embed.precompute_graph_image_embeddings(
         tmp_path,
@@ -163,6 +181,31 @@ def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:
         base_url="https://generativelanguage.googleapis.com/v1beta",
         app_name=app_name,
     )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_finds_screenshots_under_the_audited_stem_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node the runtime translator finds via ``<stem>_screenshots`` must not be
+    reported ``skipped_missing_screenshot`` by the offline precompute pass.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo_audited.json").write_text(
+        json.dumps({"nodes": [{"id": "s0_home"}]}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_audited_screenshots"
+    screenshots.mkdir()
+    (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["skipped_missing_screenshot"] == 0
+    assert summary["reference_screenshots"] == 1
+    assert summary["computed"] == 1
 
 
 @pytest.mark.usefixtures("no_sleep")

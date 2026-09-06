@@ -163,6 +163,58 @@ def test_iter_graph_files_sorts_apps_and_skips_side_files(tmp_path: Path) -> Non
     ]
 
 
+def test_reference_screenshots_dir_uses_the_stem_directory_when_present(tmp_path: Path) -> None:
+    """``GraphManager.save_graph`` writes re-explored screenshots under
+    ``<stem>_screenshots``; when present it must win over the app-name directory.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo_screenshots").mkdir()
+    stem_dir = app_dir / "demo_audited_screenshots"
+    stem_dir.mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    assert embedding_cache.reference_screenshots_dir(graph_path) == stem_dir
+
+
+def test_reference_screenshots_dir_falls_back_to_the_app_directory(tmp_path: Path) -> None:
+    """An audited graph nobody has re-explored has no ``<stem>_screenshots`` of its
+    own yet; its screenshots still live under the app directory's own name.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    fallback_dir = app_dir / "demo_screenshots"
+    fallback_dir.mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    assert embedding_cache.reference_screenshots_dir(graph_path) == fallback_dir
+
+
+def test_reference_screenshots_dir_for_a_plain_unaudited_graph(tmp_path: Path) -> None:
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    graph_path = app_dir / "demo.json"
+    assert embedding_cache.reference_screenshots_dir(graph_path) == screenshots
+
+
+def test_reference_screenshots_dir_defaults_to_the_app_directory_when_neither_exists(
+    tmp_path: Path,
+) -> None:
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    assert embedding_cache.reference_screenshots_dir(graph_path) == app_dir / "demo_screenshots"
+
+
+def test_reference_screenshot_path_joins_the_node_id(tmp_path: Path) -> None:
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    graph_path = app_dir / "demo.json"
+    assert embedding_cache.reference_screenshot_path(graph_path, "n1") == screenshots / "n1.png"
+
+
 def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
     for app in ("demo", "other"):
         app_dir = tmp_path / app

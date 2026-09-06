@@ -48,6 +48,7 @@ from android_app_graph.embedding_cache import (
     compute_embedding_with_retry,
     iter_graph_files,
     load_image_embeddings,
+    reference_screenshots_dir,
     save_image_embeddings,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
@@ -227,12 +228,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
-    screenshots_dir = path.parent / (path.stem + "_screenshots")
-    if not screenshots_dir.exists() and path.stem.endswith("_audited"):
-        base_stem = path.stem.removesuffix("_audited")
-        base_screenshots_dir = path.parent / f"{base_stem}_screenshots"
-        if base_screenshots_dir.exists():
-            screenshots_dir = base_screenshots_dir
+    screenshots_dir = reference_screenshots_dir(path)
     G = nx.DiGraph()
     for node_data in data.get("nodes", []):
         if not isinstance(node_data.get("id"), str):
