@@ -937,29 +937,12 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
         )
 
-        # _parse_record_output always returns a truthy string ("nothing" at worst), so a
-        # parse-retry loop here would never retry. Take a single completion.
-        _attempt, raw_record, _can_retry = next(
-            _chat_completion_content(
-                self.model_client,
-                model=self.model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                            },
-                        ],
-                    }
-                ],
-                max_tokens=V2_CHAT_MAX_TOKENS,
-                temperature=0.0,
-            )
+        # _parse_record_output never returns None (it returns "nothing" at worst), so
+        # the helper's parse-retry loop never retries here: this is one completion.
+        result = (
+            self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
+            or "nothing"
         )
-        result = _parse_record_output(raw_record)
         logger.info("[RECORD] parsed=%s", result)
         self._memory.add_info(result)
 
