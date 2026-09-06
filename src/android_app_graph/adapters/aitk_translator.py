@@ -328,10 +328,14 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     # uppercase letter always outranks a "NONE" found in the same text, since a
     # model that names a letter has answered even if it also explained a
     # rejection ("None of the others fit, so B").
-    matches = [as_str(m, "") for m in re.findall(r"\b([A-Z])\b", text)]
-    for match in reversed(matches):
-        if match in valid_letters:
-            return match
+    for letter_match in reversed(list(re.finditer(r"\b([A-Z])\b", text))):
+        letter = as_str(letter_match.group(1), "")
+        # A standalone "A"/"I" immediately followed by a lowercase word is the
+        # English article or pronoun, not a named answer letter.
+        if letter in ("A", "I") and re.match(r"\s+[a-z]", text[letter_match.end() :]):
+            continue
+        if letter in valid_letters:
+            return letter
     if re.search(r"\bNONE\b", answer):
         return "NONE"
     return None

@@ -81,10 +81,23 @@ def test_extract_packages_from_empty_graph() -> None:
         ("B is a match", "B"),
         ("It is clearly B, a strong match", "B"),
         ("None of the others fit, so B", "B"),
+        ("None of the candidates match. A login form is visible.", "NONE"),
+        ("NONE. A settings page is showing.", "NONE"),
+        ("A.", "A"),
     ],
 )
 def test_parse_model_choice(raw: str, expected: str | None) -> None:
     assert aitk_translator._parse_model_choice(raw, "ABCD") == expected
+
+
+def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_answer() -> None:
+    """ "A is the match" names no explicit form ("Final answer:"/single token/
+    ``</think>``), and its bare "A" is a sentence-initial article immediately
+    followed by a lowercase word, not a named letter — so the parse must return
+    ``None`` and let the caller's retry loop ask the model again, rather than
+    guessing the article as a pick.
+    """
+    assert aitk_translator._parse_model_choice("A is the match", "ABCD") is None
 
 
 def test_parse_model_choice_rejects_an_empty_reply() -> None:
