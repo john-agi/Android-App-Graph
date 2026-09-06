@@ -52,6 +52,7 @@ from android_app_graph.embedding_cache import (
 from android_app_graph.payloads import as_list, as_str, as_str_dict
 from android_app_graph.utils import make_client, resolve_env
 from android_app_graph.utils.vlm_utils import (
+    build_image_message,
     cosine_similarity,
     describe_page_and_state,
     get_gemini_native_image_embedding,
@@ -60,9 +61,6 @@ from android_app_graph.utils.vlm_utils import (
 )
 
 logger = logging.getLogger("AITK - Android-App-Graph")
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
 
 _SEP = "-" * 60
 _SEP_THICK = "=" * 60
@@ -213,7 +211,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         raw = json.load(f)
     if not isinstance(raw, dict):
         raise TypeError(f"Runtime graph JSON must be an object: {path}")
-    data = as_str_dict(raw)
+    data = raw
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
@@ -397,7 +395,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict):
-            return as_str_dict(obj)
+            return obj
     return None
 
 
@@ -407,7 +405,7 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return _extract_json_object(text)
-    return as_str_dict(parsed) if isinstance(parsed, dict) else None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _parse_decide_output(raw: str) -> dict[str, Any] | None:
@@ -536,6 +534,12 @@ class UIKobeV2Translator(BaseTranslator):
         max_pixels: int = 1_000_000,
     ) -> None:
         super().__init__()
+        # Quiet the chatty per-request loggers of the HTTP libraries these clients use.
+        # Done here rather than at import time so importing this module has no global
+        # side effect; adapters may not import utils.logging under tach.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("openai").setLevel(logging.WARNING)
+
         self.graph_dir = Path(graph_dir)
         self.history_window = history_window
         self.max_pixels = max_pixels
@@ -717,6 +721,43 @@ class UIKobeV2Translator(BaseTranslator):
                 return self._graphs.get(name)
         return None
 
+    def _ask_with_screenshot[T](
+        self,
+        prompt: str,
+        screenshot: str | None,
+        parse: Callable[[str], T | None],
+        tag: str,
+    ) -> T | None:
+        """Ask the model one question, retrying at the caller's parse boundary.
+
+        ``parse`` must return ``None`` to request a retry; any other value
+        (including a falsy one such as ``{}`` or ``""``) is accepted as success.
+        Pass ``screenshot`` to ground the question in a screenshot; ``None`` sends
+        the prompt as plain text.
+        """
+        content: str | list[Any] = prompt
+        if screenshot is not None:
+            content = [{"type": "text", "text": prompt}, build_image_message(screenshot)]
+
+        result: T | None = None
+        raw = ""
+        for attempt, raw, can_retry in _chat_completion_content(
+            self.model_client,
+            model=self.model_name,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=V2_CHAT_MAX_TOKENS,
+            temperature=0.0,
+        ):
+            result = parse(raw)
+            if result is not None:
+                return result
+            if can_retry:
+                logger.warning("%s parse failed on attempt %d; retrying", tag, attempt + 1)
+        logger.warning(
+            "%s all parse attempts exhausted. raw_len=%d raw_prefix=%r", tag, len(raw), raw[:160]
+        )
+        return None
+
     # ------------------------------------------------------------------
     # Step 1: IDENTIFY — match screen to graph node
     # ------------------------------------------------------------------
@@ -850,30 +891,12 @@ class UIKobeV2Translator(BaseTranslator):
 
         prompt = NODE_IDENTIFY_PROMPT.format(candidates=candidate_text)
 
-        answer = None
-        for attempt, raw_answer, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            answer = _parse_model_choice(raw_answer, letters[: len(top_k)])
-            if answer:
-                break
-            if can_retry:
-                logger.warning("[IDENTIFY] parse failed on attempt %d; retrying", attempt + 1)
+        answer = self._ask_with_screenshot(
+            prompt,
+            screenshot,
+            lambda raw: _parse_model_choice(raw, letters[: len(top_k)]),
+            "[IDENTIFY]",
+        )
         logger.info("[IDENTIFY] model_pick=%s", answer)
 
         if answer == "NONE" or not answer:
@@ -1120,37 +1143,8 @@ class UIKobeV2Translator(BaseTranslator):
             options=options_text,
         )
 
-        result = None
-        raw = ""
-        for attempt, raw, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            result = _parse_decide_output(raw)
-            if result is not None:
-                break
-            if can_retry:
-                logger.warning("[DECIDE] parse failed on attempt %d; retrying", attempt + 1)
+        result = self._ask_with_screenshot(prompt, screenshot, _parse_decide_output, "[DECIDE]")
         if result is None:
-            logger.warning(
-                "Failed to parse DECIDE response. raw_len=%d raw_prefix=%r",
-                len(raw),
-                raw[:160],
-            )
             return {
                 "type": "free",
                 "instruction": "",
@@ -1203,30 +1197,12 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
             action_history=history_text,
         )
-        instruction = ""
-        for attempt, raw_instruction, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            instruction = _parse_one_step_instruction(raw_instruction)
-            if instruction:
-                break
-            if can_retry:
-                logger.warning("[FREE] parse failed on attempt %d; retrying", attempt + 1)
+        instruction = self._ask_with_screenshot(
+            prompt,
+            screenshot,
+            lambda raw: _parse_one_step_instruction(raw) or None,
+            "[FREE]",
+        )
 
         if instruction:
             logger.info("[FREE] planned_instruction=%s", instruction)
@@ -1270,20 +1246,8 @@ class UIKobeV2Translator(BaseTranslator):
             task=task,
             memory=self._memory.format(),
         )
-        answer = ""
-        for attempt, raw_answer, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            answer = raw_answer.strip()
-            if answer:
-                return answer
-            if can_retry:
-                logger.warning("[DONE] parse failed on attempt %d; retrying", attempt + 1)
-        return answer
+        answer = self._ask_with_screenshot(prompt, None, lambda raw: raw.strip() or None, "[DONE]")
+        return answer or ""
 
     # ------------------------------------------------------------------
     # Main step function
@@ -1452,7 +1416,7 @@ class UIKobeV2Translator(BaseTranslator):
         aitk_action = as_str_dict(data).get("aitk_action")
         if not isinstance(aitk_action, dict) or "action" not in aitk_action:
             return {"action": "end", "answer": ""}
-        return as_str_dict(aitk_action)
+        return aitk_action
 
 
 def register(kargs: dict[str, Any]) -> UIKobeV2Translator:

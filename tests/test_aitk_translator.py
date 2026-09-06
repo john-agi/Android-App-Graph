@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -703,6 +704,15 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator.image_embedding_model == "img-model"
 
 
+def test_construction_quiets_the_http_client_loggers(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    """The httpx/openai per-request loggers are quieted on construction, not on import."""
+    del translator
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("openai").level == logging.WARNING
+
+
 def test_image_embedding_base_url_defaults_to_google(graph_dir: Path) -> None:
     config = {**_VLM_CONFIG, "image_embedding": {"base_url": "http://localhost:9000/v1"}}
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
@@ -1026,6 +1036,19 @@ def test_decide_reports_an_unparseable_reply(
         "reason": "DECIDE response could not be parsed",
     }
     assert len(client.completions.calls) == 2
+
+
+def test_decide_treats_an_empty_json_object_as_parsed_not_failed(
+    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+) -> None:
+    """DECIDE succeeds on ``is not None``, not truthiness: ``{}`` is a real (if
+    unusable) parse, so it must reach the "unrecognized choice" path and not be
+    retried as a parse failure."""
+    client = _use_model(monkeypatch, translator, "{}")
+    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    assert decision["type"] == "free"
+    assert decision["reason"] == "DECIDE returned unrecognized choice ''"
+    assert len(client.completions.calls) == 1
 
 
 def test_decide_reports_an_unknown_choice(
