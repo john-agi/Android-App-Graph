@@ -215,7 +215,9 @@ class GraphManager:
             if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
             existing_emb = data.get("description_embedding")
-            if existing_emb is None:
+            if not existing_emb:
+                # load_graph sets [] when neither a companion file nor an inline
+                # vector exists; that is a missing embedding, not a stale one.
                 continue
             if len(existing_emb) != len(description_embedding):
                 stale_count += 1
@@ -1299,7 +1301,9 @@ class GraphManager:
         stale_dims: set[int] = set()
         for node_id, data in self.graph.nodes(data=True):
             emb = data.get("description_embedding")
-            if emb is None:
+            if not emb:
+                # load_graph sets [] when neither a companion file nor an inline
+                # vector exists; that is a missing embedding, not a stale one.
                 continue
             if len(emb) != len(query_emb):
                 stale_count += 1

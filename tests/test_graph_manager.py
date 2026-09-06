@@ -389,6 +389,25 @@ def test_identify_state_skips_candidates_without_an_embedding(vlm: FakeVlm) -> N
     assert node_id == "s0_home_screen"
 
 
+def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
+    companion ``_embeddings.json`` nor an inline vector; that is a missing
+    embedding, not a stale-dimension one, and must be skipped silently.
+    """
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_empty", "Home screen", description_embedding=[])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        node_id = gm.identify_state(HOME, SHOT_A)
+
+    assert node_id == "s1_home"
+    assert "stale" not in caplog.text
+
+
 def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     vlm: FakeVlm, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1553,6 +1572,35 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
     assert gm.total_steps_completed == 0
 
 
+def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
+    tmp_path: Path, vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
+    companion ``_embeddings.json`` nor an inline vector; ``identify_state`` must
+    treat that as a missing embedding, not warn that the cache is stale.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}],
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+    gm.load_graph(path)
+    assert gm.graph.nodes["s0_home"]["description_embedding"] == []
+
+    vlm.descriptions.append(("Home screen", {}, []))
+    with caplog.at_level("WARNING"):
+        node_id = gm.identify_state(HOME, SHOT_A)
+
+    assert node_id == "s0_home_screen"
+    assert "stale" not in caplog.text
+
+
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     source = make_manager()
     add_screen(source, "s0_home", "Home screen")
@@ -1633,6 +1681,25 @@ def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
     assert [node_id for node_id, _ in results] == ["s0_home", "s1_settings"]
     assert results[0][1] == pytest.approx(1.0)
     assert results[1][1] == pytest.approx(0.0)
+    assert vlm.kinds() == ["embed"]
+
+
+def test_find_node_by_description_skips_an_empty_embedding_without_a_stale_warning(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same as ``identify_state``: an empty ``description_embedding`` (what
+    ``load_graph`` produces for a node with no cached vector at all) is a
+    missing embedding, not a stale-dimension one.
+    """
+    gm = make_manager()
+    add_screen(gm, "s0_empty", "Home screen", description_embedding=[])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        results = gm.find_node_by_description("Home screen")
+
+    assert [node_id for node_id, _ in results] == ["s1_home"]
+    assert "stale" not in caplog.text
     assert vlm.kinds() == ["embed"]
 
 
