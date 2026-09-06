@@ -1333,7 +1333,6 @@ def test_decide_returns_the_chosen_option(
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
 
     assert decision["type"] == "neighbor"
-    assert decision["node"] == "results"
     assert decision["instruction"] == "tap the shoes result"
     assert (
         "State parameters: [query]"
@@ -1356,7 +1355,7 @@ def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
     here is harmless; the type-specific fallback still applies to it."""
     _use_model(monkeypatch, translator, '{"choice": "A"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
-    assert decision == {"letter": "A", "type": "done", "instruction": "buy shoes"}
+    assert decision == {"type": "done", "instruction": "buy shoes"}
 
 
 def test_decide_leaves_a_free_pick_without_an_instruction_empty(
@@ -1371,7 +1370,7 @@ def test_decide_leaves_a_free_pick_without_an_instruction_empty(
     """
     _use_model(monkeypatch, translator, '{"choice": "D"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
-    assert decision == {"letter": "D", "type": "free", "instruction": ""}
+    assert decision == {"type": "free", "instruction": ""}
 
 
 def test_decide_uses_the_models_instruction_for_a_free_pick(
@@ -1379,7 +1378,7 @@ def test_decide_uses_the_models_instruction_for_a_free_pick(
 ) -> None:
     _use_model(monkeypatch, translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
-    assert decision == {"letter": "D", "type": "free", "instruction": "Tap the cart icon"}
+    assert decision == {"type": "free", "instruction": "Tap the cart icon"}
 
 
 def test_decide_reports_an_unparseable_reply(

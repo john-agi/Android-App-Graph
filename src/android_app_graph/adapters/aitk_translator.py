@@ -90,14 +90,11 @@ class _Option(TypedDict):
 
 
 class _Decision(TypedDict):
-    """The outcome of ``_decide``; a "free" fallback carries ``reason`` instead of a node."""
+    """The outcome of ``_decide``, read by ``_step`` for ``type`` and ``instruction``;
+    a "free" fallback additionally carries ``reason``."""
 
     type: _OptionType
     instruction: str
-    letter: NotRequired[str]
-    node: NotRequired[str]
-    description: NotRequired[str]
-    effect: NotRequired[str]
     reason: NotRequired[str]
 
 
@@ -1160,8 +1157,9 @@ class UIKobeV2Translator(BaseTranslator):
     def _decide(self, G: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
         """Ask the model to pick the next action.
 
-        Returns the chosen option dict with an added "instruction" key
-        (the refined instruction from the model).
+        Returns the chosen option's type together with its resolved
+        instruction (the model's own instruction, falling back to the
+        option's graph-built one, then to the task text).
         """
         current_desc = G.nodes[node_id].get("page_description", "")
         today = datetime.now()
@@ -1212,18 +1210,10 @@ class UIKobeV2Translator(BaseTranslator):
                     resolved_instruction = instruction
                 else:
                     resolved_instruction = instruction or opt.get("instruction") or task
-                chosen: _Decision = {
+                return {
                     "type": opt["type"],
-                    "letter": opt["letter"],
                     "instruction": resolved_instruction,
                 }
-                if "node" in opt:
-                    chosen["node"] = opt["node"]
-                if "description" in opt:
-                    chosen["description"] = opt["description"]
-                if "effect" in opt:
-                    chosen["effect"] = opt["effect"]
-                return chosen
 
         logger.warning("DECIDE: unrecognized choice '%s'", choice_letter)
         return {
