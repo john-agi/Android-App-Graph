@@ -445,7 +445,9 @@ def _chat_completion_content(
             "[API] chat completion",
             lambda: client.chat.completions.create(**kwargs),
         )
-        content = as_str(resp.choices[0].message.content, "")
+        # A filtered or refused completion can come back with zero choices; that
+        # is empty content for the parse-retry to handle, not an IndexError.
+        content = as_str(resp.choices[0].message.content, "") if resp.choices else ""
         yield attempt, content, attempt < V2_PARSE_RETRIES
 
 

@@ -529,6 +529,42 @@ def test_chat_completion_content_turns_a_missing_body_into_an_empty_string() -> 
     assert first == (0, "", True)
 
 
+class _FakeResponseWithNoChoices:
+    def __init__(self) -> None:
+        self.choices: list[Any] = []
+
+
+class _FakeCompletionsWithNoChoices:
+    def create(self, **_kwargs: Any) -> _FakeResponseWithNoChoices:
+        return _FakeResponseWithNoChoices()
+
+
+class _FakeChatWithNoChoices:
+    def __init__(self) -> None:
+        self.completions = _FakeCompletionsWithNoChoices()
+
+
+class _FakeClientWithNoChoices:
+    def __init__(self) -> None:
+        self.chat = _FakeChatWithNoChoices()
+
+
+def test_chat_completion_content_turns_an_empty_choices_list_into_empty_content() -> None:
+    """A filtered or refused completion can come back with zero choices; that must
+    be empty content the parse-retry handles, not an IndexError out of the loop.
+    """
+    client = _FakeClientWithNoChoices()
+    first = next(
+        iter(
+            aitk_translator._chat_completion_content(
+                client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+                model="m",
+            )
+        )
+    )
+    assert first == (0, "", True)
+
+
 def test_make_no_proxy_client_defaults() -> None:
     client, model = aitk_translator._make_no_proxy_client({"api_key": "test-key"})
     assert model == "gpt-4o"
