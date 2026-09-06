@@ -228,8 +228,6 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     if not isinstance(raw, dict):
         raise TypeError(f"Runtime graph JSON must be an object: {path}")
     data = raw
-    if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
-        raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
     # require_known_edge_endpoints (graph_files) validates every node id and
     # edge endpoint is a string, then every edge endpoint against the node id

@@ -116,19 +116,30 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     return encode_screenshot_b64(screenshot_path)
 
 
-def require_string_ids(data: dict[str, Any], path: Path) -> None:
-    """Raise when a node id, or an edge endpoint, is present but not a string.
+def require_graph_shape(data: dict[str, Any], path: Path) -> None:
+    """Raise when ``nodes``/``edges`` are not lists of objects, or a node id or
+    edge endpoint is present but not a string.
 
     Shared by both graph loaders (runtime ``aitk_translator`` and
     ``GraphManager``) so the check and its message cannot drift between them.
-    A missing id/endpoint fails here too (``dict.get`` returns ``None``,
-    which is not a ``str``), naming the path rather than surfacing later as a
-    bare ``KeyError``.
+    A hand-edited or truncated file can leave ``nodes``/``edges`` missing,
+    ``null``, or holding something other than a list of objects; every such
+    shape failure is reported here, naming the path, rather than surfacing
+    later as a bare ``TypeError``/``AttributeError`` with no path once a
+    loader iterates or indexes into it.
     """
-    for node in data.get("nodes", []):
+    nodes = data.get("nodes")
+    edges = data.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise TypeError(f"Graph JSON must contain list fields 'nodes' and 'edges': {path}")
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise TypeError(f"Graph node must be an object: {node!r} in {path}")
         if not isinstance(node.get("id"), str):
             raise TypeError(f"Graph node id must be a string: {node!r} in {path}")
-    for edge in data.get("edges", []):
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise TypeError(f"Graph edge must be an object: {edge!r} in {path}")
         if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
             raise TypeError(f"Graph edge endpoint must be a string: {edge!r} in {path}")
 
@@ -141,11 +152,11 @@ def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
     undefined endpoint, so a hand-edited or truncated file would load
     quietly. See #62/#63.
 
-    ``require_string_ids`` runs first, so every id and endpoint read below is
-    already confirmed to be a string -- a missing or non-string one is
-    reported there, before this ever builds the node id set.
+    ``require_graph_shape`` runs first, so every id and endpoint read below is
+    already confirmed to be a string -- a missing, malformed or non-string
+    one is reported there, before this ever builds the node id set.
     """
-    require_string_ids(data, path)
+    require_graph_shape(data, path)
     node_ids = {node["id"] for node in data.get("nodes", [])}
     missing_ids = {
         endpoint

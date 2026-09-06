@@ -1728,6 +1728,20 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
     assert gm._next_id == 7
 
 
+def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
+    """Confirmed bug: ``"nodes": null`` used to raise a bare, path-less
+    ``TypeError: 'NoneType' object is not iterable`` from ``load_graph``, which
+    has no shape check of its own and relies entirely on the shared validator.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
+    gm = make_manager()
+
+    with pytest.raises(TypeError, match="must contain list fields 'nodes' and 'edges'") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+
+
 def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
     """An int id would otherwise sail through ``require_known_edge_endpoints``,
     which compares ``str()``-normalised ids, and let ``add_edge`` grow a

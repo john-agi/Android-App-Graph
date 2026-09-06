@@ -555,11 +555,25 @@ def test_load_graph_from_json_rejects_a_non_string_node_id(tmp_path: Path) -> No
 
 def test_load_graph_from_json_rejects_a_node_without_an_id(tmp_path: Path) -> None:
     """A node missing "id" entirely must surface as a path-bearing TypeError
-    from the shared require_string_ids check (via require_known_edge_endpoints),
+    from the shared require_graph_shape check (via require_known_edge_endpoints),
     not a bare KeyError('id') from indexing it directly further down.
     """
     path = _write_graph(tmp_path, nodes=[{"page_description": "x"}])
     with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        aitk_translator._load_graph_from_json(path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_load_graph_from_json_rejects_a_null_nodes_field_naming_the_path(
+    tmp_path: Path,
+) -> None:
+    """Confirmed bug: ``"nodes": null`` used to raise a bare, path-less
+    ``TypeError: 'NoneType' object is not iterable`` before the shared shape
+    check covered this loader's own list check too.
+    """
+    path = tmp_path / "demo.json"
+    path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
+    with pytest.raises(TypeError, match="must contain list fields 'nodes' and 'edges'") as excinfo:
         aitk_translator._load_graph_from_json(path)
     assert str(path) in str(excinfo.value)
 

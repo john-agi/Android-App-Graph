@@ -306,7 +306,7 @@ def test_require_known_edge_endpoints_raises_for_an_unknown_endpoint() -> None:
 
 
 def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: Path) -> None:
-    """require_string_ids runs first, so a node missing "id" entirely is
+    """require_graph_shape runs first, so a node missing "id" entirely is
     reported here too, with the path, rather than silently skipped and left
     for a loader that runs later to report as a bare KeyError.
     """
@@ -318,26 +318,52 @@ def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: 
     assert str(path) in str(excinfo.value)
 
 
-def test_require_string_ids_accepts_string_ids_and_endpoints() -> None:
+def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
     assert (
-        graph_files.require_string_ids(
+        graph_files.require_graph_shape(
             {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}, Path()
         )
         is None
     )
 
 
-def test_require_string_ids_rejects_a_non_string_node_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("data", "match"),
+    [
+        ({"nodes": None, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": [], "edges": None}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": {}, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": ["s0"], "edges": []}, "node must be an object"),
+        ({"nodes": [], "edges": ["e0"]}, "edge must be an object"),
+    ],
+)
+def test_require_graph_shape_rejects_a_malformed_shape(
+    tmp_path: Path, data: dict[str, Any], match: str
+) -> None:
+    """Confirmed bugs: ``"nodes": null`` used to raise a bare, path-less
+    ``TypeError: 'NoneType' object is not iterable``, and ``"nodes": ["s0"]``
+    a bare ``AttributeError`` -- neither naming the file. Every shape failure
+    must instead raise a ``TypeError`` naming the path.
+    """
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
-        graph_files.require_string_ids({"nodes": [{"id": 5}]}, path)
+    with pytest.raises(TypeError, match=match) as excinfo:
+        graph_files.require_graph_shape(data, path)
     assert str(path) in str(excinfo.value)
 
 
-def test_require_string_ids_rejects_a_node_without_an_id(tmp_path: Path) -> None:
+def test_require_graph_shape_rejects_a_non_string_node_id(tmp_path: Path) -> None:
     path = tmp_path / "demo.json"
     with pytest.raises(TypeError, match="node id must be a string") as excinfo:
-        graph_files.require_string_ids({"nodes": [{"page_description": "x"}]}, path)
+        graph_files.require_graph_shape({"nodes": [{"id": 5}], "edges": []}, path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_graph_shape({"nodes": [{"page_description": "x"}], "edges": []}, path)
     assert str(path) in str(excinfo.value)
 
 
@@ -345,12 +371,12 @@ def test_require_string_ids_rejects_a_node_without_an_id(tmp_path: Path) -> None
     "edge",
     [{"source": None, "target": "n2"}, {"source": "n1", "target": None}],
 )
-def test_require_string_ids_rejects_a_non_string_edge_endpoint(
+def test_require_graph_shape_rejects_a_non_string_edge_endpoint(
     tmp_path: Path, edge: dict[str, Any]
 ) -> None:
     path = tmp_path / "demo.json"
     with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
-        graph_files.require_string_ids({"nodes": [], "edges": [edge]}, path)
+        graph_files.require_graph_shape({"nodes": [], "edges": [edge]}, path)
     assert str(path) in str(excinfo.value)
 
 
