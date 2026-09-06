@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -276,7 +277,7 @@ def test_precompute_computes_caches_and_skips(
     }
     assert embed.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
-    ).vectors == {"s0_home": [0.1, 0.2]}
+    ) == {"s0_home": [0.1, 0.2]}
 
     assert _precompute(tmp_path)["already_cached"] == 1
 
@@ -311,7 +312,7 @@ def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
         app_dir / "demo.json", model="gemini-embedding-2", node_ids={"n1"}
-    ).vectors == {"n1": [0.5, 0.5]}
+    ) == {"n1": [0.5, 0.5]}
     saved = json.loads(image_embeddings_path(app_dir / "demo.json").read_text(encoding="utf-8"))
     assert "gone" not in saved["embeddings"]
 
@@ -338,7 +339,7 @@ def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
-    ).vectors == {"s0_home": [0.9, 0.8]}
+    ) == {"s0_home": [0.9, 0.8]}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -373,7 +374,7 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
     assert (
         embed.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
-        ).vectors
+        )
         == {}
     )
 
@@ -414,6 +415,68 @@ def test_precompute_recompute_discards_through_a_symlinked_sidecar(
     }
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root passes os.access/write for every directory regardless of mode, so a "
+    "chmod 0o500 app directory denies nothing to run as root here",
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_skips_a_graph_whose_sidecar_cannot_be_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graph whose sidecar cannot be discarded cannot be rebuilt either --
+    computing fresh vectors on top of a cache the run could not confirm was
+    emptied would be worse than doing nothing -- so the discard write goes
+    through the same OSError boundary as every other sidecar write: logged
+    and skipped, continuing to the next app rather than aborting the whole
+    --recompute run.
+    """
+    first_path = _write_graph_tree(tmp_path, app="first")
+    second_path = _write_graph_tree(tmp_path, app="second")
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    first_path.parent.chmod(0o500)
+    try:
+        summary = _precompute(tmp_path, recompute=True)
+    finally:
+        first_path.parent.chmod(0o700)
+
+    assert summary["graphs"] == 2
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        second_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.5, 0.5]}
+
+
+def test_precompute_recompute_logs_and_skips_a_graph_whose_discard_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The discard write's own OSError boundary, exercised independently of
+    the privilege level the test happens to run under (see the skipped
+    chmod-based sibling test above): a graph whose sidecar cannot be
+    discarded must be logged and skipped, not raise out of the whole run.
+    """
+    first_path = _write_graph_tree(tmp_path, app="first")
+
+    def _raise_permission_error(
+        _graph_path: Path, _embeddings: dict[str, list[float]], **_kwargs: object
+    ) -> None:
+        msg = "Permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(embed, "save_image_embeddings", _raise_permission_error)
+
+    with caplog.at_level("ERROR"):
+        summary = _precompute(tmp_path, recompute=True)
+
+    assert summary["graphs"] == 1
+    assert summary["computed"] == 0
+    assert "first" in caplog.text
+    assert str(first_path) in caplog.text
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_precompute_keeps_going_when_a_node_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -432,7 +495,7 @@ def test_precompute_keeps_going_when_a_node_fails(
     assert (
         embed.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
-        ).vectors
+        )
         == {}
     )
 
@@ -479,7 +542,7 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
     assert summary["skipped_failed"] == 1
     assert embed.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
-    ).vectors == {
+    ) == {
         "n1": [0.1, 0.2],
         "n3": [0.1, 0.2],
     }
@@ -504,7 +567,7 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
-    ).vectors == {"s0_home": [0.3, 0.4]}
+    ) == {"s0_home": [0.3, 0.4]}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -528,7 +591,7 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
-    ).vectors == {"s0_home": [0.3, 0.4]}
+    ) == {"s0_home": [0.3, 0.4]}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -685,7 +748,7 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
 
     assert embed.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
-    ).vectors == {
+    ) == {
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
     }
@@ -703,31 +766,3 @@ def test_precompute_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -
     with pytest.raises(TypeError, match="list fields") as excinfo:
         _precompute(tmp_path)
     assert str(graph_path) in str(excinfo.value)
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_precompute_prunes_a_fully_cached_sidecar_without_computing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """On a fully cached graph nothing is computed, so the prune reaches disk only
-    because the compute loop rewrites on the loader's word; it must not be
-    re-dropped and re-logged on every run.
-    """
-    graph_path = _write_graph_tree(tmp_path)
-    embedding_cache.save_image_embeddings(
-        graph_path, {"s0_home": [0.1, 0.2], "gone": [0.3, 0.4]}, model="gemini-embedding-2"
-    )
-
-    def _never(*_a: Any, **_kw: Any) -> list[float]:
-        msg = "nothing to compute"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _never)
-
-    summary = _precompute(tmp_path)
-    assert summary["computed"] == 0
-    assert summary["already_cached"] == 1
-    assert json.loads(image_embeddings_path(graph_path).read_text(encoding="utf-8")) == {
-        "model": "gemini-embedding-2",
-        "embeddings": {"s0_home": [0.1, 0.2]},
-    }

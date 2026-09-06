@@ -1070,7 +1070,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     assert save_calls[0] == {"n4": [9.0, 9.0], "n1": [1.0, 0.0], "n3": [1.0, 0.0]}
     assert embedding_cache.load_image_embeddings(
         path, model="img-model", node_ids={"n1", "n2", "n3", "n4"}
-    ).vectors == {
+    ) == {
         "n4": [9.0, 9.0],
         "n1": [1.0, 0.0],
         "n3": [1.0, 0.0],
@@ -1109,7 +1109,7 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
 
     assert embedding_cache.load_image_embeddings(
         path, model="img-model", node_ids={"n1", "n2", "n3"}
-    ).vectors == {
+    ) == {
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
     }
@@ -2187,21 +2187,26 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
     assert [m for m in caplog.messages if "no candidates" in m] == [expected]
 
 
-def test_load_all_graphs_prunes_a_fully_cached_sidecar_without_computing(
+@pytest.mark.usefixtures("no_sleep")
+def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Same as the offline precompute: a vanished node's vector leaves the
-    sidecar on the first start even though every remaining node is cached.
+    """A node removed from the graph since the sidecar was written must not
+    survive a rewrite: the runtime translator shares load_image_embeddings'
+    pruning with app-graph-embed, and computing this graph's one uncached
+    node is what carries the prune to disk, through the compute loop's own
+    write -- a load never writes on its own (see load_image_embeddings).
     """
     path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}])
     model = embedding_cache.resolve_image_embedding_settings(_VLM_CONFIG).model
-    embedding_cache.save_image_embeddings(path, {"n1": [1.0, 0.0], "gone": [0.0, 1.0]}, model=model)
+    embedding_cache.save_image_embeddings(path, {"gone": [0.0, 1.0]}, model=model)
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(b"shot-n1")
 
-    def _never(*_a: Any, **_kw: Any) -> list[float]:
-        msg = "nothing to compute"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _never)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+    )
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 

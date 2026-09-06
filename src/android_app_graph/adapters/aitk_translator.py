@@ -685,8 +685,6 @@ class UIKobeV2Translator(BaseTranslator):
         app_name: str,
         graph_file: Path,
         embeddings: dict[str, list[float]],
-        *,
-        rewrite: bool,
     ) -> None:
         """Compute an image embedding for every node with a screenshot but no cached vector.
 
@@ -700,23 +698,19 @@ class UIKobeV2Translator(BaseTranslator):
         A missing ``image_embedding.api_key`` is checked once here, before the
         retry loop starts, rather than inside it: raising per node would log a
         full traceback for every candidate instead of one clear error for the graph.
-
-        ``rewrite`` is the caller's word that its load pruned entries the sidecar
-        still holds, so the loop rewrites the file even with nothing to compute.
         """
         pending = [
             (node_id, data["reference_screenshot_path"])
             for node_id, data in G.nodes(data=True)
             if data.get("reference_screenshot_path") and not data.get("image_embedding")
         ]
-        if not pending and not rewrite:
+        if not pending:
             return
         if not self.image_embedding_api_key:
-            if pending:
-                logger.error(
-                    "Native Gemini image embedding requires image_embedding.api_key "
-                    "or GEMINI_API_KEY/GOOGLE_API_KEY."
-                )
+            logger.error(
+                "Native Gemini image embedding requires image_embedding.api_key "
+                "or GEMINI_API_KEY/GOOGLE_API_KEY."
+            )
             return
         # Encoded lazily, one screenshot at a time, the same as offline
         # precomputation: at most one base64 payload resident, never every
@@ -730,7 +724,6 @@ class UIKobeV2Translator(BaseTranslator):
             model=self.image_embedding_model,
             base_url=self.image_embedding_base_url,
             app_name=app_name,
-            rewrite=rewrite,
         )
         for node_id, _screenshot_path in pending:
             if node_id in embeddings:
@@ -745,10 +738,9 @@ class UIKobeV2Translator(BaseTranslator):
             try:
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
                 G = _load_graph_from_json(graph_file)
-                loaded = load_image_embeddings(
+                embeddings = load_image_embeddings(
                     graph_file, model=self.image_embedding_model, node_ids=set(G.nodes)
                 )
-                embeddings = loaded.vectors
                 for node_id, emb in embeddings.items():
                     G.nodes[node_id]["image_embedding"] = emb
                 ref_count = sum(
@@ -765,9 +757,7 @@ class UIKobeV2Translator(BaseTranslator):
                     ref_count,
                     cached_count,
                 )
-                self._compute_missing_image_embeddings(
-                    G, app_name, graph_file, embeddings, rewrite=loaded.pruned > 0
-                )
+                self._compute_missing_image_embeddings(G, app_name, graph_file, embeddings)
                 self._graphs[app_name] = G
                 for pkg in _extract_packages_from_graph(G):
                     self._package_to_app[pkg] = app_name

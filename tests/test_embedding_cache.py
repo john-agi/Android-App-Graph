@@ -8,6 +8,7 @@ precomputation) so they cannot drift.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
     assert (
         embedding_cache.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids=set()
-        ).vectors
+        )
         == {}
     )
     embedding_cache.save_image_embeddings(
@@ -39,7 +40,7 @@ def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
     assert sidecar == {"model": "gemini-embedding-2", "embeddings": {"n1": [0.5, 0.25]}}
     assert embedding_cache.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"n1"}
-    ).vectors == {"n1": [0.5, 0.25]}
+    ) == {"n1": [0.5, 0.25]}
 
 
 def test_load_image_embeddings_drops_a_vector_for_a_node_not_in_node_ids(
@@ -50,99 +51,24 @@ def test_load_image_embeddings_drops_a_vector_for_a_node_not_in_node_ids(
     vanished from the graph since it was cached must not survive being loaded
     back in -- pruning to the caller's current node ids happens once, here,
     so the two cannot drift on what the rewritten sidecar ends up holding.
+
+    Logged at DEBUG, not INFO: a load stays a read, so this must never be the
+    line an operator sees repeat on every start of a fully cached graph --
+    only the compute loop's own eventual write is worth an INFO line.
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.save_image_embeddings(
         graph_path, {"n1": [0.1, 0.2], "gone": [0.3, 0.4]}, model="gemini-embedding-2"
     )
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         result = embedding_cache.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids={"n1"}
-        ).vectors
+        )
 
     assert result == {"n1": [0.1, 0.2]}
     assert "dropping 1 vector" in caplog.text
-
-
-def test_load_image_embeddings_reports_the_prune_and_leaves_the_write_to_the_compute_loop(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A load stays a read: a read-only graph directory must not log a failed
-    write on every start. The prune is reported so the compute loop, which
-    owns the sidecar write, rewrites the file even when it computes nothing,
-    and the drop is logged once rather than on every later load.
-    """
-    graph_path = tmp_path / "demo.json"
-    embedding_cache.save_image_embeddings(
-        graph_path, {"n1": [0.1, 0.2], "gone": [0.3, 0.4]}, model="gemini-embedding-2"
-    )
-    sidecar_path = embedding_cache.image_embeddings_path(graph_path)
-    before = sidecar_path.read_text(encoding="utf-8")
-
-    with caplog.at_level("INFO"):
-        loaded = embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1"}
-        )
-    assert loaded == embedding_cache.LoadedImageEmbeddings({"n1": [0.1, 0.2]}, 1)
-    assert sidecar_path.read_text(encoding="utf-8") == before
-    assert "dropping 1 vector" in caplog.text
-
-    run = embedding_cache.compute_missing_image_embeddings(
-        graph_path,
-        loaded.vectors,
-        [],
-        api_key="key",
-        model="gemini-embedding-2",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
-        app_name="demo",
-        rewrite=loaded.pruned > 0,
-    )
-    assert run == embedding_cache.ImageEmbeddingRun(computed=0, failed=0)
-    assert json.loads(sidecar_path.read_text(encoding="utf-8")) == {
-        "model": "gemini-embedding-2",
-        "embeddings": {"n1": [0.1, 0.2]},
-    }
-
-    caplog.clear()
-    with caplog.at_level("INFO"):
-        second = embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1"}
-        )
-    assert second.pruned == 0
-    assert "dropping" not in caplog.text
-
-
-def test_compute_missing_image_embeddings_logs_a_failed_prune_rewrite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A read-only graph directory turns the prune rewrite into the same logged
-    cache-write failure as any other, never an exception out of loading.
-    """
-    graph_path = tmp_path / "demo.json"
-
-    def _raise_permission_error(
-        _graph_path: Path, _embeddings: dict[str, list[float]], **_kwargs: object
-    ) -> None:
-        msg = "Permission denied"
-        raise PermissionError(msg)
-
-    monkeypatch.setattr(embedding_cache, "save_image_embeddings", _raise_permission_error)
-
-    with caplog.at_level("ERROR"):
-        run = embedding_cache.compute_missing_image_embeddings(
-            graph_path,
-            {"n1": [0.1, 0.2]},
-            [],
-            api_key="key",
-            model="gemini-embedding-2",
-            base_url="https://generativelanguage.googleapis.com/v1beta",
-            app_name="demo",
-            rewrite=True,
-        )
-
-    assert run == embedding_cache.ImageEmbeddingRun(computed=0, failed=0)
-    assert "Failed to write image embedding cache" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
 
 
 def test_load_image_embeddings_returns_empty_for_a_different_model(
@@ -156,9 +82,7 @@ def test_load_image_embeddings_returns_empty_for_a_different_model(
     embedding_cache.save_image_embeddings(graph_path, {"n1": [0.5, 0.25]}, model="model-a")
 
     with caplog.at_level("WARNING"):
-        result = embedding_cache.load_image_embeddings(
-            graph_path, model="model-b", node_ids={"n1"}
-        ).vectors
+        result = embedding_cache.load_image_embeddings(graph_path, model="model-b", node_ids={"n1"})
 
     assert result == {}
     assert "model-a" in caplog.text
@@ -183,7 +107,7 @@ def test_load_image_embeddings_discards_a_legacy_bare_dict(
     with caplog.at_level("WARNING"):
         result = embedding_cache.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids={"n1"}
-        ).vectors
+        )
 
     assert result == {}
     assert "predates model tagging" in caplog.text
@@ -220,14 +144,14 @@ def test_save_image_embeddings_goes_through_write_json_atomically(
     ]
     assert embedding_cache.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"n1"}
-    ).vectors == {"n1": [0.5]}
+    ) == {"n1": [0.5]}
 
 
 def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:
     assert (
         embedding_cache.load_image_embeddings(
             tmp_path / "demo.json", model="gemini-embedding-2", node_ids=set()
-        ).vectors
+        )
         == {}
     )
 
@@ -250,7 +174,7 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
     )
     assert embedding_cache.load_image_embeddings(
         graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3", "n4"}
-    ).vectors == {"n1": [1.0, 2.0]}
+    ) == {"n1": [1.0, 2.0]}
 
 
 def test_load_image_embeddings_drops_a_nan_entry(
@@ -275,7 +199,7 @@ def test_load_image_embeddings_drops_a_nan_entry(
     with caplog.at_level("WARNING"):
         embeddings = embedding_cache.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids={"n1", "n2"}
-        ).vectors
+        )
     assert embeddings == {"n1": [1.0, 2.0]}
     assert "n2" in caplog.text
 
@@ -297,7 +221,7 @@ def test_load_image_embeddings_drops_an_element_too_large_for_a_float(
     with caplog.at_level("WARNING"):
         embeddings = embedding_cache.load_image_embeddings(
             graph_path, model="gemini-embedding-2", node_ids={"n1", "n2"}
-        ).vectors
+        )
     assert embeddings == {"n1": [1.0, 2.0]}
     assert "n2" in caplog.text
 
@@ -332,7 +256,7 @@ def test_load_image_embeddings_warns_when_the_sidecar_is_not_an_object(
         assert (
             embedding_cache.load_image_embeddings(
                 graph_path, model="gemini-embedding-2", node_ids=set()
-            ).vectors
+            )
             == {}
         )
     assert "demo.image_emb.json" in caplog.text
@@ -347,7 +271,7 @@ def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
         assert (
             embedding_cache.load_image_embeddings(
                 graph_path, model="gemini-embedding-2", node_ids=set()
-            ).vectors
+            )
             == {}
         )
     assert "demo.image_emb.json" in caplog.text
@@ -368,7 +292,7 @@ def test_load_image_embeddings_treats_invalid_utf8_as_no_cache(
         assert (
             embedding_cache.load_image_embeddings(
                 graph_path, model="gemini-embedding-2", node_ids={"n1"}
-            ).vectors
+            )
             == {}
         )
     assert "demo.image_emb.json" in caplog.text
@@ -389,7 +313,7 @@ def test_load_image_embeddings_treats_an_unreadable_file_as_no_cache(
         assert (
             embedding_cache.load_image_embeddings(
                 graph_path, model="gemini-embedding-2", node_ids=set()
-            ).vectors
+            )
             == {}
         )
     assert "demo.image_emb.json" in caplog.text
@@ -575,6 +499,6 @@ def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(
     with caplog.at_level("WARNING"):
         loaded = embedding_cache.load_image_embeddings(
             graph_path, model="img-model", node_ids={"model", "n1"}
-        ).vectors
+        )
     assert loaded == {}
     assert "predates model tagging" in caplog.text

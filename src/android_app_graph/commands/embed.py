@@ -82,14 +82,23 @@ def precompute_graph_image_embeddings(
         node_ids = {node.get("id") for node in graph_data.get("nodes", []) if node.get("id")}
 
         embeddings: dict[str, list[float]]
-        rewrite = False
         if recompute:
-            save_image_embeddings(graph_path, {}, model=model)
+            try:
+                save_image_embeddings(graph_path, {}, model=model)
+            except OSError:
+                # A graph whose sidecar cannot be discarded cannot be rebuilt
+                # either: computing fresh vectors on top of a cache the run
+                # could not confirm was emptied would be worse than skipping
+                # the graph outright.
+                logger.exception(
+                    "Failed to discard image embedding cache for graph %s at %s",
+                    current_app_name,
+                    graph_path,
+                )
+                continue
             embeddings = {}
         else:
-            loaded = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
-            embeddings = loaded.vectors
-            rewrite = loaded.pruned > 0
+            embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
 
         # A stat, not a read: deciding reference_screenshots/already_cached/
         # skipped_missing_screenshot must not pay for every uncached node's
@@ -118,7 +127,6 @@ def precompute_graph_image_embeddings(
             model=model,
             base_url=base_url,
             app_name=current_app_name,
-            rewrite=rewrite,
         )
         summary["computed"] += run.computed
         summary["skipped_failed"] += run.failed
