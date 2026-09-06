@@ -41,6 +41,11 @@ def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
     except (OSError, ValueError) as exc:
         logger.warning("Corrupt image embedding cache %s; treating it as empty: %s", emb_path, exc)
         return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Image embedding cache %s is not a JSON object; treating it as empty", emb_path
+        )
+        return {}
     embeddings: dict[str, list[float]] = {}
     for node_id, vector in as_str_dict(raw).items():
         numbers = as_float_list(vector)

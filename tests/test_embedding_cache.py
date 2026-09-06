@@ -93,6 +93,20 @@ def test_load_image_embeddings_warns_about_each_dropped_entry(
     assert "n2" in caplog.text
 
 
+def test_load_image_embeddings_warns_when_the_sidecar_is_not_an_object(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``null`` parses cleanly but is not a mapping; ``as_str_dict`` would silently
+    turn it into ``{}`` like every other case, unlike a corrupt or unreadable
+    sidecar, which is warned about by name.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.image_embeddings_path(graph_path).write_text("null", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert embedding_cache.load_image_embeddings(graph_path) == {}
+    assert "demo.image_emb.json" in caplog.text
+
+
 def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
