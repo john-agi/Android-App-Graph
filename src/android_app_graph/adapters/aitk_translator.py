@@ -285,15 +285,18 @@ def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
 
 
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
-    answer = (raw or "").strip().upper()
+    text = (raw or "").strip()
+    answer = text.upper()
     if answer == "NONE":
         return "NONE"
     if len(answer) == 1 and answer in valid_letters:
         return answer
 
-    think_end = answer.rfind("</THINK>")
+    # Case-insensitive here only to find the tag; the slice keeps original case
+    # so the free-text fallbacks below see what the model actually wrote.
+    think_end = text.lower().rfind("</think>")
     if think_end != -1:
-        post_think = answer[think_end + len("</THINK>") :].strip()
+        post_think = text[think_end + len("</think>") :].strip()
         parsed = _parse_model_choice(post_think, valid_letters)
         if parsed:
             return parsed
@@ -309,12 +312,18 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if choice in valid_letters:
             return choice
 
-    if re.search(r"\bNONE\b", answer):
-        return "NONE"
-    matches = [as_str(m, "") for m in re.findall(r"\b([A-Z])\b", answer)]
+    # Free text beyond an explicit "Answer:"/</think> form is scanned in its
+    # original case: .upper() would turn a lowercase article ("a") into a false
+    # option letter and a sentence-initial "None" into a false NONE. An actual
+    # uppercase letter always outranks a "NONE" found in the same text, since a
+    # model that names a letter has answered even if it also explained a
+    # rejection ("None of the others fit, so B").
+    matches = [as_str(m, "") for m in re.findall(r"\b([A-Z])\b", text)]
     for match in reversed(matches):
         if match in valid_letters:
             return match
+    if re.search(r"\bNONE\b", answer):
+        return "NONE"
     return None
 
 

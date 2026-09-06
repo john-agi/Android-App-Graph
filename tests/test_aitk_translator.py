@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import string
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,9 @@ def test_extract_packages_from_empty_graph() -> None:
         ("I see A here, but B is better", "B"),
         ("nothing matches, so none of them", "NONE"),
         ("no letters at all", None),
+        ("B is a match", "B"),
+        ("It is clearly B, a strong match", "B"),
+        ("None of the others fit, so B", "B"),
     ],
 )
 def test_parse_model_choice(raw: str, expected: str | None) -> None:
@@ -105,6 +109,23 @@ def test_parse_model_choice_rejects_letters_outside_the_valid_set() -> None:
 def test_parse_model_choice_accepts_any_bare_valid_letter(letter: str, padding: str) -> None:
     raw = f"{padding}{letter.lower()}{padding}"
     assert aitk_translator._parse_model_choice(raw, _LETTERS) == letter
+
+
+@given(
+    st.text(alphabet=string.ascii_lowercase + " ", min_size=1, max_size=40).filter(
+        lambda s: len(s.strip()) != 1
+    )
+)
+def test_parse_model_choice_never_picks_a_letter_from_lowercase_only_prose(
+    sentence: str,
+) -> None:
+    """A lowercase word never counts as a letter pick — only an actual uppercase
+    standalone letter does — so free-form lowercase prose with no explicit
+    "Answer:"/"Final answer:" form can end in ``None`` or an explicit "NONE",
+    but never in one of the option letters.
+    """
+    result = aitk_translator._parse_model_choice(sentence, _LETTERS)
+    assert result is None or result == "NONE"
 
 
 @pytest.mark.parametrize(
