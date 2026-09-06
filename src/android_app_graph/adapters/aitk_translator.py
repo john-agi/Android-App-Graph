@@ -311,17 +311,27 @@ def _after_last_think_tag(text: str) -> str | None:
     return text[last_end:].strip() if last_end != -1 else None
 
 
-def _reads_as_article(letter: str, text: str, end: int) -> bool:
-    """True when ``letter``, matched in ``text`` up to ``end``, reads as the
-    English article/pronoun "a"/"I" rather than a named answer letter.
+def _reads_as_article(letter: str, text: str, start: int, end: int) -> bool:
+    """True when ``letter``, matched in ``text`` at ``[start, end)``, reads as
+    the English article/pronoun "a"/"I" rather than a named answer letter.
 
-    A standalone "A"/"I" followed on the same line by a lowercase word is the
-    English article or pronoun, not a named answer letter; that case is left
-    to the strict-format retry (V2_PARSE_RETRY_HINT) rather than guessed. A
-    line break ends the sentence, so a letter alone on its line ("Answer: A",
-    then an explanation) is the answer.
+    Both must hold: the letter is followed on the same line by a lowercase
+    word, AND it is sentence-initial -- at the start of the text, or preceded
+    (ignoring spaces/tabs) by a newline or one of ``. ! ? :`` (the colon
+    covers "Answer: A login screen ..." and "Candidates: A looks ..."). The
+    article reading only makes sense there; mid-sentence, "the best match is
+    A because it shows a home screen" names a letter even though "A" precedes
+    a lowercase word. That article-looking case is left to the strict-format
+    retry (V2_PARSE_RETRY_HINT) rather than guessed. A line break ends the
+    sentence, so a letter alone on its line ("Answer: A", then an explanation)
+    is the answer.
     """
-    return letter in ("A", "I") and bool(re.match(r"[ \t]+[a-z]", text[end:]))
+    if letter not in ("A", "I"):
+        return False
+    if not re.match(r"[ \t]+[a-z]", text[end:]):
+        return False
+    prefix = text[:start].rstrip(" \t")
+    return not prefix or prefix[-1] in ".!?:\n"
 
 
 def _last_answer_signal(text: str, valid_letters: str) -> str | None:
@@ -337,7 +347,7 @@ def _last_answer_signal(text: str, valid_letters: str) -> str | None:
     last_letter = ""
     for letter_match in re.finditer(r"\b([A-Z])\b", text):
         letter = as_str(letter_match.group(1), "")
-        if _reads_as_article(letter, text, letter_match.end()):
+        if _reads_as_article(letter, text, letter_match.start(), letter_match.end()):
             continue
         if letter in valid_letters:
             last_letter_pos, last_letter = letter_match.start(), letter
@@ -387,7 +397,7 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if choice == "NONE":
             return "NONE"
         if choice in valid_letters:
-            if not _reads_as_article(choice, text, final_match.end(1)):
+            if not _reads_as_article(choice, text, final_match.start(1), final_match.end(1)):
                 return choice
             # An explicit label is the strongest evidence in the reply, so an
             # articled-looking letter after it still stands unless a later,

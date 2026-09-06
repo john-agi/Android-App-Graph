@@ -106,6 +106,9 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("Answer: A login screen is shown, none of them match", "NONE"),
         ("Answer: A matches the home screen.", "A"),
         ("Answer: A login form; B is closer", "B"),
+        ("The best match is A because it shows a home screen.", "A"),
+        ("I think A is right", "A"),
+        ("Candidates: A looks right", None),
         ("Answer: A", "A"),
         ("Answer: a", "A"),
         ("answer: NONE", "NONE"),
@@ -1986,10 +1989,26 @@ def test_last_answer_signal_prefers_a_later_none_over_an_earlier_letter() -> Non
 
 
 def test_last_answer_signal_skips_a_sentence_initial_article() -> None:
-    """A standalone "A" followed by a lowercase word on the same line reads as
-    the English article, not a named answer letter, so it is not a signal.
+    """A standalone "A" followed by a lowercase word on the same line, at the
+    start of the text, reads as the English article, not a named answer
+    letter, so it is not a signal.
     """
     assert aitk_translator._last_answer_signal("A is the match", "ABCD") is None
+
+
+def test_last_answer_signal_skips_an_article_after_a_colon() -> None:
+    """A colon starts a new sentence too, e.g. "Candidates: A looks right", so a
+    standalone "A" right after one reads as the article, not a named letter.
+    """
+    assert aitk_translator._last_answer_signal("Candidates: A looks right", "ABCD") is None
+
+
+def test_last_answer_signal_treats_a_mid_sentence_article_looking_letter_as_a_letter() -> None:
+    """A standalone "A"/"I" followed by a lowercase word only reads as the
+    English article/pronoun when it is sentence-initial; mid-sentence it is a
+    named letter even though a lowercase word follows.
+    """
+    assert aitk_translator._last_answer_signal("I think A is right", "ABCD") == "A"
 
 
 def test_last_answer_signal_returns_none_without_any_signal() -> None:
