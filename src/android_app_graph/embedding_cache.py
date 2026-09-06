@@ -127,6 +127,14 @@ def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) 
     exists keeps its current mode across the rewrite, matching what in-place
     truncation used to do, so an operator's chmod on a shared graph directory
     survives a rewrite.
+
+    Unlike the in-place truncation this replaced, which needed write
+    permission only on the sidecar file itself, an atomic replace needs write
+    permission on the graph directory too (to create and rename the temp
+    file) -- the accepted cost of never leaving a truncated sidecar behind. A
+    directory the process cannot write into makes ``compute_missing_image_embeddings``
+    log the failed cache write and keep the computed vectors in memory for
+    the run, rather than persisting them.
     """
     target = image_embeddings_path(graph_path)
     tmp_path = target.parent / f"{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
