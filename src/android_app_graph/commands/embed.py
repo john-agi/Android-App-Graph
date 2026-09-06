@@ -34,11 +34,7 @@ logger = logging.getLogger(__name__)
 
 def load_graph_json(graph_path: Path) -> dict[str, Any]:
     with graph_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        msg = f"Graph JSON must be an object: {graph_path}"
-        raise TypeError(msg)
-    return data
+        return require_graph_shape(json.load(f), graph_path)
 
 
 def _pending_candidates(
@@ -77,7 +73,6 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
-        require_graph_shape(graph_data, graph_path)
         # --recompute discards the sidecar by writing an empty tagged payload
         # through the same writer as every other sidecar write, not by unlinking
         # it: unlink() on a symlinked sidecar detaches the link and leaves the

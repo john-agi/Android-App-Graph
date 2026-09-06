@@ -1208,12 +1208,11 @@ class GraphManager:
         """Load graph from a JSON file (and companion embeddings file)."""
         path = Path(path)
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
+            raw = json.load(f)
         # Run before any attribute below is assigned or the graph is cleared: a
         # corrupt file must leave the previously loaded graph and counters
         # untouched, not wipe them partway through the node loop.
-        require_known_edge_endpoints(data, path)
+        data = require_known_edge_endpoints(raw, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)

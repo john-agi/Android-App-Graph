@@ -225,14 +225,10 @@ one-step instruction. No explanations."""
 def _load_graph_from_json(path: Path) -> nx.DiGraph:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    if not isinstance(raw, dict):
-        raise TypeError(f"Runtime graph JSON must be an object: {path}")
-    data = raw
-
     # Run before anything else below: a graph with one bad node or edge must
     # reject before the node loop's per-node screenshot path lookup, and
     # before any edge is added.
-    require_known_edge_endpoints(data, path)
+    data = require_known_edge_endpoints(raw, path)
 
     edge_specs: list[tuple[str, str, dict[str, Any]]] = []
     for edge_data in data.get("edges", []):
@@ -301,6 +297,31 @@ def _after_last_think_tag(text: str) -> str | None:
     return text[last_end:].strip() if last_end != -1 else None
 
 
+# An article is followed by a noun phrase, never by a finite verb, so "A is the
+# login screen" names a letter while "A login screen is visible" does not. A
+# closed list of the verbs a model puts after an answer letter, not a parser:
+# a verb missing from it costs one strict-format retry, never a wrong pick.
+_VERBS_THAT_CANNOT_FOLLOW_AN_ARTICLE = frozenset(
+    {
+        "is",
+        "was",
+        "matches",
+        "shows",
+        "looks",
+        "seems",
+        "appears",
+        "fits",
+        "has",
+        "does",
+        "would",
+        "should",
+        "corresponds",
+        "represents",
+        "displays",
+    }
+)
+
+
 def _reads_as_article(letter: str, text: str, start: int, end: int) -> bool:
     """True when ``letter``, matched in ``text`` at ``[start, end)``, reads as
     the English article/pronoun "a"/"I" rather than a named answer letter.
@@ -318,7 +339,8 @@ def _reads_as_article(letter: str, text: str, start: int, end: int) -> bool:
     """
     if letter not in ("A", "I"):
         return False
-    if not re.match(r"[ \t]+[a-z]", text[end:]):
+    following = re.match(r"[ \t]+([a-z]+)", text[end:])
+    if following is None or following.group(1) in _VERBS_THAT_CANNOT_FOLLOW_AN_ARTICLE:
         return False
     prefix = text[:start].rstrip(" \t")
     return not prefix or prefix[-1] in ".!?:\n"

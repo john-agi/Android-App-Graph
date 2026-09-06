@@ -116,9 +116,10 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     return encode_screenshot_b64(screenshot_path)
 
 
-def require_graph_shape(data: dict[str, Any], path: Path) -> None:
-    """Raise when ``nodes``/``edges`` are not lists of objects, or a node id or
-    edge endpoint is present but not a string.
+def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
+    """Return ``data`` once it is an object whose ``nodes``/``edges`` are lists
+    of objects with string ids and endpoints; raise ``TypeError`` naming
+    ``path`` otherwise.
 
     Shared by both graph loaders (runtime ``aitk_translator`` and
     ``GraphManager``) so the check and its message cannot drift between them.
@@ -128,8 +129,13 @@ def require_graph_shape(data: dict[str, Any], path: Path) -> None:
     later as a bare ``TypeError``/``AttributeError`` with no path once a
     loader iterates or indexes into it.
     """
-    nodes = data.get("nodes")
-    edges = data.get("edges")
+    if not isinstance(data, dict):
+        raise TypeError(f"Graph JSON must be an object: {path}")
+    # JSON object keys are always strings; the comprehension is what narrows the
+    # loaded object to dict[str, Any] for the type checker (as payloads does).
+    graph: dict[str, Any] = {key: value for key, value in data.items() if isinstance(key, str)}
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
     if not isinstance(nodes, list) or not isinstance(edges, list):
         raise TypeError(f"Graph JSON must contain list fields 'nodes' and 'edges': {path}")
     for node in nodes:
@@ -142,10 +148,12 @@ def require_graph_shape(data: dict[str, Any], path: Path) -> None:
             raise TypeError(f"Graph edge must be an object: {edge!r} in {path}")
         if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
             raise TypeError(f"Graph edge endpoint must be a string: {edge!r} in {path}")
+    return graph
 
 
-def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
-    """Raise when an edge names a node id absent from ``data["nodes"]``.
+def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
+    """Return the validated graph object; raise when an edge names a node id
+    absent from ``data["nodes"]``.
 
     Shared by both graph loaders (runtime and GraphManager): networkx's
     add_edge would otherwise silently create an attribute-less node for an
@@ -156,17 +164,18 @@ def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
     already confirmed to be a string -- a missing, malformed or non-string
     one is reported there, before this ever builds the node id set.
     """
-    require_graph_shape(data, path)
-    node_ids = {node["id"] for node in data.get("nodes", [])}
+    graph = require_graph_shape(data, path)
+    node_ids = {node["id"] for node in graph["nodes"]}
     missing_ids = {
         endpoint
-        for edge in data.get("edges", [])
+        for edge in graph["edges"]
         for endpoint in (edge["source"], edge["target"])
         if endpoint not in node_ids
     }
     if missing_ids:
         msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
         raise ValueError(msg)
+    return graph
 
 
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:

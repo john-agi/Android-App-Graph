@@ -2210,3 +2210,12 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
                 assert v in gm.graph
                 assert "page_description" in gm.graph.nodes[u]
                 assert "page_description" in gm.graph.nodes[v]
+
+
+def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path) -> None:
+    path = tmp_path / "graph.json"
+    path.write_text("[]", encoding="utf-8")
+    gm = make_manager()
+    with pytest.raises(TypeError, match="must be an object") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)

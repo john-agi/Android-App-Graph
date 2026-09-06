@@ -113,7 +113,11 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("Decision: a settings page. Final pick: B", "B"),
         ("The best match is A because it shows a home screen.", "A"),
         ("I think A is right", "A"),
-        ("Candidates: A looks right", None),
+        ("A is the match", "A"),
+        ("A matches the home screen", "A"),
+        ("A login form is visible", None),
+        ("Candidates: A looks right", "A"),
+        ("Candidates: A login screen looks right", None),
         ("Answer: A", "A"),
         ("Answer: a", None),
         ("answer: NONE", "NONE"),
@@ -131,13 +135,14 @@ def test_parse_model_choice(raw: str, expected: str | None) -> None:
 
 
 def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_answer() -> None:
-    """ "A is the match" names no explicit form ("Final answer:"/single token/
-    ``</think>``), and its bare "A" is a sentence-initial article immediately
-    followed by a lowercase word, not a named letter — so the parse must return
-    ``None`` and let the caller's retry loop ask the model again, rather than
-    guessing the article as a pick.
+    """ "A login form is visible" names no explicit form ("Final answer:"/single
+    token/``</think>``), and its bare "A" is a sentence-initial article followed
+    by a noun, not a named letter -- so the parse must return ``None`` and let
+    the caller's retry loop ask the model again, rather than guessing the
+    article as a pick. "A is the match" is a pick: an article is never followed
+    by a finite verb.
     """
-    assert aitk_translator._parse_model_choice("A is the match", "ABCD") is None
+    assert aitk_translator._parse_model_choice("A login form is visible", "ABCD") is None
 
 
 def test_parse_model_choice_trusts_an_explicit_label_as_written() -> None:
@@ -1724,13 +1729,14 @@ def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
 def test_identify_node_retry_appends_the_parse_hint_and_recovers(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """ "A is the best match" reads as the sentence-initial article, not a pick, and
-    is the most common shape of a correct answer from a model that ignores the
-    requested format (A is always the top-similarity IDENTIFY candidate). The
+    """ "A login screen is the best match" reads as the sentence-initial article,
+    not a pick, and a top-candidate reply of that shape is common from a model
+    that ignores the requested format (A is always the top-similarity IDENTIFY
+    candidate). The
     retry must repeat the identical prompt with a strict-format reminder appended
     rather than guess, so the second attempt (still "A") is what recovers it.
     """
-    client = _use_model(monkeypatch, identifiable, "A is the best match", "A")
+    client = _use_model(monkeypatch, identifiable, "A login screen is the best match", "A")
     node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
@@ -2129,14 +2135,17 @@ def test_last_answer_signal_skips_a_sentence_initial_article() -> None:
     start of the text, reads as the English article, not a named answer
     letter, so it is not a signal.
     """
-    assert aitk_translator._last_answer_signal("A is the match", "ABCD") is None
+    assert aitk_translator._last_answer_signal("A login form is visible", "ABCD") is None
 
 
 def test_last_answer_signal_skips_an_article_after_a_colon() -> None:
     """A colon starts a new sentence too, e.g. "Candidates: A looks right", so a
     standalone "A" right after one reads as the article, not a named letter.
     """
-    assert aitk_translator._last_answer_signal("Candidates: A looks right", "ABCD") is None
+    assert (
+        aitk_translator._last_answer_signal("Candidates: A login screen looks right", "ABCD")
+        is None
+    )
 
 
 def test_last_answer_signal_treats_a_mid_sentence_article_looking_letter_as_a_letter() -> None:

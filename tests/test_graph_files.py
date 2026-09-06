@@ -291,10 +291,9 @@ def test_reference_screenshot_b64_is_none_without_a_screenshot(tmp_path: Path) -
 
 
 def test_require_known_edge_endpoints_accepts_a_graph_without_edges() -> None:
-    assert (
-        graph_files.require_known_edge_endpoints({"nodes": [{"id": "n1"}], "edges": []}, Path())
-        is None
-    )
+    assert graph_files.require_known_edge_endpoints(
+        {"nodes": [{"id": "n1"}], "edges": []}, Path()
+    ) == {"nodes": [{"id": "n1"}], "edges": []}
 
 
 def test_require_known_edge_endpoints_raises_for_an_unknown_endpoint() -> None:
@@ -319,12 +318,9 @@ def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: 
 
 
 def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
-    assert (
-        graph_files.require_graph_shape(
-            {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}, Path()
-        )
-        is None
-    )
+    assert graph_files.require_graph_shape(
+        {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}, Path()
+    ) == {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}
 
 
 @pytest.mark.parametrize(
@@ -392,3 +388,13 @@ def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
 
 def test_iter_graph_files_skips_an_unknown_app(tmp_path: Path) -> None:
     assert graph_files.iter_graph_files(tmp_path, "absent") == []
+
+
+def test_require_graph_shape_rejects_a_non_object_document(tmp_path: Path) -> None:
+    """A file whose top level is a list, null or a string fails here with the
+    path, in every loader alike, not with an AttributeError out of ``.get``.
+    """
+    path = tmp_path / "graph.json"
+    with pytest.raises(TypeError, match="must be an object") as excinfo:
+        graph_files.require_graph_shape([], path)
+    assert str(path) in str(excinfo.value)
