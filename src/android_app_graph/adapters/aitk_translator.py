@@ -887,15 +887,10 @@ class UIKobeV2Translator(BaseTranslator):
                     self._app_name or "(unknown)",
                 )
             else:
-                missing_embeddings = sum(
-                    1
-                    for _, data in G.nodes(data=True)
-                    if package_from_activity(data.get("activity", "")) == current_pkg
-                    and not data.get("image_embedding")
-                )
                 logger.warning(
-                    "[IDENTIFY] no candidates: %d same-package nodes lack image embeddings",
-                    missing_embeddings,
+                    "[IDENTIFY] no candidates: none of the %d same-package node(s) has a "
+                    "usable image embedding (missing, or cached at a stale dimension)",
+                    same_pkg_node_count,
                 )
             return None, page_desc
 

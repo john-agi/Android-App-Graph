@@ -1914,3 +1914,30 @@ def test_parse_model_choice_positions_survive_length_changing_uppercasing() -> N
     """
     raw = "Straße Maße Größe Füße Süße Soße Fuß: none. B"
     assert aitk_translator._parse_model_choice(raw, "ABCD") == "B"
+
+
+def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
+    identifiable: aitk_translator.UIKobeV2Translator, caplog: pytest.LogCaptureFixture
+) -> None:
+    """score_by_cosine drops a cached vector of the wrong dimension as well as a
+    missing one, so the "no candidates" line must not claim every same-package
+    node has an embedding when all of them were dropped as stale.
+    """
+    G = identifiable._graphs["demo"]
+    same_pkg = [
+        n for n, data in G.nodes(data=True) if data.get("activity", "").startswith("com.demo.app/")
+    ]
+    for node in same_pkg:
+        G.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
+
+    with caplog.at_level("WARNING"):
+        assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
+            None,
+            "a home screen",
+        )
+
+    expected = (
+        f"[IDENTIFY] no candidates: none of the {len(same_pkg)} same-package node(s) has a "
+        "usable image embedding (missing, or cached at a stale dimension)"
+    )
+    assert [m for m in caplog.messages if "no candidates" in m] == [expected]
