@@ -69,6 +69,18 @@ def test_extract_packages_from_empty_graph() -> None:
     assert aitk_translator._extract_packages_from_graph(nx.DiGraph()) == set()
 
 
+def test_after_last_think_tag_returns_none_without_a_tag() -> None:
+    assert aitk_translator._after_last_think_tag("no tag here") is None
+
+
+def test_after_last_think_tag_is_case_insensitive() -> None:
+    assert aitk_translator._after_last_think_tag("x</THINK>  y  ") == "y"
+
+
+def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
+    assert aitk_translator._after_last_think_tag("a</think>b</think>c") == "c"
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -105,6 +117,21 @@ def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_ans
     guessing the article as a pick.
     """
     assert aitk_translator._parse_model_choice("A is the match", "ABCD") is None
+
+
+def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change() -> None:
+    """``str.lower()`` can change a string's length (U+0130 "İ" lowers to the two
+    code points "i̇"), so an offset found on the lower-cased copy and used to
+    slice the original text can land in the wrong place.
+
+    Three "İ" before the tag shift the miscalculated offset three characters
+    into "xyzB", chopping the adjacent filler down to a standalone "B" that the
+    recursive parse then accepts on its single-letter fast path -- even though
+    the untouched remainder "xyzB" has no isolated letter to find at all
+    (adjacent letters share no word boundary, so the correct answer is ``None``).
+    """
+    raw = "İ" * 3 + "</think>xyzB"
+    assert aitk_translator._parse_model_choice(raw, "ABCD") is None
 
 
 def test_parse_model_choice_rejects_an_empty_reply() -> None:
@@ -187,6 +214,15 @@ def test_parse_record_output_is_never_empty(raw: str) -> None:
     assert aitk_translator._parse_record_output(raw) != ""
 
 
+def test_parse_record_output_think_tag_offset_survives_case_folding_length_change() -> None:
+    """``str.lower()`` can change a string's length (U+0130 "İ" lowers to two
+    code points), so the ``</think>`` offset must come from the original text,
+    not the lower-cased copy used only to find the tag.
+    """
+    raw = "<think>İ reasoning</think>The total is 9 EUR"
+    assert aitk_translator._parse_record_output(raw) == "The total is 9 EUR"
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -210,6 +246,15 @@ def test_parse_one_step_instruction_drops_everything_before_a_closing_think_tag(
 
 def test_parse_one_step_instruction_rejects_an_overlong_plan() -> None:
     assert aitk_translator._parse_one_step_instruction("x" * 501) == ""
+
+
+def test_parse_one_step_instruction_think_tag_offset_survives_case_folding_length_change() -> None:
+    """``str.lower()`` can change a string's length (U+0130 "İ" lowers to two
+    code points), so the ``</think>`` offset must come from the original text,
+    not the lower-cased copy used only to find the tag.
+    """
+    raw = "<think>İ reasoning</think>Tap the Search button"
+    assert aitk_translator._parse_one_step_instruction(raw) == "Tap the Search button"
 
 
 @pytest.mark.parametrize(
@@ -266,6 +311,24 @@ def test_parse_decide_output_falls_back_to_the_whole_text() -> None:
     """A </think> tag with no object after it must not hide an object before it."""
     raw = '{"choice": "A"} </think> nothing usable here'
     assert aitk_translator._parse_decide_output(raw) == {"choice": "A"}
+
+
+def test_parse_decide_output_think_tag_offset_survives_case_folding_length_change() -> None:
+    """``str.lower()`` can change a string's length (U+0130 "İ" lowers to the two
+    code points "i̇"), so an offset found on the lower-cased copy and used to
+    slice the original text can land in the wrong place.
+
+    Six "İ" before the tag shift the miscalculated offset six characters into
+    the reply, chopping ``'{"a": {"choice": "WRONG"}, "choice": "B"}'`` down to
+    ``'{"choice": "WRONG"}, "choice": "B"}'`` -- a self-contained (wrong) object
+    that gets parsed and returned immediately, never reaching the correct
+    top-level object.
+    """
+    raw = "İ" * 6 + '</think>{"a": {"choice": "WRONG"}, "choice": "B"}'
+    assert aitk_translator._parse_decide_output(raw) == {
+        "a": {"choice": "WRONG"},
+        "choice": "B",
+    }
 
 
 _key_without_backtick = st.text(alphabet=st.characters(exclude_characters="`"), max_size=10)

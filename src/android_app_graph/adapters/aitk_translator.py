@@ -294,6 +294,20 @@ def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
     return packages
 
 
+def _after_last_think_tag(text: str) -> str | None:
+    """Return the text after the last ``</think>`` tag, stripped, or ``None`` if absent.
+
+    Found with a case-insensitive regex on the original ``text``, never on
+    ``text.lower()``: case-folding can change a string's length (e.g. U+0130
+    "İ" lowers to two code points), which would shift the tag's offset out of
+    step with the original text it is used to slice.
+    """
+    last_end = -1
+    for match in re.finditer(r"</think>", text, re.IGNORECASE):
+        last_end = match.end()
+    return text[last_end:].strip() if last_end != -1 else None
+
+
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     text = (raw or "").strip()
     answer = text.upper()
@@ -302,11 +316,8 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     if len(answer) == 1 and answer in valid_letters:
         return answer
 
-    # Case-insensitive here only to find the tag; the slice keeps original case
-    # so the free-text fallbacks below see what the model actually wrote.
-    think_end = text.lower().rfind("</think>")
-    if think_end != -1:
-        post_think = text[think_end + len("</think>") :].strip()
+    post_think = _after_last_think_tag(text)
+    if post_think is not None:
         parsed = _parse_model_choice(post_think, valid_letters)
         if parsed:
             return parsed
@@ -357,9 +368,9 @@ def _parse_record_output(raw: str) -> str:
     if not text:
         return "nothing"
 
-    think_end = text.lower().rfind("</think>")
-    if think_end != -1:
-        text = text[think_end + len("</think>") :].strip()
+    post_think = _after_last_think_tag(text)
+    if post_think is not None:
+        text = post_think
 
     text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
     final_matches = list(
@@ -401,9 +412,9 @@ def _parse_one_step_instruction(raw: str) -> str:
     if not text:
         return ""
 
-    think_end = text.lower().rfind("</think>")
-    if think_end != -1:
-        text = text[think_end + len("</think>") :].strip()
+    post_think = _after_last_think_tag(text)
+    if post_think is not None:
+        text = post_think
 
     text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
     final_matches = list(
@@ -455,10 +466,9 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
 
 def _parse_decide_output(raw: str) -> dict[str, Any] | None:
     text = strip_json_fences((raw or "").strip())
-    think_end = text.lower().rfind("</think>")
-    if think_end != -1:
-        post_think = strip_json_fences(text[think_end + len("</think>") :].strip())
-        parsed = _parse_json_object(post_think)
+    post_think = _after_last_think_tag(text)
+    if post_think is not None:
+        parsed = _parse_json_object(strip_json_fences(post_think))
         if parsed is not None:
             return parsed
     return _parse_json_object(text)
