@@ -243,6 +243,10 @@ Precompute native Gemini image embeddings for a graph:
 uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 ```
 
+Pass `--recompute` after switching `image_embedding.model` to rebuild every
+cached vector from scratch, since a stale sidecar cannot be told apart from a
+missing one just by looking at it.
+
 ## Use Android-App-Graph with AITK
 
 AITK loads a translator by module name: `register_translator()` in

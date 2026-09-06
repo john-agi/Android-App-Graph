@@ -1,7 +1,7 @@
 """Precompute runtime image embeddings for every graph under a root folder.
 
 Usage:
-    uv run app-graph-embed --config configs/explore.yaml --app <app_name>
+    uv run app-graph-embed --config configs/explore.yaml --app <app_name> [--recompute]
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ def precompute_graph_image_embeddings(
     model: str,
     base_url: str,
     app_name: str | None = None,
+    recompute: bool = False,
 ) -> dict[str, int]:
     summary: dict[str, int] = {
         "graphs": 0,
@@ -56,7 +57,11 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
-        embeddings = load_image_embeddings(graph_path)
+        # A dimension match cannot prove the cached vector came from the current
+        # embedding model: a model switch that keeps the same dimension is stale
+        # too and undetectable by length, so --recompute starts from an empty
+        # cache rather than trying to tell "missing" and "stale" apart.
+        embeddings: dict[str, list[float]] = {} if recompute else load_image_embeddings(graph_path)
 
         candidates: list[tuple[str, str]] = []
         for node in graph_data.get("nodes", []):
@@ -152,6 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="API key or env reference. Defaults to GEMINI_API_KEY / GOOGLE_API_KEY.",
     )
+    parser.add_argument(
+        "--recompute",
+        action="store_true",
+        help="Recompute every node's embedding, ignoring the cache; needed after an "
+        "embedding model change, since the cache cannot tell that apart from a "
+        "missing vector.",
+    )
     return parser
 
 
@@ -184,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         model=model,
         base_url=base_url,
         app_name=args.app,
+        recompute=args.recompute,
     )
     logger.info(
         "Done: graphs=%d reference_screenshots=%d already_cached=%d computed=%d "

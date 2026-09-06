@@ -43,6 +43,12 @@ def test_embed_parser_defaults() -> None:
     assert args.model is None
     assert args.base_url is None
     assert args.api_key is None
+    assert args.recompute is False
+
+
+def test_embed_parser_accepts_recompute() -> None:
+    args = embed.build_parser().parse_args(["--recompute"])
+    assert args.recompute is True
 
 
 def test_embed_main_rejects_missing_config(capsys: pytest.CaptureFixture[str]) -> None:
@@ -177,13 +183,16 @@ def test_reference_screenshot_b64_finds_the_audited_stem_directory(tmp_path: Pat
     ).decode("ascii")
 
 
-def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:
+def _precompute(
+    tmp_path: Path, app_name: str | None = None, *, recompute: bool = False
+) -> dict[str, int]:
     return embed.precompute_graph_image_embeddings(
         tmp_path,
         api_key="key",
         model="gemini-embedding-2",
         base_url="https://generativelanguage.googleapis.com/v1beta",
         app_name=app_name,
+        recompute=recompute,
     )
 
 
@@ -266,6 +275,29 @@ def test_precompute_computes_caches_and_skips(
     assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.1, 0.2]}
 
     assert _precompute(tmp_path)["already_cached"] == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dimension match cannot prove the cached vector came from the current
+    model -- a model switch that keeps the same dimension is stale too and
+    undetectable by length -- so ``--recompute`` must recompute every node
+    with a screenshot, not just the ones the length check would flag.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.9, 0.8]
+    )
+
+    summary = _precompute(tmp_path, recompute=True)
+    assert summary["already_cached"] == 0
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.9, 0.8]}
 
 
 @pytest.mark.usefixtures("no_sleep")
