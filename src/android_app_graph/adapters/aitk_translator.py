@@ -229,12 +229,9 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         raise TypeError(f"Runtime graph JSON must be an object: {path}")
     data = raw
 
-    # require_known_edge_endpoints (graph_files) validates every node id and
-    # edge endpoint is a string, then every edge endpoint against the node id
-    # set -- the single shared check GraphManager.load_graph uses too, so the
-    # two loaders cannot drift on it. Run before anything else below: a graph
-    # with one bad node or edge must reject before the node loop's per-node
-    # screenshot path lookup, and before any edge is added.
+    # Run before anything else below: a graph with one bad node or edge must
+    # reject before the node loop's per-node screenshot path lookup, and
+    # before any edge is added.
     require_known_edge_endpoints(data, path)
 
     edge_specs: list[tuple[str, str, dict[str, Any]]] = []

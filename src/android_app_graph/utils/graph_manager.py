@@ -1210,11 +1210,9 @@ class GraphManager:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Validates every node id and edge endpoint is a string, then every
-        # edge endpoint against the node id set, before any attribute below is
-        # assigned or the graph is cleared: a corrupt file must leave the
-        # previously loaded graph and counters untouched, not wipe them
-        # partway through the node loop.
+        # Run before any attribute below is assigned or the graph is cleared: a
+        # corrupt file must leave the previously loaded graph and counters
+        # untouched, not wipe them partway through the node loop.
         require_known_edge_endpoints(data, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
