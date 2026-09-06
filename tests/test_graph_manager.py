@@ -1543,6 +1543,41 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     assert list(target.graph.nodes) == ["s0_home"]
 
 
+def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
+    tmp_path: Path,
+) -> None:
+    """save_graph writes only re-explored nodes into ``<stem>_screenshots``, so an
+    audited graph's screenshots are split between that directory and the app
+    directory's own; a node must be found in either, through the same lookup the
+    runtime translator and the offline precompute use.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    path = app_dir / "demo_audited.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "s0_home", "activity": HOME, "page_description": "Home screen"},
+                    {"id": "s1_cart", "activity": HOME, "page_description": "Cart"},
+                ],
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "demo_screenshots").mkdir()
+    (app_dir / "demo_screenshots" / "s0_home.png").write_bytes(b"screenshot-a")
+    (app_dir / "demo_audited_screenshots").mkdir()
+    (app_dir / "demo_audited_screenshots" / "s1_cart.png").write_bytes(b"screenshot-b")
+
+    gm = make_manager()
+    gm.load_graph(path)
+
+    assert gm.graph.nodes["s0_home"]["reference_screenshot"] == SHOT_A
+    assert gm.graph.nodes["s1_cart"]["reference_screenshot"] == SHOT_B
+
+
 def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
     """Regression for #62: such an edge used to grow a phantom node on load."""
     path = tmp_path / "graph.json"

@@ -31,6 +31,7 @@ import networkx as nx
 from openai import OpenAI
 
 from android_app_graph.android_packages import package_from_activity
+from android_app_graph.embedding_cache import reference_screenshot_b64
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -1240,18 +1241,13 @@ class GraphManager:
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.graph.clear()
 
-        screenshots_dir = path.parent / (path.stem + "_screenshots")
-
         for node_data in data.get("nodes", []):
             node_id = node_data["id"]
             # Prefer companion file; fall back to inline (backwards compat)
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             # Backwards compat: old graphs have "activity" only, new ones have "activities" list
             activities = node_data.get("activities", [node_data.get("activity", "")])
-            ref_screenshot = None
-            img_path = screenshots_dir / f"{node_id}.png"
-            if img_path.exists():
-                ref_screenshot = base64.b64encode(img_path.read_bytes()).decode("ascii")
+            ref_screenshot = reference_screenshot_b64(path, node_id)
             self.graph.add_node(
                 node_id,
                 activity=activities[0] if activities else "",

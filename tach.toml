@@ -74,6 +74,7 @@ depends_on = []
 path = "android_app_graph.utils.graph_manager"
 depends_on = [
     "android_app_graph.android_packages",
+    "android_app_graph.embedding_cache",
     "android_app_graph.payloads",
     "android_app_graph.utils.vlm_utils",
 ]

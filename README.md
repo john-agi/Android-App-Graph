@@ -92,6 +92,7 @@ graph TD;
     kobe --> gm;
     kobe --> vlm;
     gm --> pkgs;
+    gm --> ec;
     gm --> pay;
     gm --> vlm;
     vlm --> pay;
