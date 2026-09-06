@@ -500,13 +500,26 @@ def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_pat
 
 @pytest.mark.parametrize(
     "payload",
-    ["[]", '"a string"', '{"nodes": []}', '{"edges": []}', '{"nodes": {}, "edges": []}'],
+    ["[]", '"a string"', '{"nodes": {}, "edges": []}'],
 )
 def test_load_graph_from_json_rejects_a_malformed_document(tmp_path: Path, payload: str) -> None:
     path = tmp_path / "demo.json"
     path.write_text(payload, encoding="utf-8")
     with pytest.raises(TypeError):
         aitk_translator._load_graph_from_json(path)
+
+
+def test_load_graph_from_json_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
+    """An absent "edges" key is an empty list, not a rejection -- the same
+    require_graph_shape a missing "nodes" or "edges" key no longer fails.
+    """
+    path = tmp_path / "demo.json"
+    path.write_text(json.dumps({"nodes": [{"id": "n1"}]}), encoding="utf-8")
+
+    G = aitk_translator._load_graph_from_json(path)
+
+    assert list(G.nodes) == ["n1"]
+    assert G.number_of_edges() == 0
 
 
 def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(

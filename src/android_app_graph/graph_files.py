@@ -135,21 +135,26 @@ def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
 
     Shared by both graph loaders (runtime ``aitk_translator`` and
     ``GraphManager``) so the check and its message cannot drift between them.
-    A hand-edited or truncated file can leave ``nodes``/``edges`` missing,
-    ``null``, or holding something other than a list of objects; every such
-    shape failure is reported here, naming the path, rather than surfacing
-    later as a bare ``TypeError``/``AttributeError`` with no path once a
-    loader iterates or indexes into it.
+    A hand-edited or truncated file can leave ``nodes``/``edges`` ``null``, or
+    holding something other than a list of objects; every such shape failure
+    is reported here, naming the path, rather than surfacing later as a bare
+    ``TypeError``/``AttributeError`` with no path once a loader iterates or
+    indexes into it. An absent key is an empty list, not a shape failure --
+    ``GraphManager.load_graph`` accepted a file with no ``edges`` key at all
+    this way before this check existed (``.get("edges", [])``), and a graph
+    with no edges yet is a normal, not malformed, one.
     """
     if not isinstance(data, dict):
         raise TypeError(f"Graph JSON must be an object: {path}")
     # JSON object keys are always strings; the comprehension is what narrows the
     # loaded object to dict[str, Any] for the type checker (as payloads does).
     graph: dict[str, Any] = {key: value for key, value in data.items() if isinstance(key, str)}
-    nodes = graph.get("nodes")
-    edges = graph.get("edges")
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
     if not isinstance(nodes, list) or not isinstance(edges, list):
         raise TypeError(f"Graph JSON must contain list fields 'nodes' and 'edges': {path}")
+    graph["nodes"] = nodes
+    graph["edges"] = edges
     for node in nodes:
         if not isinstance(node, dict):
             raise TypeError(f"Graph node must be an object: {node!r} in {path}")

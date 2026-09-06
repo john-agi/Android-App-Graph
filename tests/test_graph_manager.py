@@ -1649,6 +1649,27 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     assert list(target.graph.nodes) == ["s0_home"]
 
 
+def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
+    """load_graph used to accept a file without an "edges" key via
+    ``.get("edges", [])`` before require_graph_shape started rejecting the
+    key as missing; an absent "nodes" or "edges" is an empty list, matching
+    that old behaviour, and only a present non-list value is still rejected.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {"nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}]}
+        ),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+
+    gm.load_graph(path)
+
+    assert list(gm.graph.nodes) == ["s0_home"]
+    assert gm.graph.number_of_edges() == 0
+
+
 def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
     tmp_path: Path,
 ) -> None:

@@ -370,12 +370,29 @@ def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
 
 
 @pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"edges": []}, {"nodes": [], "edges": []}),
+        ({"nodes": []}, {"nodes": [], "edges": []}),
+        ({}, {"nodes": [], "edges": []}),
+    ],
+)
+def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
+    data: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    """GraphManager.load_graph accepted a file without an "edges" key via
+    ``.get("edges", [])`` before this check existed; an absent key is an
+    empty list here too, not a rejection -- only a present non-list value
+    (``null``, a string, an object) still is.
+    """
+    assert graph_files.require_graph_shape(data, Path()) == expected
+
+
+@pytest.mark.parametrize(
     ("data", "match"),
     [
         ({"nodes": None, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
-        ({"edges": []}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": [], "edges": None}, "must contain list fields 'nodes' and 'edges'"),
-        ({"nodes": []}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": {}, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": ["s0"], "edges": []}, "node must be an object"),
         ({"nodes": [], "edges": ["e0"]}, "edge must be an object"),
