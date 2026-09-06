@@ -103,15 +103,18 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("Neither A nor B match; none of them.", "NONE"),
         ("B is close, but none match", "NONE"),
         ("b is the match", None),
-        ("Answer: A login screen is shown, none of them match", "NONE"),
+        ("Answer: A because none of the others match", "A"),
+        ("Answer: A login screen is shown, none of them match", "A"),
         ("Answer: A matches the home screen.", "A"),
         ("Answer: A login form; B is closer", "A"),
         ("Answer: A is the home screen; B and C show lists instead.", "A"),
+        ("Answer: a login screen, so the best match is C", "C"),
+        ("Decision: a settings page. Final pick: B", "B"),
         ("The best match is A because it shows a home screen.", "A"),
         ("I think A is right", "A"),
         ("Candidates: A looks right", None),
         ("Answer: A", "A"),
-        ("Answer: a", "A"),
+        ("Answer: a", None),
         ("answer: NONE", "NONE"),
         ("Answer: A\nbecause the screen shows a list of results", "A"),
         ("Final answer: A\nbecause it matches", "A"),
@@ -136,37 +139,45 @@ def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_ans
     assert aitk_translator._parse_model_choice("A is the match", "ABCD") is None
 
 
-def test_parse_model_choice_applies_the_article_guard_to_an_explicit_answer_too() -> None:
-    """The explicit "Answer:" form used to run its regex on the .upper() copy and
-    return whatever letter it captured unchecked, so "Answer: A login screen is
-    shown, none of them match" returned "A" even though the reply goes on to
-    reject every candidate. An articled letter after the label now yields to a
-    later, contrary signal found in the remainder of the text -- here the
-    trailing "none of them match".
+def test_parse_model_choice_trusts_an_explicit_label_as_written() -> None:
+    """A justification ("Answer: A because none of the others match") and a
+    rejection ("Answer: A login screen is shown, none of them match") are
+    textually indistinguishable after the label -- no rule scanning what
+    follows it can separate the two without misreading one of them, as three
+    rounds of trying proved. The label is trusted as written instead: once an
+    explicit "Answer:"/"Decision:" names an uppercase letter, that letter is
+    the answer, with no article check and no scan of the remainder for a
+    later contrary signal.
     """
+    assert (
+        aitk_translator._parse_model_choice("Answer: A because none of the others match", "ABCD")
+        == "A"
+    )
     assert (
         aitk_translator._parse_model_choice(
             "Answer: A login screen is shown, none of them match", "ABCD"
         )
-        == "NONE"
+        == "A"
     )
-
-
-def test_parse_model_choice_keeps_an_explicit_articled_letter_without_a_later_signal() -> None:
-    """An explicit label is the strongest evidence in the reply: an articled
-    letter after it is still the answer when nothing later in the text
-    contradicts it, rather than being vetoed outright.
-    """
-    assert aitk_translator._parse_model_choice("Answer: A matches the home screen.", "ABCD") == "A"
-
-
-def test_parse_model_choice_articled_letter_ignores_a_later_bare_letter() -> None:
-    """A later labelled answer is already handled by last-label-wins, so the only
-    later signal that overrides an articled explicit letter is an explicit
-    rejection ("NONE") -- a later bare letter in the explanation, such as "B" in
-    the trailing clause here, is not itself an override.
-    """
     assert aitk_translator._parse_model_choice("Answer: A login form; B is closer", "ABCD") == "A"
+
+
+def test_parse_model_choice_explicit_label_requires_an_uppercase_letter() -> None:
+    """Only the label keyword itself ("answer"/"decision"/"final answer"/"final
+    decision") is matched case-insensitively; the letter after it is not, so a
+    lowercase article right after the colon ("Answer: a login screen...") is
+    never read as a named letter -- that is what keeps the label's own case
+    sensitivity from swallowing an article the way an unscoped case-insensitive
+    match would. A lowercase "a" falls through to the free-text scan instead,
+    which finds the real answer stated later, or nothing at all.
+    """
+    assert (
+        aitk_translator._parse_model_choice(
+            "Answer: a login screen, so the best match is C", "ABCD"
+        )
+        == "C"
+    )
+    assert aitk_translator._parse_model_choice("Answer: a", "ABCD") is None
 
 
 def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change() -> None:

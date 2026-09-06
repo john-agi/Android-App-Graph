@@ -378,17 +378,22 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if parsed:
             return parsed
 
-    # Matched case-insensitively on the original text, not on `answer` (the
-    # .upper() copy): the captured letter's offset must land in the original
-    # text for the article check below to see the right following context.
-    # The LAST label wins, not the first: a model that revises itself states
-    # the revision last, so a labeled answer follows the same last-wins rule
-    # as free text ("Answer: A\n...\nFinal answer: C" answers C).
+    # The label is trusted as written, with no article check and no scan of what
+    # follows it: a justification ("Answer: A because none of the others
+    # match") and a rejection ("Answer: A login screen is shown, none of them
+    # match") are textually indistinguishable after the label, so no rule
+    # written against the remainder can separate them without breaking one of
+    # the two. Only the keyword ("answer"/"decision"/"final answer"/"final
+    # decision") is case-insensitive; the captured letter itself is not, so a
+    # lowercase article right after the colon ("Answer: a login screen...")
+    # never counts as a named letter and falls through to the free-text scan
+    # below instead. The LAST label wins, not the first: a model that revises
+    # itself states the revision last ("Answer: A\n...\nFinal answer: C"
+    # answers C).
     final_matches = list(
         re.finditer(
-            r"\b(?:FINAL\s+(?:ANSWER|DECISION)|ANSWER|DECISION)\s*:\s*(NONE|[A-Za-z])\b",
+            r"(?i:\b(?:FINAL\s+(?:ANSWER|DECISION)|ANSWER|DECISION)\s*:\s*)((?i:NONE)|[A-Z])\b",
             text,
-            re.IGNORECASE,
         )
     )
     final_match = final_matches[-1] if final_matches else None
@@ -397,16 +402,6 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if choice == "NONE":
             return "NONE"
         if choice in valid_letters:
-            if not _reads_as_article(choice, text, final_match.start(1), final_match.end(1)):
-                return choice
-            # An explicit label is the strongest evidence in the reply. A later
-            # labeled answer is already handled by last-label-wins above, so the
-            # only later signal that overrides an articled explicit letter is an
-            # explicit rejection -- a later bare letter in the explanation does
-            # not.
-            remainder = text[final_match.end(1) :]
-            if re.search(r"\bNONE\b", remainder, re.IGNORECASE):
-                return "NONE"
             return choice
 
     # Free text beyond an explicit "Answer:"/</think> form.
