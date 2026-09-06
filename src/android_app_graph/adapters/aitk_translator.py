@@ -308,6 +308,17 @@ def _after_last_think_tag(text: str) -> str | None:
     return text[last_end:].strip() if last_end != -1 else None
 
 
+def _reads_as_article(letter: str, text: str, end: int) -> bool:
+    """True when ``letter``, matched in ``text`` up to ``end``, reads as the
+    English article/pronoun "a"/"I" rather than a named answer letter.
+
+    A standalone "A"/"I" immediately followed by a lowercase word is the
+    English article or pronoun, not a named answer letter; that case is left
+    to the strict-format retry (V2_PARSE_RETRY_HINT) rather than guessed.
+    """
+    return letter in ("A", "I") and bool(re.match(r"\s+[a-z]", text[end:]))
+
+
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     text = (raw or "").strip()
     answer = text.upper()
@@ -322,15 +333,19 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if parsed:
             return parsed
 
+    # Matched case-insensitively on the original text, not on `answer` (the
+    # .upper() copy): the captured letter's offset must land in the original
+    # text for the article check below to see the right following context.
     final_match = re.search(
-        r"\b(?:FINAL\s+(?:ANSWER|DECISION)|ANSWER|DECISION)\s*:\s*(NONE|[A-Z])\b",
-        answer,
+        r"\b(?:FINAL\s+(?:ANSWER|DECISION)|ANSWER|DECISION)\s*:\s*(NONE|[A-Za-z])\b",
+        text,
+        re.IGNORECASE,
     )
     if final_match:
-        choice = as_str(final_match.group(1), "")
+        choice = as_str(final_match.group(1), "").upper()
         if choice == "NONE":
             return "NONE"
-        if choice in valid_letters:
+        if choice in valid_letters and not _reads_as_article(choice, text, final_match.end(1)):
             return choice
 
     # Free text beyond an explicit "Answer:"/</think> form: the last answer signal
@@ -343,10 +358,7 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     last_letter = ""
     for letter_match in re.finditer(r"\b([A-Z])\b", text):
         letter = as_str(letter_match.group(1), "")
-        # A standalone "A"/"I" immediately followed by a lowercase word is the
-        # English article or pronoun, not a named answer letter; that case is left
-        # to the strict-format retry (V2_PARSE_RETRY_HINT) rather than guessed.
-        if letter in ("A", "I") and re.match(r"\s+[a-z]", text[letter_match.end() :]):
+        if _reads_as_article(letter, text, letter_match.end()):
             continue
         if letter in valid_letters:
             last_letter_pos, last_letter = letter_match.start(), letter

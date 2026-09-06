@@ -103,6 +103,10 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("Neither A nor B match; none of them.", "NONE"),
         ("B is close, but none match", "NONE"),
         ("b is the match", None),
+        ("Answer: A login screen is shown, none of them match", "NONE"),
+        ("Answer: A", "A"),
+        ("Answer: a", "A"),
+        ("answer: NONE", "NONE"),
     ],
 )
 def test_parse_model_choice(raw: str, expected: str | None) -> None:
@@ -117,6 +121,22 @@ def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_ans
     guessing the article as a pick.
     """
     assert aitk_translator._parse_model_choice("A is the match", "ABCD") is None
+
+
+def test_parse_model_choice_applies_the_article_guard_to_an_explicit_answer_too() -> None:
+    """The explicit "Answer:" form used to run its regex on the .upper() copy and
+    return whatever letter it captured unchecked, so "Answer: A login screen is
+    shown, none of them match" returned "A" even though the reply goes on to
+    reject every candidate. The article guard that already covered the free-text
+    scan must also cover this path: it falls through to the free-text scan, which
+    then finds the trailing NONE.
+    """
+    assert (
+        aitk_translator._parse_model_choice(
+            "Answer: A login screen is shown, none of them match", "ABCD"
+        )
+        == "NONE"
+    )
 
 
 def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change() -> None:
