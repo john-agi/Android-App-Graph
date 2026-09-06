@@ -697,6 +697,50 @@ def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
     assert "gone" not in built._graphs["demo"]
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_load_all_graphs_writes_the_sidecar_once_per_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rewriting the sidecar after every computed node is O(N^2) for a cold
+    cache; it must be written once, after the whole node loop, inside a
+    try/finally so a node whose embedding call fails persistently still
+    leaves the nodes computed around it persisted and the graph still loads.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}])
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    shots = {node_id: f"shot-{node_id}".encode() for node_id in ("n1", "n2", "n3")}
+    for node_id, data in shots.items():
+        (screenshots / f"{node_id}.png").write_bytes(data)
+    b64_by_node = {
+        node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
+    }
+
+    def _flaky(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+        if screenshot_b64 == b64_by_node["n2"]:
+            msg = "500 upstream error"
+            raise RuntimeError(msg)
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _flaky)
+
+    save_calls: list[dict[str, list[float]]] = []
+    original_save = aitk_translator.save_image_embeddings
+
+    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]]) -> None:
+        save_calls.append(dict(embeddings))
+        original_save(graph_file, embeddings)
+
+    monkeypatch.setattr(aitk_translator, "save_image_embeddings", _tracking_save)
+
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert set(built._graphs) == {"demo"}
+    assert len(save_calls) == 1
+    assert save_calls[0] == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
+    assert embedding_cache.load_image_embeddings(path) == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
+
+
 @pytest.mark.parametrize(
     ("task", "expected"),
     [("Open Demo and search for shoes", "demo"), ("Check the weather", None)],

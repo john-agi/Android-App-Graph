@@ -587,6 +587,54 @@ class UIKobeV2Translator(BaseTranslator):
             node_id=node_id,
         )
 
+    def _compute_missing_image_embeddings(
+        self, G: nx.DiGraph, app_name: str, graph_file: Path
+    ) -> None:
+        """Compute an image embedding for every node with a screenshot but no cached vector.
+
+        The sidecar is written once, after the whole loop, inside ``finally``:
+        rewriting it after every node is O(N^2) for a cold cache, but a single
+        write at the end must not cost the nodes computed before a later one's
+        embedding call fails persistently — they are still in ``finally``'s snapshot.
+        """
+        updated_image_cache = False
+        try:
+            for node_id, data in G.nodes(data=True):
+                if data.get("image_embedding") or not data.get("reference_screenshot"):
+                    continue
+                try:
+                    started = time.perf_counter()
+                    data["image_embedding"] = self._compute_runtime_image_embedding_with_retry(
+                        data["reference_screenshot"],
+                        app_name,
+                        node_id,
+                    )
+                    updated_image_cache = True
+                    logger.info(
+                        "[GRAPH] %s/%s: computed image embedding in %.1fs",
+                        app_name,
+                        node_id,
+                        time.perf_counter() - started,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Runtime image embedding failed for graph %s node %s after retries; "
+                        "continuing without this node embedding.",
+                        app_name,
+                        node_id,
+                    )
+        finally:
+            if updated_image_cache:
+                save_image_embeddings(
+                    graph_file,
+                    {
+                        nid: ndata["image_embedding"]
+                        for nid, ndata in G.nodes(data=True)
+                        if ndata.get("image_embedding")
+                    },
+                )
+                logger.info("[GRAPH] %s: image embedding cache updated", app_name)
+
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
             logger.warning("Graph dir %s does not exist", self.graph_dir)
@@ -614,41 +662,7 @@ class UIKobeV2Translator(BaseTranslator):
                     ref_count,
                     cached_count,
                 )
-                updated_image_cache = False
-                for node_id, data in G.nodes(data=True):
-                    if data.get("image_embedding") or not data.get("reference_screenshot"):
-                        continue
-                    try:
-                        started = time.perf_counter()
-                        data["image_embedding"] = self._compute_runtime_image_embedding_with_retry(
-                            data["reference_screenshot"],
-                            app_name,
-                            node_id,
-                        )
-                        save_image_embeddings(
-                            graph_file,
-                            {
-                                nid: ndata["image_embedding"]
-                                for nid, ndata in G.nodes(data=True)
-                                if ndata.get("image_embedding")
-                            },
-                        )
-                        updated_image_cache = True
-                        logger.info(
-                            "[GRAPH] %s/%s: computed image embedding in %.1fs",
-                            app_name,
-                            node_id,
-                            time.perf_counter() - started,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Runtime image embedding failed for graph %s node %s after retries; "
-                            "continuing without this node embedding.",
-                            app_name,
-                            node_id,
-                        )
-                if updated_image_cache:
-                    logger.info("[GRAPH] %s: image embedding cache updated", app_name)
+                self._compute_missing_image_embeddings(G, app_name, graph_file)
                 self._graphs[app_name] = G
                 for pkg in _extract_packages_from_graph(G):
                     self._package_to_app[pkg] = app_name
