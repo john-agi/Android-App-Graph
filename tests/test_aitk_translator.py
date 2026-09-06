@@ -46,35 +46,6 @@ def _write_graph(
 
 
 # ---------------------------------------------------------------------------
-# _package_from_activity
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("activity", "expected"),
-    [
-        ("com.example.app/.MainActivity", "com.example.app"),
-        ("com.google.android.apps.maps/com.google.Main", "com.google.android"),
-        ("com.example.app", "com.example.app"),
-        ("two.parts", "two.parts"),
-        ("single", "single"),
-        ("", ""),
-    ],
-)
-def test_package_from_activity(activity: str, expected: str) -> None:
-    assert aitk_translator._package_from_activity(activity) == expected
-
-
-@given(st.text())
-def test_package_from_activity_keeps_at_most_three_components(activity: str) -> None:
-    """The package is a dotted prefix of the activity's component, never longer."""
-    package = aitk_translator._package_from_activity(activity)
-    component = activity.split("/", maxsplit=1)[0]
-    assert component.startswith(package)
-    assert len(package.split(".")) <= max(3, len(component.split(".")))
-
-
-# ---------------------------------------------------------------------------
 # _extract_packages_from_graph
 # ---------------------------------------------------------------------------
 
@@ -451,61 +422,9 @@ def test_load_graph_from_json_rejects_a_non_string_edge_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# image embedding sidecars
+# image embedding sidecars: pure logic is owned by tests/test_embedding_cache.py;
+# this is the integration point with _load_all_graphs.
 # ---------------------------------------------------------------------------
-
-
-def test_image_embeddings_path_is_a_sidecar(tmp_path: Path) -> None:
-    assert aitk_translator._image_embeddings_path(tmp_path / "demo.json") == (
-        tmp_path / "demo.image_emb.json"
-    )
-
-
-def test_image_embeddings_round_trip(tmp_path: Path) -> None:
-    graph_path = tmp_path / "demo.json"
-    G = nx.DiGraph()
-    G.add_node("n1", image_embedding=[0.5, 0.25])
-    G.add_node("n2", image_embedding=[])
-    G.add_node("n3")
-
-    aitk_translator._save_image_embeddings(graph_path, G)
-    assert aitk_translator._load_image_embeddings(graph_path) == {"n1": [0.5, 0.25]}
-
-
-def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:
-    assert aitk_translator._load_image_embeddings(tmp_path / "demo.json") == {}
-
-
-def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
-    graph_path = tmp_path / "demo.json"
-    aitk_translator._image_embeddings_path(graph_path).write_text(
-        json.dumps({"n1": [1.0, 2.0], "n2": "not a vector", "n3": [], "n4": [1.0, "two"]}),
-        encoding="utf-8",
-    )
-    assert aitk_translator._load_image_embeddings(graph_path) == {"n1": [1.0, 2.0]}
-
-
-def test_load_image_embeddings_warns_about_each_dropped_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    graph_path = tmp_path / "demo.json"
-    aitk_translator._image_embeddings_path(graph_path).write_text(
-        json.dumps({"n1": [1.0, 2.0], "n2": "not a vector"}), encoding="utf-8"
-    )
-    with caplog.at_level("WARNING"):
-        aitk_translator._load_image_embeddings(graph_path)
-    assert "n2" in caplog.text
-
-
-def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A truncated ``.image_emb.json`` must not raise: it is treated as an empty cache."""
-    graph_path = tmp_path / "demo.json"
-    aitk_translator._image_embeddings_path(graph_path).write_text("{not json", encoding="utf-8")
-    with caplog.at_level("WARNING"):
-        assert aitk_translator._load_image_embeddings(graph_path) == {}
-    assert "demo.image_emb.json" in caplog.text
 
 
 def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) -> None:
@@ -513,35 +432,6 @@ def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) 
     (graph_dir / "demo" / "demo.image_emb.json").write_text("{not json", encoding="utf-8")
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
     assert set(built._graphs) == {"demo"}
-
-
-# ---------------------------------------------------------------------------
-# _iter_runtime_graph_files
-# ---------------------------------------------------------------------------
-
-
-def test_iter_runtime_graph_files_without_a_graph_dir(tmp_path: Path) -> None:
-    assert aitk_translator._iter_runtime_graph_files(tmp_path / "absent") == []
-
-
-def test_iter_runtime_graph_files_prefers_the_audited_graph(tmp_path: Path) -> None:
-    _write_graph(tmp_path, app="eboox")
-    audited = _write_graph(tmp_path, app="eboox", audited=True)
-    assert aitk_translator._iter_runtime_graph_files(tmp_path) == [("eboox", audited)]
-
-
-def test_iter_runtime_graph_files_sorts_apps_and_skips_side_files(tmp_path: Path) -> None:
-    zebra = _write_graph(tmp_path, app="zebra")
-    alpha = _write_graph(tmp_path, app="alpha")
-    (tmp_path / "alpha" / "alpha_audit_report.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "alpha" / "alpha.image_emb.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "loose.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "empty").mkdir()
-
-    assert aitk_translator._iter_runtime_graph_files(tmp_path) == [
-        ("alpha", alpha),
-        ("zebra", zebra),
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1372,11 +1262,10 @@ def test_identify_node_propagates_an_embedding_failure(
 
 
 # --- _call_action_agent ----------------------------------------------------
-
-
-class _KeyboardProbe:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = stdout
+#
+# The soft-keyboard probe itself (adb call, missing-adb handling) is owned by
+# tests/test_device.py; these tests only check that _call_action_agent appends
+# whatever device.soft_keyboard_hint() returns.
 
 
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
@@ -1391,9 +1280,7 @@ def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
         seen.update(kwargs)
         return {"action": "tap", "x": 1, "y": 2}, "tapped Search | on the home screen"
 
-    monkeypatch.setattr(
-        aitk_translator.subprocess, "run", lambda *_a, **_k: _KeyboardProbe("mInputShown=true")
-    )
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: " (keyboard up)")
     monkeypatch.setattr(aitk_translator, "predict_next_action", _fake_predict)
 
     action, observation, entry = translator._call_action_agent(
@@ -1402,19 +1289,14 @@ def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     assert action == {"action": "tap", "x": 1, "y": 2}
     assert observation == "tapped Search"
     assert entry == "tapped Search | on the home screen"
-    assert seen["instruction"].endswith(
-        "the soft keyboard is currently visible — a text field is focused and ready for typing.)"
-    )
+    assert seen["instruction"] == "type shoes (keyboard up)"
     assert seen["overall_task"] == "buy shoes"
 
 
-def test_call_action_agent_survives_a_missing_adb(
+def test_call_action_agent_without_a_keyboard_hint(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    def _no_adb(*_args: Any, **_kwargs: Any) -> _KeyboardProbe:
-        raise FileNotFoundError("adb")
-
-    monkeypatch.setattr(aitk_translator.subprocess, "run", _no_adb)
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
     monkeypatch.setattr(
         aitk_translator,
         "predict_next_action",
@@ -1478,7 +1360,7 @@ def stepping(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> aitk_translator.UIKobeV2Translator:
     """``identifiable`` with the action agent and the adb keyboard probe faked out."""
-    monkeypatch.setattr(aitk_translator.subprocess, "run", lambda *_a, **_k: _KeyboardProbe(""))
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
     monkeypatch.setattr(
         aitk_translator,
         "predict_next_action",

@@ -31,7 +31,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime
@@ -43,7 +42,14 @@ import networkx as nx
 from aitk.translators.base import BaseTranslator
 from openai import OpenAI
 
-from android_app_graph.payloads import as_float_list, as_list, as_str, as_str_dict
+from android_app_graph import device
+from android_app_graph.android_packages import package_from_activity
+from android_app_graph.embedding_cache import (
+    iter_graph_files,
+    load_image_embeddings,
+    save_image_embeddings,
+)
+from android_app_graph.payloads import as_list, as_str, as_str_dict
 from android_app_graph.utils import resolve_env
 from android_app_graph.utils.vlm_utils import (
     cosine_similarity,
@@ -260,80 +266,12 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     return G
 
 
-def _load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
-    emb_path = _image_embeddings_path(graph_path)
-    if not emb_path.exists():
-        return {}
-    try:
-        with open(emb_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except json.JSONDecodeError:
-        logger.warning("Corrupt image embedding cache %s; treating it as empty", emb_path)
-        return {}
-    embeddings: dict[str, list[float]] = {}
-    for node_id, vector in as_str_dict(raw).items():
-        numbers = as_float_list(vector)
-        if numbers:
-            embeddings[node_id] = numbers
-        else:
-            logger.warning(
-                "Dropping malformed image embedding for node %s in %s", node_id, emb_path
-            )
-    return embeddings
-
-
-def _image_embeddings_path(graph_path: Path) -> Path:
-    return graph_path.with_suffix(".image_emb.json")
-
-
-def _save_image_embeddings(graph_path: Path, G: nx.DiGraph) -> None:
-    embeddings = {
-        node_id: data["image_embedding"]
-        for node_id, data in G.nodes(data=True)
-        if data.get("image_embedding")
-    }
-    emb_path = _image_embeddings_path(graph_path)
-    with open(emb_path, "w", encoding="utf-8") as f:
-        json.dump(embeddings, f, ensure_ascii=False)
-
-
-def _iter_runtime_graph_files(graph_dir: Path) -> list[tuple[str, Path]]:
-    """Return one graph JSON per app, preferring audited graphs.
-
-    Runtime should not load audit reports, merge reports, or embedding sidecars.
-    The app name comes from the graph directory name so eboox_audited.json still
-    loads as app "eboox".
-    """
-    graph_files: list[tuple[str, Path]] = []
-    if not graph_dir.exists():
-        return graph_files
-
-    for app_dir in sorted(p for p in graph_dir.iterdir() if p.is_dir()):
-        app_name = app_dir.name
-        audited = app_dir / f"{app_name}_audited.json"
-        original = app_dir / f"{app_name}.json"
-        if audited.exists():
-            graph_files.append((app_name, audited))
-        elif original.exists():
-            graph_files.append((app_name, original))
-    return graph_files
-
-
-def _package_from_activity(activity: str) -> str:
-    if "/" in activity:
-        activity = activity.split("/", maxsplit=1)[0]
-    parts = activity.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[:3])
-    return activity
-
-
 def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
     packages = set()
     for _, data in G.nodes(data=True):
         activity = data.get("activity", "")
         if activity:
-            packages.add(_package_from_activity(activity))
+            packages.add(package_from_activity(activity))
     return packages
 
 
@@ -697,11 +635,11 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("Graph dir %s does not exist", self.graph_dir)
             return
         logger.info("[GRAPH] Loading runtime graphs from %s", self.graph_dir)
-        for app_name, graph_file in _iter_runtime_graph_files(self.graph_dir):
+        for app_name, graph_file in iter_graph_files(self.graph_dir):
             try:
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
                 G = _load_graph_from_json(graph_file)
-                image_embeddings = _load_image_embeddings(graph_file)
+                image_embeddings = load_image_embeddings(graph_file)
                 for node_id, emb in image_embeddings.items():
                     if node_id in G:
                         G.nodes[node_id]["image_embedding"] = emb
@@ -730,7 +668,14 @@ class UIKobeV2Translator(BaseTranslator):
                             app_name,
                             node_id,
                         )
-                        _save_image_embeddings(graph_file, G)
+                        save_image_embeddings(
+                            graph_file,
+                            {
+                                nid: ndata["image_embedding"]
+                                for nid, ndata in G.nodes(data=True)
+                                if ndata.get("image_embedding")
+                            },
+                        )
                         updated_image_cache = True
                         logger.info(
                             "[GRAPH] %s/%s: computed image embedding in %.1fs",
@@ -770,7 +715,7 @@ class UIKobeV2Translator(BaseTranslator):
             return None
         app_name = self._package_to_app.get(package)
         if not app_name:
-            app_name = self._package_to_app.get(_package_from_activity(package))
+            app_name = self._package_to_app.get(package_from_activity(package))
         if app_name and app_name in self._graphs:
             self._app_name = app_name
             return self._graphs[app_name]
@@ -799,7 +744,7 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("[IDENTIFY] No current graph is loaded")
             return None, ""
 
-        current_pkg = _package_from_activity(activity)
+        current_pkg = package_from_activity(activity)
         graph_packages = sorted(_extract_packages_from_graph(G))
         logger.info(
             "[IDENTIFY] activity=%s package=%s graph_app=%s graph_packages=%s",
@@ -814,7 +759,7 @@ class UIKobeV2Translator(BaseTranslator):
         same_pkg_keys: list[str] = []
         same_pkg_node_count = 0
         for _, data in G.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) == current_pkg:
+            if package_from_activity(data.get("activity", "")) == current_pkg:
                 same_pkg_node_count += 1
                 desc = data.get("page_description", "")
                 if desc and desc not in same_pkg_descriptions:
@@ -864,10 +809,10 @@ class UIKobeV2Translator(BaseTranslator):
             raise
         candidates: list[tuple[str, float, str]] = []
         for node_id, data in G.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) != current_pkg:
+            if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
             # Vectors only ever enter this attribute already narrowed to list[float]
-            # (via _load_image_embeddings or get_gemini_native_image_embedding), so
+            # (via load_image_embeddings or get_gemini_native_image_embedding), so
             # re-validating and copying every one of them on every step is wasted work.
             node_image_emb = data.get("image_embedding")
             if not node_image_emb:
@@ -893,7 +838,7 @@ class UIKobeV2Translator(BaseTranslator):
                 missing_embeddings = sum(
                     1
                     for _, data in G.nodes(data=True)
-                    if _package_from_activity(data.get("activity", "")) == current_pkg
+                    if package_from_activity(data.get("activity", "")) == current_pkg
                     and not data.get("image_embedding")
                 )
                 logger.warning(
@@ -1306,19 +1251,7 @@ class UIKobeV2Translator(BaseTranslator):
         overall_task: str = "",
     ) -> tuple[dict[str, Any], str, str]:
         # Detect if soft keyboard is visible (text field is focused)
-        keyboard_hint = ""
-        try:
-            kb_check = subprocess.run(
-                ["adb", "shell", "dumpsys", "input_method"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-            if "mInputShown=true" in kb_check.stdout:
-                keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
-        except (OSError, subprocess.SubprocessError) as exc:
-            logger.debug("Soft keyboard probe failed: %s", exc)
+        keyboard_hint = device.soft_keyboard_hint()
 
         aitk_action, history_entry = _call_with_retry(
             "action agent",

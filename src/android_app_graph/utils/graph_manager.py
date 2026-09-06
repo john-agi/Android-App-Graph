@@ -30,6 +30,7 @@ from typing import Any
 import networkx as nx
 from openai import OpenAI
 
+from android_app_graph.android_packages import package_from_activity
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -46,24 +47,6 @@ logger = logging.getLogger(__name__)
 # Cosine-similarity threshold: above this we consider two descriptions the same state.
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
-
-
-def _package_from_activity(activity: str) -> str:
-    """Extract the app package from a full Android activity name.
-
-    ``com.citymapper.app.home.HomeActivity2`` → ``com.citymapper.app``
-    ``com.citymapper.app/com.citymapper.app.MainActivity`` → ``com.citymapper.app``
-
-    Heuristic: take the first 3 dot-segments (``com.company.app``).  This is the
-    standard Android package convention and is enough to group activities that
-    belong to the same app while separating different apps.
-    """
-    if "/" in activity:
-        activity = activity.split("/", maxsplit=1)[0]
-    parts = activity.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[:3])
-    return activity
 
 
 def _node_id(value: object) -> str:
@@ -194,13 +177,13 @@ class GraphManager:
                 logger.info("identify_state cache hit → %s (skipping VLM)", cached_node)
                 return cached_node
 
-        current_pkg = _package_from_activity(activity)
+        current_pkg = package_from_activity(activity)
 
         # Step 1: Collect existing same-package node info
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) == current_pkg:
+            if package_from_activity(data.get("activity", "")) == current_pkg:
                 desc = data.get("page_description", "")
                 if desc and desc not in same_pkg_descriptions:
                     same_pkg_descriptions.append(desc)
@@ -231,7 +214,7 @@ class GraphManager:
         best_node_id: str | None = None
         best_similarity = -1.0
         for node_id, data in self.graph.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) != current_pkg:
+            if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
             existing_emb = data.get("description_embedding")
             if existing_emb is None:
@@ -1100,7 +1083,7 @@ class GraphManager:
             # Skip nodes whose package doesn't match the target
             if package_name:
                 activity = self.graph.nodes[node].get("activity", "")
-                node_pkg = _package_from_activity(activity) if activity else ""
+                node_pkg = package_from_activity(activity) if activity else ""
                 if node_pkg and node_pkg != package_name:
                     continue
             out_degree = self.graph.out_degree(node)
@@ -1135,7 +1118,7 @@ class GraphManager:
 
             if package_name:
                 activity = node_data.get("activity", "")
-                node_pkg = _package_from_activity(activity) if activity else ""
+                node_pkg = package_from_activity(activity) if activity else ""
                 if node_pkg and node_pkg != package_name:
                     continue
 

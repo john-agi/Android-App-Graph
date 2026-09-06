@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, soft_keyboard_hint
 from android_app_graph.utils import make_client
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
@@ -376,27 +376,15 @@ class Kobe:
                 explored_edges = self.graph.get_all_edges_from_node(current_node)
 
                 # Check before planning so the planner can choose type vs tap.
-                keyboard_hint = ""
+                keyboard_hint = soft_keyboard_hint()
                 input_status = (
-                    "No OS keyboard signal detected. Still inspect the screenshot: "
-                    "a bottom input/keyboard bar can mean a text field is active."
-                )
-                try:
-                    kb_check = subprocess.run(
-                        ["adb", "shell", "dumpsys", "input_method"],
-                        capture_output=True,
-                        text=True,
-                        timeout=3,
-                        check=False,
+                    "Soft keyboard is visible; a text field is focused and ready for typing."
+                    if keyboard_hint
+                    else (
+                        "No OS keyboard signal detected. Still inspect the screenshot: "
+                        "a bottom input/keyboard bar can mean a text field is active."
                     )
-                    if "mInputShown=true" in kb_check.stdout:
-                        keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
-                        input_status = (
-                            "Soft keyboard is visible; a text field is focused "
-                            "and ready for typing."
-                        )
-                except (OSError, subprocess.SubprocessError) as exc:
-                    self.logger.debug("Soft keyboard probe failed: %s", exc)
+                )
 
                 # Step 1: Plan — decide WHAT to do (natural language)
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)

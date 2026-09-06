@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from android_app_graph.commands import embed
+from android_app_graph.embedding_cache import image_embeddings_path
 
 _SCREENSHOT = b"not-really-a-png"
 
@@ -142,49 +143,10 @@ def test_embed_settings_read_the_api_key_from_the_environment(
 
 
 # Pure file helpers
-
-
-def test_image_embeddings_path() -> None:
-    assert embed.image_embeddings_path(Path("graphs/demo/demo.json")) == Path(
-        "graphs/demo/demo.image_emb.json"
-    )
-
-
-def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
-    graph_path = tmp_path / "demo.json"
-    assert embed.load_image_embeddings(graph_path) == {}
-    embed.save_image_embeddings(graph_path, {"s0_home": [0.5, 1.0]})
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.5, 1.0]}
-
-
-def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
-    graph_path = tmp_path / "demo.json"
-    embed.image_embeddings_path(graph_path).write_text(
-        json.dumps({"s0_home": [1, 2], "s1_bad": "not-a-vector"}), encoding="utf-8"
-    )
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [1.0, 2.0], "s1_bad": []}
-
-
-def test_iter_graph_files_prefers_the_audited_graph(tmp_path: Path) -> None:
-    _write_graph_tree(tmp_path, app="demo")
-    audited = _write_graph_tree(tmp_path, app="other", audited=True)
-    (tmp_path / "other" / "other.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "loose_file.txt").write_text("ignored", encoding="utf-8")
-
-    assert embed.iter_graph_files(tmp_path) == [
-        ("demo", tmp_path / "demo" / "demo.json"),
-        ("other", audited),
-    ]
-
-
-def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
-    graph_path = _write_graph_tree(tmp_path, app="demo")
-    _write_graph_tree(tmp_path, app="other")
-    assert embed.iter_graph_files(tmp_path, "demo") == [("demo", graph_path)]
-
-
-def test_iter_graph_files_skips_an_unknown_app(tmp_path: Path) -> None:
-    assert embed.iter_graph_files(tmp_path, "absent") == []
+#
+# image_embeddings_path, load/save_image_embeddings and iter_graph_files are
+# imported from android_app_graph.embedding_cache (shared with the AITK
+# translator) and owned by tests/test_embedding_cache.py.
 
 
 def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:
@@ -319,3 +281,20 @@ def test_precompute_keeps_going_when_a_node_fails(
     assert summary["skipped_failed"] == 1
     assert summary["computed"] == 0
     assert embed.load_image_embeddings(graph_path) == {}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dropped (malformed) cache entry must not be mistaken for "already cached"."""
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": "not-a-vector"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4])
+
+    summary = _precompute(tmp_path)
+    assert summary["already_cached"] == 0
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.3, 0.4]}

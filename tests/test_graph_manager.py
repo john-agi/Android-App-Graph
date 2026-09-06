@@ -26,7 +26,6 @@ from android_app_graph.utils.graph_manager import (
     GraphManager,
     _merge_elements,
     _merge_into_schema,
-    _package_from_activity,
 )
 
 HOME = "com.example.app.HomeActivity"
@@ -170,23 +169,6 @@ def test_network_guard_blocks_outbound_connections() -> None:
 
 
 # Module helpers
-
-
-def test_package_from_activity_keeps_the_first_three_segments() -> None:
-    assert _package_from_activity("com.citymapper.app.home.HomeActivity2") == "com.citymapper.app"
-
-
-def test_package_from_activity_drops_the_component_after_a_slash() -> None:
-    activity = "com.citymapper.app/com.citymapper.app.MainActivity"
-    assert _package_from_activity(activity) == "com.citymapper.app"
-
-
-def test_package_from_activity_returns_short_names_unchanged() -> None:
-    assert _package_from_activity("com.example") == "com.example"
-
-
-def test_package_from_activity_returns_an_empty_string_unchanged() -> None:
-    assert _package_from_activity("") == ""
 
 
 def test_merge_into_schema_adds_a_new_key_as_a_single_element_list() -> None:
