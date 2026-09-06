@@ -716,17 +716,9 @@ class UIKobeV2Translator(BaseTranslator):
             try:
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
                 G = _load_graph_from_json(graph_file)
-                # Pruned to this graph's current nodes: compute_missing_image_embeddings
-                # writes this dict back verbatim, and an entry for a node that vanished
-                # from the graph since the sidecar was written must not survive the
-                # rewrite.
-                embeddings = {
-                    node_id: emb
-                    for node_id, emb in load_image_embeddings(
-                        graph_file, model=self.image_embedding_model
-                    ).items()
-                    if node_id in G
-                }
+                embeddings = load_image_embeddings(
+                    graph_file, model=self.image_embedding_model, node_ids=set(G.nodes)
+                )
                 for node_id, emb in embeddings.items():
                     G.nodes[node_id]["image_embedding"] = emb
                 ref_count = sum(

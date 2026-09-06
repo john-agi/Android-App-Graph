@@ -92,12 +92,14 @@ def precompute_graph_image_embeddings(
         # payload also means a run where every call then fails still leaves
         # the sidecar discarded, since it is otherwise only rewritten when at
         # least one vector succeeds.
+        node_ids = {node.get("id") for node in graph_data.get("nodes", []) if node.get("id")}
+
         embeddings: dict[str, list[float]]
         if recompute:
             save_image_embeddings(graph_path, {}, model=model)
             embeddings = {}
         else:
-            embeddings = load_image_embeddings(graph_path, model=model)
+            embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
 
         # A stat, not a read: deciding reference_screenshots/already_cached/
         # skipped_missing_screenshot must not pay for every uncached node's

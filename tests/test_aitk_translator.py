@@ -1032,7 +1032,9 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     assert G.nodes["n3"]["image_embedding"] == [1.0, 0.0]  # freshly computed
     assert len(save_calls) == 1
     assert save_calls[0] == {"n4": [9.0, 9.0], "n1": [1.0, 0.0], "n3": [1.0, 0.0]}
-    assert embedding_cache.load_image_embeddings(path, model="img-model") == {
+    assert embedding_cache.load_image_embeddings(
+        path, model="img-model", node_ids={"n1", "n2", "n3", "n4"}
+    ) == {
         "n4": [9.0, 9.0],
         "n1": [1.0, 0.0],
         "n3": [1.0, 0.0],
@@ -1069,7 +1071,9 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
     with pytest.raises(_Interrupted):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert embedding_cache.load_image_embeddings(path, model="img-model") == {
+    assert embedding_cache.load_image_embeddings(
+        path, model="img-model", node_ids={"n1", "n2", "n3"}
+    ) == {
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
     }

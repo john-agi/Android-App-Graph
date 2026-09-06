@@ -272,11 +272,44 @@ def test_precompute_computes_caches_and_skips(
         "skipped_missing_screenshot": 1,
         "skipped_failed": 0,
     }
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
-        "s0_home": [0.1, 0.2]
-    }
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.1, 0.2]}
 
     assert _precompute(tmp_path)["already_cached"] == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node removed from the graph since the sidecar was written must not
+    survive a rewrite: app-graph-embed and the runtime translator share the
+    same pruning in load_image_embeddings, so neither can leave a stale
+    entry behind.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo.json").write_text(json.dumps({"nodes": [{"id": "n1"}]}), encoding="utf-8")
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(_SCREENSHOT)
+    image_embeddings_path(app_dir / "demo.json").write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"gone": [0.9, 0.9]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    summary = _precompute(tmp_path)
+
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        app_dir / "demo.json", model="gemini-embedding-2", node_ids={"n1"}
+    ) == {"n1": [0.5, 0.5]}
+    saved = json.loads(image_embeddings_path(app_dir / "demo.json").read_text(encoding="utf-8"))
+    assert "gone" not in saved["embeddings"]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -299,9 +332,9 @@ def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
     summary = _precompute(tmp_path, recompute=True)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
-        "s0_home": [0.9, 0.8]
-    }
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.9, 0.8]}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -333,7 +366,12 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
         "model": "gemini-embedding-2",
         "embeddings": {},
     }
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {}
+    assert (
+        embed.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        )
+        == {}
+    )
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -387,7 +425,12 @@ def test_precompute_keeps_going_when_a_node_fails(
     summary = _precompute(tmp_path)
     assert summary["skipped_failed"] == 1
     assert summary["computed"] == 0
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {}
+    assert (
+        embed.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        )
+        == {}
+    )
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -429,7 +472,9 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
 
     assert summary["computed"] == 2
     assert summary["skipped_failed"] == 1
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
+    ) == {
         "n1": [0.1, 0.2],
         "n3": [0.1, 0.2],
     }
@@ -452,9 +497,9 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
-        "s0_home": [0.3, 0.4]
-    }
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.3, 0.4]}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -476,9 +521,9 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
-        "s0_home": [0.3, 0.4]
-    }
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.3, 0.4]}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -630,7 +675,9 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
     with pytest.raises(_Interrupted):
         _precompute(tmp_path)
 
-    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
+    ) == {
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
     }

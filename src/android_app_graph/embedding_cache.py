@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -79,7 +79,9 @@ def image_embeddings_path(graph_path: Path) -> Path:
     return graph_path.with_suffix(".image_emb.json")
 
 
-def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[float]]:
+def load_image_embeddings(
+    graph_path: Path, *, model: str, node_ids: Collection[str]
+) -> dict[str, list[float]]:
     """Return the cached embeddings for a graph, or ``{}`` when none are usable.
 
     A sidecar that cannot be read or parsed is an empty cache, never a reason
@@ -95,6 +97,13 @@ def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[flo
     accepting them would assert a provenance they never had. Both cases are
     treated alike -- every node recomputed as missing, ``{}`` returned after
     one warning naming the sidecar.
+
+    An entry whose id is not in ``node_ids`` is dropped too, with one summary
+    ``logger.info``: both callers (the runtime translator and offline
+    precomputation) write this same dict back to the sidecar, so a node that
+    vanished from the graph since it was cached must not survive the rewrite
+    in either one. Required, not defaulted, so a caller cannot forget to pass
+    the graph's current node ids and silently keep every stale entry forever.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():
@@ -141,6 +150,18 @@ def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[flo
             logger.warning(
                 "Dropping malformed image embedding for node %s in %s", node_id, emb_path
             )
+
+    node_id_set = set(node_ids)
+    stale_ids = [node_id for node_id in embeddings if node_id not in node_id_set]
+    if stale_ids:
+        logger.info(
+            "Image embedding cache %s: dropping %d vector(s) for node id(s) no longer "
+            "present in the graph",
+            emb_path,
+            len(stale_ids),
+        )
+        for node_id in stale_ids:
+            del embeddings[node_id]
     return embeddings
 
 
