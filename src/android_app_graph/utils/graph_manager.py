@@ -81,6 +81,25 @@ def _node_id(value: object) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
+    """Raise when an edge names a node the same file does not define.
+
+    networkx would create that endpoint bare, so a hand-edited or truncated file
+    would load quietly.  See #62.
+    """
+    node_ids = {_node_id(node["id"]) for node in data.get("nodes", [])}
+    for edge in data.get("edges", []):
+        source = _node_id(edge["source"])
+        target = _node_id(edge["target"])
+        unknown = [node_id for node_id in (source, target) if node_id not in node_ids]
+        if unknown:
+            msg = (
+                f"{path}: edge {source} -> {target} references "
+                f"node(s) absent from the file: {', '.join(unknown)}"
+            )
+            raise ValueError(msg)
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
@@ -629,7 +648,14 @@ class GraphManager:
 
         If an edge with the same action already exists, it is not duplicated.
         Instead, a visit counter is incremented.
+
+        The edge is dropped with a warning when either endpoint is missing.
         """
+        # networkx would otherwise create the missing endpoint bare.  See #62.
+        if source not in self.graph or target not in self.graph:
+            logger.warning("add_edge: missing node(s) — source=%s, target=%s", source, target)
+            return
+
         if num_steps is None:
             num_steps = len(action) if isinstance(action, list) else 1
 
@@ -1221,6 +1247,9 @@ class GraphManager:
         path = Path(path)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # Before any mutation: a corrupt file must not leave a half-loaded graph.
+        _require_known_edge_endpoints(data, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)
