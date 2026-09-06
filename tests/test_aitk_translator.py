@@ -1236,9 +1236,6 @@ def test_build_options_lists_done_self_loops_neighbours_and_free(
     assert [opt["type"] for opt in options] == ["done", "self_loop", "neighbor", "free"]
     assert [opt["letter"] for opt in options] == ["A", "B", "C", "D"]
     assert options[1]["instruction"] == "search for {query}"
-    assert options[1]["effect"] == "query:  -> shoes"
-    assert options[2]["node"] == "results"
-    assert options[2]["description"] == "results list"
     assert options[2]["instruction"] == "tap the first result"
 
     lines = text.splitlines()
@@ -1283,10 +1280,7 @@ def test_build_options_skips_the_self_loop_when_listing_neighbours(
         {
             "letter": "C",
             "type": "neighbor",
-            "node": "results",
             "instruction": "tap the first result",
-            "description": "results list",
-            "effect": "",
         }
     ]
 
@@ -1331,12 +1325,14 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     assert len(options) == 26
     assert options[0]["type"] == "done"
     assert options[-1]["type"] == "free"
-    kept_neighbors = {opt["node"] for opt in options if opt["type"] == "neighbor"}
+    # _Option carries no node id any more, so the kept neighbours are identified
+    # by their edge instruction ("go to {i}"), unique per n{i} neighbour here.
+    kept_instructions = {opt["instruction"] for opt in options if opt["type"] == "neighbor"}
     # The fixture's self-loop takes one slot, leaving 23 for 31 neighbours; "results"
     # ties with n0-n6 at visit_count 0 and is dropped with them.
-    assert len(kept_neighbors) == 23
-    assert kept_neighbors == {f"n{i}" for i in range(7, 30)}
-    assert "results" not in kept_neighbors
+    assert len(kept_instructions) == 23
+    assert kept_instructions == {f"go to {i}" for i in range(7, 30)}
+    assert "tap the first result" not in kept_instructions
     assert text.count("\n") == len(options) - 1
     assert "home" in caplog.text
 

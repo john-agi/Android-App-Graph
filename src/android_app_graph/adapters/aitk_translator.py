@@ -87,10 +87,7 @@ class _Option(TypedDict):
 
     letter: str
     type: _OptionType
-    node: NotRequired[str]
     instruction: NotRequired[str]
-    description: NotRequired[str]
-    effect: NotRequired[str]
 
 
 class _Decision(TypedDict):
@@ -1028,9 +1025,7 @@ class UIKobeV2Translator(BaseTranslator):
                 option: _Option = {
                     "letter": "",
                     "type": "self_loop",
-                    "node": node_id,
                     "instruction": tmpl_text,
-                    "effect": effect,
                 }
                 hint = f'Stay here — "{tmpl_text}"'
                 if obs_text:
@@ -1045,9 +1040,7 @@ class UIKobeV2Translator(BaseTranslator):
                 option: _Option = {
                     "letter": "",
                     "type": "self_loop",
-                    "node": node_id,
                     "instruction": instr,
-                    "effect": effect,
                 }
                 hint = f'Stay here — "{instr}"'
                 if i < len(observations) and observations[i]:
@@ -1086,10 +1079,7 @@ class UIKobeV2Translator(BaseTranslator):
             option: _Option = {
                 "letter": "",
                 "type": "neighbor",
-                "node": neighbor,
                 "instruction": instr,
-                "description": neighbor_desc,
-                "effect": effect,
             }
             edge_hint = f' — "{instr}"' if instr else ""
             if obs:
