@@ -19,6 +19,7 @@ depends_on = [
     "android_app_graph.android_packages",
     "android_app_graph.device",
     "android_app_graph.embedding_cache",
+    "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.retrying",
     "android_app_graph.utils",
@@ -35,6 +36,7 @@ depends_on = [
     "android_app_graph.cli",
     "android_app_graph.device",
     "android_app_graph.embedding_cache",
+    "android_app_graph.graph_files",
     "android_app_graph.utils",
     "android_app_graph.utils.graph_manager",
     "android_app_graph.utils.logging",
@@ -49,6 +51,10 @@ depends_on = [
     "android_app_graph.utils",
     "android_app_graph.utils.vlm_utils",
 ]
+
+[[modules]]
+path = "android_app_graph.graph_files"
+depends_on = []
 
 [[modules]]
 path = "android_app_graph.cli"
@@ -75,7 +81,7 @@ depends_on = []
 path = "android_app_graph.utils.graph_manager"
 depends_on = [
     "android_app_graph.android_packages",
-    "android_app_graph.embedding_cache",
+    "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.utils.vlm_utils",
 ]

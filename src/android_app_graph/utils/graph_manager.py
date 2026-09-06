@@ -31,7 +31,7 @@ import networkx as nx
 from openai import OpenAI
 
 from android_app_graph.android_packages import package_from_activity
-from android_app_graph.embedding_cache import reference_screenshot_b64, require_known_edge_endpoints
+from android_app_graph.graph_files import reference_screenshot_b64, require_known_edge_endpoints
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,

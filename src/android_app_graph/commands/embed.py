@@ -16,11 +16,10 @@ import yaml
 
 from android_app_graph.embedding_cache import (
     compute_missing_image_embeddings,
-    iter_graph_files,
     load_image_embeddings,
-    reference_screenshot_b64,
     resolve_image_embedding_settings,
 )
+from android_app_graph.graph_files import iter_graph_files, reference_screenshot_b64
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)

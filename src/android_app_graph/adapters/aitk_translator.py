@@ -45,11 +45,13 @@ from android_app_graph.android_packages import package_from_activity
 from android_app_graph.embedding_cache import (
     compute_embedding_with_retry,
     compute_missing_image_embeddings,
-    iter_graph_files,
     load_image_embeddings,
+    resolve_image_embedding_settings,
+)
+from android_app_graph.graph_files import (
+    iter_graph_files,
     reference_screenshot_b64,
     require_known_edge_endpoints,
-    resolve_image_embedding_settings,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
 from android_app_graph.retrying import call_with_retry
