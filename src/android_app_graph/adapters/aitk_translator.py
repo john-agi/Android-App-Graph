@@ -371,11 +371,17 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     # Matched case-insensitively on the original text, not on `answer` (the
     # .upper() copy): the captured letter's offset must land in the original
     # text for the article check below to see the right following context.
-    final_match = re.search(
-        r"\b(?:FINAL\s+(?:ANSWER|DECISION)|ANSWER|DECISION)\s*:\s*(NONE|[A-Za-z])\b",
-        text,
-        re.IGNORECASE,
+    # The LAST label wins, not the first: a model that revises itself states
+    # the revision last, so a labeled answer follows the same last-wins rule
+    # as free text ("Answer: A\n...\nFinal answer: C" answers C).
+    final_matches = list(
+        re.finditer(
+            r"\b(?:FINAL\s+(?:ANSWER|DECISION)|ANSWER|DECISION)\s*:\s*(NONE|[A-Za-z])\b",
+            text,
+            re.IGNORECASE,
+        )
     )
+    final_match = final_matches[-1] if final_matches else None
     if final_match:
         choice = as_str(final_match.group(1), "").upper()
         if choice == "NONE":
