@@ -1390,7 +1390,9 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
         node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
-    stale_warnings = [m for m in caplog.messages if "image-embedding cache is stale" in m]
+    stale_warnings = [
+        m for m in caplog.messages if "image-embedding: embedding cache is stale" in m
+    ]
     assert len(stale_warnings) == 1
     assert "query dim=2" in stale_warnings[0]
     assert "dim(s)=[3]" in stale_warnings[0]

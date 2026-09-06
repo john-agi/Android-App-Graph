@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -53,6 +54,49 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     if not math.isfinite(similarity):
         return 0.0
     return max(-1.0, min(1.0, similarity))
+
+
+def score_by_cosine[K](
+    query: list[float],
+    candidates: Iterable[tuple[K, list[float] | None]],
+    *,
+    scope: str,
+    remedy: str = "",
+) -> list[tuple[K, float]]:
+    """Score each candidate against ``query`` by cosine similarity, input order kept.
+
+    A missing or empty vector is skipped silently: that is a candidate no
+    embedding was ever computed for, not a stale one. A non-empty vector whose
+    length differs from ``query`` is skipped too, but its dimension is
+    collected and logged in a single warning once scoring is done -- an
+    embedding model changed after these vectors were cached, so they sit in a
+    different space than the fresh query; scoring them anyway would rank
+    candidates as garbage with no signal anything was wrong, and one line beats
+    a warning per candidate.
+    """
+    scored: list[tuple[K, float]] = []
+    stale_count = 0
+    stale_dims: set[int] = set()
+    for key, vector in candidates:
+        if not vector:
+            continue
+        if len(vector) != len(query):
+            stale_count += 1
+            stale_dims.add(len(vector))
+            continue
+        scored.append((key, cosine_similarity(query, vector)))
+
+    if stale_count:
+        logger.warning(
+            "%s: embedding cache is stale for %d node(s): query dim=%d, cached dim(s)=%s%s",
+            scope,
+            stale_count,
+            len(query),
+            sorted(stale_dims),
+            remedy,
+        )
+
+    return scored
 
 
 class TokenTracker:

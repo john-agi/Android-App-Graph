@@ -36,10 +36,10 @@ from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
-    cosine_similarity,
     describe_page_and_state,
     get_embedding,
     normalize_edge,
+    score_by_cosine,
     verify_same_node,
 )
 
@@ -207,38 +207,22 @@ class GraphManager:
             self._require_embedding_client(), page_description, model=self.embedding_model
         )
 
+        same_pkg_candidates = (
+            (_node_id(node_id), data.get("description_embedding"))
+            for node_id, data in self.graph.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
+        )
+        scored = score_by_cosine(
+            description_embedding,
+            same_pkg_candidates,
+            scope="identify_state description-embedding",
+        )
         best_node_id: str | None = None
         best_similarity = -1.0
-        stale_count = 0
-        stale_dims: set[int] = set()
-        for node_id, data in self.graph.nodes(data=True):
-            if package_from_activity(data.get("activity", "")) != current_pkg:
-                continue
-            existing_emb = data.get("description_embedding")
-            if not existing_emb:
-                # load_graph sets [] when neither a companion file nor an inline
-                # vector exists; that is a missing embedding, not a stale one.
-                continue
-            if len(existing_emb) != len(description_embedding):
-                stale_count += 1
-                stale_dims.add(len(existing_emb))
-                continue
-            sim = cosine_similarity(description_embedding, existing_emb)
-            if sim > best_similarity:
-                best_similarity = sim
-                best_node_id = _node_id(node_id)
-
-        if stale_count:
-            # embedding_model changed after these nodes were embedded, so their cached
-            # vectors sit in a different space than the fresh query; scoring them anyway
-            # would rank candidates as garbage with no signal anything was wrong.
-            logger.warning(
-                "identify_state: description-embedding cache is stale for %d node(s): "
-                "query dim=%d, cached dim(s)=%s",
-                stale_count,
-                len(description_embedding),
-                sorted(stale_dims),
-            )
+        if scored:
+            # max() returns the first maximal element on a tie, matching the
+            # earlier "sim > best_similarity" strict-greater loop's tie behaviour.
+            best_node_id, best_similarity = max(scored, key=lambda kv: kv[1])
 
         matched_node_id: str | None = None
 
@@ -1296,34 +1280,15 @@ class GraphManager:
         query_emb = get_embedding(
             self._require_embedding_client(), query, model=self.embedding_model
         )
-        results: list[tuple[str, float]] = []
-        stale_count = 0
-        stale_dims: set[int] = set()
-        for node_id, data in self.graph.nodes(data=True):
-            emb = data.get("description_embedding")
-            if not emb:
-                # load_graph sets [] when neither a companion file nor an inline
-                # vector exists; that is a missing embedding, not a stale one.
-                continue
-            if len(emb) != len(query_emb):
-                stale_count += 1
-                stale_dims.add(len(emb))
-                continue
-            sim = cosine_similarity(query_emb, emb)
-            results.append((_node_id(node_id), sim))
-
-        if stale_count:
-            # embedding_model changed after these nodes were embedded, so their cached
-            # vectors sit in a different space than the fresh query; scoring them anyway
-            # would rank candidates as garbage with no signal anything was wrong.
-            logger.warning(
-                "find_node_by_description: description-embedding cache is stale for "
-                "%d node(s): query dim=%d, cached dim(s)=%s",
-                stale_count,
-                len(query_emb),
-                sorted(stale_dims),
-            )
-
+        candidates = (
+            (_node_id(node_id), data.get("description_embedding"))
+            for node_id, data in self.graph.nodes(data=True)
+        )
+        results = score_by_cosine(
+            query_emb,
+            candidates,
+            scope="find_node_by_description description-embedding",
+        )
         results.sort(key=lambda x: x[1], reverse=True)
         return results
 

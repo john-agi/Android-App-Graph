@@ -425,7 +425,9 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
         node_id = gm.identify_state(HOME, SHOT_A)
 
     assert node_id == "s1_home"
-    stale_warnings = [m for m in caplog.messages if "description-embedding cache is stale" in m]
+    stale_warnings = [
+        m for m in caplog.messages if "description-embedding: embedding cache is stale" in m
+    ]
     assert len(stale_warnings) == 1
     assert "query dim=3" in stale_warnings[0]
     assert "dim(s)=[2]" in stale_warnings[0]
@@ -1715,7 +1717,9 @@ def test_find_node_by_description_skips_a_stale_dimension_embedding_and_logs_onc
 
     assert [node_id for node_id, _ in results] == ["s1_home"]
     assert vlm.kinds() == ["embed"]
-    stale_warnings = [m for m in caplog.messages if "description-embedding cache is stale" in m]
+    stale_warnings = [
+        m for m in caplog.messages if "description-embedding: embedding cache is stale" in m
+    ]
     assert len(stale_warnings) == 1
     assert "query dim=3" in stale_warnings[0]
     assert "dim(s)=[2]" in stale_warnings[0]

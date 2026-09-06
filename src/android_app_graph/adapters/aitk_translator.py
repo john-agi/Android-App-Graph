@@ -56,9 +56,9 @@ from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import make_client
 from android_app_graph.utils.vlm_utils import (
     build_image_message,
-    cosine_similarity,
     describe_page_and_state,
     predict_next_action,
+    score_by_cosine,
     strip_json_fences,
 )
 
@@ -827,35 +827,21 @@ class UIKobeV2Translator(BaseTranslator):
         except Exception as exc:
             logger.error("Runtime image embedding failed for current screenshot. Error: %s", exc)
             raise
-        candidates: list[tuple[str, float, str]] = []
-        stale_count = 0
-        stale_dims: set[int] = set()
-        for node_id, data in G.nodes(data=True):
-            if package_from_activity(data.get("activity", "")) != current_pkg:
-                continue
-            # Stored already narrowed; re-narrowing it per step doubled this loop's cost.
-            node_image_emb = data.get("image_embedding")
-            if not node_image_emb:
-                continue
-            if len(node_image_emb) != len(query_image_emb):
-                stale_count += 1
-                stale_dims.add(len(node_image_emb))
-                continue
-            sim = cosine_similarity(query_image_emb, node_image_emb)
-            candidates.append((str(node_id), sim, data.get("page_description", "")))
-
-        if stale_count:
-            # A model or image_embedding.model change after sidecars were written leaves
-            # cached vectors at a different dimension than the fresh query; scoring them
-            # anyway would rank candidates as garbage with no signal anything was wrong.
-            logger.warning(
-                "[IDENTIFY] image-embedding cache is stale for %d node(s): query dim=%d, "
-                "cached dim(s)=%s; recompute with app-graph-embed",
-                stale_count,
-                len(query_image_emb),
-                sorted(stale_dims),
-            )
-
+        # Stored already narrowed; re-narrowing it per step doubled this loop's cost.
+        same_pkg_image_candidates = (
+            (str(node_id), data.get("image_embedding"))
+            for node_id, data in G.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
+        )
+        scored = score_by_cosine(
+            query_image_emb,
+            same_pkg_image_candidates,
+            scope="[IDENTIFY] image-embedding",
+            remedy="; recompute with app-graph-embed",
+        )
+        candidates: list[tuple[str, float, str]] = [
+            (node_id, sim, G.nodes[node_id].get("page_description", "")) for node_id, sim in scored
+        ]
         candidates.sort(key=lambda x: x[1], reverse=True)
 
         logger.info("[IDENTIFY] image candidates=%d", len(candidates))

@@ -1,8 +1,8 @@
-"""Tests for android_app_graph.utils.vlm_utils.cosine_similarity.
+"""Tests for android_app_graph.utils.vlm_utils.cosine_similarity and score_by_cosine.
 
-The single shared implementation used by both android_app_graph.utils.graph_manager
+The single shared implementations used by both android_app_graph.utils.graph_manager
 and android_app_graph.adapters.aitk_translator; both modules' node-retrieval tests
-exercise it end to end, so this module owns its unit tests.
+exercise them end to end, so this module owns their unit tests.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from android_app_graph.utils.vlm_utils import cosine_similarity
+from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 
 
 def test_cosine_similarity_of_identical_vectors_is_one() -> None:
@@ -93,3 +93,44 @@ def test_cosine_similarity_with_a_nan_element_is_zero() -> None:
 def test_cosine_similarity_never_returns_nan() -> None:
     assert not math.isnan(cosine_similarity([math.nan], [1.0]))
     assert not math.isnan(cosine_similarity([math.inf], [math.inf]))
+
+
+def test_score_by_cosine_skips_missing_and_empty_vectors_without_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``None`` and ``[]`` both mean "no vector was ever computed for this
+    candidate" -- an ordinary, silent case, not the stale-dimension one.
+    """
+    candidates = [("a", None), ("b", []), ("c", [1.0, 0.0])]
+    with caplog.at_level("WARNING"):
+        scored = score_by_cosine([1.0, 0.0], candidates, scope="test")
+    assert scored == [("c", pytest.approx(1.0))]
+    assert caplog.text == ""
+
+
+def test_score_by_cosine_skips_a_wrong_dimension_vector_and_warns_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [("a", [1.0, 0.0, 0.0]), ("b", [1.0, 0.0]), ("c", [0.0, 1.0, 0.0])]
+    with caplog.at_level("WARNING"):
+        scored = score_by_cosine([1.0, 0.0], candidates, scope="my-scope")
+    assert scored == [("b", pytest.approx(1.0))]
+    stale_warnings = [m for m in caplog.messages if "my-scope" in m]
+    assert len(stale_warnings) == 1
+    assert "query dim=2" in stale_warnings[0]
+    assert "dim(s)=[3]" in stale_warnings[0]
+
+
+def test_score_by_cosine_appends_the_remedy_to_the_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [("a", [1.0, 0.0, 0.0])]
+    with caplog.at_level("WARNING"):
+        score_by_cosine([1.0, 0.0], candidates, scope="my-scope", remedy="; do X")
+    assert "; do X" in caplog.text
+
+
+def test_score_by_cosine_keeps_the_scored_order_equal_to_the_input_order() -> None:
+    candidates = [("c", [0.0, 1.0]), ("a", [1.0, 0.0]), ("b", [1.0, 1.0])]
+    scored = score_by_cosine([1.0, 0.0], candidates, scope="test")
+    assert [key for key, _ in scored] == ["c", "a", "b"]
