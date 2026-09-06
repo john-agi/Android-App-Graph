@@ -17,6 +17,7 @@ import yaml
 
 from android_app_graph.embedding_cache import (
     compute_missing_image_embeddings,
+    image_embeddings_path,
     load_image_embeddings,
     resolve_image_embedding_settings,
 )
@@ -75,9 +76,17 @@ def precompute_graph_image_embeddings(
         graph_data = load_graph_json(graph_path)
         # A dimension match cannot prove the cached vector came from the current
         # embedding model: a model switch that keeps the same dimension is stale
-        # too and undetectable by length, so --recompute starts from an empty
-        # cache rather than trying to tell "missing" and "stale" apart.
-        embeddings: dict[str, list[float]] = {} if recompute else load_image_embeddings(graph_path)
+        # too and undetectable by length, so --recompute discards the existing
+        # sidecar up front rather than trying to tell "missing" and "stale"
+        # apart -- otherwise a run where every call then fails would leave the
+        # stale vectors it was asked to discard, since the sidecar is only
+        # rewritten when at least one vector succeeds.
+        embeddings: dict[str, list[float]]
+        if recompute:
+            image_embeddings_path(graph_path).unlink(missing_ok=True)
+            embeddings = {}
+        else:
+            embeddings = load_image_embeddings(graph_path)
 
         # A stat, not a read: deciding reference_screenshots/already_cached/
         # skipped_missing_screenshot must not pay for every uncached node's
@@ -180,9 +189,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recompute",
         action="store_true",
-        help="Recompute every node's embedding, ignoring the cache; needed after an "
-        "embedding model change, since the cache cannot tell that apart from a "
-        "missing vector.",
+        help="Discard the existing embedding sidecar and recompute every node; needed "
+        "after an embedding model change, since the cache cannot tell that apart from "
+        "a missing vector.",
     )
     return parser
 

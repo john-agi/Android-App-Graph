@@ -301,6 +301,32 @@ def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar is only rewritten when at least one vector succeeds, so a
+    ``--recompute`` run where every call fails must still discard the stale
+    sidecar it was asked to recompute, not leave it in place untouched.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
+    )
+
+    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+        msg = "503 unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+
+    summary = _precompute(tmp_path, recompute=True)
+    assert summary["computed"] == 0
+    assert summary["skipped_failed"] == 1
+    assert not image_embeddings_path(graph_path).exists()
+    assert embed.load_image_embeddings(graph_path) == {}
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_keeps_going_when_a_node_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
