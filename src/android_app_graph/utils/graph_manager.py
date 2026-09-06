@@ -1210,7 +1210,22 @@ class GraphManager:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Before any mutation: a corrupt file must not leave a half-loaded graph.
+        # Every id is type-checked, and every edge endpoint checked against the
+        # node id set, before any attribute below is assigned or the graph is
+        # cleared: a corrupt file must leave the previously loaded graph and
+        # counters untouched, not wipe them partway through the node loop.
+        # require_known_edge_endpoints compares str()-normalised ids, so an int
+        # id here would sail through it and let add_edge below grow a phantom
+        # node with a different (string) id -- the same bug #62 fixed for a
+        # genuinely undefined endpoint.
+        for node_data in data.get("nodes", []):
+            if not isinstance(node_data.get("id"), str):
+                raise TypeError(f"Graph node id must be a string: {node_data!r} in {path}")
+        for edge_data in data.get("edges", []):
+            if not isinstance(edge_data.get("source"), str) or not isinstance(
+                edge_data.get("target"), str
+            ):
+                raise TypeError(f"Graph edge endpoint must be a string: {edge_data!r} in {path}")
         require_known_edge_endpoints(data, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
@@ -1229,9 +1244,7 @@ class GraphManager:
         self.graph.clear()
 
         for node_data in data.get("nodes", []):
-            node_id = node_data.get("id")
-            if node_id is None:
-                raise TypeError(f"Graph node id is missing: {node_data!r} in {path}")
+            node_id = node_data["id"]
             # Prefer companion file; fall back to inline (backwards compat)
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             # Backwards compat: old graphs have "activity" only, new ones have "activities" list

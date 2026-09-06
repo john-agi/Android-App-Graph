@@ -1706,17 +1706,57 @@ def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: 
 
 
 def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path) -> None:
-    """A node missing "id" must surface as this loader's own path-bearing error,
+    """A node missing "id" must surface as this loader's own path-bearing error --
     the same invariant the runtime loader gives, not a bare KeyError('id') from
-    indexing the node dict.
+    indexing the node dict -- and must be caught before ``self.graph.clear()``
+    or any counter is overwritten, so a bad file leaves the previously loaded
+    graph and its counters untouched rather than wiping them partway through.
     """
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"page_description": "x"}], "edges": []}), encoding="utf-8"
+        json.dumps({"next_id": 99, "nodes": [{"page_description": "x"}], "edges": []}),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+    add_screen(gm, "s9_stale", "Stale screen")
+    gm._next_id = 7
+
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+    assert list(gm.graph.nodes) == ["s9_stale"]
+    assert gm._next_id == 7
+
+
+def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
+    """An int id would otherwise sail through ``require_known_edge_endpoints``,
+    which compares ``str()``-normalised ids, and let ``add_edge`` grow a
+    phantom node with a different (string) id -- the same bug #62 fixed for a
+    genuinely undefined endpoint.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps({"nodes": [{"id": 5}], "edges": []}), encoding="utf-8")
+    gm = make_manager()
+
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_load_graph_rejects_an_int_edge_endpoint_naming_the_path(tmp_path: Path) -> None:
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "n1"}],
+                "edges": [{"source": 5, "target": "n1"}],
+            }
+        ),
+        encoding="utf-8",
     )
     gm = make_manager()
 
-    with pytest.raises(TypeError, match="node id is missing") as excinfo:
+    with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
 
