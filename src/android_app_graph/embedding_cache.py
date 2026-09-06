@@ -10,7 +10,8 @@ import base64
 import json
 import logging
 import os
-import tempfile
+import secrets
+import shutil
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -117,15 +118,29 @@ def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) 
     sidecar as either the previous complete file or the new one, never a
     truncated mix of both and never an orphaned temp file: the replace runs
     inside the same cleanup that unlinks the temp file on any other failure.
+
+    A fresh sidecar gets exactly the mode ``open(path, "w")`` would give (0o666
+    with the process umask applied by the kernel); a sidecar that already
+    exists keeps its current mode across the rewrite, matching what in-place
+    truncation used to do, so an operator's chmod on a shared graph directory
+    survives a rewrite.
     """
     target = image_embeddings_path(graph_path)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
+    tmp_path = target.parent / f"{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    # tempfile.mkstemp hardcodes mode 0600, which would make a sidecar precomputed
+    # by one user (or a CI job) unreadable to another process -- e.g. an AITK
+    # runtime -- reading the same shared graph directory as a different user.
+    # os.open lets the kernel apply the umask the way open(path, "w") does; never
+    # os.umask, which is process-global state.
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(embeddings, f, ensure_ascii=False)
-        os.replace(tmp_name, target)
+        if target.exists():
+            shutil.copymode(target, tmp_path)
+        os.replace(tmp_path, target)
     except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
         raise
 
 

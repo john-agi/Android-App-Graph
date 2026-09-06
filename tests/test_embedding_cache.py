@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import stat
 from pathlib import Path
 from typing import IO, Any
 
@@ -80,6 +81,38 @@ def test_save_image_embeddings_unlinks_the_temp_file_when_the_replace_fails(
 
     assert sidecar.read_text(encoding="utf-8") == original
     assert list(tmp_path.iterdir()) == [sidecar]
+
+
+def test_save_image_embeddings_gives_a_fresh_sidecar_the_umask_mode(tmp_path: Path) -> None:
+    """A fresh sidecar must get exactly the mode ``open(path, "w")`` would give,
+    not mkstemp's hardcoded 0600 -- otherwise a graph directory precomputed by
+    one user (or a CI job) becomes unreadable to another process reading the
+    same shared graph directory as a different user.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0]})
+    sidecar = embedding_cache.image_embeddings_path(graph_path)
+
+    sibling = tmp_path / "sibling.txt"
+    with sibling.open("w", encoding="utf-8") as f:
+        f.write("x")
+
+    assert stat.S_IMODE(sidecar.stat().st_mode) == stat.S_IMODE(sibling.stat().st_mode)
+
+
+def test_save_image_embeddings_preserves_an_existing_sidecars_mode(tmp_path: Path) -> None:
+    """A rewrite must keep the sidecar's current mode, matching what in-place
+    truncation (the pre-atomic-write behaviour) did, so an operator's chmod on
+    a shared graph directory survives a rewrite.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0]})
+    sidecar = embedding_cache.image_embeddings_path(graph_path)
+    sidecar.chmod(0o600)
+
+    embedding_cache.save_image_embeddings(graph_path, {"n1": [2.0]})
+
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
 
 
 def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:
