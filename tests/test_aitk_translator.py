@@ -1073,6 +1073,58 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     assert "home" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("num_self_loops", "num_neighbors", "expected_self_loop", "expected_neighbor"),
+    [
+        (30, 3, 21, 3),
+        (5, 40, 5, 19),
+        (30, 30, 12, 12),
+    ],
+)
+def test_build_options_reserves_half_the_middle_slots_for_neighbours(
+    translator: aitk_translator.UIKobeV2Translator,
+    num_self_loops: int,
+    num_neighbors: int,
+    expected_self_loop: int,
+    expected_neighbor: int,
+) -> None:
+    """Neighbours are the only navigation options in the menu, so a node with many
+    self-loop instructions (GraphManager adds one per distinct self-loop action)
+    must never be able to evict every "Go to" option: neighbours keep at least
+    half of the 24 middle slots, and self-loop instructions take the rest.
+    """
+    G = translator._graphs["demo"]
+    G.remove_edge("home", "results")
+    G.remove_edge("home", "home")
+    G.add_edge(
+        "home",
+        "home",
+        instructions=[f"self loop {i}" for i in range(num_self_loops)],
+        target_observations=[],
+        instruction_templates=[],
+        schema_deltas=[],
+    )
+    for i in range(num_neighbors):
+        neighbor = f"n{i}"
+        G.add_node(neighbor, page_description=f"screen {i}")
+        G.add_edge(
+            "home",
+            neighbor,
+            instructions=[f"go to {i}"],
+            target_observations=[],
+            instruction_templates=[],
+            visit_count=i,
+        )
+
+    _text, options = translator._build_options(G, "home")
+
+    kept_self_loop = [opt for opt in options if opt["type"] == "self_loop"]
+    kept_neighbors = [opt for opt in options if opt["type"] == "neighbor"]
+    assert len(kept_self_loop) == expected_self_loop
+    assert len(kept_neighbors) == expected_neighbor
+    assert len(options) == 2 + expected_self_loop + expected_neighbor
+
+
 def test_record_info_stores_what_the_model_read(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:

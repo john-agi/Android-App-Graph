@@ -1063,9 +1063,14 @@ class UIKobeV2Translator(BaseTranslator):
     def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
         """Build the option list for the DECIDE prompt.
 
-        A-Z gives 26 slots: DONE and FREE are reserved, and when self-loop
-        instructions plus neighbours exceed the other 24, the least-visited
-        neighbours are dropped (visit_count is the only usefulness signal).
+        A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
+        between self-loop instructions and neighbours. Neighbours are the only way
+        to navigate the graph (GraphManager adds one self-loop instruction per
+        distinct self-loop action, e.g. each typed query on a search screen, so
+        self-loop instructions alone can otherwise fill every slot), so when both
+        would overflow the 24 slots, neighbours keep at least half of them
+        (ranked by visit_count, the only usefulness signal) and self-loop
+        instructions take the rest.
         """
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         max_middle_options = len(letters) - 2  # reserve DONE and FREE
@@ -1078,9 +1083,10 @@ class UIKobeV2Translator(BaseTranslator):
         total_middle = len(self_loop_candidates) + len(neighbor_candidates)
 
         if total_middle > max_middle_options:
-            self_loop_budget = min(len(self_loop_candidates), max_middle_options)
+            neighbor_reserve = min(len(neighbor_candidates), max_middle_options // 2)
+            self_loop_budget = min(len(self_loop_candidates), max_middle_options - neighbor_reserve)
+            neighbor_budget = max_middle_options - self_loop_budget
             kept_self_loop = self_loop_candidates[:self_loop_budget]
-            neighbor_budget = max_middle_options - len(kept_self_loop)
             ranked = sorted(
                 range(len(neighbor_candidates)),
                 key=lambda i: (-neighbor_candidates[i][0], i),
@@ -1091,7 +1097,8 @@ class UIKobeV2Translator(BaseTranslator):
             ]
             logger.warning(
                 "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
-                "dropped %d least-useful self-loop instruction(s)/neighbour(s).",
+                "dropped %d least-useful self-loop instruction(s)/neighbour(s), "
+                "keeping neighbours to at least half the menu.",
                 node_id,
                 total_middle,
                 max_middle_options,
