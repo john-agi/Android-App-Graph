@@ -62,6 +62,24 @@ def test_load_image_embeddings_drops_a_nan_entry(
     assert "n2" in caplog.text
 
 
+def test_load_image_embeddings_drops_an_element_too_large_for_a_float(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 400-digit JSON integer raises OverflowError out of float(), not ValueError:
+    it must still be dropped as a malformed entry, not escape ``(OSError, ValueError)``
+    and take the whole app graph down with it.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.image_embeddings_path(graph_path).write_text(
+        json.dumps({"n1": [1.0, 2.0], "n2": [10**400]}),
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING"):
+        embeddings = embedding_cache.load_image_embeddings(graph_path)
+    assert embeddings == {"n1": [1.0, 2.0]}
+    assert "n2" in caplog.text
+
+
 def test_load_image_embeddings_warns_about_each_dropped_entry(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -223,3 +223,24 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.3, 0.4]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached vector element too large for float() must not crash the run;
+    it is dropped like any other malformed entry and the node is recomputed.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": [10**400]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["already_cached"] == 0
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.3, 0.4]}

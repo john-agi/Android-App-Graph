@@ -26,13 +26,18 @@ def as_int(value: object) -> int | None:
     """
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return int(value)
+    if isinstance(value, int):
+        return value
     if isinstance(value, str):
         try:
-            return int(float(value))
+            value = float(value)
         except ValueError:
             return None
+    # A float that overflowed to +-inf while being parsed (from a float value, or
+    # from a numeric string: `float()` saturates rather than raising) has no
+    # int() equivalent; int() itself would raise OverflowError, not ValueError.
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) else None
     return None
 
 
@@ -53,7 +58,9 @@ def as_float_list(value: object) -> list[float]:
     """Return ``value`` as ``list[float]`` when every item is a finite number, else ``[]``.
 
     ``json`` round-trips the literal ``NaN``, and one non-finite element rejects the
-    whole vector: dropping it alone would change the embedding's dimension.
+    whole vector: dropping it alone would change the embedding's dimension. A JSON
+    int too large for ``float()`` to represent (``OverflowError``, not ``ValueError``)
+    is malformed the same way.
     """
     if not isinstance(value, list):
         return []
@@ -61,7 +68,10 @@ def as_float_list(value: object) -> list[float]:
     for item in value:
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return []
-        number = float(item)
+        try:
+            number = float(item)
+        except OverflowError:
+            return []
         if not math.isfinite(number):
             return []
         result.append(number)
