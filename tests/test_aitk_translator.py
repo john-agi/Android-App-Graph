@@ -744,8 +744,19 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     cache; it must be written once, after the whole node loop, so a node whose
     embedding call fails persistently still leaves the nodes computed around
     it persisted and the graph still loads.
+
+    ``n4`` has no screenshot and is never a compute candidate, only a
+    pre-cached sidecar entry: it exercises the sidecar-loaded copy-back
+    (``_load_all_graphs``'s own loop) alongside ``n1``/``n3``'s freshly
+    computed one (``_compute_missing_image_embeddings``'s), so both must land
+    on ``G`` even though only the candidates it computed are its own to copy.
     """
-    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}])
+    path = _write_graph(
+        tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}, {"id": "n4"}]
+    )
+    (path.parent / "demo.image_emb.json").write_text(
+        json.dumps({"n4": [9.0, 9.0]}), encoding="utf-8"
+    )
     screenshots = path.parent / "demo_screenshots"
     screenshots.mkdir()
     shots = {node_id: f"shot-{node_id}".encode() for node_id in ("n1", "n2", "n3")}
@@ -775,9 +786,17 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
     assert set(built._graphs) == {"demo"}
+    G = built._graphs["demo"]
+    assert G.nodes["n4"]["image_embedding"] == [9.0, 9.0]  # from the sidecar, never recomputed
+    assert G.nodes["n1"]["image_embedding"] == [1.0, 0.0]  # freshly computed
+    assert G.nodes["n3"]["image_embedding"] == [1.0, 0.0]  # freshly computed
     assert len(save_calls) == 1
-    assert save_calls[0] == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
-    assert embedding_cache.load_image_embeddings(path) == {"n1": [1.0, 0.0], "n3": [1.0, 0.0]}
+    assert save_calls[0] == {"n4": [9.0, 9.0], "n1": [1.0, 0.0], "n3": [1.0, 0.0]}
+    assert embedding_cache.load_image_embeddings(path) == {
+        "n4": [9.0, 9.0],
+        "n1": [1.0, 0.0],
+        "n3": [1.0, 0.0],
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")

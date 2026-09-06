@@ -608,9 +608,11 @@ class UIKobeV2Translator(BaseTranslator):
         """Compute an image embedding for every node with a screenshot but no cached vector.
 
         ``embeddings`` is the sidecar as already loaded and pruned to this graph's
-        nodes by the caller; ``compute_missing_image_embeddings`` adds each newly
-        computed vector to it in place and persists it (once, not per node -- see
-        its own docstring), and every vector it now holds is copied back onto ``G``.
+        nodes by the caller, which has already copied every entry it holds onto
+        ``G``; ``compute_missing_image_embeddings`` adds each newly computed
+        vector to it in place and persists it (once, not per node -- see its own
+        docstring), and only those newly computed vectors are copied back onto
+        ``G`` here -- the caller's entries are on ``G`` already.
 
         A missing ``image_embedding.api_key`` is checked once here, before the
         retry loop starts, rather than inside it: raising per node would log a
@@ -638,8 +640,9 @@ class UIKobeV2Translator(BaseTranslator):
             base_url=self.image_embedding_base_url,
             app_name=app_name,
         )
-        for node_id, emb in embeddings.items():
-            G.nodes[node_id]["image_embedding"] = emb
+        for node_id, _screenshot in candidates:
+            if node_id in embeddings:
+                G.nodes[node_id]["image_embedding"] = embeddings[node_id]
 
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
