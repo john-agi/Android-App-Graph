@@ -105,7 +105,8 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("b is the match", None),
         ("Answer: A login screen is shown, none of them match", "NONE"),
         ("Answer: A matches the home screen.", "A"),
-        ("Answer: A login form; B is closer", "B"),
+        ("Answer: A login form; B is closer", "A"),
+        ("Answer: A is the home screen; B and C show lists instead.", "A"),
         ("The best match is A because it shows a home screen.", "A"),
         ("I think A is right", "A"),
         ("Candidates: A looks right", None),
@@ -159,11 +160,13 @@ def test_parse_model_choice_keeps_an_explicit_articled_letter_without_a_later_si
     assert aitk_translator._parse_model_choice("Answer: A matches the home screen.", "ABCD") == "A"
 
 
-def test_parse_model_choice_explicit_articled_letter_yields_to_a_later_letter() -> None:
-    """A later named letter in the remainder overrides the articled one, same as
-    a later NONE does.
+def test_parse_model_choice_articled_letter_ignores_a_later_bare_letter() -> None:
+    """A later labelled answer is already handled by last-label-wins, so the only
+    later signal that overrides an articled explicit letter is an explicit
+    rejection ("NONE") -- a later bare letter in the explanation, such as "B" in
+    the trailing clause here, is not itself an override.
     """
-    assert aitk_translator._parse_model_choice("Answer: A login form; B is closer", "ABCD") == "B"
+    assert aitk_translator._parse_model_choice("Answer: A login form; B is closer", "ABCD") == "A"
 
 
 def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change() -> None:

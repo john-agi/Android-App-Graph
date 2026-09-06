@@ -399,11 +399,15 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if choice in valid_letters:
             if not _reads_as_article(choice, text, final_match.start(1), final_match.end(1)):
                 return choice
-            # An explicit label is the strongest evidence in the reply, so an
-            # articled-looking letter after it still stands unless a later,
-            # contrary signal appears in the rest of the text.
-            later = _last_answer_signal(text[final_match.end(1) :], valid_letters)
-            return later or choice
+            # An explicit label is the strongest evidence in the reply. A later
+            # labeled answer is already handled by last-label-wins above, so the
+            # only later signal that overrides an articled explicit letter is an
+            # explicit rejection -- a later bare letter in the explanation does
+            # not.
+            remainder = text[final_match.end(1) :]
+            if re.search(r"\bNONE\b", remainder, re.IGNORECASE):
+                return "NONE"
+            return choice
 
     # Free text beyond an explicit "Answer:"/</think> form.
     return _last_answer_signal(text, valid_letters)
