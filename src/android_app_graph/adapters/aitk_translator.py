@@ -449,7 +449,7 @@ def _chat_completion_content(
     """Yield chat completion content, retrying at the caller's parse boundary."""
     for attempt in range(V2_PARSE_RETRIES + 1):
         resp = call_with_retry(
-            "chat completion",
+            "[API] chat completion",
             lambda: client.chat.completions.create(**kwargs),
         )
         content = as_str(resp.choices[0].message.content, "")
@@ -775,7 +775,7 @@ class UIKobeV2Translator(BaseTranslator):
 
         started = time.perf_counter()
         page_desc, _detail_snapshot, _elements = call_with_retry(
-            "page describe and state",
+            "[API] page describe and state",
             lambda: describe_page_and_state(
                 self.desc_client,
                 screenshot,
@@ -1221,7 +1221,7 @@ class UIKobeV2Translator(BaseTranslator):
         keyboard_hint = device.soft_keyboard_hint()
 
         aitk_action, history_entry = call_with_retry(
-            "action agent",
+            "[API] action agent",
             lambda: predict_next_action(
                 self.model_client,
                 screenshot,

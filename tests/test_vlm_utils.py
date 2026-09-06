@@ -65,9 +65,9 @@ def test_cosine_similarity_is_bounded_and_symmetric(a: list[float], b: list[floa
 
 
 def test_cosine_similarity_with_a_nan_element_is_zero() -> None:
-    """A NaN component must never win a similarity search: 0.0, not the NaN
+    """A NaN component scores 0.0 and never wins a similarity search.
 
-    that a naive clamp (``max(-1.0, min(1.0, nan))``) would return as 1.0.
+    A naive clamp (``max(-1.0, min(1.0, nan))``) would return 1.0 instead.
     """
     assert cosine_similarity([math.nan, 1.0], [1.0, 1.0]) == 0.0
 

@@ -45,10 +45,11 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
 def test_load_image_embeddings_drops_a_nan_entry(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """json.load happily parses the literal ``NaN``; the cached vector must still be
+    """A cached vector containing the literal ``NaN`` is rejected, not loaded.
 
-    rejected rather than letting a non-finite value reach cosine_similarity, where a
-    naive clamp would score it as the best match everywhere.
+    json.load happily parses ``NaN``; a non-finite value must not reach
+    cosine_similarity, where a naive clamp would score it as the best match
+    everywhere.
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
@@ -86,10 +87,11 @@ def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
 def test_load_image_embeddings_treats_invalid_utf8_as_no_cache(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A JSONDecodeError is caught, but UnicodeDecodeError is also a ValueError and
+    """Invalid UTF-8 in the sidecar is an empty cache, like malformed JSON.
 
-    must be treated the same way: as an empty cache, never as a reason for the
-    per-app ``except Exception`` in ``_load_all_graphs`` to drop the whole graph.
+    UnicodeDecodeError is a ValueError like JSONDecodeError and must never be a
+    reason for the per-app ``except Exception`` in ``_load_all_graphs`` to drop
+    the whole graph.
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_bytes(b'{"n1": [1.0]}\xff\xfe')

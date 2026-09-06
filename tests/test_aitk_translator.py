@@ -695,10 +695,10 @@ def test_reset_task_state_clears_the_previous_task(
 def test_reset_task_state_keeps_the_screen_size_aitk_reported(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    """Screen size is a device property that survives task boundaries: it only
+    """Screen size is a device property that survives task boundaries.
 
-    ever changes when AITK calls to_device with the real size, never on a new
-    task, so a task reset must not silently reset it back to the 1080x1920
+    It only ever changes when AITK calls to_device with the real size, never on
+    a new task, so a task reset must not silently reset it back to the 1080x1920
     default while _call_action_agent keeps using it for grounding.
     """
     translator.to_device(json.dumps({"aitk_action": {"action": "wait", "time": 1}}), 1440, 3120)
@@ -838,11 +838,11 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     translator: aitk_translator.UIKobeV2Translator,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A node with more self-loop instructions plus neighbours than fit in a
+    """An oversized menu is trimmed to 26 entries instead of raising IndexError.
 
-    26-letter menu must not raise IndexError out of to_agent: DONE and FREE
-    always keep their slot, and the 24 remaining slots keep the most-visited
-    neighbours (edge visit_count descending) rather than an arbitrary subset.
+    DONE and FREE always keep their slot, and the 24 remaining slots keep the
+    most-visited neighbours (edge visit_count descending) rather than an
+    arbitrary subset.
     """
     G = translator._graphs["demo"]
     for i in range(30):
@@ -961,12 +961,12 @@ def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
 def test_decide_leaves_a_free_pick_without_an_instruction_empty(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """FREE never carries a built-in instruction, so a model pick that writes none
+    """A FREE pick that writes no instruction resolves to "", not the whole task.
 
-    must resolve to "" (not the whole task): _step's
+    FREE never carries a built-in instruction, and _step's
     ``decision_type == "free" and not instruction`` branch is the only path that
-    re-plans through _plan_free_action, and it is unreachable if this falls back
-    to the task text instead.
+    re-plans through _plan_free_action; it is unreachable if this falls back to
+    the task text instead.
     """
     _use_model(monkeypatch, translator, '{"choice": "D"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
@@ -1403,10 +1403,10 @@ def test_step_replans_when_decide_produces_no_instruction(
 def test_step_replans_when_a_free_pick_has_no_instruction(
     monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """A model that picks FREE without writing an instruction must still re-plan
+    """A FREE pick without an instruction re-plans through _plan_free_action.
 
-    through _plan_free_action rather than sending the whole task text as one
-    instruction and recording it as the completed action.
+    The alternative is sending the whole task text as one instruction and
+    recording it as the completed action.
     """
     _use_model(
         monkeypatch,
