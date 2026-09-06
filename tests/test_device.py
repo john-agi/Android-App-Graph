@@ -42,6 +42,36 @@ def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPat
     assert device.soft_keyboard_hint() == ""
 
 
+def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``text=True`` decodes adb's stdout; undecodable bytes must not raise out of a
+    probe that has to stay best-effort.
+    """
+
+    def _bad_bytes(*_args: Any, **_kwargs: Any) -> _CompletedProcess:
+        msg = "invalid start byte"
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, msg)
+
+    monkeypatch.setattr(device.subprocess, "run", _bad_bytes)
+    assert device.soft_keyboard_hint() == ""
+
+
+def test_soft_keyboard_hint_reads_past_a_replacement_character(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``errors="replace"`` a decode failure yields a replacement character
+    (U+FFFD) next to the real output instead of raising; the hint is still found.
+    """
+    monkeypatch.setattr(
+        device.subprocess,
+        "run",
+        lambda *_a, **_k: _CompletedProcess("�mInputShown=true"),
+    )
+    hint = device.soft_keyboard_hint()
+    assert "soft keyboard is currently visible" in hint
+
+
 def test_keyboard_status_when_the_keyboard_is_shown() -> None:
     assert device.keyboard_status(" (Note: the soft keyboard is visible.)") == (
         "Soft keyboard is visible; a text field is focused and ready for typing."

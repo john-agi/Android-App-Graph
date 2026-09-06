@@ -54,10 +54,13 @@ def soft_keyboard_hint() -> str:
             ["adb", "shell", "dumpsys", "input_method"],
             capture_output=True,
             text=True,
+            # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
+            # best-effort probe; replace bad bytes instead of failing to decode them.
+            errors="replace",
             timeout=3,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         logger.debug("Soft keyboard probe failed: %s", exc)
         return ""
     return _SOFT_KEYBOARD_HINT if "mInputShown=true" in kb_check.stdout else ""
