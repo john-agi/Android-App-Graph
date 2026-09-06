@@ -113,18 +113,20 @@ def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) 
     """Write ``embeddings`` to the graph's sidecar file.
 
     Dumped to a temporary file in the same directory and moved into place with
-    ``os.replace``, so a crash mid-dump leaves the sidecar as either the
-    previous complete file or the new one -- never a truncated mix of both.
+    ``os.replace``, so a crash mid-dump -- or a failed rename -- leaves the
+    sidecar as either the previous complete file or the new one, never a
+    truncated mix of both and never an orphaned temp file: the replace runs
+    inside the same cleanup that unlinks the temp file on any other failure.
     """
     target = image_embeddings_path(graph_path)
     fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(embeddings, f, ensure_ascii=False)
+        os.replace(tmp_name, target)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
-    os.replace(tmp_name, target)
 
 
 def compute_embedding_with_retry(

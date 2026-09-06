@@ -56,6 +56,32 @@ def test_save_image_embeddings_is_atomic_on_a_failed_dump(
     assert list(tmp_path.iterdir()) == [sidecar]
 
 
+def test_save_image_embeddings_unlinks_the_temp_file_when_the_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``os.replace`` (EPERM, EBUSY, target is a directory, ...) must not
+    orphan the temp file in the graph directory: an unguarded replace leaves a
+    stray ``demo.image_emb.json.<random>.tmp`` behind, and every later run adds
+    another one.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.save_image_embeddings(graph_path, {"n1": [1.0, 2.0]})
+    sidecar = embedding_cache.image_embeddings_path(graph_path)
+    original = sidecar.read_text(encoding="utf-8")
+
+    def _raise_replace(_src: object, _dst: object) -> None:
+        msg = "Device or resource busy"
+        raise OSError(msg)
+
+    monkeypatch.setattr(embedding_cache.os, "replace", _raise_replace)
+
+    with pytest.raises(OSError, match="Device or resource busy"):
+        embedding_cache.save_image_embeddings(graph_path, {"n1": [9.9]})
+
+    assert sidecar.read_text(encoding="utf-8") == original
+    assert list(tmp_path.iterdir()) == [sidecar]
+
+
 def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:
     assert embedding_cache.load_image_embeddings(tmp_path / "demo.json") == {}
 
