@@ -1815,3 +1815,15 @@ def test_step_warns_when_the_task_names_no_known_app(
     response = json.loads(stepping._step("do something unrelated", state, history))
     assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
     assert stepping._app_opened is True
+
+
+def test_parse_model_choice_positions_survive_length_changing_uppercasing() -> None:
+    """``str.upper`` can change a string's length ("ß" -> "SS"), so the NONE scan
+    must run on the original text or its offsets drift against the letter
+    positions and the wrong signal is taken as the last one.
+
+    Seven "ß" before the NONE shift its .upper() offset past a letter named six
+    characters after it.
+    """
+    raw = "Straße Maße Größe Füße Süße Soße Fuß: none. B"
+    assert aitk_translator._parse_model_choice(raw, "ABCD") == "B"

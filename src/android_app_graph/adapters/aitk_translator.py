@@ -341,7 +341,10 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
             last_letter_pos, last_letter = letter_match.start(), letter
 
     last_none_pos = -1
-    for none_match in re.finditer(r"\bNONE\b", answer):
+    # Scanned on the original text, not its .upper() copy: upper-casing can change
+    # a string's length (e.g. "ß" -> "SS"), which would shift the offsets compared
+    # against the letter positions above.
+    for none_match in re.finditer(r"\bNONE\b", text, re.IGNORECASE):
         last_none_pos = none_match.start()
 
     if last_letter_pos == -1 and last_none_pos == -1:
