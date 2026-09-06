@@ -1108,7 +1108,20 @@ class UIKobeV2Translator(BaseTranslator):
 
         for opt in options_list:
             if opt["letter"] == choice_letter:
-                resolved_instruction = instruction or opt.get("instruction") or task
+                if opt["type"] == "free":
+                    # FREE never carries a built-in instruction (opt.get("instruction")
+                    # is always None here), so falling back to the whole task would make
+                    # it look like the model wrote one: _step's
+                    # `decision_type == "free" and not instruction` branch — the only
+                    # path that re-plans through _plan_free_action — would then never
+                    # run, and the whole task would be sent to the action agent as a
+                    # single instruction. done/self-loop/neighbour options are built
+                    # from graph data that can legitimately be empty (an edge recorded
+                    # before any instruction text was observed for it), so they keep
+                    # the task fallback.
+                    resolved_instruction = instruction
+                else:
+                    resolved_instruction = instruction or opt.get("instruction") or task
                 chosen: _Decision = {
                     "type": opt["type"],
                     "letter": opt["letter"],

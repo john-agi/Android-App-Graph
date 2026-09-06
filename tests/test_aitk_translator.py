@@ -933,9 +933,34 @@ def test_decide_keeps_the_graph_instruction_when_the_model_omits_one(
 def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
+    """DONE's instruction is never read by _step, so falling back to the whole task
+    here is harmless; the type-specific fallback still applies to it."""
     _use_model(monkeypatch, translator, '{"choice": "A"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"letter": "A", "type": "done", "instruction": "buy shoes"}
+
+
+def test_decide_leaves_a_free_pick_without_an_instruction_empty(
+    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+) -> None:
+    """FREE never carries a built-in instruction, so a model pick that writes none
+
+    must resolve to "" (not the whole task): _step's
+    ``decision_type == "free" and not instruction`` branch is the only path that
+    re-plans through _plan_free_action, and it is unreachable if this falls back
+    to the task text instead.
+    """
+    _use_model(monkeypatch, translator, '{"choice": "D"}')
+    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    assert decision == {"letter": "D", "type": "free", "instruction": ""}
+
+
+def test_decide_uses_the_models_instruction_for_a_free_pick(
+    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+) -> None:
+    _use_model(monkeypatch, translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
+    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    assert decision == {"letter": "D", "type": "free", "instruction": "Tap the cart icon"}
 
 
 def test_decide_reports_an_unparseable_reply(
@@ -1348,6 +1373,29 @@ def test_step_replans_when_decide_produces_no_instruction(
         "nothing",  # RECORD
         "not json",  # DECIDE attempt 1: fails to parse
         "still not json",  # DECIDE attempt 2: fails to parse -> type="free", instruction=""
+        "Tap the search bar",  # free-action fallback plan
+    )
+    stepping._app_opened = True
+    state, history = _step_payload()
+
+    json.loads(stepping._step("buy shoes", state, history))
+    assert stepping._memory.actions == ["Tap the search bar"]
+
+
+def test_step_replans_when_a_free_pick_has_no_instruction(
+    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+) -> None:
+    """A model that picks FREE without writing an instruction must still re-plan
+
+    through _plan_free_action rather than sending the whole task text as one
+    instruction and recording it as the completed action.
+    """
+    _use_model(
+        monkeypatch,
+        stepping,
+        "A",  # IDENTIFY
+        "nothing",  # RECORD
+        '{"choice": "D"}',  # DECIDE picks FREE, writes no instruction
         "Tap the search bar",  # free-action fallback plan
     )
     stepping._app_opened = True
