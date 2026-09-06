@@ -82,10 +82,10 @@ def _node_id(value: object) -> str:
 
 
 def _require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
-    """Raise when a saved graph has an edge to a node the same file does not define.
+    """Raise when an edge names a node the same file does not define.
 
-    ``networkx`` would create that endpoint as a node with no attributes, so a
-    hand-edited or partially written file would load quietly.  See #62.
+    networkx would create that endpoint bare, so a hand-edited or truncated file
+    would load quietly.  See #62.
     """
     node_ids = {_node_id(node["id"]) for node in data.get("nodes", [])}
     for edge in data.get("edges", []):
@@ -651,8 +651,7 @@ class GraphManager:
 
         The edge is dropped with a warning when either endpoint is missing.
         """
-        # networkx would create the missing endpoint as a node with no
-        # attributes: no description, no schema, no embedding.  See #62.
+        # networkx would otherwise create the missing endpoint bare.  See #62.
         if source not in self.graph or target not in self.graph:
             logger.warning("add_edge: missing node(s) — source=%s, target=%s", source, target)
             return
@@ -1249,8 +1248,7 @@ class GraphManager:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Checked before anything is mutated, so a corrupt file leaves this
-        # manager's graph as it was rather than half loaded.  See #62.
+        # Before any mutation: a corrupt file must not leave a half-loaded graph.
         _require_known_edge_endpoints(data, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
