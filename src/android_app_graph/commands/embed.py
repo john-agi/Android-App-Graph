@@ -17,9 +17,9 @@ import yaml
 
 from android_app_graph.embedding_cache import (
     compute_missing_image_embeddings,
-    image_embeddings_path,
     load_image_embeddings,
     resolve_image_embedding_settings,
+    save_image_embeddings,
 )
 from android_app_graph.graph_files import (
     encode_screenshot_b64,
@@ -100,12 +100,17 @@ def precompute_graph_image_embeddings(
         # --recompute is only needed for what the tag cannot cover: an
         # untagged sidecar from before this format, a hand-edited one, or a
         # deliberate refresh. Either way it discards the existing sidecar up
-        # front -- otherwise a run where every call then fails would leave the
-        # stale vectors it was asked to discard, since the sidecar is only
-        # rewritten when at least one vector succeeds.
+        # front, through the same save_image_embeddings writer every other
+        # sidecar write goes through -- unlink() on a symlinked sidecar only
+        # detaches the link, leaving the shared target it points at untouched,
+        # so the rebuilt vectors would land in a fresh plain file shadowing
+        # the stale target instead of replacing it. Writing an empty tagged
+        # payload also means a run where every call then fails still leaves
+        # the sidecar discarded, since it is otherwise only rewritten when at
+        # least one vector succeeds.
         embeddings: dict[str, list[float]]
         if recompute:
-            image_embeddings_path(graph_path).unlink(missing_ok=True)
+            save_image_embeddings(graph_path, {}, model=model)
             embeddings = {}
         else:
             embeddings = load_image_embeddings(graph_path, model=model)

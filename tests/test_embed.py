@@ -310,7 +310,10 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
 ) -> None:
     """The sidecar is only rewritten when at least one vector succeeds, so a
     ``--recompute`` run where every call fails must still discard the stale
-    sidecar it was asked to recompute, not leave it in place untouched.
+    sidecar it was asked to recompute, not leave it in place untouched. It is
+    discarded by writing an empty tagged payload through the same writer as
+    every other save, not by unlinking the file, so the sidecar still exists
+    afterward -- just emptied.
     """
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
@@ -326,8 +329,47 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
     summary = _precompute(tmp_path, recompute=True)
     assert summary["computed"] == 0
     assert summary["skipped_failed"] == 1
-    assert not image_embeddings_path(graph_path).exists()
+    assert json.loads(image_embeddings_path(graph_path).read_text(encoding="utf-8")) == {
+        "model": "gemini-embedding-2",
+        "embeddings": {},
+    }
     assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_discards_through_a_symlinked_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``unlink()`` on a symlinked sidecar only detaches the link, leaving the
+    shared target it points at untouched, so the rebuilt vectors would land in
+    a fresh plain file shadowing the stale target rather than replacing it.
+    Discarding through ``save_image_embeddings`` writes through the link
+    instead, like every other sidecar write.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    target = tmp_path / "shared_cache.json"
+    target.write_text(
+        json.dumps({"model": "other-model", "embeddings": {"s0_home": [0.1, 0.2]}}),
+        encoding="utf-8",
+    )
+    sidecar = image_embeddings_path(graph_path)
+    sidecar.symlink_to(target)
+
+    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+        msg = "503 unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+
+    summary = _precompute(tmp_path, recompute=True)
+
+    assert summary["computed"] == 0
+    assert sidecar.is_symlink()
+    assert sidecar.resolve() == target
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "model": "gemini-embedding-2",
+        "embeddings": {},
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")
