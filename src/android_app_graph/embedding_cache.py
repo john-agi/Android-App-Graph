@@ -84,7 +84,7 @@ def compute_embedding_with_retry(
                 model=model,
                 base_url=base_url,
             )
-        # A retry loop is a boundary (AGENTS.md): re-raise on the last attempt,
+        # A retry loop is a boundary: re-raise on the last attempt,
         # log the traceback on every earlier one.
         except Exception:
             if attempt >= attempts - 1:

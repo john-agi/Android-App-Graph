@@ -106,11 +106,6 @@ class _Decision(TypedDict):
     reason: NotRequired[str]
 
 
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
-
-
 NODE_IDENTIFY_PROMPT = """\
 You are looking at a mobile app screen. Below are candidate screen descriptions \
 from the app's navigation graph. Pick the one that best matches what you see, \
@@ -233,11 +228,6 @@ bar", "Press enter", or "Tap the back arrow".
 
 Think easily and briefly, under 10 sentences if needed. Reply with ONLY the \
 one-step instruction. No explanations."""
-
-
-# ---------------------------------------------------------------------------
-# Graph loading (shared with v1)
-# ---------------------------------------------------------------------------
 
 
 def _load_graph_from_json(path: Path) -> nx.DiGraph:
@@ -507,18 +497,13 @@ def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Memory module
-# ---------------------------------------------------------------------------
-
-
 class Memory:
     """Task memory that stores actions taken, observations, and extracted info."""
 
     def __init__(self) -> None:
-        self.actions: list[str] = []  # what has been done
-        self.info: list[str] = []  # extracted facts from screens
-        self.observations: list[str] = []  # model observations
+        self.actions: list[str] = []
+        self.info: list[str] = []
+        self.observations: list[str] = []
 
     def add_action(self, action: str) -> None:
         self.actions.append(action)
@@ -552,11 +537,6 @@ class Memory:
         return "\n".join(lines) if lines else "(empty)"
 
 
-# ---------------------------------------------------------------------------
-# UIKobeV2Translator
-# ---------------------------------------------------------------------------
-
-
 class UIKobeV2Translator(BaseTranslator):
     """Loop-based translator: identify → record → decide → execute."""
 
@@ -580,9 +560,8 @@ class UIKobeV2Translator(BaseTranslator):
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
 
-        # Single model for all reasoning (planner/action share the same model)
+        # The planner and the action agent share one model, configured under "action".
         self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
-        # Page detail client — used for describe+state and node verification
         self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
         image_embedding_cfg = vlm_config.get("image_embedding") or {}
         self.image_embedding_model = (
@@ -602,12 +581,10 @@ class UIKobeV2Translator(BaseTranslator):
             else "https://generativelanguage.googleapis.com/v1beta"
         )
 
-        # Load all graphs
         self._graphs: dict[str, nx.DiGraph] = {}
         self._package_to_app: dict[str, str] = {}
         self._load_all_graphs()
 
-        # Per-task state
         self._reset_task_state()
 
     def _reset_task_state(self) -> None:
@@ -617,7 +594,6 @@ class UIKobeV2Translator(BaseTranslator):
         self._screen_w = 1080
         self._screen_h = 1920
         self._memory = Memory()
-        # Loop state
         self._step_count = 0
 
     def _compute_runtime_image_embedding_with_retry(
@@ -773,10 +749,6 @@ class UIKobeV2Translator(BaseTranslator):
         )
         return None
 
-    # ------------------------------------------------------------------
-    # Step 1: IDENTIFY — match screen to graph node
-    # ------------------------------------------------------------------
-
     def _identify_node(self, activity: str, screenshot: str) -> tuple[str | None, str]:
         """Match current screen to a graph node.
 
@@ -802,7 +774,6 @@ class UIKobeV2Translator(BaseTranslator):
             graph_packages,
         )
 
-        # Collect existing same-package node descriptions for disambiguation
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         same_pkg_node_count = 0
@@ -816,7 +787,6 @@ class UIKobeV2Translator(BaseTranslator):
                     if k not in same_pkg_keys:
                         same_pkg_keys.append(k)
 
-        # Get page description + state via combined call
         logger.info(
             "[IDENTIFY] same-package graph nodes=%d known_descriptions=%d known_state_keys=%d",
             same_pkg_node_count,
@@ -870,7 +840,6 @@ class UIKobeV2Translator(BaseTranslator):
 
         candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Log top candidates
         logger.info("[IDENTIFY] image candidates=%d", len(candidates))
         for nid, sim, desc in candidates[:5]:
             logger.info('[IDENTIFY] candidate sim=%.3f node=%s desc="%s"', sim, nid, desc)
@@ -926,10 +895,6 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[IDENTIFY] identified node=%s", chosen_node)
         return chosen_node, page_desc
 
-    # ------------------------------------------------------------------
-    # Step 2: RECORD — extract info from screen
-    # ------------------------------------------------------------------
-
     def _record_info(self, task: str, screenshot: str) -> None:
         """Check if the current screen has task-relevant info to remember."""
         prompt = RECORD_PROMPT.format(
@@ -946,10 +911,6 @@ class UIKobeV2Translator(BaseTranslator):
         )
         logger.info("[RECORD] parsed=%s", result)
         self._memory.add_info(result)
-
-    # ------------------------------------------------------------------
-    # Step 3: DECIDE — pick next action from local graph context
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _unpack_template(tmpl: dict[str, Any] | str) -> tuple[str, str]:
@@ -1000,20 +961,17 @@ class UIKobeV2Translator(BaseTranslator):
         lines: list[str] = []
         idx = 0
 
-        # The first option is always "done"
         letter = letters[idx]
         options.append({"letter": letter, "type": "done"})
         lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
         idx += 1
 
-        # Self-loop actions
         if G.has_edge(node_id, node_id):
             edge_data = G[node_id][node_id]
             templates = edge_data.get("instruction_templates", [])
             observations = edge_data.get("target_observations", [])
 
             if templates:
-                # Prefer templates (normalized instructions)
                 for tmpl in templates:
                     letter = letters[idx]
                     tmpl_text, obs_text = self._unpack_template(tmpl)
@@ -1035,7 +993,6 @@ class UIKobeV2Translator(BaseTranslator):
                     lines.append(hint)
                     idx += 1
             else:
-                # Fall back to raw instructions
                 for i, raw_instr in enumerate(edge_data.get("instructions", [])):
                     letter = letters[idx]
                     instr = as_str(raw_instr, "")
@@ -1057,7 +1014,6 @@ class UIKobeV2Translator(BaseTranslator):
                     lines.append(hint)
                     idx += 1
 
-        # Neighbor nodes (1-hop)
         for _, raw_neighbor, edge_data in G.out_edges(node_id, data=True):
             neighbor = str(raw_neighbor)
             if neighbor == node_id:
@@ -1066,7 +1022,6 @@ class UIKobeV2Translator(BaseTranslator):
             templates = edge_data.get("instruction_templates", [])
             observations = edge_data.get("target_observations", [])
 
-            # Pick the best instruction: template > raw instruction
             instr = ""
             obs = ""
             if templates:
@@ -1098,7 +1053,6 @@ class UIKobeV2Translator(BaseTranslator):
             lines.append(f'{letter}) Go to "{neighbor_desc}"{edge_hint}')
             idx += 1
 
-        # Free action (fallback)
         letter = letters[idx]
         options.append({"letter": letter, "type": "free"})
         lines.append(f"{letter}) FREE — do something not listed above (describe it)")
@@ -1152,7 +1106,6 @@ class UIKobeV2Translator(BaseTranslator):
             instruction,
         )
 
-        # Find matching option
         for opt in options_list:
             if opt["letter"] == choice_letter:
                 resolved_instruction = instruction or opt.get("instruction") or task
@@ -1169,17 +1122,12 @@ class UIKobeV2Translator(BaseTranslator):
                     chosen["effect"] = opt["effect"]
                 return chosen
 
-        # Fallback
         logger.warning("DECIDE: unrecognized choice '%s'", choice_letter)
         return {
             "type": "free",
             "instruction": instruction,
             "reason": f"DECIDE returned unrecognized choice {choice_letter!r}",
         }
-
-    # ------------------------------------------------------------------
-    # Step 4: EXECUTE — action agent
-    # ------------------------------------------------------------------
 
     def _plan_free_action(
         self,
@@ -1218,7 +1166,6 @@ class UIKobeV2Translator(BaseTranslator):
         screenshot: str,
         overall_task: str = "",
     ) -> tuple[dict[str, Any], str, str]:
-        # Detect if soft keyboard is visible (text field is focused)
         keyboard_hint = device.soft_keyboard_hint()
 
         aitk_action, history_entry = _call_with_retry(
@@ -1237,10 +1184,6 @@ class UIKobeV2Translator(BaseTranslator):
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
 
-    # ------------------------------------------------------------------
-    # Generate final answer
-    # ------------------------------------------------------------------
-
     def _generate_answer(self, task: str) -> str:
         prompt = DONE_PROMPT.format(
             task=task,
@@ -1249,18 +1192,11 @@ class UIKobeV2Translator(BaseTranslator):
         answer = self._ask_with_screenshot(prompt, None, lambda raw: raw.strip() or None, "[DONE]")
         return answer or ""
 
-    # ------------------------------------------------------------------
-    # Main step function
-    # ------------------------------------------------------------------
-
     def _step(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
         screenshot = as_str(state.get("screenshot", ""), "")
         activity = as_str(state.get("activity", ""), "")
         package = as_str(state.get("package", ""), "")
 
-        # ==============================================================
-        # OPEN — launch the app (step 0)
-        # ==============================================================
         if not self._app_opened:
             self._app_opened = True
             app_name = self._resolve_app_from_task(task)
@@ -1275,9 +1211,6 @@ class UIKobeV2Translator(BaseTranslator):
                 )
             logger.warning("[OPEN] Could not resolve app from task: %s", task)
 
-        # ==============================================================
-        # Resolve graph
-        # ==============================================================
         if self._current_graph is None:
             if self._app_name and self._app_name in self._graphs:
                 self._current_graph = self._graphs[self._app_name]
@@ -1286,28 +1219,21 @@ class UIKobeV2Translator(BaseTranslator):
 
         G = self._current_graph
 
-        # ==============================================================
-        # REACTIVE LOOP — identify → record → decide → execute
-        # ==============================================================
         self._step_count += 1
         logger.info(_SEP_THICK)
         logger.info("[LOOP] Step %d", self._step_count)
         logger.info(_SEP_THICK)
 
-        # --- 1. IDENTIFY ---
         node_id, page_desc = self._identify_node(activity, screenshot)
         logger.info('[IDENTIFY] Node: %s — "%s"', node_id, page_desc)
 
-        # --- 2. RECORD ---
         self._record_info(task, screenshot)
         logger.info("[RECORD] Memory: %s", self._memory.format())
 
-        # --- 3. DECIDE ---
         decision: _Decision
         if node_id is not None and G is not None:
             decision = self._decide(G, task, node_id, screenshot)
         else:
-            # No graph or unrecognized screen — free action
             reason = (
                 "no graph is loaded"
                 if G is None
@@ -1343,7 +1269,6 @@ class UIKobeV2Translator(BaseTranslator):
             instruction,
         )
 
-        # --- Handle decision ---
         if decision_type == "done":
             answer = self._generate_answer(task)
             logger.info(_SEP_THICK)
@@ -1355,7 +1280,6 @@ class UIKobeV2Translator(BaseTranslator):
                 {"action": "end", "answer": answer},
             )
 
-        # --- 4. EXECUTE ---
         logger.info(_SEP)
         logger.info('ACTION AGENT one-step instruction: "%s"', instruction)
         logger.info(_SEP)
@@ -1382,10 +1306,6 @@ class UIKobeV2Translator(BaseTranslator):
 
         return self._make_response(f"Action: {history_entry}", aitk_action)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _make_response(message: str, aitk_action: dict[str, Any]) -> str:
         return json.dumps(
@@ -1394,10 +1314,6 @@ class UIKobeV2Translator(BaseTranslator):
                 "aitk_action": aitk_action,
             }
         )
-
-    # ------------------------------------------------------------------
-    # BaseTranslator interface
-    # ------------------------------------------------------------------
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
