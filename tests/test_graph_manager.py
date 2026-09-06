@@ -1705,6 +1705,26 @@ def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: 
     assert list(gm.graph.nodes) == ["s9_stale"]
 
 
+def test_load_graph_still_raises_a_bare_key_error_for_a_node_without_an_id(
+    tmp_path: Path,
+) -> None:
+    """Documents pre-existing behaviour on main, left unchanged here: load_graph
+    indexes ``node_data["id"]`` directly, so a node missing it still raises a
+    bare KeyError, now from that line instead of from
+    require_known_edge_endpoints -- fixing the latter's bare KeyError (see
+    graph_files.require_known_edge_endpoints) does not give this loader a
+    path-bearing error of its own.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps({"nodes": [{"page_description": "x"}], "edges": []}), encoding="utf-8"
+    )
+    gm = make_manager()
+
+    with pytest.raises(KeyError, match="id"):
+        gm.load_graph(path)
+
+
 def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")

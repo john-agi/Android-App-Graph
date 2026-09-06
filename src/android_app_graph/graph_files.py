@@ -112,13 +112,17 @@ def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
     add_edge would otherwise silently create an attribute-less node for an
     undefined endpoint, so a hand-edited or truncated file would load
     quietly. See #62/#63.
+
+    Reads every id with ``.get`` rather than indexing: this runs before each
+    loader's own per-node id check, so a node without one must fail there,
+    where the error names the path, not here as a bare KeyError.
     """
-    node_ids = {str(node["id"]) for node in data.get("nodes", [])}
+    node_ids = {str(node["id"]) for node in data.get("nodes", []) if node.get("id") is not None}
     missing_ids: set[str] = set()
     for edge in data.get("edges", []):
         missing_ids.update(
             str(endpoint)
-            for endpoint in (edge["source"], edge["target"])
+            for endpoint in (edge.get("source"), edge.get("target"))
             if str(endpoint) not in node_ids
         )
     if missing_ids:

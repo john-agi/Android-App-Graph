@@ -515,6 +515,18 @@ def test_load_graph_from_json_rejects_a_non_string_node_id(tmp_path: Path) -> No
         aitk_translator._load_graph_from_json(path)
 
 
+def test_load_graph_from_json_rejects_a_node_without_an_id(tmp_path: Path) -> None:
+    """A node missing "id" entirely must surface as this loader's own
+    path-bearing TypeError, not a bare KeyError('id') out of
+    require_known_edge_endpoints, which runs first and must tolerate an
+    id-less node long enough to let this check report it properly.
+    """
+    path = _write_graph(tmp_path, nodes=[{"page_description": "x"}])
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        aitk_translator._load_graph_from_json(path)
+    assert str(path) in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "edge",
     [

@@ -229,6 +229,31 @@ def test_reference_screenshot_b64_is_none_without_a_screenshot(tmp_path: Path) -
     assert graph_files.reference_screenshot_b64(graph_path, "n1") is None
 
 
+def test_require_known_edge_endpoints_accepts_a_graph_without_edges() -> None:
+    assert (
+        graph_files.require_known_edge_endpoints({"nodes": [{"id": "n1"}], "edges": []}, Path())
+        is None
+    )
+
+
+def test_require_known_edge_endpoints_raises_for_an_unknown_endpoint() -> None:
+    with pytest.raises(ValueError, match="ghost"):
+        graph_files.require_known_edge_endpoints(
+            {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "ghost"}]},
+            Path("g.json"),
+        )
+
+
+def test_require_known_edge_endpoints_skips_a_node_without_an_id(tmp_path: Path) -> None:
+    """This runs before each loader's own per-node id check (see #62/#63), so a
+    node missing "id" entirely must not raise a bare KeyError here -- the
+    loader that runs next reports it instead, with the path.
+    """
+    graph_files.require_known_edge_endpoints(
+        {"nodes": [{"page_description": "x"}], "edges": []}, tmp_path / "demo.json"
+    )
+
+
 def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
     for app in ("demo", "other"):
         app_dir = tmp_path / app
