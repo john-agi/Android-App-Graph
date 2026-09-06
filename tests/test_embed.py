@@ -16,6 +16,10 @@ from android_app_graph.embedding_cache import image_embeddings_path
 _SCREENSHOT = b"not-really-a-png"
 
 
+class _Interrupted(BaseException):
+    """Stand-in for KeyboardInterrupt/SystemExit that stays clear of pytest's own."""
+
+
 def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = False) -> Path:
     """Create ``<tmp_path>/<app>/`` with one graph file and one node screenshot."""
     app_dir = tmp_path / app
@@ -320,3 +324,80 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.3, 0.4]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rewriting the sidecar after every computed node is O(N^2) for a cold
+    cache, and each write is now a temp-file-and-rename rather than a plain
+    truncation, so the per-node write is also the O(N^2) cost the runtime
+    translator's loop was changed to avoid in a previous round. It must be
+    written once, after the whole node loop, for both callers alike.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+    )
+
+    save_calls: list[dict[str, list[float]]] = []
+    original_save = embedding_cache.save_image_embeddings
+
+    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]]) -> None:
+        save_calls.append(dict(embeddings))
+        original_save(graph_file, embeddings)
+
+    monkeypatch.setattr(embedding_cache, "save_image_embeddings", _tracking_save)
+
+    summary = _precompute(tmp_path)
+
+    assert summary["computed"] == 3
+    assert len(save_calls) == 1
+    assert save_calls[0] == {"n1": [0.1, 0.2], "n2": [0.1, 0.2], "n3": [0.1, 0.2]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_persists_progress_before_an_interrupt_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeyboardInterrupt/SystemExit partway through the node loop must not discard
+    the embeddings computed before it -- those are paid API calls. The node loop
+    runs inside a ``finally`` so whatever was computed is written to the sidecar
+    before the interrupt keeps propagating, and it does keep propagating: this
+    is not a reason to drop or swallow it.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    graph_path.write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    shots = {node_id: f"shot-{node_id}".encode() for node_id in ("n1", "n2", "n3")}
+    for node_id, data in shots.items():
+        (screenshots / f"{node_id}.png").write_bytes(data)
+    b64_by_node = {
+        node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
+    }
+
+    def _interrupted_at_n3(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+        if screenshot_b64 == b64_by_node["n3"]:
+            raise _Interrupted
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _interrupted_at_n3)
+
+    with pytest.raises(_Interrupted):
+        _precompute(tmp_path)
+
+    assert embed.load_image_embeddings(graph_path) == {"n1": [1.0, 0.0], "n2": [1.0, 0.0]}

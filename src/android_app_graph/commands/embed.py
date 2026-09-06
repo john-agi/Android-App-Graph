@@ -9,19 +9,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from android_app_graph.embedding_cache import (
-    compute_embedding_with_retry,
+    compute_missing_image_embeddings,
     iter_graph_files,
     load_image_embeddings,
     reference_screenshot_b64,
     resolve_image_embedding_settings,
-    save_image_embeddings,
 )
 from android_app_graph.utils.logging import setup_logging
 
@@ -60,6 +58,7 @@ def precompute_graph_image_embeddings(
         graph_data = load_graph_json(graph_path)
         embeddings = load_image_embeddings(graph_path)
 
+        candidates: list[tuple[str, str]] = []
         for node in graph_data.get("nodes", []):
             node_id = node.get("id")
             if not node_id:
@@ -72,33 +71,19 @@ def precompute_graph_image_embeddings(
             if node_id in embeddings:
                 summary["already_cached"] += 1
                 continue
+            candidates.append((node_id, screenshot_b64))
 
-            try:
-                started = time.perf_counter()
-                embeddings[node_id] = compute_embedding_with_retry(
-                    api_key,
-                    screenshot_b64,
-                    model=model,
-                    base_url=base_url,
-                    app_name=current_app_name,
-                    node_id=node_id,
-                )
-                save_image_embeddings(graph_path, embeddings)
-                summary["computed"] += 1
-                logger.info(
-                    "[GRAPH] %s/%s: computed image embedding in %.1fs",
-                    current_app_name,
-                    node_id,
-                    time.perf_counter() - started,
-                )
-            except Exception:
-                summary["skipped_failed"] += 1
-                logger.exception(
-                    "Runtime image embedding failed for graph %s node %s after retries; "
-                    "continuing without this node embedding.",
-                    current_app_name,
-                    node_id,
-                )
+        run = compute_missing_image_embeddings(
+            graph_path,
+            embeddings,
+            candidates,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            app_name=current_app_name,
+        )
+        summary["computed"] += run.computed
+        summary["skipped_failed"] += run.failed
 
     return summary
 

@@ -1,7 +1,8 @@
 """Graph-file discovery and the image-embedding sidecar cache.
 
 Shared by runtime graph loading and offline precomputation so they cannot
-drift on what counts as a usable cached vector or how a failed call is retried.
+drift on what counts as a usable cached vector, how a failed call is retried,
+or how newly computed vectors are logged and persisted.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import logging
 import os
 import secrets
 import shutil
+import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -165,6 +168,82 @@ def compute_embedding_with_retry(
         retries=IMAGE_EMBEDDING_RETRIES,
         base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
     )
+
+
+class ImageEmbeddingRun(NamedTuple):
+    computed: int
+    failed: int
+
+
+def compute_missing_image_embeddings(
+    graph_path: Path,
+    embeddings: dict[str, list[float]],
+    candidates: Iterable[tuple[str, str]],
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    app_name: str,
+) -> ImageEmbeddingRun:
+    """Compute an image embedding for every ``(node_id, screenshot_b64)`` candidate.
+
+    Shared by offline precomputation (``commands.embed``) and runtime graph
+    loading (``adapters.aitk_translator``) so the two cannot drift on retry,
+    logging or persistence behaviour. ``embeddings`` is the cache as already
+    loaded; each computed vector is added to it in place, and it is what gets
+    written back, so a caller that pre-filters or prunes entries controls
+    exactly what the sidecar ends up holding.
+
+    The sidecar is written once, after the whole loop, since rewriting it after
+    every node is O(N^2) for a cold cache. The write runs in a ``finally`` so a
+    ``KeyboardInterrupt`` or ``SystemExit`` partway through the loop still
+    persists every embedding computed before it -- those are paid API calls,
+    and the interrupt itself keeps propagating. A failed write is caught as
+    ``OSError`` and only logged, since a cache write failure must not drop a
+    graph that loaded and computed its embeddings fine.
+    """
+    computed = 0
+    failed = 0
+    updated = False
+    try:
+        for node_id, screenshot_b64 in candidates:
+            try:
+                started = time.perf_counter()
+                embeddings[node_id] = compute_embedding_with_retry(
+                    api_key,
+                    screenshot_b64,
+                    model=model,
+                    base_url=base_url,
+                    app_name=app_name,
+                    node_id=node_id,
+                )
+                updated = True
+                computed += 1
+                logger.info(
+                    "[GRAPH] %s/%s: computed image embedding in %.1fs",
+                    app_name,
+                    node_id,
+                    time.perf_counter() - started,
+                )
+            except Exception:
+                failed += 1
+                logger.exception(
+                    "Runtime image embedding failed for graph %s node %s after retries; "
+                    "continuing without this node embedding.",
+                    app_name,
+                    node_id,
+                )
+    finally:
+        if updated:
+            try:
+                save_image_embeddings(graph_path, embeddings)
+            except OSError:
+                logger.exception(
+                    "Failed to write image embedding cache for graph %s at %s",
+                    app_name,
+                    graph_path,
+                )
+    return ImageEmbeddingRun(computed=computed, failed=failed)
 
 
 def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:

@@ -774,13 +774,13 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _flaky)
 
     save_calls: list[dict[str, list[float]]] = []
-    original_save = aitk_translator.save_image_embeddings
+    original_save = embedding_cache.save_image_embeddings
 
     def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]]) -> None:
         save_calls.append(dict(embeddings))
         original_save(graph_file, embeddings)
 
-    monkeypatch.setattr(aitk_translator, "save_image_embeddings", _tracking_save)
+    monkeypatch.setattr(embedding_cache, "save_image_embeddings", _tracking_save)
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -844,7 +844,7 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
         msg = "Permission denied"
         raise PermissionError(msg)
 
-    monkeypatch.setattr(aitk_translator, "save_image_embeddings", _raise_permission_error)
+    monkeypatch.setattr(embedding_cache, "save_image_embeddings", _raise_permission_error)
 
     with caplog.at_level("ERROR"):
         built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
@@ -1236,7 +1236,34 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     )
 
 
-def test_runtime_image_embedding_requires_a_key(graph_dir: Path) -> None:
+def test_load_all_graphs_requires_an_api_key_once_per_graph_not_per_node(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A missing ``image_embedding.api_key`` must not raise inside the per-node
+    retry loop -- that would log a full traceback once per candidate node. It
+    is checked once per graph, before the loop starts, and only when the graph
+    actually has a candidate to compute.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}])
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(b"shot-n1")
+    (screenshots / "n2.png").write_bytes(b"shot-n2")
+    config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
+
+    with caplog.at_level("ERROR"):
+        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
+
+    assert set(built._graphs) == {"demo"}
+    key_errors = [m for m in caplog.messages if "Native Gemini image embedding requires" in m]
+    assert len(key_errors) == 1
+    assert not any("Runtime image embedding failed for graph" in m for m in caplog.messages)
+
+
+def test_compute_runtime_image_embedding_with_retry_requires_a_key(graph_dir: Path) -> None:
+    """This is the one remaining caller of the shared api-key check: the runtime
+    query embedding computed once per ``_identify_node`` call, not the per-node
+    cache-fill loop (that check is once-per-graph -- see the test above)."""
     config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
     with pytest.raises(RuntimeError, match="Native Gemini image embedding requires"):
