@@ -1070,7 +1070,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     assert save_calls[0] == {"n4": [9.0, 9.0], "n1": [1.0, 0.0], "n3": [1.0, 0.0]}
     assert embedding_cache.load_image_embeddings(
         path, model="img-model", node_ids={"n1", "n2", "n3", "n4"}
-    ) == {
+    ).vectors == {
         "n4": [9.0, 9.0],
         "n1": [1.0, 0.0],
         "n3": [1.0, 0.0],
@@ -1109,7 +1109,7 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
 
     assert embedding_cache.load_image_embeddings(
         path, model="img-model", node_ids={"n1", "n2", "n3"}
-    ) == {
+    ).vectors == {
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
     }
@@ -2185,3 +2185,28 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
         "usable image embedding (missing, or cached at a stale dimension)"
     )
     assert [m for m in caplog.messages if "no candidates" in m] == [expected]
+
+
+def test_load_all_graphs_prunes_a_fully_cached_sidecar_without_computing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same as the offline precompute: a vanished node's vector leaves the
+    sidecar on the first start even though every remaining node is cached.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}])
+    model = embedding_cache.resolve_image_embedding_settings(_VLM_CONFIG).model
+    embedding_cache.save_image_embeddings(path, {"n1": [1.0, 0.0], "gone": [0.0, 1.0]}, model=model)
+
+    def _never(*_a: Any, **_kw: Any) -> list[float]:
+        msg = "nothing to compute"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _never)
+
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [1.0, 0.0]
+    assert json.loads(embedding_cache.image_embeddings_path(path).read_text(encoding="utf-8")) == {
+        "model": model,
+        "embeddings": {"n1": [1.0, 0.0]},
+    }

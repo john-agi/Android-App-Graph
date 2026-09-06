@@ -82,11 +82,14 @@ def precompute_graph_image_embeddings(
         node_ids = {node.get("id") for node in graph_data.get("nodes", []) if node.get("id")}
 
         embeddings: dict[str, list[float]]
+        rewrite = False
         if recompute:
             save_image_embeddings(graph_path, {}, model=model)
             embeddings = {}
         else:
-            embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
+            loaded = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
+            embeddings = loaded.vectors
+            rewrite = loaded.pruned > 0
 
         # A stat, not a read: deciding reference_screenshots/already_cached/
         # skipped_missing_screenshot must not pay for every uncached node's
@@ -115,6 +118,7 @@ def precompute_graph_image_embeddings(
             model=model,
             base_url=base_url,
             app_name=current_app_name,
+            rewrite=rewrite,
         )
         summary["computed"] += run.computed
         summary["skipped_failed"] += run.failed

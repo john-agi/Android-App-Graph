@@ -79,10 +79,16 @@ def image_embeddings_path(graph_path: Path) -> Path:
     return graph_path.with_suffix(".image_emb.json")
 
 
+class LoadedImageEmbeddings(NamedTuple):
+    vectors: dict[str, list[float]]
+    pruned: int
+
+
 def load_image_embeddings(
     graph_path: Path, *, model: str, node_ids: Collection[str]
-) -> dict[str, list[float]]:
-    """Return the cached embeddings for a graph, or ``{}`` when none are usable.
+) -> LoadedImageEmbeddings:
+    """Return the cached embeddings for a graph (empty when none are usable) and
+    how many entries were pruned for nodes no longer in ``node_ids``.
 
     A sidecar that cannot be read or parsed is an empty cache, never a reason
     to drop the app graph; a malformed or non-finite vector is dropped and logged.
@@ -105,29 +111,26 @@ def load_image_embeddings(
     in either one. Required, not defaulted, so a caller cannot forget to pass
     the graph's current node ids and silently keep every stale entry forever.
 
-    A prune is written straight back to the sidecar here, rather than left
-    for a caller's later compute loop to persist: on a fully cached graph
-    nothing is computed, so a caller that only writes after computing would
-    never persist the prune, and this same "dropping" line would fire again
-    on every future load instead of once. A failed write here is logged and
-    swallowed, the same boundary ``compute_missing_image_embeddings`` uses
-    for its own cache write, since a write failure must not undo a load that
-    otherwise succeeded.
+    The prune is not written here: a load stays a read, since a read-only
+    graph directory must not log a failed write on every start. ``pruned``
+    reports how many entries were dropped so the caller's compute loop, which
+    owns the sidecar write, rewrites the file even when it computes nothing;
+    otherwise the same "dropping" line would repeat on every later load.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():
-        return {}
+        return LoadedImageEmbeddings({}, 0)
     try:
         with emb_path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, ValueError) as exc:
         logger.warning("Corrupt image embedding cache %s; treating it as empty: %s", emb_path, exc)
-        return {}
+        return LoadedImageEmbeddings({}, 0)
     if not isinstance(raw, dict):
         logger.warning(
             "Image embedding cache %s is not a JSON object; treating it as empty", emb_path
         )
-        return {}
+        return LoadedImageEmbeddings({}, 0)
 
     sidecar_model = raw.get("model")
     # A legacy bare dict may hold a node called "model", so the tagged form is
@@ -139,7 +142,7 @@ def load_image_embeddings(
             emb_path,
             model,
         )
-        return {}
+        return LoadedImageEmbeddings({}, 0)
     if sidecar_model != model:
         logger.warning(
             "Image embedding cache %s was written by model %r, not the current model %r; "
@@ -148,7 +151,7 @@ def load_image_embeddings(
             sidecar_model,
             model,
         )
-        return {}
+        return LoadedImageEmbeddings({}, 0)
 
     embeddings: dict[str, list[float]] = {}
     for node_id, vector in as_str_dict(raw.get("embeddings")).items():
@@ -171,11 +174,7 @@ def load_image_embeddings(
         )
         for node_id in stale_ids:
             del embeddings[node_id]
-        try:
-            save_image_embeddings(graph_path, embeddings, model=model)
-        except OSError:
-            logger.exception("Failed to write pruned image embedding cache to %s", emb_path)
-    return embeddings
+    return LoadedImageEmbeddings(embeddings, len(stale_ids))
 
 
 def save_image_embeddings(
@@ -271,6 +270,7 @@ def compute_missing_image_embeddings(
     model: str,
     base_url: str,
     app_name: str,
+    rewrite: bool = False,
 ) -> ImageEmbeddingRun:
     """Compute an image embedding for every ``(node_id, screenshot_b64)`` candidate.
 
@@ -285,7 +285,9 @@ def compute_missing_image_embeddings(
     every node is O(N^2) for a cold cache. The write runs in a ``finally`` so a
     ``KeyboardInterrupt`` or ``SystemExit`` partway through the loop still
     persists every embedding computed before it -- those are paid API calls,
-    and the interrupt itself keeps propagating. A failed write is caught as
+    and the interrupt itself keeps propagating. ``rewrite`` asks for that write
+    even when nothing was computed, for a caller whose load pruned entries the
+    file still holds. A failed write is caught as
     ``OSError`` and only logged, since a cache write failure must not drop a
     graph that loaded and computed its embeddings fine.
     """
@@ -319,7 +321,7 @@ def compute_missing_image_embeddings(
                     node_id,
                 )
     finally:
-        if computed:
+        if computed or rewrite:
             try:
                 save_image_embeddings(graph_path, embeddings, model=model)
             except OSError:
