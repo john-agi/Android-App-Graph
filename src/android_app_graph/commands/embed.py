@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,11 @@ from android_app_graph.embedding_cache import (
     load_image_embeddings,
     resolve_image_embedding_settings,
 )
-from android_app_graph.graph_files import iter_graph_files, reference_screenshot_b64
+from android_app_graph.graph_files import (
+    encode_screenshot_b64,
+    iter_graph_files,
+    reference_screenshot_path,
+)
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,18 @@ def load_graph_json(graph_path: Path) -> dict[str, Any]:
         msg = f"Graph JSON must be an object: {graph_path}"
         raise TypeError(msg)
     return data
+
+
+def _pending_candidates(pending: list[tuple[str, Path]]) -> Iterator[tuple[str, str]]:
+    """Encode each pending node's screenshot lazily, one at a time.
+
+    ``compute_missing_image_embeddings`` makes one API call per candidate;
+    encoding here rather than up front keeps at most one base64 payload
+    resident, so a cold cache on a graph with hundreds of nodes never holds
+    hundreds of MB of screenshots before the first API call.
+    """
+    for node_id, screenshot_path in pending:
+        yield node_id, encode_screenshot_b64(screenshot_path)
 
 
 def precompute_graph_image_embeddings(
@@ -62,25 +79,29 @@ def precompute_graph_image_embeddings(
         # cache rather than trying to tell "missing" and "stale" apart.
         embeddings: dict[str, list[float]] = {} if recompute else load_image_embeddings(graph_path)
 
-        candidates: list[tuple[str, str]] = []
+        # A stat, not a read: deciding reference_screenshots/already_cached/
+        # skipped_missing_screenshot must not pay for every uncached node's
+        # base64 encoding before the first API call, and a cached node's
+        # screenshot is never read at all.
+        pending: list[tuple[str, Path]] = []
         for node in graph_data.get("nodes", []):
             node_id = node.get("id")
             if not node_id:
                 continue
-            screenshot_b64 = reference_screenshot_b64(graph_path, node_id)
-            if screenshot_b64 is None:
+            screenshot_path = reference_screenshot_path(graph_path, node_id)
+            if screenshot_path is None:
                 summary["skipped_missing_screenshot"] += 1
                 continue
             summary["reference_screenshots"] += 1
             if node_id in embeddings:
                 summary["already_cached"] += 1
                 continue
-            candidates.append((node_id, screenshot_b64))
+            pending.append((node_id, screenshot_path))
 
         run = compute_missing_image_embeddings(
             graph_path,
             embeddings,
-            candidates,
+            _pending_candidates(pending),
             api_key=api_key,
             model=model,
             base_url=base_url,

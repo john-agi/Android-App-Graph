@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from android_app_graph import embedding_cache
+from android_app_graph import embedding_cache, graph_files
 from android_app_graph.commands import embed
 from android_app_graph.embedding_cache import image_embeddings_path
 
@@ -159,10 +159,10 @@ def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:
 
 def test_reference_screenshot_b64(tmp_path: Path) -> None:
     graph_path = _write_graph_tree(tmp_path)
-    assert embed.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
+    assert graph_files.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
         _SCREENSHOT
     ).decode("ascii")
-    assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
+    assert graph_files.reference_screenshot_b64(graph_path, "s1_detail") is None
 
 
 def test_reference_screenshot_b64_finds_the_audited_stem_directory(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_reference_screenshot_b64_finds_the_audited_stem_directory(tmp_path: Pat
     screenshots.mkdir()
     (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
 
-    assert embed.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
+    assert graph_files.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
         _SCREENSHOT
     ).decode("ascii")
 
@@ -395,6 +395,80 @@ def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     assert summary["computed"] == 3
     assert len(save_calls) == 1
     assert save_calls[0] == {"n1": [0.1, 0.2], "n2": [0.1, 0.2], "n3": [0.1, 0.2]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_streams_screenshot_reads_lazily(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The candidate list must not read and base64-encode every uncached
+    screenshot before the first embedding call: each screenshot is read only
+    right before its own call, so a cold cache on a large graph never holds
+    every screenshot's base64 payload in memory at once.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+
+    reads_so_far = 0
+    original_encode = embed.encode_screenshot_b64
+
+    def counting_encode(path: Path) -> str:
+        nonlocal reads_so_far
+        reads_so_far += 1
+        return original_encode(path)
+
+    monkeypatch.setattr(embed, "encode_screenshot_b64", counting_encode)
+
+    reads_at_call: list[int] = []
+
+    def fake_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+        reads_at_call.append(reads_so_far)
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+
+    summary = _precompute(tmp_path)
+    assert summary["computed"] == 3
+    assert reads_at_call == [1, 2, 3]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_never_reads_an_already_cached_screenshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached node's screenshot must never be opened at all: reading and
+    encoding it only to throw the result away was the wasted work this fixes,
+    and here it would also raise, since the screenshot path is a directory
+    (standing in for any read failure) rather than a readable file.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
+    )
+    screenshot_file = tmp_path / "demo" / "demo_screenshots" / "s0_home.png"
+    screenshot_file.unlink()
+    screenshot_file.mkdir()
+
+    reads = 0
+    original_encode = embed.encode_screenshot_b64
+
+    def counting_encode(path: Path) -> str:
+        nonlocal reads
+        reads += 1
+        return original_encode(path)
+
+    monkeypatch.setattr(embed, "encode_screenshot_b64", counting_encode)
+
+    summary = _precompute(tmp_path)
+    assert summary["already_cached"] == 1
+    assert reads == 0
 
 
 @pytest.mark.usefixtures("no_sleep")

@@ -38,12 +38,23 @@ def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
     return None
 
 
+def encode_screenshot_b64(screenshot_path: Path) -> str:
+    """Read one screenshot file and return its bytes as base64 ascii.
+
+    Split out of ``reference_screenshot_b64`` so a caller that already has a
+    node's screenshot path -- offline precomputation streaming one candidate
+    at a time instead of reading every uncached screenshot up front -- reads
+    and encodes through the same path as runtime graph loading.
+    """
+    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+
+
 def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     """Return one node's reference screenshot as base64, or ``None`` when it has none."""
     screenshot_path = reference_screenshot_path(graph_path, node_id)
     if screenshot_path is None:
         return None
-    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+    return encode_screenshot_b64(screenshot_path)
 
 
 def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
