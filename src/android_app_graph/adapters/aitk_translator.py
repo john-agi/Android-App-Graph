@@ -585,14 +585,16 @@ class UIKobeV2Translator(BaseTranslator):
         self._package_to_app: dict[str, str] = {}
         self._load_all_graphs()
 
+        # Screen size is a device property, not a task property: it is only ever
+        # updated by to_device reporting the real size, never reset between tasks.
+        self._screen_w = 1080
+        self._screen_h = 1920
         self._reset_task_state()
 
     def _reset_task_state(self) -> None:
         self._current_graph: nx.DiGraph | None = None
         self._app_name: str = ""
         self._app_opened = False
-        self._screen_w = 1080
-        self._screen_h = 1920
         self._memory = Memory()
         self._step_count = 0
 

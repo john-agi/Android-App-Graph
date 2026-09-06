@@ -730,6 +730,22 @@ def test_reset_task_state_clears_the_previous_task(
     assert translator._memory.actions == []
 
 
+def test_reset_task_state_keeps_the_screen_size_aitk_reported(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    """Screen size is a device property that survives task boundaries: it only
+
+    ever changes when AITK calls to_device with the real size, never on a new
+    task, so a task reset must not silently reset it back to the 1080x1920
+    default while _call_action_agent keeps using it for grounding.
+    """
+    translator.to_device(json.dumps({"aitk_action": {"action": "wait", "time": 1}}), 1440, 3120)
+
+    translator._reset_task_state()
+
+    assert (translator._screen_w, translator._screen_h) == (1440, 3120)
+
+
 @pytest.mark.parametrize(
     ("template", "expected"),
     [
