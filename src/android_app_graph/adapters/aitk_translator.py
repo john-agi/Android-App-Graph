@@ -321,6 +321,36 @@ def _reads_as_article(letter: str, text: str, end: int) -> bool:
     return letter in ("A", "I") and bool(re.match(r"[ \t]+[a-z]", text[end:]))
 
 
+def _last_answer_signal(text: str, valid_letters: str) -> str | None:
+    """Return the last answer signal in free text: a named letter or "NONE".
+
+    The last signal wins, whether that is a named letter or a "NONE" rejection,
+    because a model states its conclusion last ("None of the others fit, so B"
+    answers B; "Neither A nor B match; none of them." answers NONE). Uppercase
+    letters are scanned in the original case, so .upper() cannot turn a
+    lowercase article ("a") into a false option letter.
+    """
+    last_letter_pos = -1
+    last_letter = ""
+    for letter_match in re.finditer(r"\b([A-Z])\b", text):
+        letter = as_str(letter_match.group(1), "")
+        if _reads_as_article(letter, text, letter_match.end()):
+            continue
+        if letter in valid_letters:
+            last_letter_pos, last_letter = letter_match.start(), letter
+
+    last_none_pos = -1
+    # Scanned on the original text, not its .upper() copy: upper-casing can change
+    # a string's length (e.g. "ß" -> "SS"), which would shift the offsets compared
+    # against the letter positions above.
+    for none_match in re.finditer(r"\bNONE\b", text, re.IGNORECASE):
+        last_none_pos = none_match.start()
+
+    if last_letter_pos == -1 and last_none_pos == -1:
+        return None
+    return "NONE" if last_none_pos > last_letter_pos else last_letter
+
+
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     text = (raw or "").strip()
     answer = text.upper()
@@ -347,34 +377,17 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         choice = as_str(final_match.group(1), "").upper()
         if choice == "NONE":
             return "NONE"
-        if choice in valid_letters and not _reads_as_article(choice, text, final_match.end(1)):
-            return choice
+        if choice in valid_letters:
+            if not _reads_as_article(choice, text, final_match.end(1)):
+                return choice
+            # An explicit label is the strongest evidence in the reply, so an
+            # articled-looking letter after it still stands unless a later,
+            # contrary signal appears in the rest of the text.
+            later = _last_answer_signal(text[final_match.end(1) :], valid_letters)
+            return later or choice
 
-    # Free text beyond an explicit "Answer:"/</think> form: the last answer signal
-    # in the text wins, whether that is a named letter or a "NONE" rejection,
-    # because a model states its conclusion last ("None of the others fit, so B"
-    # answers B; "Neither A nor B match; none of them." answers NONE). Uppercase
-    # letters are scanned in the original case, so .upper() cannot turn a
-    # lowercase article ("a") into a false option letter.
-    last_letter_pos = -1
-    last_letter = ""
-    for letter_match in re.finditer(r"\b([A-Z])\b", text):
-        letter = as_str(letter_match.group(1), "")
-        if _reads_as_article(letter, text, letter_match.end()):
-            continue
-        if letter in valid_letters:
-            last_letter_pos, last_letter = letter_match.start(), letter
-
-    last_none_pos = -1
-    # Scanned on the original text, not its .upper() copy: upper-casing can change
-    # a string's length (e.g. "ß" -> "SS"), which would shift the offsets compared
-    # against the letter positions above.
-    for none_match in re.finditer(r"\bNONE\b", text, re.IGNORECASE):
-        last_none_pos = none_match.start()
-
-    if last_letter_pos == -1 and last_none_pos == -1:
-        return None
-    return "NONE" if last_none_pos > last_letter_pos else last_letter
+    # Free text beyond an explicit "Answer:"/</think> form.
+    return _last_answer_signal(text, valid_letters)
 
 
 def _parse_record_output(raw: str) -> str:

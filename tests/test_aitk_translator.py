@@ -104,6 +104,8 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("B is close, but none match", "NONE"),
         ("b is the match", None),
         ("Answer: A login screen is shown, none of them match", "NONE"),
+        ("Answer: A matches the home screen.", "A"),
+        ("Answer: A login form; B is closer", "B"),
         ("Answer: A", "A"),
         ("Answer: a", "A"),
         ("answer: NONE", "NONE"),
@@ -131,9 +133,9 @@ def test_parse_model_choice_applies_the_article_guard_to_an_explicit_answer_too(
     """The explicit "Answer:" form used to run its regex on the .upper() copy and
     return whatever letter it captured unchecked, so "Answer: A login screen is
     shown, none of them match" returned "A" even though the reply goes on to
-    reject every candidate. The article guard that already covered the free-text
-    scan must also cover this path: it falls through to the free-text scan, which
-    then finds the trailing NONE.
+    reject every candidate. An articled letter after the label now yields to a
+    later, contrary signal found in the remainder of the text -- here the
+    trailing "none of them match".
     """
     assert (
         aitk_translator._parse_model_choice(
@@ -141,6 +143,21 @@ def test_parse_model_choice_applies_the_article_guard_to_an_explicit_answer_too(
         )
         == "NONE"
     )
+
+
+def test_parse_model_choice_keeps_an_explicit_articled_letter_without_a_later_signal() -> None:
+    """An explicit label is the strongest evidence in the reply: an articled
+    letter after it is still the answer when nothing later in the text
+    contradicts it, rather than being vetoed outright.
+    """
+    assert aitk_translator._parse_model_choice("Answer: A matches the home screen.", "ABCD") == "A"
+
+
+def test_parse_model_choice_explicit_articled_letter_yields_to_a_later_letter() -> None:
+    """A later named letter in the remainder overrides the articled one, same as
+    a later NONE does.
+    """
+    assert aitk_translator._parse_model_choice("Answer: A login form; B is closer", "ABCD") == "B"
 
 
 def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change() -> None:
@@ -1914,6 +1931,28 @@ def test_parse_model_choice_positions_survive_length_changing_uppercasing() -> N
     """
     raw = "Straße Maße Größe Füße Süße Soße Fuß: none. B"
     assert aitk_translator._parse_model_choice(raw, "ABCD") == "B"
+
+
+def test_last_answer_signal_returns_the_last_valid_letter() -> None:
+    assert aitk_translator._last_answer_signal("I see A here, but B is better", "ABCD") == "B"
+
+
+def test_last_answer_signal_prefers_a_later_none_over_an_earlier_letter() -> None:
+    assert (
+        aitk_translator._last_answer_signal("Neither A nor B match; none of them.", "ABCD")
+        == "NONE"
+    )
+
+
+def test_last_answer_signal_skips_a_sentence_initial_article() -> None:
+    """A standalone "A" followed by a lowercase word on the same line reads as
+    the English article, not a named answer letter, so it is not a signal.
+    """
+    assert aitk_translator._last_answer_signal("A is the match", "ABCD") is None
+
+
+def test_last_answer_signal_returns_none_without_any_signal() -> None:
+    assert aitk_translator._last_answer_signal("no letters at all", "ABCD") is None
 
 
 def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
