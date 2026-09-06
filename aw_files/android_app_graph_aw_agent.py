@@ -28,7 +28,15 @@ def _pixels_to_png_b64(pixels: np.ndarray) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _package_from_activity(activity: str) -> str:
+def _component_package(activity: str) -> str:
+    """Return the package half of an ``activity`` component, before its "/".
+
+    This is not ``android_packages.package_from_activity``: that one truncates
+    to the standard 3-segment package convention, while this keeps every
+    dot-segment before the "/" as-is. Android World's ``adb_utils`` always
+    reports the full ``package/component`` form, so no truncation is needed
+    here; the two functions are named differently so they are not confused.
+    """
     return activity.split("/", 1)[0] if activity else ""
 
 
@@ -162,7 +170,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         state = self.get_post_transition_state()
         screenshot_b64 = _pixels_to_png_b64(state.pixels)
         activity = self.env.foreground_activity_name
-        package = _package_from_activity(activity)
+        package = _component_package(activity)
 
         response_text = self._runtime._step(
             goal,
