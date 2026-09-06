@@ -98,11 +98,19 @@ def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
     rather than picking one directory for the whole graph. Both runtime graph
     loading and offline precomputation must resolve to the same path, or one
     sees a screenshot the other reports missing.
+
+    The app-directory fallback only ever applies to that plain/audited pair:
+    a graph with any other stem (an operator's ``demo_v1.json`` kept next to
+    ``demo.json``) never falls back to it, or it would silently borrow a
+    sibling graph's screenshot for a colliding node id.
     """
     stem_path = graph_path.parent / f"{graph_path.stem}_screenshots" / f"{node_id}.png"
     if stem_path.exists():
         return stem_path
-    app_path = graph_path.parent / f"{graph_path.parent.name}_screenshots" / f"{node_id}.png"
+    app_name = graph_path.parent.name
+    if graph_path.stem not in (app_name, f"{app_name}_audited"):
+        return None
+    app_path = graph_path.parent / f"{app_name}_screenshots" / f"{node_id}.png"
     if app_path.exists():
         return app_path
     return None

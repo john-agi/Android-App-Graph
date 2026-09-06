@@ -227,6 +227,23 @@ def test_reference_screenshot_path_falls_back_when_the_node_is_only_in_the_app_d
     assert embedding_cache.reference_screenshot_path(graph_path, "n2") == app_screenshots / "n2.png"
 
 
+def test_reference_screenshot_path_does_not_fall_back_for_a_sibling_graph(
+    tmp_path: Path,
+) -> None:
+    """A sibling graph in the same app directory (an operator's ``demo_v1.json``
+    kept next to ``demo.json``) must never borrow another graph's screenshot for
+    a colliding node id. Only the plain graph and its audited pair produce the
+    split layout the app-directory fallback exists for.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "s0.png").write_bytes(b"shot")
+    graph_path = app_dir / "demo_v1.json"
+    assert embedding_cache.reference_screenshot_path(graph_path, "s0") is None
+
+
 def test_reference_screenshot_path_returns_none_when_neither_directory_has_the_node(
     tmp_path: Path,
 ) -> None:
