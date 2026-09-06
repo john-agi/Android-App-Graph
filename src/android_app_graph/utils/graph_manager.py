@@ -31,7 +31,7 @@ import networkx as nx
 from openai import OpenAI
 
 from android_app_graph.android_packages import package_from_activity
-from android_app_graph.embedding_cache import reference_screenshot_b64
+from android_app_graph.embedding_cache import reference_screenshot_b64, require_known_edge_endpoints
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -63,25 +63,6 @@ def _node_id(value: object) -> str:
     the one place that says so.
     """
     return value if isinstance(value, str) else str(value)
-
-
-def _require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
-    """Raise when an edge names a node the same file does not define.
-
-    networkx would create that endpoint bare, so a hand-edited or truncated file
-    would load quietly.  See #62.
-    """
-    node_ids = {_node_id(node["id"]) for node in data.get("nodes", [])}
-    for edge in data.get("edges", []):
-        source = _node_id(edge["source"])
-        target = _node_id(edge["target"])
-        unknown = [node_id for node_id in (source, target) if node_id not in node_ids]
-        if unknown:
-            msg = (
-                f"{path}: edge {source} -> {target} references "
-                f"node(s) absent from the file: {', '.join(unknown)}"
-            )
-            raise ValueError(msg)
 
 
 def _merge_into_schema(
@@ -1242,7 +1223,7 @@ class GraphManager:
             data = json.load(f)
 
         # Before any mutation: a corrupt file must not leave a half-loaded graph.
-        _require_known_edge_endpoints(data, path)
+        require_known_edge_endpoints(data, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)

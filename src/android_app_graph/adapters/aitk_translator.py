@@ -48,6 +48,7 @@ from android_app_graph.embedding_cache import (
     iter_graph_files,
     load_image_embeddings,
     reference_screenshot_b64,
+    require_known_edge_endpoints,
     save_image_embeddings,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
@@ -228,7 +229,6 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
     G = nx.DiGraph()
-    node_ids: set[str] = set()
     for node_data in data.get("nodes", []):
         if not isinstance(node_data.get("id"), str):
             raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
@@ -245,13 +245,8 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             reference_screenshot=ref_screenshot,
             visit_count=node_data.get("visit_count", 0),
         )
-        node_ids.add(node_id)
 
-    # Validated in one pass before any edge is added: networkx's add_edge silently
-    # creates an attribute-less node for an undefined endpoint, so a graph with one
-    # bad edge must load none of its edges rather than a partially-formed graph.
     edge_specs: list[tuple[str, str, dict[str, Any]]] = []
-    missing_ids: set[str] = set()
     for edge_data in data.get("edges", []):
         if not isinstance(edge_data.get("source"), str) or not isinstance(
             edge_data.get("target"), str
@@ -261,7 +256,6 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             )
         source = edge_data["source"]
         target = edge_data["target"]
-        missing_ids.update(n for n in (source, target) if n not in node_ids)
         edge_attrs: dict[str, Any] = {
             "actions": edge_data.get("actions", []),
             "instructions": as_list(edge_data.get("instructions")),
@@ -274,10 +268,10 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         edge_specs.append((source, target, edge_attrs))
 
-    if missing_ids:
-        raise ValueError(
-            f"Runtime graph edge(s) reference undefined node id(s) {sorted(missing_ids)}: {path}"
-        )
+    # Checked before any edge is added: networkx's add_edge silently creates an
+    # attribute-less node for an undefined endpoint, so a graph with one bad edge
+    # must load none of its edges rather than a partially-formed graph.
+    require_known_edge_endpoints(data, path)
 
     for source, target, edge_attrs in edge_specs:
         G.add_edge(source, target, **edge_attrs)

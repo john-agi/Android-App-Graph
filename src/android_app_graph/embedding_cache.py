@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from android_app_graph.payloads import as_float_list, as_str_dict
 from android_app_graph.retrying import call_with_retry
@@ -136,6 +137,27 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     if screenshot_path is None:
         return None
     return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+
+
+def require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
+    """Raise when an edge names a node id absent from ``data["nodes"]``.
+
+    Shared by both graph loaders (runtime and GraphManager): networkx's
+    add_edge would otherwise silently create an attribute-less node for an
+    undefined endpoint, so a hand-edited or truncated file would load
+    quietly. See #62/#63.
+    """
+    node_ids = {str(node["id"]) for node in data.get("nodes", [])}
+    missing_ids: set[str] = set()
+    for edge in data.get("edges", []):
+        missing_ids.update(
+            str(endpoint)
+            for endpoint in (edge["source"], edge["target"])
+            if str(endpoint) not in node_ids
+        )
+    if missing_ids:
+        msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
+        raise ValueError(msg)
 
 
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
