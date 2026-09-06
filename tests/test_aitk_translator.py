@@ -473,44 +473,6 @@ class _FakeClient:
         self.chat = _FakeChat(self.completions)
 
 
-def test_call_with_retry_returns_the_first_success() -> None:
-    calls: list[int] = []
-
-    def once() -> str:
-        calls.append(1)
-        return "ok"
-
-    assert aitk_translator._call_with_retry("label", once) == "ok"
-    assert len(calls) == 1
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_call_with_retry_recovers_after_a_failure() -> None:
-    attempts: list[int] = []
-
-    def flaky() -> str:
-        attempts.append(1)
-        if len(attempts) < 3:
-            raise RuntimeError("boom")
-        return "ok"
-
-    assert aitk_translator._call_with_retry("label", flaky) == "ok"
-    assert len(attempts) == 3
-
-
-def test_call_with_retry_reraises_after_the_last_attempt(no_sleep: list[float]) -> None:
-    attempts: list[int] = []
-
-    def always_fails() -> str:
-        attempts.append(1)
-        raise RuntimeError("boom")
-
-    with pytest.raises(RuntimeError, match="boom"):
-        aitk_translator._call_with_retry("label", always_fails)
-    assert len(attempts) == aitk_translator.V2_API_RETRIES + 1
-    assert no_sleep == [2.0, 4.0]
-
-
 def test_chat_completion_content_stops_when_the_caller_breaks() -> None:
     """Breaking out of the loop must not pull (or pay for) a second completion."""
     client = _FakeClient("first", "second")

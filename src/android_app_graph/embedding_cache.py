@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from pathlib import Path
 
 from android_app_graph.payloads import as_float_list, as_str_dict
+from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils.vlm_utils import get_gemini_native_image_embedding
 
 logger = logging.getLogger(__name__)
@@ -79,33 +79,17 @@ def compute_embedding_with_retry(
     node_id: str,
 ) -> list[float]:
     """Get a native Gemini image embedding, retrying on failure with backoff."""
-    attempts = IMAGE_EMBEDDING_RETRIES + 1
-    for attempt in range(attempts):
-        try:
-            return get_gemini_native_image_embedding(
-                api_key,
-                screenshot_b64,
-                model=model,
-                base_url=base_url,
-            )
-        # A retry loop is a boundary: re-raise on the last attempt,
-        # log the traceback on every earlier one.
-        except Exception:
-            if attempt >= attempts - 1:
-                raise
-            delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            logger.warning(
-                "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d).",
-                app_name,
-                node_id,
-                delay,
-                attempt + 1,
-                attempts - 1,
-                exc_info=True,
-            )
-            time.sleep(delay)
-    msg = "compute_embedding_with_retry exhausted its attempts without raising"
-    raise RuntimeError(msg)
+    return call_with_retry(
+        f"[GRAPH] {app_name}/{node_id}: image embedding",
+        lambda: get_gemini_native_image_embedding(
+            api_key,
+            screenshot_b64,
+            model=model,
+            base_url=base_url,
+        ),
+        retries=IMAGE_EMBEDDING_RETRIES,
+        base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
+    )
 
 
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:

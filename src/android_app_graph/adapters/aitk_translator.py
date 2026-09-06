@@ -51,6 +51,7 @@ from android_app_graph.embedding_cache import (
     save_image_embeddings,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
+from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import make_client, resolve_env
 from android_app_graph.utils.vlm_utils import (
     build_image_message,
@@ -66,8 +67,6 @@ _SEP = "-" * 60
 _SEP_THICK = "=" * 60
 V2_CHAT_MAX_TOKENS = 3000
 V2_PARSE_RETRIES = 1
-V2_API_RETRIES = 2
-V2_API_RETRY_BASE_DELAY_SECONDS = 2.0
 
 _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
@@ -443,35 +442,13 @@ def _parse_decide_output(raw: str) -> dict[str, Any] | None:
     return _parse_json_object(text)
 
 
-def _call_with_retry[T](label: str, func: Callable[[], T]) -> T:
-    """Run one API operation with up to three total attempts."""
-    attempts = V2_API_RETRIES + 1
-    for attempt in range(attempts):
-        try:
-            return func()
-        except Exception as exc:
-            if attempt >= attempts - 1:
-                raise
-            delay = V2_API_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            logger.warning(
-                "[API] %s failed; retrying in %.1fs (%d/%d). Error: %s",
-                label,
-                delay,
-                attempt + 1,
-                attempts - 1,
-                exc,
-            )
-            time.sleep(delay)
-    raise RuntimeError("unreachable")
-
-
 def _chat_completion_content(
     client: OpenAI,
     **kwargs: Any,
 ) -> Iterator[tuple[int, str, bool]]:
     """Yield chat completion content, retrying at the caller's parse boundary."""
     for attempt in range(V2_PARSE_RETRIES + 1):
-        resp = _call_with_retry(
+        resp = call_with_retry(
             "chat completion",
             lambda: client.chat.completions.create(**kwargs),
         )
@@ -797,7 +774,7 @@ class UIKobeV2Translator(BaseTranslator):
         )
 
         started = time.perf_counter()
-        page_desc, _detail_snapshot, _elements = _call_with_retry(
+        page_desc, _detail_snapshot, _elements = call_with_retry(
             "page describe and state",
             lambda: describe_page_and_state(
                 self.desc_client,
@@ -1243,7 +1220,7 @@ class UIKobeV2Translator(BaseTranslator):
     ) -> tuple[dict[str, Any], str, str]:
         keyboard_hint = device.soft_keyboard_hint()
 
-        aitk_action, history_entry = _call_with_retry(
+        aitk_action, history_entry = call_with_retry(
             "action agent",
             lambda: predict_next_action(
                 self.model_client,
