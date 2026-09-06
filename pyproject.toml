@@ -195,7 +195,7 @@ show_missing = true
 skip_covered = true
 skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised. See AGENTS.md.
-fail_under = 70
+fail_under = 71
 
 # Mutation testing. Policy and triage: see AGENTS.md, "Mutation testing".
 [tool.mutmut]
