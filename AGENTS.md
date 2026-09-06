@@ -91,10 +91,6 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - Only `uv add` and `uv remove` (`--dev` for tools, a `--group` for heavy
   optional tooling). Commit `pyproject.toml` and `uv.lock` together. If a hook
   fails because the lockfile is stale, run `uv lock` and stage it.
-- `exclude-newer = "3 days"` hides releases younger than 3 days, but `uv add`
-  writes `>=<latest>`. If the latest release is younger than that, lower the
-  floor by hand to the newest release older than the cutoff. Never shorten
-  `exclude-newer`.
 - `required-version` is bumped by hand in its own pull request, together with
   the `version:` of every setup-uv step under `.github/workflows/`; those
   checkout, setup-uv and Python steps are byte-for-byte copies of `ci.yml`.

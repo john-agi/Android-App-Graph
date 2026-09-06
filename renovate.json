@@ -6,7 +6,6 @@
   ],
   "forkProcessing": "enabled",
   "dependencyDashboard": true,
-  "minimumReleaseAge": "3 days",
   "automerge": false,
   "lockFileMaintenance": {
     "enabled": true,
