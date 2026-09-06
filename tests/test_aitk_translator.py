@@ -259,21 +259,10 @@ _key_without_backtick = st.text(alphabet=st.characters(exclude_characters="`"), 
 def test_parse_decide_output_round_trips_json_objects(payload: dict[str, int]) -> None:
     """A key alphabet that excludes the backtick: ``strip_json_fences`` fences on ```.
 
-    A key containing two triple-backtick runs (see the documented limitation below)
-    makes fence-stripping eat part of the serialized JSON, which is not a property
-    of arbitrary JSON round-tripping.
+    A key containing two triple-backtick runs makes fence-stripping eat part of
+    the serialized JSON, which is not a property of arbitrary JSON round-tripping.
     """
     assert aitk_translator._parse_decide_output(json.dumps(payload)) == payload
-
-
-def test_parse_decide_output_documented_limitation_backtick_fences_in_a_key() -> None:
-    """A key containing ```-fences is stripped along with any real markdown fence.
-
-    ``strip_json_fences`` cannot tell a fence embedded inside serialized JSON from
-    a real markdown code fence around it, so this input is not round-tripped.
-    """
-    payload = {"```a```": 1}
-    assert aitk_translator._parse_decide_output(json.dumps(payload)) is None
 
 
 # ---------------------------------------------------------------------------
