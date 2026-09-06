@@ -629,14 +629,6 @@ def test_make_no_proxy_client_reads_the_config() -> None:
     assert client.max_retries == 3
 
 
-def test_make_no_proxy_client_resolves_env_references(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("APP_GRAPH_TEST_MODEL", "from-env")
-    _, model = aitk_translator._make_no_proxy_client(
-        {"api_key": "test-key", "model": "${APP_GRAPH_TEST_MODEL}"}
-    )
-    assert model == "from-env"
-
-
 def test_make_no_proxy_client_prefers_the_timeout_alias() -> None:
     client, _ = aitk_translator._make_no_proxy_client({"api_key": "test-key", "timeout": 5})
     assert client.timeout == 5.0

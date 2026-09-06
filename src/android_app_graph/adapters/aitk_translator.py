@@ -50,7 +50,7 @@ from android_app_graph.embedding_cache import (
     save_image_embeddings,
 )
 from android_app_graph.payloads import as_list, as_str, as_str_dict
-from android_app_graph.utils import resolve_env
+from android_app_graph.utils import make_client, resolve_env
 from android_app_graph.utils.vlm_utils import (
     cosine_similarity,
     describe_page_and_state,
@@ -465,22 +465,14 @@ def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
     forwarded locally, so they must ignore HTTP(S)_PROXY.
     """
     cfg = cfg or {}
-    api_key = resolve_env(cfg.get("api_key")) or os.environ.get("OPENAI_API_KEY")
-    base_url = resolve_env(cfg.get("base_url"))
-    model = resolve_env(cfg.get("model")) or "gpt-4o"
     request_timeout = float(cfg.get("request_timeout", cfg.get("timeout", 60)))
     max_retries = int(cfg.get("max_retries", 0))
-
-    kwargs: dict[str, Any] = {
-        "api_key": api_key,
-        "http_client": httpx.Client(trust_env=False),
-        "timeout": request_timeout,
-        "max_retries": max_retries,
-    }
-    if base_url:
-        kwargs["base_url"] = base_url
-
-    return OpenAI(**kwargs), model
+    return make_client(
+        cfg,
+        http_client=httpx.Client(trust_env=False),
+        timeout=request_timeout,
+        max_retries=max_retries,
+    )
 
 
 # ---------------------------------------------------------------------------
