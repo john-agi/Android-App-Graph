@@ -42,6 +42,25 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
     assert embedding_cache.load_image_embeddings(graph_path) == {"n1": [1.0, 2.0]}
 
 
+def test_load_image_embeddings_drops_a_nan_entry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """json.load happily parses the literal ``NaN``; the cached vector must still be
+
+    rejected rather than letting a non-finite value reach cosine_similarity, where a
+    naive clamp would score it as the best match everywhere.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.image_embeddings_path(graph_path).write_text(
+        json.dumps({"n1": [1.0, 2.0], "n2": [1.0, float("nan")]}),
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING"):
+        embeddings = embedding_cache.load_image_embeddings(graph_path)
+    assert embeddings == {"n1": [1.0, 2.0]}
+    assert "n2" in caplog.text
+
+
 def test_load_image_embeddings_warns_about_each_dropped_entry(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -62,3 +62,16 @@ def test_cosine_similarity_is_bounded_and_symmetric(a: list[float], b: list[floa
     assert -1.0 <= similarity <= 1.0
     assert similarity == pytest.approx(cosine_similarity(b, a))
     assert not math.isnan(similarity)
+
+
+def test_cosine_similarity_with_a_nan_element_is_zero() -> None:
+    """A NaN component must never win a similarity search: 0.0, not the NaN
+
+    that a naive clamp (``max(-1.0, min(1.0, nan))``) would return as 1.0.
+    """
+    assert cosine_similarity([math.nan, 1.0], [1.0, 1.0]) == 0.0
+
+
+def test_cosine_similarity_never_returns_nan() -> None:
+    assert not math.isnan(cosine_similarity([math.nan], [1.0]))
+    assert not math.isnan(cosine_similarity([math.inf], [math.inf]))

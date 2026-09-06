@@ -8,6 +8,7 @@ explicit fallback when the payload does not have the expected shape.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -49,14 +50,25 @@ def as_int_list(value: object) -> list[int]:
 
 
 def as_float_list(value: object) -> list[float]:
-    """Return ``value`` as ``list[float]`` when every item is numeric, else ``[]``."""
+    """Return ``value`` as ``list[float]`` when every item is a finite number, else ``[]``.
+
+    ``json.dumps``/``json.load`` round-trip the literal ``NaN``/``Infinity`` tokens,
+    so a persisted vector can carry a non-finite element without ever failing to
+    parse. A NaN or infinite element rejects the whole vector rather than being
+    dropped: dropping just that element would change the vector's dimension out
+    from under a caller that expects a fixed-length embedding, and a non-finite
+    component would otherwise reach similarity math downstream.
+    """
     if not isinstance(value, list):
         return []
     result: list[float] = []
     for item in value:
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return []
-        result.append(float(item))
+        number = float(item)
+        if not math.isfinite(number):
+            return []
+        result.append(number)
     return result
 
 

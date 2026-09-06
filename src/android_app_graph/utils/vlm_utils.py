@@ -37,14 +37,22 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     rather than raising a division error. Subnormal floats can otherwise push the
     unclamped ratio slightly outside ``[-1.0, 1.0]`` (a violation of
     Cauchy-Schwarz that is a floating-point rounding artifact, not a real
-    similarity), so the result is clamped before it is returned.
+    similarity), so the result is clamped before it is returned. A non-finite
+    input (a NaN slipping in from a corrupt cached vector) must never win a
+    similarity search by clamping to 1.0, so a non-finite ratio is treated the
+    same as a zero norm: the caller's job is narrowing inputs with
+    ``payloads.as_float_list`` before they ever reach here, this is the last
+    line of defense.
     """
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if not norm_a or not norm_b:
         return 0.0
-    return max(-1.0, min(1.0, dot / (norm_a * norm_b)))
+    similarity = dot / (norm_a * norm_b)
+    if not math.isfinite(similarity):
+        return 0.0
+    return max(-1.0, min(1.0, similarity))
 
 
 class TokenTracker:
