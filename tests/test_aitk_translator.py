@@ -709,6 +709,11 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator.model_name == "action-model"
     assert translator.desc_model == "detail-model"
     assert translator.image_embedding_model == "img-model"
+    assert translator.image_embedding_api_key == "image-key"
+    # image_embedding.base_url resolution itself is embedding_cache's
+    # resolve_image_embedding_settings; this only checks the translator wires
+    # its result through.
+    assert translator.image_embedding_base_url == "https://generativelanguage.googleapis.com/v1beta"
 
 
 @pytest.mark.usefixtures("translator")
@@ -716,21 +721,6 @@ def test_construction_quiets_the_http_client_loggers() -> None:
     """The httpx/openai per-request loggers are quieted on construction, not on import."""
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("openai").level == logging.WARNING
-
-
-def test_image_embedding_base_url_defaults_to_google(graph_dir: Path) -> None:
-    config = {**_VLM_CONFIG, "image_embedding": {"base_url": "http://localhost:9000/v1"}}
-    built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
-    assert built.image_embedding_base_url == "https://generativelanguage.googleapis.com/v1beta"
-
-
-def test_image_embedding_base_url_keeps_a_google_override(graph_dir: Path) -> None:
-    config = {
-        **_VLM_CONFIG,
-        "image_embedding": {"native_base_url": "https://eu.googleapis.com/v1beta"},
-    }
-    built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
-    assert built.image_embedding_base_url == "https://eu.googleapis.com/v1beta"
 
 
 def test_load_all_graphs_tolerates_a_missing_graph_dir(tmp_path: Path) -> None:

@@ -46,6 +46,7 @@ path = "android_app_graph.embedding_cache"
 depends_on = [
     "android_app_graph.payloads",
     "android_app_graph.retrying",
+    "android_app_graph.utils",
     "android_app_graph.utils.vlm_utils",
 ]
 

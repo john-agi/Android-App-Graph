@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from collections.abc import Callable, Iterator
@@ -49,11 +48,12 @@ from android_app_graph.embedding_cache import (
     load_image_embeddings,
     reference_screenshot_b64,
     require_known_edge_endpoints,
+    resolve_image_embedding_settings,
     save_image_embeddings,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
 from android_app_graph.retrying import call_with_retry
-from android_app_graph.utils import make_client, resolve_env
+from android_app_graph.utils import make_client
 from android_app_graph.utils.vlm_utils import (
     build_image_message,
     cosine_similarity,
@@ -543,23 +543,10 @@ class UIKobeV2Translator(BaseTranslator):
         # The planner and the action agent share one model, configured under "action".
         self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
         self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
-        image_embedding_cfg = vlm_config.get("image_embedding") or {}
-        self.image_embedding_model = (
-            resolve_env(image_embedding_cfg.get("model")) or "gemini-embedding-2"
-        )
-        self.image_embedding_api_key = (
-            resolve_env(image_embedding_cfg.get("api_key"))
-            or os.environ.get("GEMINI_API_KEY")
-            or os.environ.get("GOOGLE_API_KEY")
-        )
-        base_url_cfg = resolve_env(
-            image_embedding_cfg.get("native_base_url") or image_embedding_cfg.get("base_url")
-        )
-        self.image_embedding_base_url = (
-            base_url_cfg
-            if base_url_cfg and "googleapis.com" in base_url_cfg
-            else "https://generativelanguage.googleapis.com/v1beta"
-        )
+        image_embedding_settings = resolve_image_embedding_settings(vlm_config)
+        self.image_embedding_model = image_embedding_settings.model
+        self.image_embedding_api_key = image_embedding_settings.api_key
+        self.image_embedding_base_url = image_embedding_settings.base_url
 
         self._graphs: dict[str, nx.DiGraph] = {}
         self._package_to_app: dict[str, str] = {}

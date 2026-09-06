@@ -12,16 +12,64 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from android_app_graph.payloads import as_float_list, as_str_dict
 from android_app_graph.retrying import call_with_retry
+from android_app_graph.utils import resolve_env
 from android_app_graph.utils.vlm_utils import get_gemini_native_image_embedding
 
 logger = logging.getLogger(__name__)
 
 IMAGE_EMBEDDING_RETRIES = 2
 IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
+DEFAULT_IMAGE_EMBEDDING_MODEL = "gemini-embedding-2"
+DEFAULT_NATIVE_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+
+class ImageEmbeddingSettings(NamedTuple):
+    api_key: str | None
+    model: str
+    base_url: str
+
+
+def resolve_image_embedding_settings(
+    vlm_config: dict[str, Any],
+    *,
+    model_override: str | None = None,
+    api_key_override: str | None = None,
+    base_url_override: str | None = None,
+) -> ImageEmbeddingSettings:
+    """Resolve the native-Gemini image-embedding model, API key and base URL.
+
+    Shared by runtime graph loading (``aitk_translator``) and offline
+    precomputation (``commands.embed``) so an override, an env-var reference or
+    the GEMINI_API_KEY/GOOGLE_API_KEY fallback cannot drift between the two
+    callers. A base URL that does not name a googleapis.com host falls back to
+    the default, since ``get_gemini_native_image_embedding`` only speaks the
+    native Gemini API.
+    """
+    image_embedding_cfg = vlm_config.get("image_embedding") or {}
+    model = (
+        resolve_env(model_override)
+        or resolve_env(image_embedding_cfg.get("model"))
+        or DEFAULT_IMAGE_EMBEDDING_MODEL
+    )
+    base_url_cfg = base_url_override or resolve_env(
+        image_embedding_cfg.get("native_base_url") or image_embedding_cfg.get("base_url")
+    )
+    base_url = (
+        base_url_cfg
+        if base_url_cfg and "googleapis.com" in base_url_cfg
+        else DEFAULT_NATIVE_GEMINI_BASE_URL
+    )
+    api_key = (
+        resolve_env(api_key_override)
+        or resolve_env(image_embedding_cfg.get("api_key"))
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+    )
+    return ImageEmbeddingSettings(api_key=api_key, model=model, base_url=base_url)
 
 
 def image_embeddings_path(graph_path: Path) -> Path:

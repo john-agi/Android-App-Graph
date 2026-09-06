@@ -86,6 +86,7 @@ graph TD;
     cli --> logging;
     ec --> pay;
     ec --> retry;
+    ec --> utils;
     ec --> vlm;
     kobe --> dev;
     kobe --> utils;

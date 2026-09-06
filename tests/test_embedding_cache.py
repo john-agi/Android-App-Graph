@@ -374,3 +374,72 @@ def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
     with pytest.raises(RuntimeError, match="500 upstream error"):
         _retry("key", "shot")
     assert len(attempts) == embedding_cache.IMAGE_EMBEDDING_RETRIES + 1
+
+
+def test_resolve_image_embedding_settings_defaults() -> None:
+    settings = embedding_cache.resolve_image_embedding_settings({})
+    assert settings.model == "gemini-embedding-2"
+    assert settings.api_key is None
+    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+
+
+def test_resolve_image_embedding_settings_reads_config_values() -> None:
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {
+            "image_embedding": {
+                "model": "config-model",
+                "api_key": "config-key",
+                "native_base_url": "https://config.googleapis.com/v1",
+            }
+        }
+    )
+    assert settings == embedding_cache.ImageEmbeddingSettings(
+        api_key="config-key", model="config-model", base_url="https://config.googleapis.com/v1"
+    )
+
+
+def test_resolve_image_embedding_settings_base_url_defaults_to_google() -> None:
+    """A base URL that is not a googleapis.com host falls back to the native
+    default, since get_gemini_native_image_embedding only speaks that API.
+    """
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {"image_embedding": {"base_url": "http://localhost:9000/v1"}}
+    )
+    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+
+
+def test_resolve_image_embedding_settings_keeps_a_google_base_url_override() -> None:
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {"image_embedding": {"native_base_url": "https://eu.googleapis.com/v1beta"}}
+    )
+    assert settings.base_url == "https://eu.googleapis.com/v1beta"
+
+
+def test_resolve_image_embedding_settings_reads_the_api_key_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "from-env")
+    settings = embedding_cache.resolve_image_embedding_settings({})
+    assert settings.api_key == "from-env"
+
+
+def test_resolve_image_embedding_settings_overrides_win_over_config() -> None:
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {
+            "image_embedding": {
+                "model": "config-model",
+                "api_key": "config-key",
+                "native_base_url": "https://config.googleapis.com/v1",
+            }
+        },
+        model_override="cli-model",
+        api_key_override="cli-key",
+        base_url_override="https://cli.example.com/v1",
+    )
+    # A base URL override that is not a googleapis.com host still falls back to
+    # the native default, same as one read from config.
+    assert settings == embedding_cache.ImageEmbeddingSettings(
+        api_key="cli-key",
+        model="cli-model",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )

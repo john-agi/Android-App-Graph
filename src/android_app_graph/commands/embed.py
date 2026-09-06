@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -21,9 +20,9 @@ from android_app_graph.embedding_cache import (
     iter_graph_files,
     load_image_embeddings,
     reference_screenshot_b64,
+    resolve_image_embedding_settings,
     save_image_embeddings,
 )
-from android_app_graph.utils import resolve_env
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -122,27 +121,13 @@ def load_image_embedding_settings(
     )
 
     vlm_config = translator_args.get("vlm_config") or config.get("vlm") or {}
-    image_embedding_cfg = vlm_config.get("image_embedding") or {}
-    model = (
-        resolve_env(model_override)
-        or resolve_env(image_embedding_cfg.get("model"))
-        or "gemini-embedding-2"
+    settings = resolve_image_embedding_settings(
+        vlm_config,
+        model_override=model_override,
+        api_key_override=api_key_override,
+        base_url_override=base_url_override,
     )
-    base_url_cfg = base_url_override or resolve_env(
-        image_embedding_cfg.get("native_base_url") or image_embedding_cfg.get("base_url")
-    )
-    base_url = (
-        base_url_cfg
-        if base_url_cfg and "googleapis.com" in base_url_cfg
-        else "https://generativelanguage.googleapis.com/v1beta"
-    )
-    api_key = (
-        resolve_env(api_key_override)
-        or resolve_env(image_embedding_cfg.get("api_key"))
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-    )
-    return graph_dir, api_key, model, base_url
+    return graph_dir, settings.api_key, settings.model, settings.base_url
 
 
 def build_parser() -> argparse.ArgumentParser:
