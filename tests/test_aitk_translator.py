@@ -382,10 +382,6 @@ def test_load_graph_from_json_rejects_a_non_string_edge_endpoint(
         aitk_translator._load_graph_from_json(path)
 
 
-# image embedding sidecars: pure logic is owned by tests/test_embedding_cache.py;
-# this is the integration point with _load_all_graphs.
-
-
 def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) -> None:
     """A corrupt cache file must not take down the whole app graph it caches for."""
     (graph_dir / "demo" / "demo.image_emb.json").write_text("{not json", encoding="utf-8")
@@ -864,9 +860,8 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     assert options[0]["type"] == "done"
     assert options[-1]["type"] == "free"
     kept_neighbors = {opt["node"] for opt in options if opt["type"] == "neighbor"}
-    # The self-loop instruction from the "demo" fixture graph takes one slot,
-    # leaving 23 for the 31 candidate neighbours (30 new + the fixture's own
-    # "results", tied at visit_count 0 with n0-n6 and dropped along with them).
+    # The fixture's self-loop takes one slot, leaving 23 for 31 neighbours; "results"
+    # ties with n0-n6 at visit_count 0 and is dropped with them.
     assert len(kept_neighbors) == 23
     assert kept_neighbors == {f"n{i}" for i in range(7, 30)}
     assert "results" not in kept_neighbors
@@ -1196,11 +1191,6 @@ def test_identify_node_propagates_an_embedding_failure(
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
 
-# The soft-keyboard probe itself (adb call, missing-adb handling) is owned by
-# tests/test_device.py; these tests only check that _call_action_agent appends
-# whatever device.soft_keyboard_hint() returns.
-
-
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
@@ -1374,8 +1364,6 @@ def test_step_plans_a_free_action_when_no_node_matches(
     state, history = _step_payload()
 
     json.loads(stepping._step("buy shoes", state, history))
-    # A free-action instruction from the planner (rather than a DECIDE choice) is only
-    # reached when IDENTIFY found no matching node.
     assert stepping._memory.actions == ["Tap the cart icon"]
 
 

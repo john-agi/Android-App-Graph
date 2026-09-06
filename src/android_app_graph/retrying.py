@@ -1,11 +1,4 @@
-"""Shared retry-with-backoff policy for every remote call this project makes.
-
-``adapters.aitk_translator`` (chat completion, page describe/state, action agent)
-and ``embedding_cache`` (image embedding computation) each retried a failing
-remote call the same way -- a fixed number of retries, a base delay doubling
-per attempt, re-raise on the last attempt -- so this is the single place that
-owns that policy, and the two callers cannot drift on it.
-"""
+"""One retry-with-backoff policy for every remote call, so callers cannot drift on it."""
 
 from __future__ import annotations
 

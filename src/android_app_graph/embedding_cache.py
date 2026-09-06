@@ -1,12 +1,7 @@
-"""Graph-file discovery and image-embedding sidecar cache.
+"""Graph-file discovery and the image-embedding sidecar cache.
 
-Runtime graph loading (``adapters.aitk_translator``) and offline embedding
-precomputation (``commands.embed``) both need to find one JSON graph file per
-app (preferring the audited file over the plain one), read/write its
-``.image_emb.json`` sidecar of cached image embeddings, and compute a fresh
-embedding with the same retry-with-backoff policy. This is the single place
-that does all three, so the two callers cannot drift on what counts as a
-usable cached vector or how a failed embedding call is retried.
+Shared by runtime graph loading and offline precomputation so they cannot
+drift on what counts as a usable cached vector or how a failed call is retried.
 """
 
 from __future__ import annotations
@@ -33,14 +28,8 @@ def image_embeddings_path(graph_path: Path) -> Path:
 def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
     """Return the cached embeddings for a graph, or ``{}`` when none are usable.
 
-    A sidecar that cannot be read or parsed is treated as "no cache" rather than
-    raising: a truncated, corrupt, unreadable, or invalid-UTF-8 cache file must
-    not take down the whole app graph it caches for. ``OSError`` covers a file
-    that cannot be opened or read (permissions, disappears mid-read); ``ValueError``
-    covers both ``json.JSONDecodeError`` (malformed JSON) and ``UnicodeDecodeError``
-    (invalid UTF-8 bytes), which are both ``ValueError`` subclasses. A malformed or
-    empty vector for one node is dropped (not kept as ``[]``) and logged, naming
-    the node.
+    A sidecar that cannot be read or parsed is an empty cache, never a reason
+    to drop the app graph; a malformed or non-finite vector is dropped and logged.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():

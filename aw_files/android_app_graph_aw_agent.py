@@ -29,13 +29,10 @@ def _pixels_to_png_b64(pixels: np.ndarray) -> str:
 
 
 def _component_package(activity: str) -> str:
-    """Return the package half of an ``activity`` component, before its "/".
+    """Return the package before the ``/`` of an Android World activity component.
 
-    This is not ``android_packages.package_from_activity``: that one truncates
-    to the standard 3-segment package convention, while this keeps every
-    dot-segment before the "/" as-is. Android World's ``adb_utils`` always
-    reports the full ``package/component`` form, so no truncation is needed
-    here; the two functions are named differently so they are not confused.
+    Unlike ``package_from_activity`` it keeps every dot-segment: Android World
+    reports the full ``package/component`` form.
     """
     return activity.split("/", 1)[0] if activity else ""
 

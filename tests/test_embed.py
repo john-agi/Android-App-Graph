@@ -140,11 +140,6 @@ def test_embed_settings_read_the_api_key_from_the_environment(
     assert api_key == "from-env"
 
 
-# image_embeddings_path, load/save_image_embeddings and iter_graph_files are
-# imported from android_app_graph.embedding_cache (shared with the AITK
-# translator) and owned by tests/test_embedding_cache.py.
-
-
 def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
     graph_path.write_text("[1, 2, 3]", encoding="utf-8")
@@ -158,10 +153,6 @@ def test_reference_screenshot_b64(tmp_path: Path) -> None:
         _SCREENSHOT
     ).decode("ascii")
     assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
-
-
-# Retry behaviour: compute_embedding_with_retry is imported from
-# android_app_graph.embedding_cache and owned by tests/test_embedding_cache.py.
 
 
 def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:

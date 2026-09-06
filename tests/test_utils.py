@@ -9,10 +9,6 @@ from hypothesis import strategies as st
 
 from android_app_graph.utils import make_client, resolve_env
 
-# ---------------------------------------------------------------------------
-# resolve_env
-# ---------------------------------------------------------------------------
-
 
 def test_none_passes_through() -> None:
     assert resolve_env(None) is None
@@ -31,11 +27,6 @@ def test_reference_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_reference_to_unset_variable_is_none() -> None:
     assert resolve_env("${APP_GRAPH_TEST_UNSET}") is None
-
-
-# ---------------------------------------------------------------------------
-# make_client
-# ---------------------------------------------------------------------------
 
 
 def test_make_client_defaults() -> None:

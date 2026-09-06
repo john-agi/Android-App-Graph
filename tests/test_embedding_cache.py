@@ -159,11 +159,6 @@ def test_iter_graph_files_skips_an_unknown_app(tmp_path: Path) -> None:
     assert embedding_cache.iter_graph_files(tmp_path, "absent") == []
 
 
-# ---------------------------------------------------------------------------
-# compute_embedding_with_retry
-# ---------------------------------------------------------------------------
-
-
 def _retry(api_key: str, screenshot_b64: str) -> list[float]:
     return embedding_cache.compute_embedding_with_retry(
         api_key,

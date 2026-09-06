@@ -72,12 +72,7 @@ _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
 
 class _Option(TypedDict):
-    """One DECIDE menu entry, as built by ``_build_options``.
-
-    ``letter`` and ``type`` are set on every entry; the rest depend on the
-    option's type ("done" and "free" carry neither ``node`` nor
-    ``instruction``, a self-loop carries no ``description``, and so on).
-    """
+    """One DECIDE menu entry; the keys present depend on ``type``."""
 
     letter: str
     type: _OptionType
@@ -88,13 +83,7 @@ class _Option(TypedDict):
 
 
 class _Decision(TypedDict):
-    """The outcome of ``_decide`` (and its free-action fallbacks in ``_step``).
-
-    ``type`` and ``instruction`` are set on every return path: a chosen option's
-    fields (which is where ``letter``/``node``/``description``/``effect`` come
-    from) plus a possibly-updated ``instruction``, or a "free" fallback with a
-    ``reason`` explaining why graph guidance was not used.
-    """
+    """The outcome of ``_decide``; a "free" fallback carries ``reason`` instead of a node."""
 
     type: _OptionType
     instruction: str
@@ -253,9 +242,8 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         img_path = screenshots_dir / f"{node_id}.png"
         if img_path.exists():
             ref_screenshot = base64.b64encode(img_path.read_bytes()).decode("ascii")
-        # `.get(key, default)` does not apply `default` to a present-but-null value, so
-        # every field a downstream reader iterates or indexes into is narrowed here, once,
-        # rather than at every read site.
+        # `.get(key, default)` keeps a present-but-null value, so every field a reader
+        # iterates or indexes is narrowed here once rather than at each read site.
         G.add_node(
             node_id,
             activity=as_str(node_data.get("activity"), ""),
@@ -524,16 +512,13 @@ class UIKobeV2Translator(BaseTranslator):
         max_pixels: int = 1_000_000,
     ) -> None:
         super().__init__()
-        # Quiet the chatty per-request loggers of the HTTP libraries these clients use.
-        # Done here rather than at import time so importing this module has no global
-        # side effect; adapters may not import utils.logging under tach.
+        # Set here, not at import time, so importing this module has no global side effect.
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
 
         self.graph_dir = Path(graph_dir)
-        # AITK forwards every translator_args key, and its own configs/controller.yaml
-        # sets max_pixels, so the constructor must accept it although this translator
-        # sends screenshots unresized.
+        # Accepted because AITK forwards every translator_args key and its controller.yaml
+        # sets max_pixels; this translator sends screenshots unresized.
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
 
@@ -562,8 +547,7 @@ class UIKobeV2Translator(BaseTranslator):
         self._package_to_app: dict[str, str] = {}
         self._load_all_graphs()
 
-        # Screen size is a device property, not a task property: it is only ever
-        # updated by to_device reporting the real size, never reset between tasks.
+        # A device property: only to_device updates it, and a task reset must not.
         self._screen_w = 1080
         self._screen_h = 1920
         self._reset_task_state()
@@ -808,9 +792,7 @@ class UIKobeV2Translator(BaseTranslator):
         for node_id, data in G.nodes(data=True):
             if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
-            # Vectors only ever enter this attribute already narrowed to list[float]
-            # (via load_image_embeddings or compute_embedding_with_retry), so
-            # re-validating and copying every one of them on every step is wasted work.
+            # Stored already narrowed; re-narrowing it per step doubled this loop's cost.
             node_image_emb = data.get("image_embedding")
             if not node_image_emb:
                 continue
@@ -882,8 +864,7 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
         )
 
-        # _parse_record_output never returns None (it returns "nothing" at worst), so
-        # the helper's parse-retry loop never retries here: this is one completion.
+        # _parse_record_output never returns None, so this never retries: one completion.
         result = (
             self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
             or "nothing"
@@ -934,12 +915,7 @@ class UIKobeV2Translator(BaseTranslator):
         return self._format_schema_delta(merged)
 
     def _build_self_loop_candidates(self, G: nx.DiGraph, node_id: str) -> list[tuple[_Option, str]]:
-        """Return (option, menu line) pairs for the node's self-loop, if any.
-
-        Each pair's option has no "letter" yet: the final letter depends on how
-        many candidates from here and ``_build_neighbor_candidates`` survive the
-        26-entry cap in ``_build_options``.
-        """
+        """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
         if not G.has_edge(node_id, node_id):
             return []
         edge_data = G[node_id][node_id]
@@ -987,12 +963,7 @@ class UIKobeV2Translator(BaseTranslator):
     def _build_neighbor_candidates(
         self, G: nx.DiGraph, node_id: str
     ) -> list[tuple[int, _Option, str]]:
-        """Return (edge visit_count, option, menu line) triples for each neighbour.
-
-        ``visit_count`` is only used to rank candidates when ``_build_options``
-        must drop some to fit the 26-entry cap; the option itself carries no
-        "letter" yet, for the same reason as ``_build_self_loop_candidates``.
-        """
+        """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
         candidates: list[tuple[int, _Option, str]] = []
         for _, raw_neighbor, edge_data in G.out_edges(node_id, data=True):
             neighbor = str(raw_neighbor)
@@ -1035,15 +1006,9 @@ class UIKobeV2Translator(BaseTranslator):
     def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
         """Build the option list for the DECIDE prompt.
 
-        The menu is lettered A-Z, so it holds at most 26 entries. DONE and FREE
-        always take one slot each; the remaining 24 go to self-loop instructions
-        and neighbours. A node with more candidates than that would otherwise
-        index past "Z" and raise IndexError out of to_agent, so the least useful
-        candidates are dropped instead: self-loop instructions have no
-        popularity signal of their own and keep graph order (trimmed only if
-        they alone exceed the budget), while neighbours are kept by edge
-        visit_count descending, then graph order — the closest available proxy
-        for "the agent found this transition useful before".
+        A-Z gives 26 slots: DONE and FREE are reserved, and when self-loop
+        instructions plus neighbours exceed the other 24, the least-visited
+        neighbours are dropped (visit_count is the only usefulness signal).
         """
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         max_middle_options = len(letters) - 2  # reserve DONE and FREE
@@ -1148,16 +1113,9 @@ class UIKobeV2Translator(BaseTranslator):
         for opt in options_list:
             if opt["letter"] == choice_letter:
                 if opt["type"] == "free":
-                    # FREE never carries a built-in instruction (opt.get("instruction")
-                    # is always None here), so falling back to the whole task would make
-                    # it look like the model wrote one: _step's
-                    # `decision_type == "free" and not instruction` branch — the only
-                    # path that re-plans through _plan_free_action — would then never
-                    # run, and the whole task would be sent to the action agent as a
-                    # single instruction. done/self-loop/neighbour options are built
-                    # from graph data that can legitimately be empty (an edge recorded
-                    # before any instruction text was observed for it), so they keep
-                    # the task fallback.
+                    # An empty instruction is what makes _step re-plan a FREE pick; the
+                    # task-text fallback would hide that. Graph-built options may be empty
+                    # by construction, so they keep it.
                     resolved_instruction = instruction
                 else:
                     resolved_instruction = instruction or opt.get("instruction") or task

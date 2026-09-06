@@ -33,16 +33,8 @@ MAX_PIXELS = 1_000_000
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Return the cosine similarity of ``a`` and ``b``, clamped to ``[-1.0, 1.0]``.
 
-    A zero-norm vector has no direction, so the similarity is defined as ``0.0``
-    rather than raising a division error. Subnormal floats can otherwise push the
-    unclamped ratio slightly outside ``[-1.0, 1.0]`` (a violation of
-    Cauchy-Schwarz that is a floating-point rounding artifact, not a real
-    similarity), so the result is clamped before it is returned. A non-finite
-    input (a NaN slipping in from a corrupt cached vector) must never win a
-    similarity search by clamping to 1.0, so a non-finite ratio is treated the
-    same as a zero norm: the caller's job is narrowing inputs with
-    ``payloads.as_float_list`` before they ever reach here, this is the last
-    line of defense.
+    A zero norm has no direction and scores 0.0. Subnormal rounding can push the
+    ratio outside the clamp, and a non-finite ratio scores 0.0 so a NaN never wins.
     """
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
