@@ -79,11 +79,22 @@ def image_embeddings_path(graph_path: Path) -> Path:
     return graph_path.with_suffix(".image_emb.json")
 
 
-def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
+def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[float]]:
     """Return the cached embeddings for a graph, or ``{}`` when none are usable.
 
     A sidecar that cannot be read or parsed is an empty cache, never a reason
     to drop the app graph; a malformed or non-finite vector is dropped and logged.
+
+    The current sidecar format tags the file with the embedding model that
+    wrote it (``{"model": ..., "embeddings": {...}}``), since a dimension
+    match alone cannot prove two vectors came from the same model. A tag
+    matching ``model`` returns its vectors; a different tag means the cached
+    vectors sit in a model it did not come from, so every node must be
+    recomputed as missing -- ``{}`` is returned after one warning naming both
+    models. A bare ``{node_id: vector}`` file predates model tagging (an
+    older release, or a hand-edited sidecar); it is accepted the same as
+    always, logged once at info level, and gets tagged the next time this
+    graph's embeddings are saved.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():
@@ -99,8 +110,29 @@ def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
             "Image embedding cache %s is not a JSON object; treating it as empty", emb_path
         )
         return {}
+
+    if "model" in raw:
+        sidecar_model = raw.get("model")
+        if sidecar_model != model:
+            logger.warning(
+                "Image embedding cache %s was written by model %r, not the current model %r; "
+                "treating it as empty so every node is recomputed",
+                emb_path,
+                sidecar_model,
+                model,
+            )
+            return {}
+        raw_vectors = raw.get("embeddings")
+    else:
+        logger.info(
+            "Image embedding cache %s predates model tagging; it will be tagged the next "
+            "time this graph's embeddings are saved",
+            emb_path,
+        )
+        raw_vectors = raw
+
     embeddings: dict[str, list[float]] = {}
-    for node_id, vector in as_str_dict(raw).items():
+    for node_id, vector in as_str_dict(raw_vectors).items():
         numbers = as_float_list(vector)
         if numbers:
             embeddings[node_id] = numbers
@@ -111,15 +143,22 @@ def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
     return embeddings
 
 
-def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) -> None:
-    """Write ``embeddings`` to the graph's sidecar file, replacing it atomically.
+def save_image_embeddings(
+    graph_path: Path, embeddings: dict[str, list[float]], *, model: str
+) -> None:
+    """Write ``embeddings`` to the graph's sidecar file, tagged with the
+    embedding model that computed them, replacing it atomically.
 
-    See ``graph_files.write_json_atomically`` for the write mechanism. A
-    directory the process cannot write into makes
+    See ``graph_files.write_json_atomically`` for the write mechanism. The
+    model tag is what ``load_image_embeddings`` uses to detect a model switch
+    on its own, rather than relying on a dimension match (two different
+    models can share a dimension) or an operator remembering ``--recompute``.
+    A directory the process cannot write into makes
     ``compute_missing_image_embeddings`` log the failed cache write and keep
     the computed vectors in memory for the run, rather than persisting them.
     """
-    write_json_atomically(image_embeddings_path(graph_path), embeddings, ensure_ascii=False)
+    payload = {"model": model, "embeddings": embeddings}
+    write_json_atomically(image_embeddings_path(graph_path), payload, ensure_ascii=False)
 
 
 def compute_embedding_with_retry(
@@ -209,7 +248,7 @@ def compute_missing_image_embeddings(
     finally:
         if computed:
             try:
-                save_image_embeddings(graph_path, embeddings)
+                save_image_embeddings(graph_path, embeddings, model=model)
             except OSError:
                 logger.exception(
                     "Failed to write image embedding cache for graph %s at %s",

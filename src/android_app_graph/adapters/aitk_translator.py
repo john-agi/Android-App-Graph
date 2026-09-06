@@ -722,7 +722,9 @@ class UIKobeV2Translator(BaseTranslator):
                 # rewrite.
                 embeddings = {
                     node_id: emb
-                    for node_id, emb in load_image_embeddings(graph_file).items()
+                    for node_id, emb in load_image_embeddings(
+                        graph_file, model=self.image_embedding_model
+                    ).items()
                     if node_id in G
                 }
                 for node_id, emb in embeddings.items():
@@ -903,7 +905,7 @@ class UIKobeV2Translator(BaseTranslator):
             query_image_emb,
             same_pkg_image_candidates,
             scope="[IDENTIFY] image-embedding",
-            remedy="; the sidecar was written by a different embedding model, "
+            remedy="; the sidecar predates model tagging or was hand-edited, "
             "rerun app-graph-embed --recompute",
         )
         candidates: list[tuple[str, float, str]] = [

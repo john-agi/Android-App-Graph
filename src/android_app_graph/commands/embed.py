@@ -95,11 +95,12 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
-        # A dimension match cannot prove the cached vector came from the current
-        # embedding model: a model switch that keeps the same dimension is stale
-        # too and undetectable by length, so --recompute discards the existing
-        # sidecar up front rather than trying to tell "missing" and "stale"
-        # apart -- otherwise a run where every call then fails would leave the
+        # A model switch is now detected automatically from the sidecar's own
+        # model tag (load_image_embeddings returns {} on a mismatch), so
+        # --recompute is only needed for what the tag cannot cover: an
+        # untagged sidecar from before this format, a hand-edited one, or a
+        # deliberate refresh. Either way it discards the existing sidecar up
+        # front -- otherwise a run where every call then fails would leave the
         # stale vectors it was asked to discard, since the sidecar is only
         # rewritten when at least one vector succeeds.
         embeddings: dict[str, list[float]]
@@ -107,7 +108,7 @@ def precompute_graph_image_embeddings(
             image_embeddings_path(graph_path).unlink(missing_ok=True)
             embeddings = {}
         else:
-            embeddings = load_image_embeddings(graph_path)
+            embeddings = load_image_embeddings(graph_path, model=model)
 
         # A stat, not a read: deciding reference_screenshots/already_cached/
         # skipped_missing_screenshot must not pay for every uncached node's
@@ -210,9 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recompute",
         action="store_true",
-        help="Discard the existing embedding sidecar and recompute every node; needed "
-        "after an embedding model change, since the cache cannot tell that apart from "
-        "a missing vector.",
+        help="Discard the existing embedding sidecar and rebuild every vector, "
+        "regardless of its model tag; for an untagged sidecar from an older release "
+        "or a deliberate refresh. A model change is otherwise detected from the tag "
+        "and recomputed automatically, no flag needed.",
     )
     return parser
 

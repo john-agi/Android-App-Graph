@@ -929,9 +929,9 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     save_calls: list[dict[str, list[float]]] = []
     original_save = embedding_cache.save_image_embeddings
 
-    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]]) -> None:
+    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]], *, model: str) -> None:
         save_calls.append(dict(embeddings))
-        original_save(graph_file, embeddings)
+        original_save(graph_file, embeddings, model=model)
 
     monkeypatch.setattr(embedding_cache, "save_image_embeddings", _tracking_save)
 
@@ -944,7 +944,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     assert G.nodes["n3"]["image_embedding"] == [1.0, 0.0]  # freshly computed
     assert len(save_calls) == 1
     assert save_calls[0] == {"n4": [9.0, 9.0], "n1": [1.0, 0.0], "n3": [1.0, 0.0]}
-    assert embedding_cache.load_image_embeddings(path) == {
+    assert embedding_cache.load_image_embeddings(path, model="img-model") == {
         "n4": [9.0, 9.0],
         "n1": [1.0, 0.0],
         "n3": [1.0, 0.0],
@@ -981,7 +981,10 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
     with pytest.raises(_Interrupted):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert embedding_cache.load_image_embeddings(path) == {"n1": [1.0, 0.0], "n2": [1.0, 0.0]}
+    assert embedding_cache.load_image_embeddings(path, model="img-model") == {
+        "n1": [1.0, 0.0],
+        "n2": [1.0, 0.0],
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1001,7 +1004,9 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
         embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
     )
 
-    def _raise_permission_error(_graph_file: Path, _embeddings: dict[str, list[float]]) -> None:
+    def _raise_permission_error(
+        _graph_file: Path, _embeddings: dict[str, list[float]], **_kwargs: object
+    ) -> None:
         msg = "Permission denied"
         raise PermissionError(msg)
 

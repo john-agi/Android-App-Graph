@@ -272,7 +272,9 @@ def test_precompute_computes_caches_and_skips(
         "skipped_missing_screenshot": 1,
         "skipped_failed": 0,
     }
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.1, 0.2]}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+        "s0_home": [0.1, 0.2]
+    }
 
     assert _precompute(tmp_path)["already_cached"] == 1
 
@@ -297,7 +299,9 @@ def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
     summary = _precompute(tmp_path, recompute=True)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.9, 0.8]}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+        "s0_home": [0.9, 0.8]
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -323,7 +327,7 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
     assert summary["computed"] == 0
     assert summary["skipped_failed"] == 1
     assert not image_embeddings_path(graph_path).exists()
-    assert embed.load_image_embeddings(graph_path) == {}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -341,7 +345,7 @@ def test_precompute_keeps_going_when_a_node_fails(
     summary = _precompute(tmp_path)
     assert summary["skipped_failed"] == 1
     assert summary["computed"] == 0
-    assert embed.load_image_embeddings(graph_path) == {}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -383,7 +387,10 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
 
     assert summary["computed"] == 2
     assert summary["skipped_failed"] == 1
-    assert embed.load_image_embeddings(graph_path) == {"n1": [0.1, 0.2], "n3": [0.1, 0.2]}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+        "n1": [0.1, 0.2],
+        "n3": [0.1, 0.2],
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -402,7 +409,9 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.3, 0.4]}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+        "s0_home": [0.3, 0.4]
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -423,7 +432,9 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.3, 0.4]}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+        "s0_home": [0.3, 0.4]
+    }
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -452,9 +463,9 @@ def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     save_calls: list[dict[str, list[float]]] = []
     original_save = embedding_cache.save_image_embeddings
 
-    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]]) -> None:
+    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]], *, model: str) -> None:
         save_calls.append(dict(embeddings))
-        original_save(graph_file, embeddings)
+        original_save(graph_file, embeddings, model=model)
 
     monkeypatch.setattr(embedding_cache, "save_image_embeddings", _tracking_save)
 
@@ -574,4 +585,7 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
     with pytest.raises(_Interrupted):
         _precompute(tmp_path)
 
-    assert embed.load_image_embeddings(graph_path) == {"n1": [1.0, 0.0], "n2": [1.0, 0.0]}
+    assert embed.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
+        "n1": [1.0, 0.0],
+        "n2": [1.0, 0.0],
+    }

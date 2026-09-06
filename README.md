@@ -246,9 +246,11 @@ Precompute native Gemini image embeddings for a graph:
 uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 ```
 
-Pass `--recompute` after switching `image_embedding.model` to rebuild every
-cached vector from scratch, since a stale sidecar cannot be told apart from a
-missing one just by looking at it.
+The sidecar is tagged with the embedding model that wrote it, so switching
+`image_embedding.model` is detected automatically and recomputed without any
+flag. Pass `--recompute` to discard the sidecar and rebuild every vector
+regardless of its model tag -- for an untagged sidecar left over from an
+older release, a hand-edited one, or a deliberate refresh.
 
 ## Use Android-App-Graph with AITK
 
