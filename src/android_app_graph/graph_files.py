@@ -26,7 +26,9 @@ def write_json_atomically(
     ``os.replace``, so a crash mid-dump -- or a failed rename -- leaves ``path``
     as either the previous complete file or the new one, never a truncated mix
     of both and never an orphaned temp file: the replace runs inside the same
-    cleanup that unlinks the temp file on any other failure.
+    cleanup that unlinks the temp file on any other failure. The temp file is
+    flushed and fsync'd before the rename, so that guarantee survives a power
+    loss too, not only a process crash.
 
     A fresh file gets exactly the mode ``open(path, "w")`` would give (0o666
     with the process umask applied by the kernel); a file that already exists
@@ -56,6 +58,8 @@ def write_json_atomically(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=indent, ensure_ascii=ensure_ascii)
+            f.flush()
+            os.fsync(f.fileno())
         if path.exists():
             shutil.copymode(path, tmp_path)
         os.replace(tmp_path, path)

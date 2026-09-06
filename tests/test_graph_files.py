@@ -23,6 +23,49 @@ def test_write_json_atomically_round_trips(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
 
 
+def test_write_json_atomically_fsyncs_the_temp_file_before_the_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "either the previous complete file or the new one" guarantee only
+    survives a power loss, not just a process crash, if the temp file's data
+    reached disk before the rename -- os.fsync must run once, on the temp
+    file's own descriptor, before os.replace runs.
+    """
+    path = tmp_path / "data.json"
+    calls: list[str] = []
+    opened_fds: list[int] = []
+    fsynced_fds: list[int] = []
+
+    original_open = graph_files.os.open
+
+    def _recording_open(file: Path, flags: int, mode: int = 0o777) -> int:
+        fd = original_open(file, flags, mode)
+        opened_fds.append(fd)
+        return fd
+
+    original_fsync = graph_files.os.fsync
+
+    def _recording_fsync(fd: int) -> None:
+        calls.append("fsync")
+        fsynced_fds.append(fd)
+        original_fsync(fd)
+
+    original_replace = graph_files.os.replace
+
+    def _recording_replace(src: Path, dst: Path) -> None:
+        calls.append("replace")
+        original_replace(src, dst)
+
+    monkeypatch.setattr(graph_files.os, "open", _recording_open)
+    monkeypatch.setattr(graph_files.os, "fsync", _recording_fsync)
+    monkeypatch.setattr(graph_files.os, "replace", _recording_replace)
+
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+
+    assert calls == ["fsync", "replace"]
+    assert fsynced_fds == opened_fds
+
+
 def test_write_json_atomically_honours_indent_and_ensure_ascii(tmp_path: Path) -> None:
     path = tmp_path / "data.json"
     graph_files.write_json_atomically(path, {"name": "café"}, indent=2, ensure_ascii=False)
