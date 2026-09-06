@@ -374,6 +374,22 @@ def test_parse_decide_output_falls_back_to_the_whole_text() -> None:
     assert aitk_translator._parse_decide_output(raw) == {"choice": "A"}
 
 
+def test_parse_decide_output_finds_the_think_tag_before_stripping_fences() -> None:
+    """Fence-stripping the whole reply before looking for ``</think>`` would let a
+    fenced JSON draft *inside* the think block eat the tag itself -- ``strip_json_fences``
+    matches the first fence pair it finds -- so the fenced final answer that follows the
+    tag would never be reached and the draft would be returned instead. The tag must be
+    found on the raw text first, and fences stripped only from the slice after it.
+    """
+    raw = (
+        "<think>Draft:\n"
+        '```json\n{"choice": "B", "instruction": "draft"}\n```\n'
+        "On reflection C is right.</think>\n"
+        '```json\n{"choice": "C", "instruction": "final"}\n```'
+    )
+    assert aitk_translator._parse_decide_output(raw) == {"choice": "C", "instruction": "final"}
+
+
 def test_parse_decide_output_think_tag_offset_survives_case_folding_length_change() -> None:
     """``str.lower()`` can change a string's length (U+0130 "İ" lowers to the two
     code points "i̇"), so an offset found on the lower-cased copy and used to

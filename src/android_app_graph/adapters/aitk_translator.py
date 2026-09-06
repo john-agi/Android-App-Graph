@@ -505,13 +505,21 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
 
 
 def _parse_decide_output(raw: str) -> dict[str, Any] | None:
-    text = strip_json_fences((raw or "").strip())
+    """Parse the DECIDE reply's JSON object, preferring anything after ``</think>``.
+
+    ``</think>`` is located on the raw text before fences are stripped, never
+    after: stripping fences first can eat a fenced JSON draft inside the think
+    block along with the tag itself (``strip_json_fences`` matches the first
+    fence pair it finds), which would hide the fenced final answer that
+    follows the tag and return the draft instead.
+    """
+    text = (raw or "").strip()
     post_think = _after_last_think_tag(text)
     if post_think is not None:
         parsed = _parse_json_object(strip_json_fences(post_think))
         if parsed is not None:
             return parsed
-    return _parse_json_object(text)
+    return _parse_json_object(strip_json_fences(text))
 
 
 def _chat_completion_content(
