@@ -85,16 +85,16 @@ def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[flo
     A sidecar that cannot be read or parsed is an empty cache, never a reason
     to drop the app graph; a malformed or non-finite vector is dropped and logged.
 
-    The current sidecar format tags the file with the embedding model that
-    wrote it (``{"model": ..., "embeddings": {...}}``), since a dimension
-    match alone cannot prove two vectors came from the same model. A tag
-    matching ``model`` returns its vectors; a different tag means the cached
-    vectors sit in a model it did not come from, so every node must be
-    recomputed as missing -- ``{}`` is returned after one warning naming both
-    models. A bare ``{node_id: vector}`` file predates model tagging (an
-    older release, or a hand-edited sidecar); it is accepted the same as
-    always, logged once at info level, and gets tagged the next time this
-    graph's embeddings are saved.
+    The sidecar format tags the file with the embedding model that wrote it
+    (``{"model": ..., "embeddings": {...}}``), since a dimension match alone
+    cannot prove two vectors came from the same model. A tag matching
+    ``model`` returns its vectors; a different tag means the cached vectors
+    sit in a model it did not come from. A bare ``{node_id: vector}`` file
+    predates model tagging and has the same problem one step further back:
+    its vectors carry no record of which model produced them at all, and
+    accepting them would assert a provenance they never had. Both cases are
+    treated alike -- every node recomputed as missing, ``{}`` returned after
+    one warning naming the sidecar.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():
@@ -114,27 +114,26 @@ def load_image_embeddings(graph_path: Path, *, model: str) -> dict[str, list[flo
     sidecar_model = raw.get("model")
     # A legacy bare dict may hold a node called "model", so the tagged form is
     # recognised by its shape (string tag plus an embeddings object), not by the key.
-    if isinstance(sidecar_model, str) and isinstance(raw.get("embeddings"), dict):
-        if sidecar_model != model:
-            logger.warning(
-                "Image embedding cache %s was written by model %r, not the current model %r; "
-                "treating it as empty so every node is recomputed",
-                emb_path,
-                sidecar_model,
-                model,
-            )
-            return {}
-        raw_vectors = raw.get("embeddings")
-    else:
-        logger.info(
-            "Image embedding cache %s predates model tagging; it will be tagged the next "
-            "time this graph's embeddings are saved",
+    if not (isinstance(sidecar_model, str) and isinstance(raw.get("embeddings"), dict)):
+        logger.warning(
+            "Image embedding cache %s predates model tagging; its vectors' provenance is "
+            "unknown, so they are recomputed under the current model %r",
             emb_path,
+            model,
         )
-        raw_vectors = raw
+        return {}
+    if sidecar_model != model:
+        logger.warning(
+            "Image embedding cache %s was written by model %r, not the current model %r; "
+            "treating it as empty so every node is recomputed",
+            emb_path,
+            sidecar_model,
+            model,
+        )
+        return {}
 
     embeddings: dict[str, list[float]] = {}
-    for node_id, vector in as_str_dict(raw_vectors).items():
+    for node_id, vector in as_str_dict(raw.get("embeddings")).items():
         numbers = as_float_list(vector)
         if numbers:
             embeddings[node_id] = numbers

@@ -900,8 +900,7 @@ class UIKobeV2Translator(BaseTranslator):
             query_image_emb,
             same_pkg_image_candidates,
             scope="[IDENTIFY] image-embedding",
-            remedy="; the sidecar predates model tagging or was hand-edited, "
-            "rerun app-graph-embed --recompute",
+            remedy="; the sidecar was hand-edited or is stale, rerun app-graph-embed --recompute",
         )
         candidates: list[tuple[str, float, str]] = [
             (node_id, sim, G.nodes[node_id].get("page_description", "")) for node_id, sim in scored

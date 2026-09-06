@@ -95,11 +95,11 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
-        # A model switch is now detected automatically from the sidecar's own
-        # model tag (load_image_embeddings returns {} on a mismatch), so
-        # --recompute is only needed for what the tag cannot cover: an
-        # untagged sidecar from before this format, a hand-edited one, or a
-        # deliberate refresh. Either way it discards the existing sidecar up
+        # A model switch, or a sidecar that predates model tagging, is now
+        # detected automatically (load_image_embeddings returns {} for either),
+        # so --recompute is only needed for what that cannot cover: a
+        # hand-edited sidecar or a deliberate refresh. Either way it discards
+        # the existing sidecar up
         # front, through the same save_image_embeddings writer every other
         # sidecar write goes through -- unlink() on a symlinked sidecar only
         # detaches the link, leaving the shared target it points at untouched,
@@ -217,9 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute",
         action="store_true",
         help="Discard the existing embedding sidecar and rebuild every vector, "
-        "regardless of its model tag; for an untagged sidecar from an older release "
-        "or a deliberate refresh. A model change is otherwise detected from the tag "
-        "and recomputed automatically, no flag needed.",
+        "regardless of its model tag; for a hand-edited sidecar or a deliberate "
+        "refresh. A model change, or a sidecar that predates model tagging, is "
+        "otherwise detected automatically and recomputed with no flag needed.",
     )
     return parser
 

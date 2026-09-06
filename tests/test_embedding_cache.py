@@ -56,22 +56,24 @@ def test_load_image_embeddings_returns_empty_for_a_different_model(
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
 
 
-def test_load_image_embeddings_accepts_a_legacy_bare_dict(
+def test_load_image_embeddings_discards_a_legacy_bare_dict(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A sidecar written before model tagging existed has no "model" key at all;
-    it is still a usable cache, not an empty one, but is logged once so an
-    operator can tell it will be re-tagged on the next save.
+    """A sidecar written before model tagging existed has no "model" key at all,
+    so its vectors carry no record of which model produced them -- accepting
+    them would assert a provenance they never had. They are recomputed under
+    the current model instead, the same as a sidecar tagged with a different
+    model, not silently reused.
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
         json.dumps({"n1": [0.5, 0.25]}), encoding="utf-8"
     )
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("WARNING"):
         result = embedding_cache.load_image_embeddings(graph_path, model="gemini-embedding-2")
 
-    assert result == {"n1": [0.5, 0.25]}
+    assert result == {}
     assert "predates model tagging" in caplog.text
 
 
@@ -119,7 +121,17 @@ def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:
 def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
-        json.dumps({"n1": [1.0, 2.0], "n2": "not a vector", "n3": [], "n4": [1.0, "two"]}),
+        json.dumps(
+            {
+                "model": "gemini-embedding-2",
+                "embeddings": {
+                    "n1": [1.0, 2.0],
+                    "n2": "not a vector",
+                    "n3": [],
+                    "n4": [1.0, "two"],
+                },
+            }
+        ),
         encoding="utf-8",
     )
     assert embedding_cache.load_image_embeddings(graph_path, model="gemini-embedding-2") == {
@@ -138,7 +150,12 @@ def test_load_image_embeddings_drops_a_nan_entry(
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
-        json.dumps({"n1": [1.0, 2.0], "n2": [1.0, float("nan")]}),
+        json.dumps(
+            {
+                "model": "gemini-embedding-2",
+                "embeddings": {"n1": [1.0, 2.0], "n2": [1.0, float("nan")]},
+            }
+        ),
         encoding="utf-8",
     )
     with caplog.at_level("WARNING"):
@@ -156,7 +173,9 @@ def test_load_image_embeddings_drops_an_element_too_large_for_a_float(
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
-        json.dumps({"n1": [1.0, 2.0], "n2": [10**400]}),
+        json.dumps(
+            {"model": "gemini-embedding-2", "embeddings": {"n1": [1.0, 2.0], "n2": [10**400]}}
+        ),
         encoding="utf-8",
     )
     with caplog.at_level("WARNING"):
@@ -170,7 +189,10 @@ def test_load_image_embeddings_warns_about_each_dropped_entry(
 ) -> None:
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
-        json.dumps({"n1": [1.0, 2.0], "n2": "not a vector"}), encoding="utf-8"
+        json.dumps(
+            {"model": "gemini-embedding-2", "embeddings": {"n1": [1.0, 2.0], "n2": "not a vector"}}
+        ),
+        encoding="utf-8",
     )
     with caplog.at_level("WARNING"):
         embedding_cache.load_image_embeddings(graph_path, model="gemini-embedding-2")
@@ -397,19 +419,20 @@ def test_resolve_image_embedding_settings_falls_back_for_an_unresolved_or_non_go
     assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
 
 
-def test_load_image_embeddings_keeps_a_legacy_node_named_model(
+def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The tagged form is recognised by a string tag plus an embeddings object,
     not by the presence of a "model" key alone: a legacy bare dict may hold a
-    node called "model", and that node's vector must load, not be misread as
-    a mismatched tag that empties the cache.
+    node called "model" whose value is a vector, not a model-name string. That
+    shape is still the untagged legacy form -- discarded like any other
+    untagged sidecar, not misread as a mismatched tag.
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
         json.dumps({"model": [1.0, 0.0], "n1": [0.0, 1.0]}), encoding="utf-8"
     )
-    with caplog.at_level("INFO"):
+    with caplog.at_level("WARNING"):
         loaded = embedding_cache.load_image_embeddings(graph_path, model="img-model")
-    assert loaded == {"model": [1.0, 0.0], "n1": [0.0, 1.0]}
+    assert loaded == {}
     assert "predates model tagging" in caplog.text

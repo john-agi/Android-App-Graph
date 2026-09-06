@@ -893,7 +893,10 @@ def test_load_all_graphs_skips_a_broken_graph(tmp_path: Path) -> None:
 
 def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
     sidecar = graph_dir / "demo" / "demo.image_emb.json"
-    sidecar.write_text(json.dumps({"home": [1.0, 0.0], "gone": [0.0, 1.0]}), encoding="utf-8")
+    sidecar.write_text(
+        json.dumps({"model": "img-model", "embeddings": {"home": [1.0, 0.0], "gone": [0.0, 1.0]}}),
+        encoding="utf-8",
+    )
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
     assert built._graphs["demo"].nodes["home"]["image_embedding"] == [1.0, 0.0]
     assert "gone" not in built._graphs["demo"]
@@ -918,7 +921,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
         tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}, {"id": "n4"}]
     )
     (path.parent / "demo.image_emb.json").write_text(
-        json.dumps({"n4": [9.0, 9.0]}), encoding="utf-8"
+        json.dumps({"model": "img-model", "embeddings": {"n4": [9.0, 9.0]}}), encoding="utf-8"
     )
     screenshots = path.parent / "demo_screenshots"
     screenshots.mkdir()

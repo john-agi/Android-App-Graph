@@ -442,7 +442,8 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     """A dropped (malformed) cache entry must not be mistaken for "already cached"."""
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
-        json.dumps({"s0_home": "not-a-vector"}), encoding="utf-8"
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": "not-a-vector"}}),
+        encoding="utf-8",
     )
     monkeypatch.setattr(
         embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
@@ -465,7 +466,8 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     """
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
-        json.dumps({"s0_home": [10**400]}), encoding="utf-8"
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [10**400]}}),
+        encoding="utf-8",
     )
     monkeypatch.setattr(
         embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
@@ -571,7 +573,8 @@ def test_precompute_never_reads_an_already_cached_screenshot(
     """
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
-        json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [0.1, 0.2]}}),
+        encoding="utf-8",
     )
     screenshot_file = tmp_path / "demo" / "demo_screenshots" / "s0_home.png"
     screenshot_file.unlink()

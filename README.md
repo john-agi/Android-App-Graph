@@ -248,9 +248,10 @@ uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 
 The sidecar is tagged with the embedding model that wrote it, so switching
 `image_embedding.model` is detected automatically and recomputed without any
-flag. Pass `--recompute` to discard the sidecar and rebuild every vector
-regardless of its model tag -- for an untagged sidecar left over from an
-older release, a hand-edited one, or a deliberate refresh.
+flag; an untagged sidecar left over from an older release is recomputed the
+same way, since its vectors carry no record of which model produced them.
+Pass `--recompute` to discard the sidecar and rebuild every vector regardless
+of its model tag -- for a hand-edited sidecar or a deliberate refresh.
 
 ## Use Android-App-Graph with AITK
 
