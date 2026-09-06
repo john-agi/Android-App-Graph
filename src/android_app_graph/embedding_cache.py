@@ -33,10 +33,14 @@ def image_embeddings_path(graph_path: Path) -> Path:
 def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
     """Return the cached embeddings for a graph, or ``{}`` when none are usable.
 
-    A sidecar that fails to parse as JSON is treated as "no cache" rather than
-    raising: a truncated or corrupt cache file must not take down the whole app
-    graph it caches for. A malformed or empty vector for one node is dropped
-    (not kept as ``[]``) and logged, naming the node.
+    A sidecar that cannot be read or parsed is treated as "no cache" rather than
+    raising: a truncated, corrupt, unreadable, or invalid-UTF-8 cache file must
+    not take down the whole app graph it caches for. ``OSError`` covers a file
+    that cannot be opened or read (permissions, disappears mid-read); ``ValueError``
+    covers both ``json.JSONDecodeError`` (malformed JSON) and ``UnicodeDecodeError``
+    (invalid UTF-8 bytes), which are both ``ValueError`` subclasses. A malformed or
+    empty vector for one node is dropped (not kept as ``[]``) and logged, naming
+    the node.
     """
     emb_path = image_embeddings_path(graph_path)
     if not emb_path.exists():
@@ -44,8 +48,8 @@ def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
     try:
         with emb_path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
-    except json.JSONDecodeError:
-        logger.warning("Corrupt image embedding cache %s; treating it as empty", emb_path)
+    except (OSError, ValueError) as exc:
+        logger.warning("Corrupt image embedding cache %s; treating it as empty: %s", emb_path, exc)
         return {}
     embeddings: dict[str, list[float]] = {}
     for node_id, vector in as_str_dict(raw).items():

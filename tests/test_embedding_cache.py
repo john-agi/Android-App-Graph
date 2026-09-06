@@ -83,6 +83,37 @@ def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
     assert "demo.image_emb.json" in caplog.text
 
 
+def test_load_image_embeddings_treats_invalid_utf8_as_no_cache(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A JSONDecodeError is caught, but UnicodeDecodeError is also a ValueError and
+
+    must be treated the same way: as an empty cache, never as a reason for the
+    per-app ``except Exception`` in ``_load_all_graphs`` to drop the whole graph.
+    """
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.image_embeddings_path(graph_path).write_bytes(b'{"n1": [1.0]}\xff\xfe')
+    with caplog.at_level("WARNING"):
+        assert embedding_cache.load_image_embeddings(graph_path) == {}
+    assert "demo.image_emb.json" in caplog.text
+
+
+def test_load_image_embeddings_treats_an_unreadable_file_as_no_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    graph_path = tmp_path / "demo.json"
+    embedding_cache.image_embeddings_path(graph_path).write_text("{}", encoding="utf-8")
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        msg = "Permission denied"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "open", _raise_permission_error)
+    with caplog.at_level("WARNING"):
+        assert embedding_cache.load_image_embeddings(graph_path) == {}
+    assert "demo.image_emb.json" in caplog.text
+
+
 def test_iter_graph_files_without_a_graph_dir(tmp_path: Path) -> None:
     assert embedding_cache.iter_graph_files(tmp_path / "absent") == []
 
