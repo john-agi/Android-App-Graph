@@ -96,12 +96,13 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("no letters at all", None),
         ("B is a match", "B"),
         ("It is clearly B, a strong match", "B"),
-        ("None of the others fit, so B", "B"),
+        ("None of the others fit, so B", None),
+        ("B is the best match. None of the others match.", None),
         ("None of the candidates match. A login form is visible.", "NONE"),
         ("NONE. A settings page is showing.", "NONE"),
         ("A.", "A"),
-        ("Neither A nor B match; none of them.", "NONE"),
-        ("B is close, but none match", "NONE"),
+        ("Neither A nor B match; none of them.", None),
+        ("B is close, but none match", None),
         ("b is the match", None),
         ("Answer: A because none of the others match", "A"),
         ("Answer: A login screen is shown, none of them match", "A"),
@@ -2077,26 +2078,35 @@ def test_step_warns_when_the_task_names_no_known_app(
     assert stepping._app_opened is True
 
 
-def test_parse_model_choice_positions_survive_length_changing_uppercasing() -> None:
-    """``str.upper`` can change a string's length ("ß" -> "SS"), so the NONE scan
-    must run on the original text or its offsets drift against the letter
-    positions and the wrong signal is taken as the last one.
-
-    Seven "ß" before the NONE shift its .upper() offset past a letter named six
-    characters after it.
+def test_last_answer_signal_finds_none_after_a_szlig_heavy_prefix() -> None:
+    """``str.upper()`` can change a string's length ("ß" -> "SS"); the NONE scan
+    must run directly on the original text with ``re.IGNORECASE``, never
+    against an uppercased copy, or a long enough case-folding prefix could
+    shift a naive offset-based scan past the token entirely.
     """
-    raw = "Straße Maße Größe Füße Süße Soße Fuß: none. B"
-    assert aitk_translator._parse_model_choice(raw, "ABCD") == "B"
+    raw = "Straße Maße Größe Füße Süße Soße Fuß: none of them match"
+    assert aitk_translator._last_answer_signal(raw, "ABCD") == "NONE"
 
 
 def test_last_answer_signal_returns_the_last_valid_letter() -> None:
     assert aitk_translator._last_answer_signal("I see A here, but B is better", "ABCD") == "B"
 
 
-def test_last_answer_signal_prefers_a_later_none_over_an_earlier_letter() -> None:
+def test_last_answer_signal_is_ambiguous_when_both_a_letter_and_none_are_present() -> None:
+    """A rejection-then-letter ("Neither A nor B match; none of them.") and a
+    letter-then-rejection ("B is the best match. None of the others match.")
+    are mirror images of each other; no positional rule can tell which one
+    the model meant, so carrying both kinds of signal is ambiguous and must
+    be resolved by asking again, not by picking whichever came last.
+    """
     assert (
-        aitk_translator._last_answer_signal("Neither A nor B match; none of them.", "ABCD")
-        == "NONE"
+        aitk_translator._last_answer_signal("Neither A nor B match; none of them.", "ABCD") is None
+    )
+    assert (
+        aitk_translator._last_answer_signal(
+            "B is the best match. None of the others match.", "ABCD"
+        )
+        is None
     )
 
 

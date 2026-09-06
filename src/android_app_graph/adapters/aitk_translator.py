@@ -330,33 +330,36 @@ def _reads_as_article(letter: str, text: str, start: int, end: int) -> bool:
 
 
 def _last_answer_signal(text: str, valid_letters: str) -> str | None:
-    """Return the last answer signal in free text: a named letter or "NONE".
+    """Return free text's one answer signal -- a named letter or "NONE" -- or
+    ``None`` when the text carries no signal, or carries both kinds.
 
-    The last signal wins, whether that is a named letter or a "NONE" rejection,
-    because a model states its conclusion last ("None of the others fit, so B"
-    answers B; "Neither A nor B match; none of them." answers NONE). Uppercase
-    letters are scanned in the original case, so .upper() cannot turn a
-    lowercase article ("a") into a false option letter.
+    The parser decides only when the reply carries one kind of answer signal:
+    when only letters are present, the last one wins, because a model states
+    its conclusion last ("None of the others fit, so B" answers B); when only
+    "NONE" is present, it answers NONE. When a reply carries both a letter and
+    a "NONE" -- "B is the best match. None of the others match." as much as
+    "None of the others fit, so B" -- their order carries no reliable meaning
+    and no text rule can tell a rejection-then-letter from a
+    letter-then-rejection, so the reply is ambiguous: this returns ``None``,
+    which sends the caller back to the strict-format retry (asking for
+    exactly one letter or NONE) instead of guessing.
     """
-    last_letter_pos = -1
+    has_letter = False
     last_letter = ""
     for letter_match in re.finditer(r"\b([A-Z])\b", text):
         letter = as_str(letter_match.group(1), "")
         if _reads_as_article(letter, text, letter_match.start(), letter_match.end()):
             continue
         if letter in valid_letters:
-            last_letter_pos, last_letter = letter_match.start(), letter
+            has_letter, last_letter = True, letter
 
-    last_none_pos = -1
-    # Scanned on the original text, not its .upper() copy: upper-casing can change
-    # a string's length (e.g. "ß" -> "SS"), which would shift the offsets compared
-    # against the letter positions above.
-    for none_match in re.finditer(r"\bNONE\b", text, re.IGNORECASE):
-        last_none_pos = none_match.start()
+    has_none = re.search(r"\bNONE\b", text, re.IGNORECASE) is not None
 
-    if last_letter_pos == -1 and last_none_pos == -1:
+    if has_letter and has_none:
         return None
-    return "NONE" if last_none_pos > last_letter_pos else last_letter
+    if has_none:
+        return "NONE"
+    return last_letter or None
 
 
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
