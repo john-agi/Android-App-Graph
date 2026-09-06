@@ -50,7 +50,7 @@ from android_app_graph.embedding_cache import (
     load_image_embeddings,
     save_image_embeddings,
 )
-from android_app_graph.payloads import as_list, as_str, as_str_dict
+from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
 from android_app_graph.utils import make_client, resolve_env
 from android_app_graph.utils.vlm_utils import (
     build_image_message,
@@ -956,66 +956,67 @@ class UIKobeV2Translator(BaseTranslator):
                     merged.setdefault(key, change)
         return self._format_schema_delta(merged)
 
-    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
-        """Build the option list for the DECIDE prompt."""
-        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        options: list[_Option] = []
-        lines: list[str] = []
-        idx = 0
+    def _build_self_loop_candidates(self, G: nx.DiGraph, node_id: str) -> list[tuple[_Option, str]]:
+        """Return (option, menu line) pairs for the node's self-loop, if any.
 
-        letter = letters[idx]
-        options.append({"letter": letter, "type": "done"})
-        lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
-        idx += 1
+        Each pair's option has no "letter" yet: the final letter depends on how
+        many candidates from here and ``_build_neighbor_candidates`` survive the
+        26-entry cap in ``_build_options``.
+        """
+        if not G.has_edge(node_id, node_id):
+            return []
+        edge_data = G[node_id][node_id]
+        templates = edge_data.get("instruction_templates", [])
+        observations = edge_data.get("target_observations", [])
+        candidates: list[tuple[_Option, str]] = []
 
-        if G.has_edge(node_id, node_id):
-            edge_data = G[node_id][node_id]
-            templates = edge_data.get("instruction_templates", [])
-            observations = edge_data.get("target_observations", [])
+        if templates:
+            for tmpl in templates:
+                tmpl_text, obs_text = self._unpack_template(tmpl)
+                effect = self._edge_effect_hint(edge_data)
+                option: _Option = {
+                    "letter": "",
+                    "type": "self_loop",
+                    "node": node_id,
+                    "instruction": tmpl_text,
+                    "effect": effect,
+                }
+                hint = f'Stay here — "{tmpl_text}"'
+                if obs_text:
+                    hint += f" → {obs_text}"
+                if effect:
+                    hint += f" | changes: {effect}"
+                candidates.append((option, hint))
+        else:
+            for i, raw_instr in enumerate(edge_data.get("instructions", [])):
+                instr = as_str(raw_instr, "")
+                effect = self._edge_effect_hint(edge_data, i)
+                option: _Option = {
+                    "letter": "",
+                    "type": "self_loop",
+                    "node": node_id,
+                    "instruction": instr,
+                    "effect": effect,
+                }
+                hint = f'Stay here — "{instr}"'
+                if i < len(observations) and observations[i]:
+                    hint += f" → {observations[i]}"
+                if effect:
+                    hint += f" | changes: {effect}"
+                candidates.append((option, hint))
 
-            if templates:
-                for tmpl in templates:
-                    letter = letters[idx]
-                    tmpl_text, obs_text = self._unpack_template(tmpl)
-                    effect = self._edge_effect_hint(edge_data)
-                    options.append(
-                        {
-                            "letter": letter,
-                            "type": "self_loop",
-                            "node": node_id,
-                            "instruction": tmpl_text,
-                            "effect": effect,
-                        }
-                    )
-                    hint = f'{letter}) Stay here — "{tmpl_text}"'
-                    if obs_text:
-                        hint += f" → {obs_text}"
-                    if effect:
-                        hint += f" | changes: {effect}"
-                    lines.append(hint)
-                    idx += 1
-            else:
-                for i, raw_instr in enumerate(edge_data.get("instructions", [])):
-                    letter = letters[idx]
-                    instr = as_str(raw_instr, "")
-                    effect = self._edge_effect_hint(edge_data, i)
-                    options.append(
-                        {
-                            "letter": letter,
-                            "type": "self_loop",
-                            "node": node_id,
-                            "instruction": instr,
-                            "effect": effect,
-                        }
-                    )
-                    hint = f'{letter}) Stay here — "{instr}"'
-                    if i < len(observations) and observations[i]:
-                        hint += f" → {observations[i]}"
-                    if effect:
-                        hint += f" | changes: {effect}"
-                    lines.append(hint)
-                    idx += 1
+        return candidates
 
+    def _build_neighbor_candidates(
+        self, G: nx.DiGraph, node_id: str
+    ) -> list[tuple[int, _Option, str]]:
+        """Return (edge visit_count, option, menu line) triples for each neighbour.
+
+        ``visit_count`` is only used to rank candidates when ``_build_options``
+        must drop some to fit the 26-entry cap; the option itself carries no
+        "letter" yet, for the same reason as ``_build_self_loop_candidates``.
+        """
+        candidates: list[tuple[int, _Option, str]] = []
         for _, raw_neighbor, edge_data in G.out_edges(node_id, data=True):
             neighbor = str(raw_neighbor)
             if neighbor == node_id:
@@ -1035,24 +1036,83 @@ class UIKobeV2Translator(BaseTranslator):
                 if observations:
                     obs = as_str(observations[0], "")
 
-            letter = letters[idx]
             effect = self._edge_effect_hint(edge_data, 0)
-            options.append(
-                {
-                    "letter": letter,
-                    "type": "neighbor",
-                    "node": neighbor,
-                    "instruction": instr,
-                    "description": neighbor_desc,
-                    "effect": effect,
-                }
-            )
+            option: _Option = {
+                "letter": "",
+                "type": "neighbor",
+                "node": neighbor,
+                "instruction": instr,
+                "description": neighbor_desc,
+                "effect": effect,
+            }
             edge_hint = f' — "{instr}"' if instr else ""
             if obs:
                 edge_hint += f" → {obs}"
             if effect:
                 edge_hint += f" | changes: {effect}"
-            lines.append(f'{letter}) Go to "{neighbor_desc}"{edge_hint}')
+            line = f'Go to "{neighbor_desc}"{edge_hint}'
+            visit_count = as_int(edge_data.get("visit_count")) or 0
+            candidates.append((visit_count, option, line))
+        return candidates
+
+    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
+        """Build the option list for the DECIDE prompt.
+
+        The menu is lettered A-Z, so it holds at most 26 entries. DONE and FREE
+        always take one slot each; the remaining 24 go to self-loop instructions
+        and neighbours. A node with more candidates than that would otherwise
+        index past "Z" and raise IndexError out of to_agent, so the least useful
+        candidates are dropped instead: self-loop instructions have no
+        popularity signal of their own and keep graph order (trimmed only if
+        they alone exceed the budget), while neighbours are kept by edge
+        visit_count descending, then graph order — the closest available proxy
+        for "the agent found this transition useful before".
+        """
+        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        max_middle_options = len(letters) - 2  # reserve DONE and FREE
+
+        self_loop_candidates = self._build_self_loop_candidates(G, node_id)
+        neighbor_candidates = self._build_neighbor_candidates(G, node_id)
+
+        kept_self_loop = self_loop_candidates
+        kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
+        total_middle = len(self_loop_candidates) + len(neighbor_candidates)
+
+        if total_middle > max_middle_options:
+            self_loop_budget = min(len(self_loop_candidates), max_middle_options)
+            kept_self_loop = self_loop_candidates[:self_loop_budget]
+            neighbor_budget = max_middle_options - len(kept_self_loop)
+            ranked = sorted(
+                range(len(neighbor_candidates)),
+                key=lambda i: (-neighbor_candidates[i][0], i),
+            )
+            keep_indices = sorted(ranked[:neighbor_budget])
+            kept_neighbors = [
+                (neighbor_candidates[i][1], neighbor_candidates[i][2]) for i in keep_indices
+            ]
+            logger.warning(
+                "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
+                "dropped %d least-useful self-loop instruction(s)/neighbour(s).",
+                node_id,
+                total_middle,
+                max_middle_options,
+                total_middle - len(kept_self_loop) - len(kept_neighbors),
+            )
+
+        options: list[_Option] = []
+        lines: list[str] = []
+        idx = 0
+
+        letter = letters[idx]
+        options.append({"letter": letter, "type": "done"})
+        lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
+        idx += 1
+
+        for option, line in (*kept_self_loop, *kept_neighbors):
+            letter = letters[idx]
+            option["letter"] = letter
+            options.append(option)
+            lines.append(f"{letter}) {line}")
             idx += 1
 
         letter = letters[idx]

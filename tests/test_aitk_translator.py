@@ -872,6 +872,46 @@ def _use_model(
     return client
 
 
+def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours(
+    translator: aitk_translator.UIKobeV2Translator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A node with more self-loop instructions plus neighbours than fit in a
+
+    26-letter menu must not raise IndexError out of to_agent: DONE and FREE
+    always keep their slot, and the 24 remaining slots keep the most-visited
+    neighbours (edge visit_count descending) rather than an arbitrary subset.
+    """
+    G = translator._graphs["demo"]
+    for i in range(30):
+        neighbor = f"n{i}"
+        G.add_node(neighbor, page_description=f"screen {i}")
+        G.add_edge(
+            "home",
+            neighbor,
+            instructions=[f"go to {i}"],
+            target_observations=[],
+            instruction_templates=[],
+            visit_count=i,  # n29 is visited most, n0 least
+        )
+
+    with caplog.at_level("WARNING"):
+        text, options = translator._build_options(G, "home")
+
+    assert len(options) == 26
+    assert options[0]["type"] == "done"
+    assert options[-1]["type"] == "free"
+    kept_neighbors = {opt["node"] for opt in options if opt["type"] == "neighbor"}
+    # The self-loop instruction from the "demo" fixture graph takes one slot,
+    # leaving 23 for the 31 candidate neighbours (30 new + the fixture's own
+    # "results", tied at visit_count 0 with n0-n6 and dropped along with them).
+    assert len(kept_neighbors) == 23
+    assert kept_neighbors == {f"n{i}" for i in range(7, 30)}
+    assert "results" not in kept_neighbors
+    assert text.count("\n") == len(options) - 1
+    assert "home" in caplog.text
+
+
 def test_record_info_stores_what_the_model_read(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
