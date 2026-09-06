@@ -12,9 +12,6 @@ the pull request.
 
 - `uv add --dev <tool>`; heavy optional tooling gets its own `--group`, like
   `mutation`.
-- `uv add` writes `>=<latest>`, and `exclude-newer = "3 days"` hides releases
-  younger than three days. If the latest release is that young, lower the floor
-  by hand to the newest older release. Never shorten `exclude-newer`.
 - Commit `pyproject.toml` and `uv.lock` together.
 
 ## 2. Configure
