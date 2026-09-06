@@ -209,6 +209,39 @@ def test_precompute_finds_screenshots_under_the_audited_stem_directory(
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_precompute_finds_every_node_in_a_partially_audited_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audited graph is split across two screenshot directories: only the
+    nodes ``GraphManager.save_graph`` re-explored land in ``<stem>_screenshots``
+    (here one of three), and the rest stay under the app-name directory. Every
+    node must be found, not just the re-explored one.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo_audited.json").write_text(
+        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": "s2_cart"}]}),
+        encoding="utf-8",
+    )
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
+    (app_screenshots / "s1_detail.png").write_bytes(_SCREENSHOT)
+    (app_screenshots / "s2_cart.png").write_bytes(_SCREENSHOT)
+    stem_screenshots = app_dir / "demo_audited_screenshots"
+    stem_screenshots.mkdir()
+    (stem_screenshots / "s1_detail.png").write_bytes(_SCREENSHOT)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["skipped_missing_screenshot"] == 0
+    assert summary["reference_screenshots"] == 3
+    assert summary["computed"] == 3
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_computes_caches_and_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

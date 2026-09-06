@@ -6,6 +6,7 @@ drift on what counts as a usable cached vector or how a failed call is retried.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from pathlib import Path
@@ -81,25 +82,33 @@ def compute_embedding_with_retry(
     )
 
 
-def reference_screenshots_dir(graph_path: Path) -> Path:
-    """Return the directory holding a graph's per-node reference screenshots.
+def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
+    """Return one node's reference screenshot path, or ``None`` when it has none.
 
-    ``GraphManager.save_graph`` writes re-explored screenshots under
-    ``<stem>_screenshots`` (``demo_audited_screenshots`` for an audited graph),
-    so that directory is preferred; a graph nobody has re-explored keeps its
-    screenshots under the app directory's own name instead. Both runtime graph
-    loading and offline precomputation must resolve to the same directory, or
-    one sees screenshots the other reports missing.
+    ``GraphManager.save_graph`` writes only the nodes it re-explored into
+    ``<stem>_screenshots`` (``demo_audited_screenshots`` for an audited graph);
+    every other node's screenshot stays where it always was, under the app
+    directory's own name (``<parent.name>_screenshots``). An audited graph is
+    thus split across both directories, so each node is looked up on its own
+    rather than picking one directory for the whole graph. Both runtime graph
+    loading and offline precomputation must resolve to the same path, or one
+    sees a screenshot the other reports missing.
     """
-    stem_dir = graph_path.parent / f"{graph_path.stem}_screenshots"
-    if stem_dir.exists():
-        return stem_dir
-    return graph_path.parent / f"{graph_path.parent.name}_screenshots"
+    stem_path = graph_path.parent / f"{graph_path.stem}_screenshots" / f"{node_id}.png"
+    if stem_path.exists():
+        return stem_path
+    app_path = graph_path.parent / f"{graph_path.parent.name}_screenshots" / f"{node_id}.png"
+    if app_path.exists():
+        return app_path
+    return None
 
 
-def reference_screenshot_path(graph_path: Path, node_id: str) -> Path:
-    """Return one node's reference screenshot path under ``reference_screenshots_dir``."""
-    return reference_screenshots_dir(graph_path) / f"{node_id}.png"
+def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
+    """Return one node's reference screenshot as base64, or ``None`` when it has none."""
+    screenshot_path = reference_screenshot_path(graph_path, node_id)
+    if screenshot_path is None:
+        return None
+    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
 
 
 def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:

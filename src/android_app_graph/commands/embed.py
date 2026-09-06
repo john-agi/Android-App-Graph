@@ -7,7 +7,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import logging
 import os
@@ -21,7 +20,7 @@ from android_app_graph.embedding_cache import (
     compute_embedding_with_retry,
     iter_graph_files,
     load_image_embeddings,
-    reference_screenshot_path,
+    reference_screenshot_b64,
     save_image_embeddings,
 )
 from android_app_graph.utils import resolve_env
@@ -37,13 +36,6 @@ def load_graph_json(graph_path: Path) -> dict[str, Any]:
         msg = f"Graph JSON must be an object: {graph_path}"
         raise TypeError(msg)
     return data
-
-
-def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
-    screenshot_path = reference_screenshot_path(graph_path, node_id)
-    if not screenshot_path.exists():
-        return None
-    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
 
 
 def precompute_graph_image_embeddings(

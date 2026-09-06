@@ -26,7 +26,6 @@ Loop-based architecture with a single small model (7-9B):
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
@@ -48,7 +47,7 @@ from android_app_graph.embedding_cache import (
     compute_embedding_with_retry,
     iter_graph_files,
     load_image_embeddings,
-    reference_screenshots_dir,
+    reference_screenshot_b64,
     save_image_embeddings,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
@@ -228,17 +227,13 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
-    screenshots_dir = reference_screenshots_dir(path)
     G = nx.DiGraph()
     node_ids: set[str] = set()
     for node_data in data.get("nodes", []):
         if not isinstance(node_data.get("id"), str):
             raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
         node_id = node_data["id"]
-        ref_screenshot = None
-        img_path = screenshots_dir / f"{node_id}.png"
-        if img_path.exists():
-            ref_screenshot = base64.b64encode(img_path.read_bytes()).decode("ascii")
+        ref_screenshot = reference_screenshot_b64(path, node_id)
         # `.get(key, default)` keeps a present-but-null value, so every field a reader
         # iterates or indexes is narrowed here once rather than at each read site.
         G.add_node(
