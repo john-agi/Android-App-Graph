@@ -204,7 +204,6 @@ def compute_missing_image_embeddings(
     """
     computed = 0
     failed = 0
-    updated = False
     try:
         for node_id, screenshot_b64 in candidates:
             try:
@@ -217,7 +216,6 @@ def compute_missing_image_embeddings(
                     app_name=app_name,
                     node_id=node_id,
                 )
-                updated = True
                 computed += 1
                 logger.info(
                     "[GRAPH] %s/%s: computed image embedding in %.1fs",
@@ -234,7 +232,7 @@ def compute_missing_image_embeddings(
                     node_id,
                 )
     finally:
-        if updated:
+        if computed:
             try:
                 save_image_embeddings(graph_path, embeddings)
             except OSError:
