@@ -1334,7 +1334,7 @@ class UIKobeV2Translator(BaseTranslator):
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
-        if not history["actions"]:
+        if not history.get("actions", []):
             self._reset_task_state()
         return self._step(task, state, history)
 

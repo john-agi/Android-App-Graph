@@ -1362,6 +1362,19 @@ def test_to_agent_opens_the_app_on_the_first_turn(
     assert translator._app_name == "demo"
 
 
+def test_to_agent_without_an_actions_key_resets_state(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    """``_step`` reads ``history.get("actions", [])``; ``to_agent`` must match it
+    instead of indexing ``history["actions"]``, or a history without that key
+    (a first turn AITK sends bare) raises a KeyError before ``_step`` even runs.
+    """
+    state, _ = _step_payload()
+    response = json.loads(translator.to_agent("Open demo and buy shoes", state, {}))
+    assert response["aitk_action"] == {"action": "open", "app": "demo"}
+    assert translator._app_name == "demo"
+
+
 def test_to_agent_runs_the_loop(
     monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
