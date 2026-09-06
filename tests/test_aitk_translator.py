@@ -88,6 +88,9 @@ def test_extract_packages_from_empty_graph() -> None:
         ("None of the candidates match. A login form is visible.", "NONE"),
         ("NONE. A settings page is showing.", "NONE"),
         ("A.", "A"),
+        ("Neither A nor B match; none of them.", "NONE"),
+        ("B is close, but none match", "NONE"),
+        ("b is the match", None),
     ],
 )
 def test_parse_model_choice(raw: str, expected: str | None) -> None:
@@ -549,43 +552,34 @@ class _FakeClient:
         self.chat = _FakeChat(self.completions)
 
 
-def test_chat_completion_content_stops_when_the_caller_breaks() -> None:
-    """Breaking out of the loop must not pull (or pay for) a second completion."""
+def test_chat_completion_content_returns_the_reply_content() -> None:
     client = _FakeClient("first", "second")
-    seen = []
-    for attempt, content, can_retry in aitk_translator._chat_completion_content(
+    content = aitk_translator._chat_completion_content(
         client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
         model="m",
-    ):
-        seen.append((attempt, content, can_retry))
-        break
-    assert seen == [(0, "first", True)]
-    assert len(client.completions.calls) == 1
-
-
-def test_chat_completion_content_yields_every_attempt_when_the_caller_exhausts_it() -> None:
-    client = _FakeClient("first", "second")
-    seen = list(
-        aitk_translator._chat_completion_content(
-            client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-            model="m",
-        )
     )
-    assert seen == [(0, "first", True), (1, "second", False)]
-    assert len(client.completions.calls) == 2
+    assert content == "first"
+
+
+def test_chat_completion_content_makes_exactly_one_completion_call() -> None:
+    """Retrying is the caller's job now (``_ask_with_screenshot``); a single call
+    must never loop internally even when more replies are queued up.
+    """
+    client = _FakeClient("first", "second")
+    aitk_translator._chat_completion_content(
+        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        model="m",
+    )
+    assert len(client.completions.calls) == 1
 
 
 def test_chat_completion_content_turns_a_missing_body_into_an_empty_string() -> None:
     client = _FakeClient(None)
-    first = next(
-        iter(
-            aitk_translator._chat_completion_content(
-                client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-                model="m",
-            )
-        )
+    content = aitk_translator._chat_completion_content(
+        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        model="m",
     )
-    assert first == (0, "", True)
+    assert content == ""
 
 
 class _FakeResponseWithNoChoices:
@@ -610,18 +604,14 @@ class _FakeClientWithNoChoices:
 
 def test_chat_completion_content_turns_an_empty_choices_list_into_empty_content() -> None:
     """A filtered or refused completion can come back with zero choices; that must
-    be empty content the parse-retry handles, not an IndexError out of the loop.
+    be empty content the parse-retry handles, not an IndexError.
     """
     client = _FakeClientWithNoChoices()
-    first = next(
-        iter(
-            aitk_translator._chat_completion_content(
-                client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-                model="m",
-            )
-        )
+    content = aitk_translator._chat_completion_content(
+        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        model="m",
     )
-    assert first == (0, "", True)
+    assert content == ""
 
 
 def test_make_no_proxy_client_defaults() -> None:
@@ -1381,6 +1371,38 @@ def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
     node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
     assert node_id == "results"
     assert len(client.completions.calls) == 2
+
+
+def test_identify_node_retry_appends_the_parse_hint_and_recovers(
+    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+) -> None:
+    """ "A is the best match" reads as the sentence-initial article, not a pick, and
+    is the most common shape of a correct answer from a model that ignores the
+    requested format (A is always the top-similarity IDENTIFY candidate). The
+    retry must repeat the identical prompt with a strict-format reminder appended
+    rather than guess, so the second attempt (still "A") is what recovers it.
+    """
+    client = _use_model(monkeypatch, identifiable, "A is the best match", "A")
+    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+
+    assert node_id == "home"
+    assert len(client.completions.calls) == 2
+    first_text = client.completions.calls[0]["messages"][0]["content"][0]["text"]
+    second_text = client.completions.calls[1]["messages"][0]["content"][0]["text"]
+    assert aitk_translator.V2_PARSE_RETRY_HINT not in first_text
+    assert second_text.endswith(aitk_translator.V2_PARSE_RETRY_HINT)
+
+
+def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
+    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+) -> None:
+    client = _use_model(monkeypatch, identifiable, "A")
+    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+
+    assert node_id == "home"
+    assert len(client.completions.calls) == 1
+    text = client.completions.calls[0]["messages"][0]["content"][0]["text"]
+    assert aitk_translator.V2_PARSE_RETRY_HINT not in text
 
 
 def test_identify_node_without_candidates_in_the_current_package(

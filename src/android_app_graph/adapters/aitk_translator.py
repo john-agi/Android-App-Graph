@@ -30,7 +30,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, override
@@ -68,6 +68,12 @@ _SEP = "-" * 60
 _SEP_THICK = "=" * 60
 V2_CHAT_MAX_TOKENS = 3000
 V2_PARSE_RETRIES = 1
+# Format-agnostic: it is appropriate whether the caller's parse expects a letter,
+# JSON, or free text, so one reminder covers every _ask_with_screenshot caller.
+V2_PARSE_RETRY_HINT = (
+    "Your previous reply could not be parsed. Reply in exactly the format "
+    "requested above and nothing else."
+)
 
 _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
@@ -316,22 +322,31 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if choice in valid_letters:
             return choice
 
-    # Free text beyond an explicit "Answer:"/</think> form: uppercase letters are
-    # scanned in the original case, so .upper() cannot turn a lowercase article
-    # ("a") into a false option letter. A named letter outranks a NONE found
-    # anywhere in the text, since a model that names a letter has answered even
-    # if it also explained a rejection ("None of the others fit, so B").
-    for letter_match in reversed(list(re.finditer(r"\b([A-Z])\b", text))):
+    # Free text beyond an explicit "Answer:"/</think> form: the last answer signal
+    # in the text wins, whether that is a named letter or a "NONE" rejection,
+    # because a model states its conclusion last ("None of the others fit, so B"
+    # answers B; "Neither A nor B match; none of them." answers NONE). Uppercase
+    # letters are scanned in the original case, so .upper() cannot turn a
+    # lowercase article ("a") into a false option letter.
+    last_letter_pos = -1
+    last_letter = ""
+    for letter_match in re.finditer(r"\b([A-Z])\b", text):
         letter = as_str(letter_match.group(1), "")
         # A standalone "A"/"I" immediately followed by a lowercase word is the
-        # English article or pronoun, not a named answer letter.
+        # English article or pronoun, not a named answer letter; that case is left
+        # to the strict-format retry (V2_PARSE_RETRY_HINT) rather than guessed.
         if letter in ("A", "I") and re.match(r"\s+[a-z]", text[letter_match.end() :]):
             continue
         if letter in valid_letters:
-            return letter
-    if re.search(r"\bNONE\b", answer):
-        return "NONE"
-    return None
+            last_letter_pos, last_letter = letter_match.start(), letter
+
+    last_none_pos = -1
+    for none_match in re.finditer(r"\bNONE\b", answer):
+        last_none_pos = none_match.start()
+
+    if last_letter_pos == -1 and last_none_pos == -1:
+        return None
+    return "NONE" if last_none_pos > last_letter_pos else last_letter
 
 
 def _parse_record_output(raw: str) -> str:
@@ -449,17 +464,15 @@ def _parse_decide_output(raw: str) -> dict[str, Any] | None:
 def _chat_completion_content(
     client: OpenAI,
     **kwargs: Any,
-) -> Iterator[tuple[int, str, bool]]:
-    """Yield chat completion content, retrying at the caller's parse boundary."""
-    for attempt in range(V2_PARSE_RETRIES + 1):
-        resp = call_with_retry(
-            "[API] chat completion",
-            lambda: client.chat.completions.create(**kwargs),
-        )
-        # A filtered or refused completion can come back with zero choices; that
-        # is empty content for the parse-retry to handle, not an IndexError.
-        content = as_str(resp.choices[0].message.content, "") if resp.choices else ""
-        yield attempt, content, attempt < V2_PARSE_RETRIES
+) -> str:
+    """Run one chat completion and return its content."""
+    resp = call_with_retry(
+        "[API] chat completion",
+        lambda: client.chat.completions.create(**kwargs),
+    )
+    # A filtered or refused completion can come back with zero choices; that
+    # is empty content for the parse-retry to handle, not an IndexError.
+    return as_str(resp.choices[0].message.content, "") if resp.choices else ""
 
 
 def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
@@ -708,25 +721,30 @@ class UIKobeV2Translator(BaseTranslator):
         ``parse`` must return ``None`` to request a retry; any other value
         (including a falsy one such as ``{}`` or ``""``) is accepted as success.
         Pass ``screenshot`` to ground the question in a screenshot; ``None`` sends
-        the prompt as plain text.
+        the prompt as plain text. A retry resends the identical prompt at
+        temperature 0.0, so a reply the parser could not read would otherwise come
+        back the same way; every attempt after the first appends a strict-format
+        reminder (``V2_PARSE_RETRY_HINT``) to give the retry an actual chance.
         """
-        content: str | list[Any] = prompt
-        if screenshot is not None:
-            content = [{"type": "text", "text": prompt}, build_image_message(screenshot)]
-
         result: T | None = None
         raw = ""
-        for attempt, raw, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[{"role": "user", "content": content}],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
+        for attempt in range(V2_PARSE_RETRIES + 1):
+            text = prompt if attempt == 0 else f"{prompt}\n\n{V2_PARSE_RETRY_HINT}"
+            content: str | list[Any] = text
+            if screenshot is not None:
+                content = [{"type": "text", "text": text}, build_image_message(screenshot)]
+
+            raw = _chat_completion_content(
+                self.model_client,
+                model=self.model_name,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=V2_CHAT_MAX_TOKENS,
+                temperature=0.0,
+            )
             result = parse(raw)
             if result is not None:
                 return result
-            if can_retry:
+            if attempt < V2_PARSE_RETRIES:
                 logger.warning("%s parse failed on attempt %d; retrying", tag, attempt + 1)
         logger.warning(
             "%s all parse attempts exhausted. raw_len=%d raw_prefix=%r", tag, len(raw), raw[:160]
