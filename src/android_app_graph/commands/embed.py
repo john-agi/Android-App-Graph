@@ -17,59 +17,16 @@ from typing import Any
 
 import yaml
 
-from android_app_graph.payloads import as_float_list, as_str_dict
+from android_app_graph.embedding_cache import (
+    compute_embedding_with_retry,
+    iter_graph_files,
+    load_image_embeddings,
+    save_image_embeddings,
+)
 from android_app_graph.utils import resolve_env
 from android_app_graph.utils.logging import setup_logging
-from android_app_graph.utils.vlm_utils import get_gemini_native_image_embedding
 
 logger = logging.getLogger(__name__)
-
-IMAGE_EMBEDDING_RETRIES = 2
-IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
-
-
-def image_embeddings_path(graph_path: Path) -> Path:
-    return graph_path.with_suffix(".image_emb.json")
-
-
-def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
-    """Return the cached embeddings for a graph, or ``{}`` when none were written.
-
-    The payload is narrowed the way ``GraphManager.load_graph`` narrows its own
-    companion embeddings file: a malformed vector becomes ``[]`` rather than
-    propagating ``Any`` into the caller.
-    """
-    emb_path = image_embeddings_path(graph_path)
-    if emb_path.exists():
-        with emb_path.open("r", encoding="utf-8") as f:
-            return {
-                node_id: as_float_list(vector)
-                for node_id, vector in as_str_dict(json.load(f)).items()
-            }
-    return {}
-
-
-def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) -> None:
-    with image_embeddings_path(graph_path).open("w", encoding="utf-8") as f:
-        json.dump(embeddings, f, ensure_ascii=False)
-
-
-def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
-    selected: list[tuple[str, Path]] = []
-    app_dirs = (
-        [graph_dir / app_name] if app_name else sorted(p for p in graph_dir.iterdir() if p.is_dir())
-    )
-    for app_dir in app_dirs:
-        if not app_dir.is_dir():
-            continue
-        name = app_dir.name
-        audited = app_dir / f"{name}_audited.json"
-        plain = app_dir / f"{name}.json"
-        if audited.exists():
-            selected.append((name, audited))
-        elif plain.exists():
-            selected.append((name, plain))
-    return selected
 
 
 def load_graph_json(graph_path: Path) -> dict[str, Any]:
@@ -86,44 +43,6 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     if not screenshot_path.exists():
         return None
     return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
-
-
-def compute_embedding_with_retry(
-    api_key: str,
-    screenshot_b64: str,
-    *,
-    model: str,
-    base_url: str,
-    app_name: str,
-    node_id: str,
-) -> list[float]:
-    attempts = IMAGE_EMBEDDING_RETRIES + 1
-    for attempt in range(attempts):
-        try:
-            return get_gemini_native_image_embedding(
-                api_key,
-                screenshot_b64,
-                model=model,
-                base_url=base_url,
-            )
-        # A retry loop is a boundary: re-raise on the last attempt,
-        # log the traceback on every earlier one.
-        except Exception:
-            if attempt >= attempts - 1:
-                raise
-            delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            logger.warning(
-                "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d).",
-                app_name,
-                node_id,
-                delay,
-                attempt + 1,
-                attempts - 1,
-                exc_info=True,
-            )
-            time.sleep(delay)
-    msg = "compute_embedding_with_retry exhausted its attempts without raising"
-    raise RuntimeError(msg)
 
 
 def precompute_graph_image_embeddings(

@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from aitk.translators.android_app_graph_v2 import UIKobeV2Translator
 from android_world.agents import base_agent
 from android_world.env import adb_utils, interface, json_action
 from PIL import Image
+
+from android_app_graph.adapters.aitk_translator import UIKobeV2Translator
 
 if TYPE_CHECKING:
     import numpy as np

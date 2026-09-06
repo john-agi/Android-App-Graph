@@ -29,34 +29,38 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import math
 import os
 import re
-import subprocess
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, override
+from typing import Any, Literal, NotRequired, TypedDict, override
 
 import httpx
 import networkx as nx
 from aitk.translators.base import BaseTranslator
 from openai import OpenAI
 
-from android_app_graph.payloads import as_float_list, as_str, as_str_dict
-from android_app_graph.utils import resolve_env
+from android_app_graph import device
+from android_app_graph.android_packages import package_from_activity
+from android_app_graph.embedding_cache import (
+    compute_embedding_with_retry,
+    iter_graph_files,
+    load_image_embeddings,
+    save_image_embeddings,
+)
+from android_app_graph.payloads import as_list, as_str, as_str_dict
+from android_app_graph.utils import make_client, resolve_env
 from android_app_graph.utils.vlm_utils import (
+    build_image_message,
+    cosine_similarity,
     describe_page_and_state,
-    get_gemini_native_image_embedding,
     predict_next_action,
     strip_json_fences,
 )
 
 logger = logging.getLogger("AITK - Android-App-Graph")
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
 
 _SEP = "-" * 60
 _SEP_THICK = "=" * 60
@@ -64,8 +68,42 @@ V2_CHAT_MAX_TOKENS = 3000
 V2_PARSE_RETRIES = 1
 V2_API_RETRIES = 2
 V2_API_RETRY_BASE_DELAY_SECONDS = 2.0
-RUNTIME_IMAGE_EMBEDDING_RETRIES = 2
-RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
+
+_OptionType = Literal["done", "self_loop", "neighbor", "free"]
+
+
+class _Option(TypedDict):
+    """One DECIDE menu entry, as built by ``_build_options``.
+
+    ``letter`` and ``type`` are set on every entry; the rest depend on the
+    option's type ("done" and "free" carry neither ``node`` nor
+    ``instruction``, a self-loop carries no ``description``, and so on).
+    """
+
+    letter: str
+    type: _OptionType
+    node: NotRequired[str]
+    instruction: NotRequired[str]
+    description: NotRequired[str]
+    effect: NotRequired[str]
+
+
+class _Decision(TypedDict):
+    """The outcome of ``_decide`` (and its free-action fallbacks in ``_step``).
+
+    ``type`` and ``instruction`` are set on every return path: a chosen option's
+    fields (which is where ``letter``/``node``/``description``/``effect`` come
+    from) plus a possibly-updated ``instruction``, or a "free" fallback with a
+    ``reason`` explaining why graph guidance was not used.
+    """
+
+    type: _OptionType
+    instruction: str
+    letter: NotRequired[str]
+    node: NotRequired[str]
+    description: NotRequired[str]
+    effect: NotRequired[str]
+    reason: NotRequired[str]
 
 
 NODE_IDENTIFY_PROMPT = """\
@@ -192,12 +230,12 @@ Think easily and briefly, under 10 sentences if needed. Reply with ONLY the \
 one-step instruction. No explanations."""
 
 
-def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict[str, Any]]:
+def _load_graph_from_json(path: Path) -> nx.DiGraph:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     if not isinstance(raw, dict):
         raise TypeError(f"Runtime graph JSON must be an object: {path}")
-    data = as_str_dict(raw)
+    data = raw
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
@@ -209,94 +247,45 @@ def _load_graph_from_json(path: Path) -> tuple[nx.DiGraph, dict[str, Any]]:
             screenshots_dir = base_screenshots_dir
     G = nx.DiGraph()
     for node_data in data.get("nodes", []):
-        node_id = str(node_data["id"])
+        if not isinstance(node_data.get("id"), str):
+            raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
+        node_id = node_data["id"]
         ref_screenshot = None
         img_path = screenshots_dir / f"{node_id}.png"
         if img_path.exists():
             ref_screenshot = base64.b64encode(img_path.read_bytes()).decode("ascii")
+        # `.get(key, default)` does not apply `default` to a present-but-null value, so
+        # every field a downstream reader iterates or indexes into is narrowed here, once,
+        # rather than at every read site.
         G.add_node(
             node_id,
-            activity=node_data.get("activity", ""),
-            page_description=node_data.get("page_description", ""),
-            state_schema=node_data.get("state_schema", {}),
-            last_detail_snapshot=node_data.get("last_detail_snapshot", {}),
+            activity=as_str(node_data.get("activity"), ""),
+            page_description=as_str(node_data.get("page_description"), ""),
+            state_schema=as_str_dict(node_data.get("state_schema")),
+            last_detail_snapshot=as_str_dict(node_data.get("last_detail_snapshot")),
             reference_screenshot=ref_screenshot,
             visit_count=node_data.get("visit_count", 0),
         )
     for edge_data in data.get("edges", []):
+        if not isinstance(edge_data.get("source"), str) or not isinstance(
+            edge_data.get("target"), str
+        ):
+            raise TypeError(
+                f"Runtime graph edge endpoints must be strings: {edge_data!r} in {path}"
+            )
         edge_attrs = {
             "actions": edge_data.get("actions", []),
-            "instructions": edge_data.get("instructions", []),
-            "instruction_templates": edge_data.get("instruction_templates", []),
-            "target_observations": edge_data.get("target_observations", []),
+            "instructions": as_list(edge_data.get("instructions")),
+            "instruction_templates": as_list(edge_data.get("instruction_templates")),
+            "target_observations": as_list(edge_data.get("target_observations")),
             "num_steps": edge_data.get("num_steps", []),
             "visit_count": edge_data.get("visit_count", 0),
         }
         if edge_data.get("schema_deltas"):
-            edge_attrs["schema_deltas"] = edge_data["schema_deltas"]
-        G.add_edge(str(edge_data["source"]), str(edge_data["target"]), **edge_attrs)
+            edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
+        G.add_edge(edge_data["source"], edge_data["target"], **edge_attrs)
 
-    return G, data
-
-
-def _load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
-    emb_path = _image_embeddings_path(graph_path)
-    if not emb_path.exists():
-        return {}
-    with open(emb_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    embeddings: dict[str, list[float]] = {}
-    for node_id, vector in as_str_dict(raw).items():
-        numbers = as_float_list(vector)
-        if numbers:
-            embeddings[node_id] = numbers
-    return embeddings
-
-
-def _image_embeddings_path(graph_path: Path) -> Path:
-    return graph_path.with_suffix(".image_emb.json")
-
-
-def _save_image_embeddings(graph_path: Path, G: nx.DiGraph) -> None:
-    embeddings = {
-        node_id: data["image_embedding"]
-        for node_id, data in G.nodes(data=True)
-        if data.get("image_embedding")
-    }
-    emb_path = _image_embeddings_path(graph_path)
-    with open(emb_path, "w", encoding="utf-8") as f:
-        json.dump(embeddings, f, ensure_ascii=False)
-
-
-def _iter_runtime_graph_files(graph_dir: Path) -> list[tuple[str, Path]]:
-    """Return one graph JSON per app, preferring audited graphs.
-
-    Runtime should not load audit reports, merge reports, or embedding sidecars.
-    The app name comes from the graph directory name so eboox_audited.json still
-    loads as app "eboox".
-    """
-    graph_files: list[tuple[str, Path]] = []
-    if not graph_dir.exists():
-        return graph_files
-
-    for app_dir in sorted(p for p in graph_dir.iterdir() if p.is_dir()):
-        app_name = app_dir.name
-        audited = app_dir / f"{app_name}_audited.json"
-        original = app_dir / f"{app_name}.json"
-        if audited.exists():
-            graph_files.append((app_name, audited))
-        elif original.exists():
-            graph_files.append((app_name, original))
-    return graph_files
-
-
-def _package_from_activity(activity: str) -> str:
-    if "/" in activity:
-        activity = activity.split("/", maxsplit=1)[0]
-    parts = activity.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[:3])
-    return activity
+    return G
 
 
 def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
@@ -304,22 +293,15 @@ def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
     for _, data in G.nodes(data=True):
         activity = data.get("activity", "")
         if activity:
-            packages.add(_package_from_activity(activity))
+            packages.add(package_from_activity(activity))
     return packages
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
 
 
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     answer = (raw or "").strip().upper()
     if answer == "NONE":
         return "NONE"
-    if answer in valid_letters:
+    if len(answer) == 1 and answer in valid_letters:
         return answer
 
     think_end = answer.rfind("</THINK>")
@@ -437,7 +419,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict):
-            return as_str_dict(obj)
+            return obj
     return None
 
 
@@ -447,7 +429,7 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return _extract_json_object(text)
-    return as_str_dict(parsed) if isinstance(parsed, dict) else None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _parse_decide_output(raw: str) -> dict[str, Any] | None:
@@ -485,18 +467,16 @@ def _call_with_retry[T](label: str, func: Callable[[], T]) -> T:
 
 def _chat_completion_content(
     client: OpenAI,
-    *,
-    parse_retries: int = V2_PARSE_RETRIES,
     **kwargs: Any,
 ) -> Iterator[tuple[int, str, bool]]:
     """Yield chat completion content, retrying at the caller's parse boundary."""
-    for attempt in range(parse_retries + 1):
+    for attempt in range(V2_PARSE_RETRIES + 1):
         resp = _call_with_retry(
             "chat completion",
             lambda: client.chat.completions.create(**kwargs),
         )
         content = as_str(resp.choices[0].message.content, "")
-        yield attempt, content, attempt < parse_retries
+        yield attempt, content, attempt < V2_PARSE_RETRIES
 
 
 def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
@@ -507,22 +487,14 @@ def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
     forwarded locally, so they must ignore HTTP(S)_PROXY.
     """
     cfg = cfg or {}
-    api_key = resolve_env(cfg.get("api_key")) or os.environ.get("OPENAI_API_KEY")
-    base_url = resolve_env(cfg.get("base_url"))
-    model = resolve_env(cfg.get("model")) or "gpt-4o"
     request_timeout = float(cfg.get("request_timeout", cfg.get("timeout", 60)))
     max_retries = int(cfg.get("max_retries", 0))
-
-    kwargs: dict[str, Any] = {
-        "api_key": api_key,
-        "http_client": httpx.Client(trust_env=False),
-        "timeout": request_timeout,
-        "max_retries": max_retries,
-    }
-    if base_url:
-        kwargs["base_url"] = base_url
-
-    return OpenAI(**kwargs), model
+    return make_client(
+        cfg,
+        http_client=httpx.Client(trust_env=False),
+        timeout=request_timeout,
+        max_retries=max_retries,
+    )
 
 
 class Memory:
@@ -564,9 +536,6 @@ class Memory:
                 lines.append(f"  {i}. {obs}")
         return "\n".join(lines) if lines else "(empty)"
 
-    def has_content(self) -> bool:
-        return bool(self.actions or self.info or self.observations)
-
 
 class UIKobeV2Translator(BaseTranslator):
     """Loop-based translator: identify → record → decide → execute."""
@@ -575,20 +544,25 @@ class UIKobeV2Translator(BaseTranslator):
         self,
         graph_dir: str = "graphs",
         vlm_config: dict[str, Any] | None = None,
-        history_window: int = 5,
         max_pixels: int = 1_000_000,
     ) -> None:
         super().__init__()
+        # Quiet the chatty per-request loggers of the HTTP libraries these clients use.
+        # Done here rather than at import time so importing this module has no global
+        # side effect; adapters may not import utils.logging under tach.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("openai").setLevel(logging.WARNING)
+
         self.graph_dir = Path(graph_dir)
-        self.history_window = history_window
+        # AITK forwards every translator_args key, and its own configs/controller.yaml
+        # sets max_pixels, so the constructor must accept it although this translator
+        # sends screenshots unresized.
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
 
         # The planner and the action agent share one model, configured under "action".
         self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
         self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
-        embedding_cfg = vlm_config.get("embedding") or {}
-        self.emb_model = resolve_env(embedding_cfg.get("model")) or "gemini-embedding-2-preview"
         image_embedding_cfg = vlm_config.get("image_embedding") or {}
         self.image_embedding_model = (
             resolve_env(image_embedding_cfg.get("model")) or "gemini-embedding-2"
@@ -615,7 +589,6 @@ class UIKobeV2Translator(BaseTranslator):
 
     def _reset_task_state(self) -> None:
         self._current_graph: nx.DiGraph | None = None
-        self._current_node: str | None = None
         self._app_name: str = ""
         self._app_opened = False
         self._screen_w = 1080
@@ -623,57 +596,37 @@ class UIKobeV2Translator(BaseTranslator):
         self._memory = Memory()
         self._step_count = 0
 
-    def _get_runtime_image_embedding(self, screenshot_b64: str) -> list[float]:
-        """Use native Gemini image embeddings for runtime node retrieval."""
-        if not self.image_embedding_api_key:
-            raise RuntimeError(
-                "Native Gemini image embedding requires image_embedding.api_key "
-                "or GEMINI_API_KEY/GOOGLE_API_KEY."
-            )
-        return get_gemini_native_image_embedding(
-            self.image_embedding_api_key,
-            screenshot_b64,
-            model=self.image_embedding_model,
-            base_url=self.image_embedding_base_url,
-        )
-
     def _compute_runtime_image_embedding_with_retry(
         self,
         screenshot_b64: str,
         app_name: str,
         node_id: str,
     ) -> list[float]:
-        attempts = RUNTIME_IMAGE_EMBEDDING_RETRIES + 1
-        for attempt in range(attempts):
-            try:
-                return self._get_runtime_image_embedding(screenshot_b64)
-            except Exception as exc:
-                can_retry = attempt < attempts - 1
-                if not can_retry:
-                    raise
-                delay = RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-                logger.warning(
-                    "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d). Error: %s",
-                    app_name,
-                    node_id,
-                    delay,
-                    attempt + 1,
-                    attempts - 1,
-                    exc,
-                )
-                time.sleep(delay)
-        raise RuntimeError("unreachable")
+        """Use native Gemini image embeddings for runtime node retrieval, with retry."""
+        if not self.image_embedding_api_key:
+            raise RuntimeError(
+                "Native Gemini image embedding requires image_embedding.api_key "
+                "or GEMINI_API_KEY/GOOGLE_API_KEY."
+            )
+        return compute_embedding_with_retry(
+            self.image_embedding_api_key,
+            screenshot_b64,
+            model=self.image_embedding_model,
+            base_url=self.image_embedding_base_url,
+            app_name=app_name,
+            node_id=node_id,
+        )
 
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
             logger.warning("Graph dir %s does not exist", self.graph_dir)
             return
         logger.info("[GRAPH] Loading runtime graphs from %s", self.graph_dir)
-        for app_name, graph_file in _iter_runtime_graph_files(self.graph_dir):
+        for app_name, graph_file in iter_graph_files(self.graph_dir):
             try:
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
-                G, _ = _load_graph_from_json(graph_file)
-                image_embeddings = _load_image_embeddings(graph_file)
+                G = _load_graph_from_json(graph_file)
+                image_embeddings = load_image_embeddings(graph_file)
                 for node_id, emb in image_embeddings.items():
                     if node_id in G:
                         G.nodes[node_id]["image_embedding"] = emb
@@ -702,7 +655,14 @@ class UIKobeV2Translator(BaseTranslator):
                             app_name,
                             node_id,
                         )
-                        _save_image_embeddings(graph_file, G)
+                        save_image_embeddings(
+                            graph_file,
+                            {
+                                nid: ndata["image_embedding"]
+                                for nid, ndata in G.nodes(data=True)
+                                if ndata.get("image_embedding")
+                            },
+                        )
                         updated_image_cache = True
                         logger.info(
                             "[GRAPH] %s/%s: computed image embedding in %.1fs",
@@ -738,9 +698,11 @@ class UIKobeV2Translator(BaseTranslator):
         return None
 
     def _get_graph_for_package(self, package: str) -> nx.DiGraph | None:
+        if not package:
+            return None
         app_name = self._package_to_app.get(package)
         if not app_name:
-            app_name = self._package_to_app.get(_package_from_activity(package))
+            app_name = self._package_to_app.get(package_from_activity(package))
         if app_name and app_name in self._graphs:
             self._app_name = app_name
             return self._graphs[app_name]
@@ -748,6 +710,43 @@ class UIKobeV2Translator(BaseTranslator):
             if package.startswith(pkg_prefix) or pkg_prefix.startswith(package):
                 self._app_name = name
                 return self._graphs.get(name)
+        return None
+
+    def _ask_with_screenshot[T](
+        self,
+        prompt: str,
+        screenshot: str | None,
+        parse: Callable[[str], T | None],
+        tag: str,
+    ) -> T | None:
+        """Ask the model one question, retrying at the caller's parse boundary.
+
+        ``parse`` must return ``None`` to request a retry; any other value
+        (including a falsy one such as ``{}`` or ``""``) is accepted as success.
+        Pass ``screenshot`` to ground the question in a screenshot; ``None`` sends
+        the prompt as plain text.
+        """
+        content: str | list[Any] = prompt
+        if screenshot is not None:
+            content = [{"type": "text", "text": prompt}, build_image_message(screenshot)]
+
+        result: T | None = None
+        raw = ""
+        for attempt, raw, can_retry in _chat_completion_content(
+            self.model_client,
+            model=self.model_name,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=V2_CHAT_MAX_TOKENS,
+            temperature=0.0,
+        ):
+            result = parse(raw)
+            if result is not None:
+                return result
+            if can_retry:
+                logger.warning("%s parse failed on attempt %d; retrying", tag, attempt + 1)
+        logger.warning(
+            "%s all parse attempts exhausted. raw_len=%d raw_prefix=%r", tag, len(raw), raw[:160]
+        )
         return None
 
     def _identify_node(self, activity: str, screenshot: str) -> tuple[str | None, str]:
@@ -765,7 +764,7 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("[IDENTIFY] No current graph is loaded")
             return None, ""
 
-        current_pkg = _package_from_activity(activity)
+        current_pkg = package_from_activity(activity)
         graph_packages = sorted(_extract_packages_from_graph(G))
         logger.info(
             "[IDENTIFY] activity=%s package=%s graph_app=%s graph_packages=%s",
@@ -779,7 +778,7 @@ class UIKobeV2Translator(BaseTranslator):
         same_pkg_keys: list[str] = []
         same_pkg_node_count = 0
         for _, data in G.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) == current_pkg:
+            if package_from_activity(data.get("activity", "")) == current_pkg:
                 same_pkg_node_count += 1
                 desc = data.get("page_description", "")
                 if desc and desc not in same_pkg_descriptions:
@@ -828,13 +827,16 @@ class UIKobeV2Translator(BaseTranslator):
             raise
         candidates: list[tuple[str, float, str]] = []
         for node_id, data in G.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) != current_pkg:
+            if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
-            node_image_emb = as_float_list(data.get("image_embedding"))
+            # Vectors only ever enter this attribute already narrowed to list[float]
+            # (via load_image_embeddings or compute_embedding_with_retry), so
+            # re-validating and copying every one of them on every step is wasted work.
+            node_image_emb = data.get("image_embedding")
             if not node_image_emb:
                 continue
-            sim = _cosine_similarity(query_image_emb, node_image_emb)
-            candidates.append((str(node_id), sim, as_str(data.get("page_description", ""), "")))
+            sim = cosine_similarity(query_image_emb, node_image_emb)
+            candidates.append((str(node_id), sim, data.get("page_description", "")))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
 
@@ -853,7 +855,7 @@ class UIKobeV2Translator(BaseTranslator):
                 missing_embeddings = sum(
                     1
                     for _, data in G.nodes(data=True)
-                    if _package_from_activity(data.get("activity", "")) == current_pkg
+                    if package_from_activity(data.get("activity", "")) == current_pkg
                     and not data.get("image_embedding")
                 )
                 logger.warning(
@@ -873,30 +875,12 @@ class UIKobeV2Translator(BaseTranslator):
 
         prompt = NODE_IDENTIFY_PROMPT.format(candidates=candidate_text)
 
-        answer = None
-        for attempt, raw_answer, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            answer = _parse_model_choice(raw_answer, letters[: len(top_k)])
-            if answer:
-                break
-            if can_retry:
-                logger.warning("[IDENTIFY] parse failed on attempt %d; retrying", attempt + 1)
+        answer = self._ask_with_screenshot(
+            prompt,
+            screenshot,
+            lambda raw: _parse_model_choice(raw, letters[: len(top_k)]),
+            "[IDENTIFY]",
+        )
         logger.info("[IDENTIFY] model_pick=%s", answer)
 
         if answer == "NONE" or not answer:
@@ -919,30 +903,12 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
         )
 
-        result = "nothing"
-        for attempt, raw_record, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            result = _parse_record_output(raw_record)
-            if result:
-                break
-            if can_retry:
-                logger.warning("[RECORD] parse failed on attempt %d; retrying", attempt + 1)
+        # _parse_record_output never returns None (it returns "nothing" at worst), so
+        # the helper's parse-retry loop never retries here: this is one completion.
+        result = (
+            self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
+            or "nothing"
+        )
         logger.info("[RECORD] parsed=%s", result)
         self._memory.add_info(result)
 
@@ -988,15 +954,10 @@ class UIKobeV2Translator(BaseTranslator):
                     merged.setdefault(key, change)
         return self._format_schema_delta(merged)
 
-    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[dict[str, str]]]:
-        """Build the option list for the DECIDE prompt.
-
-        Returns (formatted_text, option_list) where each option is:
-        {"letter": "A", "type": "self_loop"|"neighbor"|"done"|"free",
-         "node": node_id, "instruction": str, ...}
-        """
+    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
+        """Build the option list for the DECIDE prompt."""
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        options: list[dict[str, str]] = []
+        options: list[_Option] = []
         lines: list[str] = []
         idx = 0
 
@@ -1057,7 +1018,7 @@ class UIKobeV2Translator(BaseTranslator):
             neighbor = str(raw_neighbor)
             if neighbor == node_id:
                 continue
-            neighbor_desc = as_str(G.nodes[neighbor].get("page_description", neighbor), neighbor)
+            neighbor_desc = G.nodes[neighbor].get("page_description", neighbor)
             templates = edge_data.get("instruction_templates", [])
             observations = edge_data.get("target_observations", [])
 
@@ -1099,18 +1060,18 @@ class UIKobeV2Translator(BaseTranslator):
 
         return "\n".join(lines), options
 
-    def _decide(self, G: nx.DiGraph, task: str, node_id: str, screenshot: str) -> dict[str, str]:
+    def _decide(self, G: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
         """Ask the model to pick the next action.
 
         Returns the chosen option dict with an added "instruction" key
         (the refined instruction from the model).
         """
-        current_desc = as_str(G.nodes[node_id].get("page_description", ""), "")
+        current_desc = G.nodes[node_id].get("page_description", "")
         today = datetime.now()
 
         # Show state keys (from schema) so the model knows what parameters this screen has.
         # Values are omitted — the model can read them from the screenshot directly.
-        state_schema = as_str_dict(G.nodes[node_id].get("state_schema", {}))
+        state_schema = G.nodes[node_id].get("state_schema", {})
         if state_schema:
             keys_str = ", ".join(state_schema.keys())
             state_context = f"State parameters: [{keys_str}]\n"
@@ -1129,37 +1090,8 @@ class UIKobeV2Translator(BaseTranslator):
             options=options_text,
         )
 
-        result = None
-        raw = ""
-        for attempt, raw, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            result = _parse_decide_output(raw)
-            if result is not None:
-                break
-            if can_retry:
-                logger.warning("[DECIDE] parse failed on attempt %d; retrying", attempt + 1)
+        result = self._ask_with_screenshot(prompt, screenshot, _parse_decide_output, "[DECIDE]")
         if result is None:
-            logger.warning(
-                "Failed to parse DECIDE response. raw_len=%d raw_prefix=%r",
-                len(raw),
-                raw[:160],
-            )
             return {
                 "type": "free",
                 "instruction": "",
@@ -1176,11 +1108,18 @@ class UIKobeV2Translator(BaseTranslator):
 
         for opt in options_list:
             if opt["letter"] == choice_letter:
-                chosen = {**opt}
-                if instruction:
-                    chosen["instruction"] = instruction
-                elif not chosen.get("instruction"):
-                    chosen["instruction"] = task
+                resolved_instruction = instruction or opt.get("instruction") or task
+                chosen: _Decision = {
+                    "type": opt["type"],
+                    "letter": opt["letter"],
+                    "instruction": resolved_instruction,
+                }
+                if "node" in opt:
+                    chosen["node"] = opt["node"]
+                if "description" in opt:
+                    chosen["description"] = opt["description"]
+                if "effect" in opt:
+                    chosen["effect"] = opt["effect"]
                 return chosen
 
         logger.warning("DECIDE: unrecognized choice '%s'", choice_letter)
@@ -1206,30 +1145,12 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
             action_history=history_text,
         )
-        instruction = ""
-        for attempt, raw_instruction, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            instruction = _parse_one_step_instruction(raw_instruction)
-            if instruction:
-                break
-            if can_retry:
-                logger.warning("[FREE] parse failed on attempt %d; retrying", attempt + 1)
+        instruction = self._ask_with_screenshot(
+            prompt,
+            screenshot,
+            lambda raw: _parse_one_step_instruction(raw) or None,
+            "[FREE]",
+        )
 
         if instruction:
             logger.info("[FREE] planned_instruction=%s", instruction)
@@ -1245,19 +1166,7 @@ class UIKobeV2Translator(BaseTranslator):
         screenshot: str,
         overall_task: str = "",
     ) -> tuple[dict[str, Any], str, str]:
-        keyboard_hint = ""
-        try:
-            kb_check = subprocess.run(
-                ["adb", "shell", "dumpsys", "input_method"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-            if "mInputShown=true" in kb_check.stdout:
-                keyboard_hint = " (Note: the soft keyboard is currently visible — a text field is focused and ready for typing.)"
-        except (OSError, subprocess.SubprocessError) as exc:
-            logger.debug("Soft keyboard probe failed: %s", exc)
+        keyboard_hint = device.soft_keyboard_hint()
 
         aitk_action, history_entry = _call_with_retry(
             "action agent",
@@ -1275,39 +1184,13 @@ class UIKobeV2Translator(BaseTranslator):
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
 
-    def _make_free_instruction(self, task: str, reason: str) -> str:
-        """Constrain graph fallback so the action agent still emits one local UI action."""
-        app_context = (
-            f"You are already inside the {self._app_name} app. "
-            if self._app_name
-            else "You are already inside the target app. "
-        )
-        return (
-            f"{app_context}"
-            f"Graph guidance is unavailable because {reason}. "
-            f"Take exactly one immediate visible UI action that moves toward this goal: {task}. "
-            "Do not press Home, do not open the app, and do not leave the app unless the screenshot clearly shows you are outside it."
-        )
-
     def _generate_answer(self, task: str) -> str:
         prompt = DONE_PROMPT.format(
             task=task,
             memory=self._memory.format(),
         )
-        answer = ""
-        for attempt, raw_answer, can_retry in _chat_completion_content(
-            self.model_client,
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=V2_CHAT_MAX_TOKENS,
-            temperature=0.0,
-        ):
-            answer = raw_answer.strip()
-            if answer:
-                return answer
-            if can_retry:
-                logger.warning("[DONE] parse failed on attempt %d; retrying", attempt + 1)
-        return answer
+        answer = self._ask_with_screenshot(prompt, None, lambda raw: raw.strip() or None, "[DONE]")
+        return answer or ""
 
     def _step(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
         screenshot = as_str(state.get("screenshot", ""), "")
@@ -1342,12 +1225,12 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info(_SEP_THICK)
 
         node_id, page_desc = self._identify_node(activity, screenshot)
-        self._current_node = node_id
         logger.info('[IDENTIFY] Node: %s — "%s"', node_id, page_desc)
 
         self._record_info(task, screenshot)
         logger.info("[RECORD] Memory: %s", self._memory.format())
 
+        decision: _Decision
         if node_id is not None and G is not None:
             decision = self._decide(G, task, node_id, screenshot)
         else:
@@ -1365,8 +1248,8 @@ class UIKobeV2Translator(BaseTranslator):
             )
             decision = {"type": "free", "instruction": fallback_instruction}
 
-        decision_type = decision.get("type", "free")
-        instruction = decision.get("instruction", task)
+        decision_type = decision["type"]
+        instruction = decision["instruction"]
         if decision_type == "free" and not instruction:
             reason = decision.get(
                 "reason", "graph guidance did not produce an executable instruction"
@@ -1448,9 +1331,9 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("Failed to parse action: %s", action)
             return {"action": "end", "answer": "parse error"}
         aitk_action = as_str_dict(data).get("aitk_action")
-        if not isinstance(aitk_action, dict):
+        if not isinstance(aitk_action, dict) or "action" not in aitk_action:
             return {"action": "end", "answer": ""}
-        return as_str_dict(aitk_action)
+        return aitk_action
 
 
 def register(kargs: dict[str, Any]) -> UIKobeV2Translator:

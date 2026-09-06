@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from collections.abc import Iterator
 from typing import Any, NoReturn
 
@@ -16,7 +17,7 @@ settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
 
 _CREDENTIAL_PREFIXES = ("APP_GRAPH_",)
-_CREDENTIAL_NAMES = frozenset({"GEMINI_API_KEY", "OPENAI_API_KEY"})
+_CREDENTIAL_NAMES = frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"})
 
 
 @pytest.fixture(autouse=True)
@@ -41,3 +42,16 @@ def _no_network() -> Iterator[None]:
         mp.setattr(socket.socket, "connect", _deny_network)
         mp.setattr(socket.socket, "connect_ex", _deny_network)
         yield
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record retry back-off delays instead of waiting for them.
+
+    Every production module that retries with a back-off (adapters.aitk_translator,
+    commands.embed, commands.audit) does ``import time`` and calls ``time.sleep(...)``,
+    so patching the shared stdlib module here covers all of them.
+    """
+    delays: list[float] = []
+    monkeypatch.setattr(time, "sleep", delays.append)
+    return delays

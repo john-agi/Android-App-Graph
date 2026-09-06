@@ -67,12 +67,15 @@ Arrows point from importer to imported module; anything not drawn is forbidden.
 ```mermaid
 graph TD;
     pkg["android_app_graph"] --> kobe["android_app_graph.kobe"];
-    adapters["android_app_graph.adapters"] --> pay["android_app_graph.payloads"];
+    adapters["android_app_graph.adapters"] --> pkgs["android_app_graph.android_packages"];
+    adapters --> dev["android_app_graph.device"];
+    adapters --> ec["android_app_graph.embedding_cache"];
+    adapters --> pay["android_app_graph.payloads"];
     adapters --> utils["android_app_graph.utils"];
     adapters --> vlm["android_app_graph.utils.vlm_utils"];
     cmd["android_app_graph.commands"] --> cli["android_app_graph.cli"];
-    cmd --> dev["android_app_graph.device"];
-    cmd --> pay;
+    cmd --> dev;
+    cmd --> ec;
     cmd --> utils;
     cmd --> gm["android_app_graph.utils.graph_manager"];
     cmd --> logging["android_app_graph.utils.logging"];
@@ -80,10 +83,13 @@ graph TD;
     cli --> dev;
     cli --> kobe;
     cli --> logging;
+    ec --> pay;
+    ec --> vlm;
     kobe --> dev;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
+    gm --> pkgs;
     gm --> pay;
     gm --> vlm;
     vlm --> pay;
@@ -286,9 +292,14 @@ translator itself stays in the installed package. Verified against AITK commit
 5. Register it in AITK's `configs/controller.yaml`: set `translator: android_app_graph_v2`
    and pass the graph directory and VLM settings through `translator_args`:
 
+   AITK's own `scripts/interact.py` reads `translator_args.max_pixels`
+   unconditionally, so it must be set even though this translator itself
+   defaults it to `1_000_000` when the key is absent:
+
    ```yaml
    translator_args:
      graph_dir: /path/to/Android-App-Graph/graphs
+     max_pixels: 784000
      vlm_config:
        similarity_threshold: 0.84
        page_detail:
@@ -326,7 +337,11 @@ The copied shim imports the translator from the installed `android_app_graph`
 package; that is why Android-App-Graph must be installed in the AITK
 environment. Re-copy the shim only when it changes, which it rarely does:
 changes to the translator reach AITK through `uv pip install` of this project,
-not through step 4.
+not through step 4. The one exception is upgrading from a release where the
+full translator (rather than this shim) was copied into the AITK checkout:
+that old copy imports a private helper name that no longer exists, so it
+fails to import after the `uv pip install` upgrade until the shim is
+re-copied once.
 
 ## Use Android-App-Graph with Android World
 
@@ -409,7 +424,7 @@ The core pattern is:
 4. Choose either a graph-guided transition or a free-form fallback action.
 5. Convert that decision into the action format required by your environment.
 
-The two files below show this pattern in concrete systems.
+The two examples below show this pattern in concrete systems.
 
 ### AITK translator
 
@@ -432,8 +447,10 @@ def register(kargs: dict) -> MyTranslator:
     return MyTranslator(**kargs)
 ```
 
-Use `aitk_files/android_app_graph_v2.py` as the full graph-guided AITK example. It shows
-how to load an Android-App-Graph graph, identify the current node, record task-relevant
+Use `src/android_app_graph/adapters/aitk_translator.py` as the full graph-guided AITK
+example (`aitk_files/android_app_graph_v2.py` is only the 5-line shim you copy into an
+AITK checkout; see "Use Android-App-Graph with AITK" above). It shows how to load an
+Android-App-Graph graph, identify the current node, record task-relevant
 information, choose a graph edge, and convert the choice into a low-level AITK
 action. You can transfer the same graph usage to other agent frameworks by
 replacing only the final action-conversion layer.

@@ -24,17 +24,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import math
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import networkx as nx
 from openai import OpenAI
 
+from android_app_graph.android_packages import package_from_activity
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
+    cosine_similarity,
     describe_page_and_state,
     get_embedding,
     normalize_edge,
@@ -53,24 +54,6 @@ class _IdentifyCacheEntry(NamedTuple):
     node_id: str
 
 
-def _package_from_activity(activity: str) -> str:
-    """Extract the app package from a full Android activity name.
-
-    ``com.citymapper.app.home.HomeActivity2`` → ``com.citymapper.app``
-    ``com.citymapper.app/com.citymapper.app.MainActivity`` → ``com.citymapper.app``
-
-    Heuristic: take the first 3 dot-segments (``com.company.app``).  This is the
-    standard Android package convention and is enough to group activities that
-    belong to the same app while separating different apps.
-    """
-    if "/" in activity:
-        activity = activity.split("/", maxsplit=1)[0]
-    parts = activity.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[:3])
-    return activity
-
-
 def _node_id(value: object) -> str:
     """Return a graph node ID as ``str``.
 
@@ -79,15 +62,6 @@ def _node_id(value: object) -> str:
     the one place that says so.
     """
     return value if isinstance(value, str) else str(value)
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _merge_into_schema(
@@ -201,12 +175,12 @@ class GraphManager:
             logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
             return cached.node_id
 
-        current_pkg = _package_from_activity(activity)
+        current_pkg = package_from_activity(activity)
 
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) == current_pkg:
+            if package_from_activity(data.get("activity", "")) == current_pkg:
                 desc = data.get("page_description", "")
                 if desc and desc not in same_pkg_descriptions:
                     same_pkg_descriptions.append(desc)
@@ -235,12 +209,12 @@ class GraphManager:
         best_node_id: str | None = None
         best_similarity = -1.0
         for node_id, data in self.graph.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) != current_pkg:
+            if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
             existing_emb = data.get("description_embedding")
             if existing_emb is None:
                 continue
-            sim = _cosine_similarity(description_embedding, existing_emb)
+            sim = cosine_similarity(description_embedding, existing_emb)
             if sim > best_similarity:
                 best_similarity = sim
                 best_node_id = _node_id(node_id)
@@ -1064,7 +1038,7 @@ class GraphManager:
                 continue
             if package_name:
                 activity = self.graph.nodes[node].get("activity", "")
-                node_pkg = _package_from_activity(activity) if activity else ""
+                node_pkg = package_from_activity(activity) if activity else ""
                 if node_pkg and node_pkg != package_name:
                     continue
             out_degree = self.graph.out_degree(node)
@@ -1099,7 +1073,7 @@ class GraphManager:
 
             if package_name:
                 activity = node_data.get("activity", "")
-                node_pkg = _package_from_activity(activity) if activity else ""
+                node_pkg = package_from_activity(activity) if activity else ""
                 if node_pkg and node_pkg != package_name:
                     continue
 
@@ -1301,7 +1275,7 @@ class GraphManager:
             emb = data.get("description_embedding")
             if emb is None:
                 continue
-            sim = _cosine_similarity(query_emb, emb)
+            sim = cosine_similarity(query_emb, emb)
             results.append((_node_id(node_id), sim))
         results.sort(key=lambda x: x[1], reverse=True)
         return results

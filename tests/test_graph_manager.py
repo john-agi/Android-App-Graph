@@ -24,10 +24,8 @@ from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
     NORMALIZE_EVERY_N_VISITS,
     GraphManager,
-    _cosine_similarity,
     _merge_elements,
     _merge_into_schema,
-    _package_from_activity,
 )
 
 HOME = "com.example.app.HomeActivity"
@@ -165,39 +163,6 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
 def test_network_guard_blocks_outbound_connections() -> None:
     with pytest.raises(RuntimeError, match="network access is disabled"):
         socket.create_connection(("127.0.0.1", 9), timeout=0.1)
-
-
-def test_package_from_activity_keeps_the_first_three_segments() -> None:
-    assert _package_from_activity("com.citymapper.app.home.HomeActivity2") == "com.citymapper.app"
-
-
-def test_package_from_activity_drops_the_component_after_a_slash() -> None:
-    activity = "com.citymapper.app/com.citymapper.app.MainActivity"
-    assert _package_from_activity(activity) == "com.citymapper.app"
-
-
-def test_package_from_activity_returns_short_names_unchanged() -> None:
-    assert _package_from_activity("com.example") == "com.example"
-
-
-def test_package_from_activity_returns_an_empty_string_unchanged() -> None:
-    assert _package_from_activity("") == ""
-
-
-def test_cosine_similarity_of_parallel_vectors_is_one() -> None:
-    assert _cosine_similarity([1.0, 0.0], [2.0, 0.0]) == pytest.approx(1.0)
-
-
-def test_cosine_similarity_of_orthogonal_vectors_is_zero() -> None:
-    assert _cosine_similarity([1.0, 0.0], [0.0, 3.0]) == pytest.approx(0.0)
-
-
-def test_cosine_similarity_with_a_zero_vector_is_zero() -> None:
-    assert _cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
-
-
-def test_cosine_similarity_with_a_zero_second_vector_is_zero() -> None:
-    assert _cosine_similarity([1.0, 1.0], [0.0, 0.0]) == 0.0
 
 
 def test_merge_into_schema_adds_a_new_key_as_a_single_element_list() -> None:
