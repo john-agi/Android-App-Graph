@@ -1421,6 +1421,27 @@ def test_step_plans_a_free_action_when_no_node_matches(
     assert stepping._memory.actions == ["Tap the cart icon"]
 
 
+def test_step_replans_when_decide_produces_no_instruction(
+    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+) -> None:
+    """A matched node whose DECIDE reply never parses must still re-plan through
+    _plan_free_action rather than executing the action agent on an empty instruction."""
+    _use_model(
+        monkeypatch,
+        stepping,
+        "A",  # IDENTIFY
+        "nothing",  # RECORD
+        "not json",  # DECIDE attempt 1: fails to parse
+        "still not json",  # DECIDE attempt 2: fails to parse -> type="free", instruction=""
+        "Tap the search bar",  # free-action fallback plan
+    )
+    stepping._app_opened = True
+    state, history = _step_payload()
+
+    json.loads(stepping._step("buy shoes", state, history))
+    assert stepping._memory.actions == ["Tap the search bar"]
+
+
 def test_step_resolves_the_graph_from_the_package(
     monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
