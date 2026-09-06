@@ -59,7 +59,7 @@ def resolve_image_embedding_settings(
         or resolve_env(image_embedding_cfg.get("model"))
         or DEFAULT_IMAGE_EMBEDDING_MODEL
     )
-    base_url_cfg = base_url_override or resolve_env(
+    base_url_cfg = resolve_env(base_url_override) or resolve_env(
         image_embedding_cfg.get("native_base_url") or image_embedding_cfg.get("base_url")
     )
     base_url = (

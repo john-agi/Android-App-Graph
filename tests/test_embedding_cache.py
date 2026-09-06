@@ -502,3 +502,34 @@ def test_resolve_image_embedding_settings_overrides_win_over_config() -> None:
         model="cli-model",
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
+
+
+def test_resolve_image_embedding_settings_resolves_an_env_reference_base_url_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--base-url '${GEMINI_BASE_URL}'`` must resolve through the environment
+    like ``model_override`` and ``api_key_override`` already do, not keep the
+    literal ``${...}`` string (which fails the googleapis.com check and
+    silently falls back to the default endpoint).
+    """
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://eu.googleapis.com/v1beta")
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {}, base_url_override="${GEMINI_BASE_URL}"
+    )
+    assert settings.base_url == "https://eu.googleapis.com/v1beta"
+
+
+def test_resolve_image_embedding_settings_falls_back_for_an_unresolved_or_non_google_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {}, base_url_override="${GEMINI_BASE_URL}"
+    )
+    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://not-google.example.com/v1")
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {}, base_url_override="${GEMINI_BASE_URL}"
+    )
+    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
