@@ -38,7 +38,14 @@ def write_json_atomically(
     permission only on the target file itself, an atomic replace needs write
     permission on the containing directory too (to create and rename the temp
     file) -- the accepted cost of never leaving a truncated file behind.
+
+    A symlinked ``path`` is resolved to its real target first, so the temp
+    file and the replace happen next to that file: ``os.replace`` over a
+    symlink replaces the link itself, leaving whatever it pointed to
+    untouched and turning ``path`` into a plain file.
     """
+    if path.is_symlink():
+        path = path.resolve()
     tmp_path = path.parent / f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     # tempfile.mkstemp hardcodes mode 0600, which would make a file written by
     # one user (or a CI job) unreadable to another process -- e.g. an AITK

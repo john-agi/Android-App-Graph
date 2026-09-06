@@ -108,6 +108,24 @@ def test_write_json_atomically_preserves_an_existing_files_mode(tmp_path: Path) 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
+    """``os.replace`` over a symlink replaces the link itself: with
+    ``demo.image_emb.json -> shared_cache.json``, writing must land in
+    ``shared_cache.json`` and leave the link a link, not silently detach it
+    into a plain file that shadows the (unchanged) shared target.
+    """
+    target = tmp_path / "shared_cache.json"
+    target.write_text('{"old": 1}', encoding="utf-8")
+    link = tmp_path / "demo.image_emb.json"
+    link.symlink_to(target)
+
+    graph_files.write_json_atomically(link, {"new": 2})
+
+    assert link.is_symlink()
+    assert link.resolve() == target
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+
+
 def test_iter_graph_files_without_a_graph_dir(tmp_path: Path) -> None:
     assert graph_files.iter_graph_files(tmp_path / "absent") == []
 
