@@ -477,6 +477,10 @@ This repository uses [uv](https://docs.astral.sh/uv/) as its only project
 manager and [Poe the Poet](https://poethepoet.natn.io/) as its task runner.
 The engineering contract for humans and coding agents is in
 [AGENTS.md](AGENTS.md).
+Multi-step maintenance procedures (adopting a tool, triaging a red Security
+run, reviewing surviving mutants, reviewing the dead-code queue) are skills
+under `.agents/skills/`, which Codex reads directly and Claude Code reads
+through the `.claude/skills` symlink.
 
 ```bash
 uv sync --locked                      # create .venv from uv.lock (Python 3.14)

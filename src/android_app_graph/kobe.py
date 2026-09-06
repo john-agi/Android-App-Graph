@@ -76,7 +76,6 @@ class Kobe:
 
         vlm_config = vlm_config or {}
 
-        # Create per-call clients
         self.page_detail_client, self.page_detail_model = make_client(vlm_config.get("page_detail"))
         self.embedding_client, self.embedding_model = make_client(vlm_config.get("embedding"))
         self.instruction_client, self.instruction_model = make_client(vlm_config.get("instruction"))
@@ -84,7 +83,6 @@ class Kobe:
 
         similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
 
-        # Graph manager with embedding-based state matching
         self.graph = GraphManager(
             page_detail_client=self.page_detail_client,
             page_detail_model=self.page_detail_model,
@@ -93,7 +91,6 @@ class Kobe:
             similarity_threshold=similarity_threshold,
         )
 
-        # Graph persistence path: graphs/{app_name}/{app_name}.json
         base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
         self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
 
@@ -245,9 +242,8 @@ class Kobe:
 
         for i, (node_id, action) in enumerate(path):
             if i == 0:
-                continue  # skip the start node (no action)
+                continue  # the first entry is the start node and carries no action
 
-            # action can be a single dict or a list of dicts (compound)
             if isinstance(action, list):
                 self.logger.info(
                     "  Replay %d/%d: %s --> %s via %d compound actions",
@@ -272,7 +268,6 @@ class Kobe:
                 self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
-        # Verify we reached the expected state
         device_state = self.controller.get_state()
         actual_node = self.graph.identify_state(
             device_state["activity"],
@@ -323,7 +318,6 @@ class Kobe:
             return
 
         if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
-            # Resolve "auto" to least-explored node
             if resume_from == "auto":
                 resume_from = self.graph.get_least_explored_node(package_name=self.package_name)
                 self.logger.info("Auto-selected least-explored node: %s", resume_from)
@@ -363,16 +357,13 @@ class Kobe:
 
         try:
             while step < max_steps:
-                # Snapshot token counts before this step
                 tokens_before = token_tracker.snapshot_by_type()
 
                 screenshot = device_state["screenshot"]
                 node_data = self._require_node(current_node)
 
-                # Capture schema snapshot before action (for delta computation)
                 detail_before = dict(node_data.get("last_detail_snapshot", {}))
 
-                # Get edges already explored from this node (with instructions)
                 explored_edges = self.graph.get_all_edges_from_node(current_node)
 
                 # Check before planning so the planner can choose type vs tap.
@@ -386,7 +377,6 @@ class Kobe:
                     )
                 )
 
-                # Step 1: Plan — decide WHAT to do (natural language)
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)
                 instruction = plan_next_action(
                     client=self.instruction_client,
@@ -399,7 +389,6 @@ class Kobe:
                     model=self.instruction_model,
                 )
 
-                # Step 2: Action agent executes ONE action per exploration step
                 left_app = False
 
                 action, _history_entry = predict_next_action(
@@ -412,7 +401,6 @@ class Kobe:
                     model=self.action_model,
                 )
 
-                # Agent says "end" — no action to take
                 if action.get("action") == "end":
                     self.logger.info(
                         '  Action agent said end for: "%s", recording as back',
@@ -430,17 +418,14 @@ class Kobe:
 
                 action_sequence = [action]
 
-                # Get final device state
                 time.sleep(0.5)
                 device_state = self.controller.get_state()
 
-                # Check if we left the app
                 if not left_app:
                     current_package = device_state.get("package", "").strip()
                     if current_package and current_package != self.package_name:
                         left_app = True
 
-                # Handle external app
                 if left_app:
                     new_node = self._handle_external_app(
                         current_node,
@@ -466,13 +451,11 @@ class Kobe:
                     )
                     continue
 
-                # Identify the new state node
                 new_node = self.graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
                 )
 
-                # Check for in-app WebView showing external content
                 new_node_data = self._require_node(new_node)
                 if self._is_external_web(
                     device_state.get("activity", ""),
@@ -500,7 +483,6 @@ class Kobe:
                     )
                     continue
 
-                # Compute schema delta for self-loop edges
                 schema_delta = None
                 if new_node == current_node:
                     new_data = self._require_node(new_node)
@@ -512,7 +494,6 @@ class Kobe:
                             {k: v for k, v in schema_delta.items()},
                         )
 
-                # Build target observation from the post-action state
                 target_obs = new_node_data.get("page_description", "")
                 post_detail = new_node_data.get("last_detail_snapshot", {})
                 if post_detail:
@@ -522,7 +503,6 @@ class Kobe:
                     if detail_str:
                         target_obs = f"{target_obs} ({detail_str})"
 
-                # Record the transition — store the full action sequence as the edge
                 self.graph.add_edge(
                     current_node,
                     new_node,
@@ -532,13 +512,11 @@ class Kobe:
                     schema_delta=schema_delta,
                     num_steps=len(action_sequence),
                 )
-                # Mark the element that was interacted with as explored
                 self.graph.mark_element_explored(current_node, instruction)
                 self.graph.maybe_normalize_node_edges(current_node)
                 step += 1
                 self.graph.total_steps_completed = step
 
-                # Per-step token usage by agent
                 tokens_after = token_tracker.snapshot_by_type()
                 agent_names = [
                     "page_describe_and_state",
@@ -580,7 +558,6 @@ class Kobe:
                     cumulative,
                 )
 
-                # Auto-save after every step
                 self.save_graph()
 
                 current_node, device_state = self._apply_coverage_checkpoint_after_step(
@@ -617,7 +594,6 @@ class Kobe:
         )
         token_tracker.print_summary()
 
-    # Activity names that indicate an in-app browser / WebView.
     _WEBVIEW_ACTIVITY_PATTERNS = (
         "webview",
         "customtab",
@@ -626,7 +602,6 @@ class Kobe:
         "inappbrowser",
     )
 
-    # Keywords in the page description that indicate external web content.
     _WEB_DESCRIPTION_KEYWORDS = (
         "web page",
         "webpage",
@@ -671,17 +646,14 @@ class Kobe:
 
         return False
 
-    # Packages that are system overlays (keyboard, permissions, system UI).
-    # These sit on top of the app but don't represent real navigation away.
+    # These sit on top of the app but do not represent real navigation away.
     _SYSTEM_OVERLAY_PACKAGES = frozenset(
         {
-            # Input methods / keyboards
             "com.google.android.inputmethod.latin",  # Gboard
             "com.android.inputmethod.latin",  # AOSP keyboard
             "com.samsung.android.honeyboard",  # Samsung keyboard
             "com.swiftkey.swiftkey",  # SwiftKey
             "com.touchtype.swiftkey",  # SwiftKey (alt)
-            # System UI / overlays
             "com.android.systemui",  # Status bar, notifications
             "com.android.permissioncontroller",  # Permission dialogs
             "com.google.android.permissioncontroller",  # Permission dialogs (Google)
@@ -724,7 +696,6 @@ class Kobe:
             self.package_name,
         )
 
-        # Create external app node if it doesn't exist (no VLM calls)
         if ext_node_id not in self.graph.graph:
             self.graph.graph.add_node(
                 ext_node_id,
@@ -739,7 +710,6 @@ class Kobe:
             self.graph.graph.nodes[ext_node_id].get("visit_count", 0) + 1
         )
 
-        # Record the edge that led to the external app
         self.graph.add_edge(
             source_node,
             ext_node_id,
@@ -759,11 +729,9 @@ class Kobe:
             ext_node_id,
         )
 
-        # Try pressing back
         self.controller.exe_action({"action": "back"})
         time.sleep(1)
 
-        # Check if we're back in the correct app
         state = self.controller.get_state()
         if state.get("package", "") != self.package_name:
             self.logger.warning(

@@ -25,7 +25,7 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import networkx as nx
 from openai import OpenAI
@@ -44,9 +44,14 @@ from android_app_graph.utils.vlm_utils import (
 
 logger = logging.getLogger(__name__)
 
-# Cosine-similarity threshold: above this we consider two descriptions the same state.
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
+
+
+class _IdentifyCacheEntry(NamedTuple):
+    screenshot_hash: int
+    activity: str
+    node_id: str
 
 
 def _node_id(value: object) -> str:
@@ -122,10 +127,8 @@ class GraphManager:
         self.embedding_model = embedding_model
         self.similarity_threshold = similarity_threshold
         self._next_id = 0
-        # Tracks which nodes had their reference screenshot updated since last save
         self._dirty_screenshots: set[str] = set()
-        # Cache: (screenshot_hash, activity) → node_id to skip VLM when screen unchanged
-        self._last_identify_cache: tuple[int, str, str] | None = None  # (hash, activity, node_id)
+        self._last_identify_cache: _IdentifyCacheEntry | None = None
         self.total_steps_completed = 0
 
     def _require_page_detail_client(self) -> OpenAI:
@@ -141,10 +144,6 @@ class GraphManager:
             msg = "GraphManager needs an embedding_client for this operation"
             raise RuntimeError(msg)
         return self.embedding_client
-
-    # ------------------------------------------------------------------
-    # State identification (multi-level)
-    # ------------------------------------------------------------------
 
     def identify_state(self, activity: str, screenshot_b64: str) -> str:
         """Identify which node the current screen belongs to, or create a new one.
@@ -165,21 +164,19 @@ class GraphManager:
         Returns:
             The node ID (str) for this state.
         """
-        # Fast path: if screenshot + activity unchanged from last call, reuse result
         screen_hash = hash(screenshot_b64)
-        if self._last_identify_cache is not None:
-            cached_hash, cached_activity, cached_node = self._last_identify_cache
-            if (
-                screen_hash == cached_hash
-                and activity == cached_activity
-                and cached_node in self.graph
-            ):
-                logger.info("identify_state cache hit → %s (skipping VLM)", cached_node)
-                return cached_node
+        cached = self._last_identify_cache
+        if (
+            cached is not None
+            and screen_hash == cached.screenshot_hash
+            and activity == cached.activity
+            and cached.node_id in self.graph
+        ):
+            logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
+            return cached.node_id
 
         current_pkg = package_from_activity(activity)
 
-        # Step 1: Collect existing same-package node info
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
@@ -191,7 +188,6 @@ class GraphManager:
                     if k not in same_pkg_keys:
                         same_pkg_keys.append(k)
 
-        # Step 2: Single VLM call — always outputs a fresh description
         page_description, detail_snapshot, elements = describe_page_and_state(
             self._require_page_detail_client(),
             screenshot_b64,
@@ -206,7 +202,6 @@ class GraphManager:
             len(elements),
         )
 
-        # Step 3: Compute embedding and find best candidate
         description_embedding = get_embedding(
             self._require_embedding_client(), page_description, model=self.embedding_model
         )
@@ -224,7 +219,6 @@ class GraphManager:
                 best_similarity = sim
                 best_node_id = _node_id(node_id)
 
-        # Step 4: If similar enough, ALWAYS verify with screenshot comparison
         matched_node_id: str | None = None
 
         if best_node_id is not None:
@@ -258,7 +252,6 @@ class GraphManager:
                         verify_result.get("reason", ""),
                     )
                 else:
-                    # Different — rename existing node if verifier provides better name
                     refined_existing = verify_result.get("existing_description", "")
                     refined_new = verify_result.get("new_description", "")
 
@@ -284,7 +277,6 @@ class GraphManager:
                         page_description,
                     )
             else:
-                # No reference screenshot stored — trust embedding
                 matched_node_id = best_node_id
                 logger.info(
                     "Matched node %s by embedding (sim=%.3f, no ref screenshot): %s",
@@ -293,7 +285,6 @@ class GraphManager:
                     candidate_data.get("page_description"),
                 )
 
-        # Step 5: Update existing or create new node
         if matched_node_id is not None:
             node_id = matched_node_id
             node_data = self.graph.nodes[node_id]
@@ -306,7 +297,6 @@ class GraphManager:
             node_data["activities"] = activities
         else:
             node_id = self._make_node_id(page_description)
-            # Initialize elements with explored=False
             init_elements = [
                 {
                     "description": e.get("description", ""),
@@ -334,14 +324,13 @@ class GraphManager:
                 len(init_elements),
             )
 
-        # Step 5: Merge state snapshot into schema and update elements
         node_data = self.graph.nodes[node_id]
         schema = node_data.get("state_schema", {})
         _merge_into_schema(schema, detail_snapshot)
         node_data["state_schema"] = schema
         node_data["last_detail_snapshot"] = detail_snapshot
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
-        # Merge newly observed elements into existing list (structural elements accumulate)
+        # Structural elements accumulate across visits, so merge rather than replace.
         _merge_elements(node_data, elements)
         # Only update reference screenshot for new nodes or verifier-rejected splits;
         # keep the existing screenshot when verifier confirmed a match.
@@ -355,7 +344,7 @@ class GraphManager:
             len(schema),
             node_data["visit_count"],
         )
-        self._last_identify_cache = (screen_hash, activity, node_id)
+        self._last_identify_cache = _IdentifyCacheEntry(screen_hash, activity, node_id)
         return node_id
 
     def _make_node_id(self, page_description: str) -> str:
@@ -411,10 +400,9 @@ class GraphManager:
                 self._dirty_screenshots.discard(node_id)
             if self.graph.nodes[new_node_id].get("reference_screenshot"):
                 self._dirty_screenshots.add(new_node_id)
-            if self._last_identify_cache is not None:
-                cached_hash, cached_activity, cached_node = self._last_identify_cache
-                if cached_node == node_id:
-                    self._last_identify_cache = (cached_hash, cached_activity, new_node_id)
+            cached = self._last_identify_cache
+            if cached is not None and cached.node_id == node_id:
+                self._last_identify_cache = cached._replace(node_id=new_node_id)
         else:
             if node_data.get("reference_screenshot"):
                 self._dirty_screenshots.add(node_id)
@@ -427,10 +415,6 @@ class GraphManager:
             page_description,
         )
         return new_node_id
-
-    # ------------------------------------------------------------------
-    # Node operations
-    # ------------------------------------------------------------------
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Return node attributes or None if the node doesn't exist."""
@@ -510,12 +494,10 @@ class GraphManager:
         keep_data = self.graph.nodes[keep_id]
         remove_data = self.graph.nodes[remove_id]
 
-        # Merge visit counts
         keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get(
             "visit_count", 0
         )
 
-        # Merge activities
         keep_activities = keep_data.get("activities", [keep_data.get("activity", "")])
         remove_activities = remove_data.get("activities", [remove_data.get("activity", "")])
         for act in remove_activities:
@@ -523,7 +505,6 @@ class GraphManager:
                 keep_activities.append(act)
         keep_data["activities"] = keep_activities
 
-        # Merge state schemas
         keep_schema = keep_data.get("state_schema", {})
         remove_schema = remove_data.get("state_schema", {})
         for key, values in remove_schema.items():
@@ -535,40 +516,33 @@ class GraphManager:
                         keep_schema[key].append(v)
         keep_data["state_schema"] = keep_schema
 
-        # Merge interactable elements
         _merge_elements(keep_data, remove_data.get("interactable_elements", []))
 
-        # Rewire incoming edges (X → remove_id) to (X → keep_id)
         for pred in list(self.graph.predecessors(remove_id)):
             if pred == remove_id:
                 continue  # handle self-loops separately
             edge_data = dict(self.graph[pred][remove_id])
             self.graph.remove_edge(pred, remove_id)
             if pred == keep_id:
-                # This becomes a self-loop on keep_id
                 self._merge_edge_data(keep_id, keep_id, edge_data)
             else:
                 self._merge_edge_data(pred, keep_id, edge_data)
 
-        # Rewire outgoing edges (remove_id → X) to (keep_id → X)
         for succ in list(self.graph.successors(remove_id)):
             if succ == remove_id:
                 continue  # handle self-loops separately
             edge_data = dict(self.graph[remove_id][succ])
             self.graph.remove_edge(remove_id, succ)
             if succ == keep_id:
-                # This becomes a self-loop on keep_id
                 self._merge_edge_data(keep_id, keep_id, edge_data)
             else:
                 self._merge_edge_data(keep_id, succ, edge_data)
 
-        # Self-loop on remove_id → self-loop on keep_id
         if self.graph.has_edge(remove_id, remove_id):
             edge_data = dict(self.graph[remove_id][remove_id])
             self.graph.remove_edge(remove_id, remove_id)
             self._merge_edge_data(keep_id, keep_id, edge_data)
 
-        # Remove the node
         self.graph.remove_node(remove_id)
 
         logger.info(
@@ -602,10 +576,6 @@ class GraphManager:
             )
         else:
             self.graph.add_edge(source, target, **new_data)
-
-    # ------------------------------------------------------------------
-    # Edge operations
-    # ------------------------------------------------------------------
 
     def add_edge(
         self,
@@ -698,7 +668,6 @@ class GraphManager:
         if not instructions:
             return False
 
-        # Skip if already normalized with the same number of instructions
         existing_templates = edge_data.get("instruction_templates", [])
         if existing_templates:
             examples = (
@@ -709,7 +678,6 @@ class GraphManager:
             if len(examples) >= len(instructions):
                 return False
 
-        # Single instruction with no variable-looking content — skip API call
         if len(instructions) == 1:
             instr = instructions[0]
             # Heuristic: if no quoted values, numbers, or proper nouns, unlikely to be parameterizable
@@ -841,10 +809,6 @@ class GraphManager:
             actions.extend(edge.get("actions", []))
         return actions
 
-    # ------------------------------------------------------------------
-    # Path finding
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
         """Return the minimum num_steps for an edge (used as path weight)."""
@@ -887,7 +851,6 @@ class GraphManager:
         for i in range(len(node_path) - 1):
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
-            # Pick the action with the fewest steps
             actions = edge_data.get("actions", [])
             steps_list = edge_data.get("num_steps", [1] * len(actions))
             if actions:
@@ -934,14 +897,12 @@ class GraphManager:
             target_node = wp["node_id"]
             required_schema = wp.get("required_schema", {})
 
-            # Step A: Navigate from current to target_node
             if current != target_node:
                 nav_path = self.find_path(current, target_node)
                 if nav_path is None:
                     logger.warning("No path from %s to %s", current, target_node)
                     return None
 
-                # Convert to navigate steps (skip the starting node)
                 for i in range(1, len(nav_path)):
                     node_id, action = nav_path[i]
                     prev_node = nav_path[i - 1][0]
@@ -965,13 +926,11 @@ class GraphManager:
                         }
                     )
 
-            # Step B: Self-loop edges for required schema changes
             if required_schema:
                 self_loop_step = self._find_matching_self_loop(target_node, required_schema)
                 if self_loop_step:
                     path_steps.append(self_loop_step)
                 else:
-                    # No matching self-loop — record as a gap for fallback
                     path_steps.append(
                         {
                             "type": "schema_gap",
@@ -1007,7 +966,6 @@ class GraphManager:
         if not deltas:
             return None
 
-        # Score each self-loop by how many required keys it changes
         best_idx = -1
         best_score = 0
 
@@ -1069,18 +1027,15 @@ class GraphManager:
         if start is None:
             return None
 
-        # Only consider reachable nodes
         reachable = nx.descendants(self.graph, start) | {start}
         best_node: str | None = None
         min_out_degree = float("inf")
 
         for node in reachable:
-            # Skip external app nodes
             if node.startswith("ext_"):
                 continue
             if self.graph.nodes[node].get("is_external"):
                 continue
-            # Skip nodes whose package doesn't match the target
             if package_name:
                 activity = self.graph.nodes[node].get("activity", "")
                 node_pkg = package_from_activity(activity) if activity else ""
@@ -1158,10 +1113,6 @@ class GraphManager:
         )
         return candidates[:top_k]
 
-    # ------------------------------------------------------------------
-    # Serialization
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _embeddings_path(graph_path: Path) -> Path:
         """Return the companion embeddings file path for a graph JSON."""
@@ -1224,7 +1175,6 @@ class GraphManager:
         with open(emb_path, "w", encoding="utf-8") as f:
             json.dump(embeddings, f, ensure_ascii=False)
 
-        # Save only changed reference screenshots
         if self._dirty_screenshots:
             screenshots_dir = path.parent / (path.stem + "_screenshots")
             screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -1246,7 +1196,7 @@ class GraphManager:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Load embeddings from companion file (or fall back to inline for old graphs)
+        # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)
         embeddings: dict[str, list[float]] = {}
         if emb_path.exists():
@@ -1261,7 +1211,6 @@ class GraphManager:
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.graph.clear()
 
-        # Load reference screenshots from companion directory
         screenshots_dir = path.parent / (path.stem + "_screenshots")
 
         for node_data in data.get("nodes", []):
@@ -1270,7 +1219,6 @@ class GraphManager:
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             # Backwards compat: old graphs have "activity" only, new ones have "activities" list
             activities = node_data.get("activities", [node_data.get("activity", "")])
-            # Load reference screenshot if available
             ref_screenshot = None
             img_path = screenshots_dir / f"{node_id}.png"
             if img_path.exists():
@@ -1313,10 +1261,6 @@ class GraphManager:
             self.graph.number_of_nodes(),
             self.graph.number_of_edges(),
         )
-
-    # ------------------------------------------------------------------
-    # Graph queries (for future task planning)
-    # ------------------------------------------------------------------
 
     def find_node_by_description(self, query: str) -> list[tuple[str, float]]:
         """Find nodes whose page_description is most similar to the query.
@@ -1378,15 +1322,10 @@ class GraphManager:
             ],
         }
 
-    # ------------------------------------------------------------------
-    # Graph audit
-    # ------------------------------------------------------------------
-
     def format_for_audit(self) -> str:
         """Format the graph as human-readable text for LLM audit."""
         lines = []
 
-        # Nodes
         lines.append(f"## Nodes ({self.graph.number_of_nodes()})")
         for node_id, data in self.graph.nodes(data=True):
             desc = data.get("page_description", "")
@@ -1403,7 +1342,7 @@ class GraphManager:
                 f"(visits={visits}, out={out_degree}, in={in_degree}{keys_str}{elem_str})"
             )
 
-        # Edges — show every instruction so the auditor can spot mismatches
+        # Every instruction is listed so the auditor can spot mismatches.
         lines.append(f"\n## Edges ({self.graph.number_of_edges()})")
         for source, target, data in self.graph.edges(data=True):
             instructions = data.get("instructions", [])
