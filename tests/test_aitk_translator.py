@@ -694,11 +694,9 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator.image_embedding_model == "img-model"
 
 
-def test_construction_quiets_the_http_client_loggers(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
+@pytest.mark.usefixtures("translator")
+def test_construction_quiets_the_http_client_loggers() -> None:
     """The httpx/openai per-request loggers are quieted on construction, not on import."""
-    del translator
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("openai").level == logging.WARNING
 
