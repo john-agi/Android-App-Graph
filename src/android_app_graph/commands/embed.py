@@ -22,7 +22,11 @@ from android_app_graph.embedding_cache import (
     resolve_image_embedding_settings,
     save_image_embeddings,
 )
-from android_app_graph.graph_files import iter_graph_files, reference_screenshot_path
+from android_app_graph.graph_files import (
+    iter_graph_files,
+    reference_screenshot_path,
+    require_graph_shape,
+)
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,7 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
+        require_graph_shape(graph_data, graph_path)
         # --recompute discards the sidecar by writing an empty tagged payload
         # through the same writer as every other sidecar write, not by unlinking
         # it: unlink() on a symlinked sidecar detaches the link and leaves the

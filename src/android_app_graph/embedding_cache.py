@@ -171,13 +171,6 @@ def load_image_embeddings(
         )
         for node_id in stale_ids:
             del embeddings[node_id]
-        # Written back here, not left for the compute loop's own write: on a fully
-        # cached graph nothing is computed, so a prune that only the compute loop
-        # persisted would never reach disk, and this same "dropping" line would
-        # repeat on every future load instead of firing once. A failed write is
-        # the same boundary compute_missing_image_embeddings uses for its own
-        # cache write: caught, logged, and no reason to return anything but the
-        # pruned dict this call already has in memory.
         try:
             save_image_embeddings(graph_path, embeddings, model=model)
         except OSError:

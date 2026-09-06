@@ -26,7 +26,7 @@ def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = Fals
     app_dir.mkdir(parents=True)
     stem = f"{app}_audited" if audited else app
     (app_dir / f"{stem}.json").write_text(
-        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": ""}]}),
+        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": ""}], "edges": []}),
         encoding="utf-8",
     )
     screenshots = app_dir / f"{app}_screenshots"
@@ -173,7 +173,7 @@ def test_reference_screenshot_b64_finds_the_audited_stem_directory(tmp_path: Pat
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
     graph_path = app_dir / "demo_audited.json"
-    graph_path.write_text(json.dumps({"nodes": [{"id": "s0_home"}]}), encoding="utf-8")
+    graph_path.write_text(json.dumps({"nodes": [{"id": "s0_home"}], "edges": []}), encoding="utf-8")
     screenshots = app_dir / "demo_audited_screenshots"
     screenshots.mkdir()
     (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
@@ -206,7 +206,7 @@ def test_precompute_finds_screenshots_under_the_audited_stem_directory(
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
     (app_dir / "demo_audited.json").write_text(
-        json.dumps({"nodes": [{"id": "s0_home"}]}), encoding="utf-8"
+        json.dumps({"nodes": [{"id": "s0_home"}], "edges": []}), encoding="utf-8"
     )
     screenshots = app_dir / "demo_audited_screenshots"
     screenshots.mkdir()
@@ -233,7 +233,9 @@ def test_precompute_finds_every_node_in_a_partially_audited_graph(
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
     (app_dir / "demo_audited.json").write_text(
-        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": "s2_cart"}]}),
+        json.dumps(
+            {"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": "s2_cart"}], "edges": []}
+        ),
         encoding="utf-8",
     )
     app_screenshots = app_dir / "demo_screenshots"
@@ -290,7 +292,9 @@ def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
     """
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
-    (app_dir / "demo.json").write_text(json.dumps({"nodes": [{"id": "n1"}]}), encoding="utf-8")
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "n1"}], "edges": []}), encoding="utf-8"
+    )
     screenshots = app_dir / "demo_screenshots"
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
@@ -447,7 +451,8 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
     app_dir.mkdir()
     graph_path = app_dir / "demo.json"
     graph_path.write_text(
-        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
     )
     screenshots = app_dir / "demo_screenshots"
     screenshots.mkdir()
@@ -539,7 +544,8 @@ def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
     (app_dir / "demo.json").write_text(
-        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
     )
     screenshots = app_dir / "demo_screenshots"
     screenshots.mkdir()
@@ -577,7 +583,8 @@ def test_precompute_streams_screenshot_reads_lazily(
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
     (app_dir / "demo.json").write_text(
-        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
     )
     screenshots = app_dir / "demo_screenshots"
     screenshots.mkdir()
@@ -654,7 +661,8 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
     app_dir.mkdir()
     graph_path = app_dir / "demo.json"
     graph_path.write_text(
-        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}]}), encoding="utf-8"
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
     )
     screenshots = app_dir / "demo_screenshots"
     screenshots.mkdir()
@@ -681,3 +689,17 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
     }
+
+
+def test_precompute_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
+    """A hand-edited graph file fails through the shared shape check with the
+    path in the message, not with a bare TypeError out of the node loop.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    graph_path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
+
+    with pytest.raises(TypeError, match="list fields") as excinfo:
+        _precompute(tmp_path)
+    assert str(graph_path) in str(excinfo.value)
