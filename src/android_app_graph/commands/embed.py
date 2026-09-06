@@ -79,7 +79,7 @@ def precompute_graph_image_embeddings(
         # shared target it points at stale. Writing it up front also keeps the
         # discard when every call afterwards fails, since the loop only rewrites
         # the sidecar once a vector succeeds.
-        node_ids = {node.get("id") for node in graph_data.get("nodes", []) if node.get("id")}
+        node_ids = {node["id"] for node in graph_data["nodes"]}
 
         embeddings: dict[str, list[float]]
         if recompute:
@@ -105,10 +105,8 @@ def precompute_graph_image_embeddings(
         # base64 encoding before the first API call, and a cached node's
         # screenshot is never read at all.
         pending: list[tuple[str, Path]] = []
-        for node in graph_data.get("nodes", []):
-            node_id = node.get("id")
-            if not node_id:
-                continue
+        for node in graph_data["nodes"]:
+            node_id = node["id"]
             screenshot_path = reference_screenshot_path(graph_path, node_id)
             if screenshot_path is None:
                 summary["skipped_missing_screenshot"] += 1

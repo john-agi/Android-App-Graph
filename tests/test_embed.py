@@ -27,7 +27,7 @@ def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = Fals
     app_dir.mkdir(parents=True)
     stem = f"{app}_audited" if audited else app
     (app_dir / f"{stem}.json").write_text(
-        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": ""}], "edges": []}),
+        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}], "edges": []}),
         encoding="utf-8",
     )
     screenshots = app_dir / f"{app}_screenshots"

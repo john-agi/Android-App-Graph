@@ -141,8 +141,8 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
 
 def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     """Return ``data`` once it is an object whose ``nodes``/``edges`` are lists
-    of objects with string ids and endpoints; raise ``TypeError`` naming
-    ``path`` otherwise.
+    of objects with non-empty string ids and endpoints; raise ``TypeError``
+    naming ``path`` otherwise.
 
     Shared by both graph loaders (runtime ``aitk_translator`` and
     ``GraphManager``) so the check and its message cannot drift between them.
@@ -154,6 +154,12 @@ def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     ``GraphManager.load_graph`` accepted a file with no ``edges`` key at all
     this way before this check existed (``.get("edges", [])``), and a graph
     with no edges yet is a normal, not malformed, one.
+
+    A node id of ``""`` is a string, so it would otherwise sail past the
+    string check above; rejected here instead of left for each loader to
+    filter on its own, since two loaders filtering separately is exactly how
+    ``commands.embed`` (skipping it) and ``_load_graph_from_json`` (adding it
+    as a node) ended up disagreeing on this one case.
     """
     if not isinstance(data, dict):
         raise TypeError(f"Graph JSON must be an object: {path}")
@@ -169,8 +175,11 @@ def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     for node in nodes:
         if not isinstance(node, dict):
             raise TypeError(f"Graph node must be an object: {node!r} in {path}")
-        if not isinstance(node.get("id"), str):
+        node_id = node.get("id")
+        if not isinstance(node_id, str):
             raise TypeError(f"Graph node id must be a string: {node!r} in {path}")
+        if not node_id:
+            raise TypeError(f"Graph node id must be a non-empty string: {node!r} in {path}")
     for edge in edges:
         if not isinstance(edge, dict):
             raise TypeError(f"Graph edge must be an object: {edge!r} in {path}")

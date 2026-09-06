@@ -428,6 +428,18 @@ def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> Non
     assert str(path) in str(excinfo.value)
 
 
+def test_require_graph_shape_rejects_an_empty_node_id(tmp_path: Path) -> None:
+    """``embed.py`` used to skip a ``""`` id with ``if not node_id: continue``
+    while ``_load_graph_from_json`` added it as a node -- the two loaders
+    disagreeing on a case ``require_graph_shape`` had already let through.
+    An empty id is now rejected here, the one place both loaders trust.
+    """
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a non-empty string") as excinfo:
+        graph_files.require_graph_shape({"nodes": [{"id": ""}], "edges": []}, path)
+    assert str(path) in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "edge",
     [{"source": None, "target": "n2"}, {"source": "n1", "target": None}],
