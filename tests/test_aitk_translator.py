@@ -107,6 +107,10 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
         ("Answer: A", "A"),
         ("Answer: a", "A"),
         ("answer: NONE", "NONE"),
+        ("Answer: A\nbecause the screen shows a list of results", "A"),
+        ("Final answer: A\nbecause it matches", "A"),
+        ("Answer: A\nit matches B's layout partially", "A"),
+        ("A\nis the match", "A"),
     ],
 )
 def test_parse_model_choice(raw: str, expected: str | None) -> None:

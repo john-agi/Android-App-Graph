@@ -312,11 +312,13 @@ def _reads_as_article(letter: str, text: str, end: int) -> bool:
     """True when ``letter``, matched in ``text`` up to ``end``, reads as the
     English article/pronoun "a"/"I" rather than a named answer letter.
 
-    A standalone "A"/"I" immediately followed by a lowercase word is the
+    A standalone "A"/"I" followed on the same line by a lowercase word is the
     English article or pronoun, not a named answer letter; that case is left
-    to the strict-format retry (V2_PARSE_RETRY_HINT) rather than guessed.
+    to the strict-format retry (V2_PARSE_RETRY_HINT) rather than guessed. A
+    line break ends the sentence, so a letter alone on its line ("Answer: A",
+    then an explanation) is the answer.
     """
-    return letter in ("A", "I") and bool(re.match(r"\s+[a-z]", text[end:]))
+    return letter in ("A", "I") and bool(re.match(r"[ \t]+[a-z]", text[end:]))
 
 
 def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
