@@ -564,7 +564,6 @@ class UIKobeV2Translator(BaseTranslator):
         self,
         graph_dir: str = "graphs",
         vlm_config: dict[str, Any] | None = None,
-        history_window: int = 5,
         max_pixels: int = 1_000_000,
     ) -> None:
         super().__init__()
@@ -575,7 +574,9 @@ class UIKobeV2Translator(BaseTranslator):
         logging.getLogger("openai").setLevel(logging.WARNING)
 
         self.graph_dir = Path(graph_dir)
-        self.history_window = history_window
+        # AITK forwards every translator_args key, and its own configs/controller.yaml
+        # sets max_pixels, so the constructor must accept it although this translator
+        # sends screenshots unresized.
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
 
