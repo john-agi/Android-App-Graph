@@ -45,6 +45,7 @@ from openai import OpenAI
 from android_app_graph import device
 from android_app_graph.android_packages import package_from_activity
 from android_app_graph.embedding_cache import (
+    compute_embedding_with_retry,
     iter_graph_files,
     load_image_embeddings,
     save_image_embeddings,
@@ -55,7 +56,6 @@ from android_app_graph.utils.vlm_utils import (
     build_image_message,
     cosine_similarity,
     describe_page_and_state,
-    get_gemini_native_image_embedding,
     predict_next_action,
     strip_json_fences,
 )
@@ -68,8 +68,6 @@ V2_CHAT_MAX_TOKENS = 3000
 V2_PARSE_RETRIES = 1
 V2_API_RETRIES = 2
 V2_API_RETRY_BASE_DELAY_SECONDS = 2.0
-RUNTIME_IMAGE_EMBEDDING_RETRIES = 2
-RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
 
 _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
@@ -621,46 +619,26 @@ class UIKobeV2Translator(BaseTranslator):
         # Loop state
         self._step_count = 0
 
-    def _get_runtime_image_embedding(self, screenshot_b64: str) -> list[float]:
-        """Use native Gemini image embeddings for runtime node retrieval."""
-        if not self.image_embedding_api_key:
-            raise RuntimeError(
-                "Native Gemini image embedding requires image_embedding.api_key "
-                "or GEMINI_API_KEY/GOOGLE_API_KEY."
-            )
-        return get_gemini_native_image_embedding(
-            self.image_embedding_api_key,
-            screenshot_b64,
-            model=self.image_embedding_model,
-            base_url=self.image_embedding_base_url,
-        )
-
     def _compute_runtime_image_embedding_with_retry(
         self,
         screenshot_b64: str,
         app_name: str,
         node_id: str,
     ) -> list[float]:
-        attempts = RUNTIME_IMAGE_EMBEDDING_RETRIES + 1
-        for attempt in range(attempts):
-            try:
-                return self._get_runtime_image_embedding(screenshot_b64)
-            except Exception as exc:
-                can_retry = attempt < attempts - 1
-                if not can_retry:
-                    raise
-                delay = RUNTIME_IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-                logger.warning(
-                    "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d). Error: %s",
-                    app_name,
-                    node_id,
-                    delay,
-                    attempt + 1,
-                    attempts - 1,
-                    exc,
-                )
-                time.sleep(delay)
-        raise RuntimeError("unreachable")
+        """Use native Gemini image embeddings for runtime node retrieval, with retry."""
+        if not self.image_embedding_api_key:
+            raise RuntimeError(
+                "Native Gemini image embedding requires image_embedding.api_key "
+                "or GEMINI_API_KEY/GOOGLE_API_KEY."
+            )
+        return compute_embedding_with_retry(
+            self.image_embedding_api_key,
+            screenshot_b64,
+            model=self.image_embedding_model,
+            base_url=self.image_embedding_base_url,
+            app_name=app_name,
+            node_id=node_id,
+        )
 
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
@@ -881,7 +859,7 @@ class UIKobeV2Translator(BaseTranslator):
             if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
             # Vectors only ever enter this attribute already narrowed to list[float]
-            # (via load_image_embeddings or get_gemini_native_image_embedding), so
+            # (via load_image_embeddings or compute_embedding_with_retry), so
             # re-validating and copying every one of them on every step is wasted work.
             node_image_emb = data.get("image_embedding")
             if not node_image_emb:

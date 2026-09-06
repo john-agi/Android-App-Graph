@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from android_app_graph import embedding_cache
 from android_app_graph.commands import embed
 from android_app_graph.embedding_cache import image_embeddings_path
 
@@ -164,71 +165,8 @@ def test_reference_screenshot_b64(tmp_path: Path) -> None:
     assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
 
 
-# Retry behaviour
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_embedding_with_retry_returns_on_first_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-
-    def fake_embedding(api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
-        calls.append((api_key, screenshot_b64))
-        return [1.0, 2.0]
-
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", fake_embedding)
-
-    assert _retry("key", "shot") == [1.0, 2.0]
-    assert calls == [("key", "shot")]
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_embedding_with_retry_recovers_after_a_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts: list[int] = []
-
-    def flaky_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(len(attempts))
-        if len(attempts) == 1:
-            msg = "429 rate limited"
-            raise RuntimeError(msg)
-        return [0.25]
-
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", flaky_embedding)
-
-    assert _retry("key", "shot") == [0.25]
-    assert len(attempts) == 2
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts: list[int] = []
-
-    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(len(attempts))
-        msg = "500 upstream error"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", always_failing)
-
-    with pytest.raises(RuntimeError, match="500 upstream error"):
-        _retry("key", "shot")
-    assert len(attempts) == embed.IMAGE_EMBEDDING_RETRIES + 1
-
-
-def _retry(api_key: str, screenshot_b64: str) -> list[float]:
-    return embed.compute_embedding_with_retry(
-        api_key,
-        screenshot_b64,
-        model="gemini-embedding-2",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
-        app_name="demo",
-        node_id="s0_home",
-    )
+# Retry behaviour: compute_embedding_with_retry is imported from
+# android_app_graph.embedding_cache and owned by tests/test_embedding_cache.py.
 
 
 # precompute_graph_image_embeddings, end to end on a temporary graph tree
@@ -249,7 +187,9 @@ def test_precompute_computes_caches_and_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph_path = _write_graph_tree(tmp_path)
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2])
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+    )
 
     summary = _precompute(tmp_path)
     assert summary == {
@@ -275,7 +215,7 @@ def test_precompute_keeps_going_when_a_node_fails(
         msg = "503 unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", always_failing)
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
 
     summary = _precompute(tmp_path)
     assert summary["skipped_failed"] == 1
@@ -292,7 +232,9 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     image_embeddings_path(graph_path).write_text(
         json.dumps({"s0_home": "not-a-vector"}), encoding="utf-8"
     )
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4])
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
+    )
 
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0

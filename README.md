@@ -84,6 +84,7 @@ graph TD;
     cli --> kobe;
     cli --> logging;
     ec --> pay;
+    ec --> vlm;
     kobe --> dev;
     kobe --> utils;
     kobe --> gm;

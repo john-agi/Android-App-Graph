@@ -13,6 +13,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
 
 _SCREENSHOT = b"not-really-a-png"
@@ -1078,53 +1079,20 @@ def test_runtime_image_embedding_requires_a_key(graph_dir: Path) -> None:
     config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
     with pytest.raises(RuntimeError, match="Native Gemini image embedding requires"):
-        built._get_runtime_image_embedding("screenshot")
-
-
-def test_runtime_image_embedding_passes_the_configured_endpoint(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
-) -> None:
-    seen: dict[str, Any] = {}
-
-    def _fake_embedding(api_key: str, screenshot_b64: str, **kwargs: Any) -> list[float]:
-        seen.update({"api_key": api_key, "screenshot": screenshot_b64, **kwargs})
-        return [0.5, 0.5]
-
-    monkeypatch.setattr(aitk_translator, "get_gemini_native_image_embedding", _fake_embedding)
-    assert translator._get_runtime_image_embedding("shot") == [0.5, 0.5]
-    assert seen == {
-        "api_key": "image-key",
-        "screenshot": "shot",
-        "model": "img-model",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta",
-    }
+        built._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_compute_runtime_image_embedding_retries(
+def test_compute_runtime_image_embedding_with_retry_propagates_a_persistent_failure(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    attempts: list[int] = []
+    """The retry loop itself is owned by tests/test_embedding_cache.py; this is the
+    integration point: a persistent failure must still propagate to the caller."""
 
-    def _flaky(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(1)
-        if len(attempts) < 3:
-            raise RuntimeError("rate limited")
-        return [1.0]
-
-    monkeypatch.setattr(aitk_translator, "get_gemini_native_image_embedding", _flaky)
-    assert translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home") == [1.0]
-    assert len(attempts) == aitk_translator.RUNTIME_IMAGE_EMBEDDING_RETRIES + 1
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_runtime_image_embedding_gives_up(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
-) -> None:
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("rate limited")
 
-    monkeypatch.setattr(aitk_translator, "get_gemini_native_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="rate limited"):
         translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
 
@@ -1140,7 +1108,7 @@ def identifiable(
         lambda *_args, **_kwargs: ("a home screen", {}, []),
     )
     monkeypatch.setattr(
-        aitk_translator,
+        embedding_cache,
         "get_gemini_native_image_embedding",
         lambda *_args, **_kwargs: [1.0, 0.0],
     )
@@ -1247,7 +1215,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
         aitk_translator, "describe_page_and_state", lambda *_a, **_kw: ("home screen", {}, [])
     )
     monkeypatch.setattr(
-        aitk_translator, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
     )
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
     G = translator._graphs["demo"]
@@ -1271,7 +1239,7 @@ def test_identify_node_propagates_an_embedding_failure(
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("embedding down")
 
-    monkeypatch.setattr(aitk_translator, "get_gemini_native_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 

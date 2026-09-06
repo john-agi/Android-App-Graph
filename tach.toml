@@ -43,7 +43,7 @@ depends_on = [
 
 [[modules]]
 path = "android_app_graph.embedding_cache"
-depends_on = ["android_app_graph.payloads"]
+depends_on = ["android_app_graph.payloads", "android_app_graph.utils.vlm_utils"]
 
 [[modules]]
 path = "android_app_graph.cli"

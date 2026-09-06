@@ -18,18 +18,15 @@ from typing import Any
 import yaml
 
 from android_app_graph.embedding_cache import (
+    compute_embedding_with_retry,
     iter_graph_files,
     load_image_embeddings,
     save_image_embeddings,
 )
 from android_app_graph.utils import resolve_env
 from android_app_graph.utils.logging import setup_logging
-from android_app_graph.utils.vlm_utils import get_gemini_native_image_embedding
 
 logger = logging.getLogger(__name__)
-
-IMAGE_EMBEDDING_RETRIES = 2
-IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
 
 
 def load_graph_json(graph_path: Path) -> dict[str, Any]:
@@ -46,44 +43,6 @@ def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     if not screenshot_path.exists():
         return None
     return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
-
-
-def compute_embedding_with_retry(
-    api_key: str,
-    screenshot_b64: str,
-    *,
-    model: str,
-    base_url: str,
-    app_name: str,
-    node_id: str,
-) -> list[float]:
-    attempts = IMAGE_EMBEDDING_RETRIES + 1
-    for attempt in range(attempts):
-        try:
-            return get_gemini_native_image_embedding(
-                api_key,
-                screenshot_b64,
-                model=model,
-                base_url=base_url,
-            )
-        # A retry loop is a boundary (AGENTS.md): re-raise on the last attempt,
-        # log the traceback on every earlier one.
-        except Exception:
-            if attempt >= attempts - 1:
-                raise
-            delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            logger.warning(
-                "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d).",
-                app_name,
-                node_id,
-                delay,
-                attempt + 1,
-                attempts - 1,
-                exc_info=True,
-            )
-            time.sleep(delay)
-    msg = "compute_embedding_with_retry exhausted its attempts without raising"
-    raise RuntimeError(msg)
 
 
 def precompute_graph_image_embeddings(
