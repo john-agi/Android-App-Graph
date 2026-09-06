@@ -29,9 +29,6 @@ def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = Fals
     return app_dir / f"{stem}.json"
 
 
-# Argument parsing and settings
-
-
 def test_embed_parser_defaults() -> None:
     args = embed.build_parser().parse_args([])
     assert args.config == Path("configs/explore.yaml")
@@ -145,9 +142,6 @@ def test_embed_settings_read_the_api_key_from_the_environment(
     assert api_key == "from-env"
 
 
-# Pure file helpers
-
-
 def test_image_embeddings_path() -> None:
     assert embed.image_embeddings_path(Path("graphs/demo/demo.json")) == Path(
         "graphs/demo/demo.image_emb.json"
@@ -204,9 +198,6 @@ def test_reference_screenshot_b64(tmp_path: Path) -> None:
         _SCREENSHOT
     ).decode("ascii")
     assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
-
-
-# Retry behaviour
 
 
 @pytest.fixture
@@ -276,9 +267,6 @@ def _retry(api_key: str, screenshot_b64: str) -> list[float]:
         app_name="demo",
         node_id="s0_home",
     )
-
-
-# precompute_graph_image_embeddings, end to end on a temporary graph tree
 
 
 def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:

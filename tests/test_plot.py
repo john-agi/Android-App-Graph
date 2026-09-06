@@ -12,8 +12,6 @@ import pytest
 
 from android_app_graph.commands import plot
 
-# Argument parsing and the missing-extra message
-
 
 def test_plot_parser_defaults() -> None:
     args = plot.build_parser().parse_args(["graph.json"])
@@ -55,9 +53,6 @@ def test_plot_reports_missing_graph_file(
         plot.main([str(tmp_path / "absent.json"), "--no-open"])
     assert excinfo.value.code == 2
     assert "graph file not found" in capsys.readouterr().err
-
-
-# Label helpers
 
 
 @pytest.mark.parametrize(
@@ -123,9 +118,6 @@ def test_node_category(description: str, category: str) -> None:
 )
 def test_summarize_actions(actions: list[Any], expected: str) -> None:
     assert plot._summarize_actions(actions) == expected
-
-
-# Graph filters
 
 
 def _paper_graph() -> nx.DiGraph:
@@ -195,9 +187,6 @@ def test_prepare_paper_graph_can_keep_everything() -> None:
 def test_as_digraph_rejects_other_types() -> None:
     with pytest.raises(TypeError, match="expected a networkx DiGraph"):
         plot._as_digraph(object())
-
-
-# load_graph and the renderers
 
 
 def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:

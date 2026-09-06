@@ -30,11 +30,6 @@ logger = logging.getLogger(__name__)
 MAX_PIXELS = 1_000_000
 
 
-# ---------------------------------------------------------------------------
-# Token usage tracker
-# ---------------------------------------------------------------------------
-
-
 class TokenTracker:
     """Accumulates token usage across all API calls, broken down by call type."""
 
@@ -135,7 +130,6 @@ class TokenTracker:
         logger.info("\n".join(lines))
 
 
-# Global tracker instance
 token_tracker = TokenTracker()
 
 
@@ -181,10 +175,6 @@ def strip_json_fences(text: str) -> str:
         return as_str(m.group(1), text).strip()
     return text
 
-
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
 
 NORMALIZE_EDGE_PROMPT = """\
 You are helping build a reusable navigation graph for a mobile app. Your job is to \
@@ -469,7 +459,6 @@ Examples:
 Reply with ONLY the JSON, nothing else."""
 
 NEXT_ACTION_SYSTEM_PROMPT = """\
-# Tools
 
 You may call one or more functions to assist with the user query.
 
@@ -483,7 +472,6 @@ For each function call, return a json object with function name and arguments wi
 {{"name": <function-name>, "arguments": <args-json-object>}}
 </tool_call>
 
-# Response format
 
 Response format for every step:
 1) Thought: one concise sentence explaining the next move (no multi-step reasoning).
@@ -521,10 +509,6 @@ DEFAULT_PAGE_DETAIL_MODEL = "gpt-5.4"
 DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2-preview"
 DEFAULT_INSTRUCTION_MODEL = "gpt-5.4"
 DEFAULT_ACTION_MODEL = "qwen3.5-plus-2026-02-15"
-
-# ---------------------------------------------------------------------------
-# API helpers
-# ---------------------------------------------------------------------------
 
 
 def _message_text(resp: ChatCompletion) -> str:
@@ -571,7 +555,6 @@ def describe_page_and_state(
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
-    # Build existing nodes section
     if existing_nodes:
         nodes_list = "\n".join(f'  - "{d}"' for d in existing_nodes)
         existing_nodes_section = (
@@ -588,7 +571,6 @@ def describe_page_and_state(
         existing_nodes_section = "No screens have been discovered yet in this app."
         description_hint = "Focus on the screen's purpose. Use precise words."
 
-    # Build existing keys section
     if existing_keys:
         keys_str = ", ".join(f'"{k}"' for k in existing_keys)
         existing_keys_section = (
@@ -1128,7 +1110,7 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
         parsed = json.loads(inner)
     except json.JSONDecodeError:
         return None
-    # Handle {"name": "mobile_use", "arguments": {...}}
+    # A native tool call arrives as {"name": ..., "arguments": {...}}; only the arguments matter.
     if "arguments" in parsed:
         return parsed["arguments"]
     return parsed
@@ -1235,7 +1217,6 @@ def _tool_call_to_aitk(
     if action == "error":
         return {"action": "end"}
 
-    # Unknown action
     logger.warning("Unknown action: %s", action)
     return {"action": "end"}
 
@@ -1266,7 +1247,6 @@ def plan_next_action(
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
-    # Format explored instructions with their outcomes
     if explored_edges:
         lines = []
         for edge in explored_edges:
@@ -1276,7 +1256,6 @@ def plan_next_action(
                 for instr in instructions:
                     lines.append(f'- "{instr}" → led to: "{target_desc}"')
             else:
-                # Fallback for edges without instruction metadata
                 for action in edge.get("actions", []):
                     lines.append(f'- {json.dumps(action)} → led to: "{target_desc}"')
         instructions_str = (
@@ -1285,7 +1264,6 @@ def plan_next_action(
     else:
         instructions_str = "(none — this screen has not been explored yet)"
 
-    # Format unexplored elements section
     if unexplored_elements:
         elem_lines = []
         for elem in unexplored_elements:
@@ -1337,7 +1315,6 @@ def plan_next_action(
     except json.JSONDecodeError:
         instruction = raw
 
-    # Strip surrounding quotes if present
     instruction = instruction.strip().strip('"').strip("'")
 
     logger.info("Planned instruction: %s", instruction)
@@ -1354,7 +1331,6 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
     """
     raw_content = resp.choices[0].message.content
     if raw_content is None:
-        # Model returned no text content — check for native tool calls
         tool_calls = resp.choices[0].message.tool_calls
         if tool_calls:
             logger.info("  Agent used native tool calling")
@@ -1373,7 +1349,6 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
     raw = raw_content.strip()
     logger.debug("  Agent raw output: %s", raw)
 
-    # Extract Thought and Action lines
     thought = ""
     thought_m = re.search(r"Thought:\s*(.+?)(?:\n|$)", raw)
     if thought_m:
@@ -1384,12 +1359,10 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
     if action_m:
         action_desc = action_m.group(1).strip()
 
-    # Parse <tool_call> block
     tool_args = _parse_tool_call(raw)
     if tool_args is not None:
         return tool_args, thought, action_desc
 
-    # Fallback: try parsing whole response as JSON
     raw_json = strip_json_fences(raw)
     try:
         parsed = json.loads(raw_json)
@@ -1435,14 +1408,12 @@ def predict_next_action(
         screen_h=resized_h,
     )
 
-    # Build history section
     if action_history:
         history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(action_history))
         history_section = f"Task progress (actions already taken):\n{history_text}\n\n"
     else:
         history_section = ""
 
-    # Build overall task context section
     if overall_task and overall_task != instruction:
         overall_task_section = f"(Overall goal for context: {overall_task})\n\n"
     else:
@@ -1479,7 +1450,6 @@ def predict_next_action(
 
     action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
 
-    # Build history entry
     history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
 
     logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)

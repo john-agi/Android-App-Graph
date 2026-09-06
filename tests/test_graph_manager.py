@@ -162,15 +162,9 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     return fake
 
 
-# Suite guard
-
-
 def test_network_guard_blocks_outbound_connections() -> None:
     with pytest.raises(RuntimeError, match="network access is disabled"):
         socket.create_connection(("127.0.0.1", 9), timeout=0.1)
-
-
-# Module helpers
 
 
 def test_package_from_activity_keeps_the_first_three_segments() -> None:
@@ -248,9 +242,6 @@ def test_merge_elements_defaults_a_missing_position_to_an_empty_string() -> None
     assert node_data["interactable_elements"][0]["position"] == ""
 
 
-# Construction
-
-
 def test_construction_defaults() -> None:
     gm = GraphManager()
     assert gm.graph.number_of_nodes() == 0
@@ -271,9 +262,6 @@ def test_identify_state_without_an_embedding_client_raises(vlm: FakeVlm) -> None
     gm = GraphManager(page_detail_client=FAKE_CLIENT)
     with pytest.raises(RuntimeError, match="embedding_client"):
         gm.identify_state(HOME, SHOT_A)
-
-
-# identify_state
 
 
 def test_identify_state_creates_the_first_node(vlm: FakeVlm) -> None:
@@ -457,9 +445,6 @@ def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm) -> Non
     assert len(node_id.split("_", 1)[1]) == 40
 
 
-# rename_node
-
-
 def test_rename_node_returns_a_missing_id_unchanged() -> None:
     gm = make_manager()
     assert gm.rename_node("s9_missing", "Anything") == "s9_missing"
@@ -534,9 +519,6 @@ def test_rename_node_updates_the_identify_cache(vlm: FakeVlm) -> None:
 
     assert gm.identify_state(HOME, SHOT_A) == new_id
     assert vlm.kinds() == ["describe", "embed", "embed"]
-
-
-# Node and edge queries
 
 
 def test_get_node_returns_a_copy() -> None:
@@ -710,9 +692,6 @@ def test_get_explored_actions_from_node_flattens_every_outgoing_edge() -> None:
     ]
 
 
-# add_edge
-
-
 def test_add_edge_creates_an_edge_with_defaults() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -788,9 +767,6 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
     assert data["instructions"] == ["sort by price"]
     assert data["target_observations"] == ["sorted by price"]
     assert data["schema_deltas"] == [{"sort": {"after": "price"}}]
-
-
-# merge_nodes
 
 
 def test_merge_nodes_returns_false_when_a_node_is_missing() -> None:
@@ -899,9 +875,6 @@ def test_merge_nodes_merges_edge_data_into_an_existing_edge() -> None:
     assert data["num_steps"] == [1, 3]
     assert data["visit_count"] == 2
     assert data["instruction_templates"] == [{"template": "go to {x}"}]
-
-
-# Edge normalization
 
 
 @dataclass
@@ -1120,9 +1093,6 @@ def test_maybe_normalize_node_edges_for_a_missing_node_returns_false() -> None:
     assert make_manager().maybe_normalize_node_edges("s9_missing") is False
 
 
-# Path finding
-
-
 def _line_graph(gm: GraphManager) -> None:
     """s0 → s1 → s3 in two cheap hops, or s0 → s3 in one expensive hop."""
     for node_id, description in (
@@ -1335,9 +1305,6 @@ def test_get_path_actions_takes_the_first_action_of_every_hop() -> None:
     assert actions == [{"action": "a"}, {"action": "b"}]
 
 
-# Selection heuristics
-
-
 def test_get_start_node_returns_none_for_an_empty_graph() -> None:
     assert make_manager().get_start_node() is None
 
@@ -1472,9 +1439,6 @@ def test_get_exploration_target_candidates_skips_external_and_other_packages() -
     assert [c["node_id"] for c in candidates] == ["s0_home"]
 
 
-# Persistence
-
-
 def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
     assert GraphManager._embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
 
@@ -1586,9 +1550,6 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     target.load_graph(path)
 
     assert list(target.graph.nodes) == ["s0_home"]
-
-
-# Reporting and audit
 
 
 def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
@@ -1809,8 +1770,6 @@ def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     assert result["results"][0]["reason"] == "different banner"
     assert gm.graph.number_of_nodes() == 2
 
-
-# Properties
 
 POOL = [f"s{i}_screen" for i in range(5)]
 

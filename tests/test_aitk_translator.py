@@ -45,11 +45,6 @@ def _write_graph(
     return path
 
 
-# ---------------------------------------------------------------------------
-# _package_from_activity
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("activity", "expected"),
     [
@@ -74,11 +69,6 @@ def test_package_from_activity_keeps_at_most_three_components(activity: str) -> 
     assert len(package.split(".")) <= max(3, len(component.split(".")))
 
 
-# ---------------------------------------------------------------------------
-# _extract_packages_from_graph
-# ---------------------------------------------------------------------------
-
-
 def test_extract_packages_from_graph_skips_nodes_without_activity() -> None:
     G = nx.DiGraph()
     G.add_node("a", activity="com.example.app/.Main")
@@ -94,11 +84,6 @@ def test_extract_packages_from_graph_skips_nodes_without_activity() -> None:
 
 def test_extract_packages_from_empty_graph() -> None:
     assert aitk_translator._extract_packages_from_graph(nx.DiGraph()) == set()
-
-
-# ---------------------------------------------------------------------------
-# _cosine_similarity
-# ---------------------------------------------------------------------------
 
 
 def test_cosine_similarity_of_identical_vectors_is_one() -> None:
@@ -134,11 +119,6 @@ def test_cosine_similarity_is_bounded_and_symmetric(a: list[float], b: list[floa
     assert -1.0 - 1e-9 <= similarity <= 1.0 + 1e-9
     assert similarity == pytest.approx(aitk_translator._cosine_similarity(b, a))
     assert not math.isnan(similarity)
-
-
-# ---------------------------------------------------------------------------
-# _parse_model_choice
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -177,11 +157,6 @@ def test_parse_model_choice_rejects_letters_outside_the_valid_set() -> None:
 def test_parse_model_choice_accepts_any_bare_valid_letter(letter: str, padding: str) -> None:
     raw = f"{padding}{letter.lower()}{padding}"
     assert aitk_translator._parse_model_choice(raw, _LETTERS) == letter
-
-
-# ---------------------------------------------------------------------------
-# _parse_record_output
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -223,11 +198,6 @@ def test_parse_record_output_is_never_empty(raw: str) -> None:
     assert aitk_translator._parse_record_output(raw) != ""
 
 
-# ---------------------------------------------------------------------------
-# _parse_one_step_instruction
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -265,11 +235,6 @@ def test_parse_one_step_instruction_rejects_an_overlong_plan() -> None:
 )
 def test_parse_one_step_instruction_rejects_generic_restatements(raw: str) -> None:
     assert aitk_translator._parse_one_step_instruction(raw) == ""
-
-
-# ---------------------------------------------------------------------------
-# _extract_json_object, _parse_json_object and _parse_decide_output
-# ---------------------------------------------------------------------------
 
 
 def test_extract_json_object_finds_an_embedded_object() -> None:
@@ -317,11 +282,6 @@ def test_parse_decide_output_falls_back_to_the_whole_text() -> None:
 @given(st.dictionaries(st.text(max_size=10), st.integers(), max_size=5))
 def test_parse_decide_output_round_trips_json_objects(payload: dict[str, int]) -> None:
     assert aitk_translator._parse_decide_output(json.dumps(payload)) == payload
-
-
-# ---------------------------------------------------------------------------
-# _load_graph_from_json
-# ---------------------------------------------------------------------------
 
 
 def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
@@ -404,11 +364,6 @@ def test_load_graph_from_json_rejects_a_malformed_document(tmp_path: Path, paylo
         aitk_translator._load_graph_from_json(path)
 
 
-# ---------------------------------------------------------------------------
-# image embedding sidecars
-# ---------------------------------------------------------------------------
-
-
 def test_image_embeddings_path_is_a_sidecar(tmp_path: Path) -> None:
     assert aitk_translator._image_embeddings_path(tmp_path / "demo.json") == (
         tmp_path / "demo.image_emb.json"
@@ -439,11 +394,6 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
     assert aitk_translator._load_image_embeddings(graph_path) == {"n1": [1.0, 2.0]}
 
 
-# ---------------------------------------------------------------------------
-# _iter_runtime_graph_files
-# ---------------------------------------------------------------------------
-
-
 def test_iter_runtime_graph_files_without_a_graph_dir(tmp_path: Path) -> None:
     assert aitk_translator._iter_runtime_graph_files(tmp_path / "absent") == []
 
@@ -466,11 +416,6 @@ def test_iter_runtime_graph_files_sorts_apps_and_skips_side_files(tmp_path: Path
         ("alpha", alpha),
         ("zebra", zebra),
     ]
-
-
-# ---------------------------------------------------------------------------
-# Memory
-# ---------------------------------------------------------------------------
 
 
 def test_memory_starts_empty() -> None:
@@ -515,11 +460,6 @@ def test_memory_numbers_repeated_entries() -> None:
     memory.add_action("first")
     memory.add_action("second")
     assert "  1. first\n  2. second" in memory.format()
-
-
-# ---------------------------------------------------------------------------
-# API call helpers
-# ---------------------------------------------------------------------------
 
 
 class _FakeMessage:
@@ -632,11 +572,6 @@ def test_chat_completion_content_turns_a_missing_body_into_an_empty_string() -> 
     assert first == (0, "", True)
 
 
-# ---------------------------------------------------------------------------
-# _make_no_proxy_client
-# ---------------------------------------------------------------------------
-
-
 def test_make_no_proxy_client_defaults() -> None:
     client, model = aitk_translator._make_no_proxy_client({"api_key": "test-key"})
     assert model == "gpt-4o"
@@ -671,11 +606,6 @@ def test_make_no_proxy_client_resolves_env_references(monkeypatch: pytest.Monkey
 def test_make_no_proxy_client_prefers_the_timeout_alias() -> None:
     client, _ = aitk_translator._make_no_proxy_client({"api_key": "test-key", "timeout": 5})
     assert client.timeout == 5.0
-
-
-# ---------------------------------------------------------------------------
-# Translator fixtures
-# ---------------------------------------------------------------------------
 
 
 _VLM_CONFIG: dict[str, Any] = {
@@ -729,11 +659,6 @@ def translator(graph_dir: Path) -> aitk_translator.UIKobeV2Translator:
     return aitk_translator.register({"graph_dir": str(graph_dir), "vlm_config": _VLM_CONFIG})
 
 
-# ---------------------------------------------------------------------------
-# Construction and graph loading
-# ---------------------------------------------------------------------------
-
-
 def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
     assert isinstance(translator, aitk_translator.UIKobeV2Translator)
     assert set(translator._graphs) == {"demo"}
@@ -782,11 +707,6 @@ def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
     assert "gone" not in built._graphs["demo"]
 
 
-# ---------------------------------------------------------------------------
-# Task and package resolution
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("task", "expected"),
     [("Open Demo and search for shoes", "demo"), ("Check the weather", None)],
@@ -827,11 +747,6 @@ def test_reset_task_state_clears_the_previous_task(
     assert translator._current_graph is None
     assert translator._step_count == 0
     assert translator._memory.has_content() is False
-
-
-# ---------------------------------------------------------------------------
-# Option formatting
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -949,11 +864,6 @@ def test_build_options_skips_the_self_loop_when_listing_neighbours(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Model-driven steps, with every provider call replaced by a fake
-# ---------------------------------------------------------------------------
-
-
 def _use_model(
     monkeypatch: pytest.MonkeyPatch,
     translator: aitk_translator.UIKobeV2Translator,
@@ -1030,9 +940,6 @@ def test_make_free_instruction(
     assert "buy shoes" in instruction
 
 
-# --- _decide ---------------------------------------------------------------
-
-
 def test_decide_returns_the_chosen_option(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
@@ -1097,9 +1004,6 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     assert (
         "State parameters" not in client.completions.calls[0]["messages"][0]["content"][0]["text"]
     )
-
-
-# --- image embeddings and _identify_node -----------------------------------
 
 
 def test_runtime_image_embedding_requires_a_key(graph_dir: Path) -> None:
@@ -1243,9 +1147,6 @@ def test_identify_node_propagates_an_embedding_failure(
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
 
-# --- _call_action_agent ----------------------------------------------------
-
-
 class _KeyboardProbe:
     def __init__(self, stdout: str) -> None:
         self.stdout = stdout
@@ -1297,11 +1198,6 @@ def test_call_action_agent_survives_a_missing_adb(
     assert action == {"action": "back"}
     assert observation == ""
     assert entry == "went back"
-
-
-# ---------------------------------------------------------------------------
-# BaseTranslator interface
-# ---------------------------------------------------------------------------
 
 
 def test_make_response_wraps_the_action() -> None:

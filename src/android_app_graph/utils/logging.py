@@ -19,7 +19,6 @@ from typing import override
 from rich.console import Console
 from rich.text import Text
 
-# Logger name prefix -> style config.
 _LOGGER_CONFIG: dict[str, dict[str, str]] = {
     "scripts": {
         "label": "Explorer",
@@ -138,6 +137,5 @@ def setup_logging(level: int = logging.INFO) -> None:
     root.handlers.clear()
     root.addHandler(handler)
 
-    # Silence noisy HTTP loggers from OpenAI SDK / httpx / urllib3
     for noisy in ("httpx", "httpcore", "urllib3", "openai", "openai._base_client"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

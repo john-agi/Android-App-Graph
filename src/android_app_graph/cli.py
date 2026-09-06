@@ -139,7 +139,6 @@ def main() -> None:
     vlm_config = config.get("vlm", {})
     graph_dir = exp_config.get("graph_dir", "graphs")
 
-    # CLI args override config; config overrides defaults
     max_steps = args.max_steps or exp_config.get("max_steps", 20)
     resume_from = args.resume_from or exp_config.get("resume_from")
     coverage_checkpoint_steps = exp_config.get("coverage_checkpoint_steps", 50)
@@ -149,12 +148,10 @@ def main() -> None:
         app_name = app["name"]
         package_name = app["package_name"]
 
-        # Terminate all running apps before launching
         logger.info("Terminating all running apps...")
         controller._terminate_all_apps()
         time.sleep(1)
 
-        # Launch the app on the emulator
         launch_app(config, app, logger)
         time.sleep(4)
 
