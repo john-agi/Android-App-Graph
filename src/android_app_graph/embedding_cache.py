@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -183,6 +183,47 @@ def compute_embedding_with_retry(
         retries=IMAGE_EMBEDDING_RETRIES,
         base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
     )
+
+
+def iter_screenshot_candidates(
+    pending: Iterable[tuple[str, Path]],
+    *,
+    app_name: str,
+    encode: Callable[[Path], str],
+    on_failed: Callable[[str], None] | None = None,
+) -> Iterator[tuple[str, str]]:
+    """Encode each pending node's screenshot lazily, one at a time.
+
+    Shared by offline precomputation (``commands.embed``) and runtime graph
+    loading (``adapters.aitk_translator``) so the two cannot drift on this:
+    encoding here rather than up front keeps at most one base64 payload
+    resident, so a cold cache on a graph with hundreds of nodes never holds
+    hundreds of MB of screenshots before the first API call.
+
+    A candidate's path was only stat'd for existence when ``pending`` was
+    built; by the time it is read and encoded here it may have become
+    unreadable or gone. This generator is iterated from a plain ``for`` in
+    ``compute_missing_image_embeddings``, outside that loop's own per-node
+    ``except``, so an uncaught ``OSError`` here would abort the whole run --
+    every remaining node and every remaining app -- rather than skip one
+    node. Caught and logged here instead, a boundary this generator forms on
+    behalf of its caller. ``encode`` is taken as a parameter, not imported
+    directly, so each caller's own module-level name stays the one tests
+    monkeypatch.
+    """
+    for node_id, screenshot_path in pending:
+        try:
+            screenshot_b64 = encode(screenshot_path)
+        except OSError:
+            logger.exception(
+                "[GRAPH] %s/%s: reference screenshot could not be read; skipping",
+                app_name,
+                node_id,
+            )
+            if on_failed is not None:
+                on_failed(node_id)
+            continue
+        yield node_id, screenshot_b64
 
 
 class ImageEmbeddingRun(NamedTuple):

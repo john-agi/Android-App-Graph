@@ -45,12 +45,14 @@ from android_app_graph.android_packages import package_from_activity
 from android_app_graph.embedding_cache import (
     compute_embedding_with_retry,
     compute_missing_image_embeddings,
+    iter_screenshot_candidates,
     load_image_embeddings,
     resolve_image_embedding_settings,
 )
 from android_app_graph.graph_files import (
+    encode_screenshot_b64,
     iter_graph_files,
-    reference_screenshot_b64,
+    reference_screenshot_path,
     require_known_edge_endpoints,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
@@ -233,9 +235,8 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     if not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise TypeError(f"Runtime graph JSON must contain list fields 'nodes' and 'edges': {path}")
 
-    # Built before the node loop below reads and base64-encodes every reference
-    # screenshot, and before require_known_edge_endpoints, so a malformed edge's
-    # own TypeError still takes priority over the endpoint-existence check.
+    # Built before require_known_edge_endpoints, so a malformed edge's own
+    # TypeError still takes priority over the endpoint-existence check.
     edge_specs: list[tuple[str, str, dict[str, Any]]] = []
     for edge_data in data.get("edges", []):
         if not isinstance(edge_data.get("source"), str) or not isinstance(
@@ -269,7 +270,13 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         if not isinstance(node_data.get("id"), str):
             raise TypeError(f"Runtime graph node id must be a string: {node_data!r} in {path}")
         node_id = node_data["id"]
-        ref_screenshot = reference_screenshot_b64(path, node_id)
+        # A path, not the screenshot itself: reading and base64-encoding every
+        # node's screenshot at load time kept every one of them resident for the
+        # whole AITK session even though only _compute_missing_image_embeddings
+        # (a candidate with no cached vector) ever reads the bytes. The path is
+        # looked up once here (a stat, not a read) and encoded lazily there,
+        # the same as offline precomputation already does.
+        screenshot_path = reference_screenshot_path(path, node_id)
         # `.get(key, default)` keeps a present-but-null value, so every field a reader
         # iterates or indexes is narrowed here once rather than at each read site.
         G.add_node(
@@ -278,7 +285,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             page_description=as_str(node_data.get("page_description"), ""),
             state_schema=as_str_dict(node_data.get("state_schema")),
             last_detail_snapshot=as_str_dict(node_data.get("last_detail_snapshot")),
-            reference_screenshot=ref_screenshot,
+            reference_screenshot_path=screenshot_path,
             visit_count=node_data.get("visit_count", 0),
         )
 
@@ -676,12 +683,12 @@ class UIKobeV2Translator(BaseTranslator):
         retry loop starts, rather than inside it: raising per node would log a
         full traceback for every candidate instead of one clear error for the graph.
         """
-        candidates = [
-            (node_id, data["reference_screenshot"])
+        pending = [
+            (node_id, data["reference_screenshot_path"])
             for node_id, data in G.nodes(data=True)
-            if data.get("reference_screenshot") and not data.get("image_embedding")
+            if data.get("reference_screenshot_path") and not data.get("image_embedding")
         ]
-        if not candidates:
+        if not pending:
             return
         if not self.image_embedding_api_key:
             logger.error(
@@ -689,6 +696,12 @@ class UIKobeV2Translator(BaseTranslator):
                 "or GEMINI_API_KEY/GOOGLE_API_KEY."
             )
             return
+        # Encoded lazily, one screenshot at a time, the same as offline
+        # precomputation: at most one base64 payload resident, never every
+        # uncached node's at once.
+        candidates = iter_screenshot_candidates(
+            pending, app_name=app_name, encode=encode_screenshot_b64
+        )
         compute_missing_image_embeddings(
             graph_file,
             embeddings,
@@ -698,7 +711,7 @@ class UIKobeV2Translator(BaseTranslator):
             base_url=self.image_embedding_base_url,
             app_name=app_name,
         )
-        for node_id, _screenshot in candidates:
+        for node_id, _screenshot_path in pending:
             if node_id in embeddings:
                 G.nodes[node_id]["image_embedding"] = embeddings[node_id]
 
@@ -725,7 +738,7 @@ class UIKobeV2Translator(BaseTranslator):
                 for node_id, emb in embeddings.items():
                     G.nodes[node_id]["image_embedding"] = emb
                 ref_count = sum(
-                    1 for _, data in G.nodes(data=True) if data.get("reference_screenshot")
+                    1 for _, data in G.nodes(data=True) if data.get("reference_screenshot_path")
                 )
                 cached_count = sum(
                     1 for _, data in G.nodes(data=True) if data.get("image_embedding")

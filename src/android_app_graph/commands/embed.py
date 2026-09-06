@@ -17,6 +17,7 @@ import yaml
 
 from android_app_graph.embedding_cache import (
     compute_missing_image_embeddings,
+    iter_screenshot_candidates,
     load_image_embeddings,
     resolve_image_embedding_settings,
     save_image_embeddings,
@@ -43,34 +44,17 @@ def load_graph_json(graph_path: Path) -> dict[str, Any]:
 def _pending_candidates(
     pending: list[tuple[str, Path]], *, app_name: str, summary: dict[str, int]
 ) -> Iterator[tuple[str, str]]:
-    """Encode each pending node's screenshot lazily, one at a time.
-
-    ``compute_missing_image_embeddings`` makes one API call per candidate;
-    encoding here rather than up front keeps at most one base64 payload
-    resident, so a cold cache on a graph with hundreds of nodes never holds
-    hundreds of MB of screenshots before the first API call.
-
-    ``reference_screenshot_path`` only saw that the file existed; by the time
-    it is read and encoded here it may have become unreadable or gone. This
-    generator is iterated from a plain ``for`` in
-    ``compute_missing_image_embeddings``, outside that loop's own per-node
-    ``except``, so an uncaught ``OSError`` here would abort the whole run --
-    every remaining node and every remaining app -- rather than skip one
-    node. Caught and logged here instead, a boundary this generator forms on
-    behalf of its caller.
+    """Wrap the shared lazy screenshot generator, counting a failed read into
+    this run's own summary -- the accounting embedding_cache's shared helper
+    has no reason to know about.
     """
-    for node_id, screenshot_path in pending:
-        try:
-            screenshot_b64 = encode_screenshot_b64(screenshot_path)
-        except OSError:
-            summary["skipped_failed"] += 1
-            logger.exception(
-                "[GRAPH] %s/%s: reference screenshot could not be read; skipping",
-                app_name,
-                node_id,
-            )
-            continue
-        yield node_id, screenshot_b64
+
+    def _count_failed(_node_id: str) -> None:
+        summary["skipped_failed"] += 1
+
+    yield from iter_screenshot_candidates(
+        pending, app_name=app_name, encode=encode_screenshot_b64, on_failed=_count_failed
+    )
 
 
 def precompute_graph_image_embeddings(

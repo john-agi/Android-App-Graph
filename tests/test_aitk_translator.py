@@ -426,7 +426,7 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
     assert G.nodes["n1"]["page_description"] == "home"
     assert G.nodes["n1"]["state_schema"] == {"query": "str"}
     assert G.nodes["n1"]["visit_count"] == 3
-    assert G.nodes["n1"]["reference_screenshot"] is None
+    assert G.nodes["n1"]["reference_screenshot_path"] is None
     assert G.nodes["n2"]["activity"] == ""
     assert G.edges["n1", "n2"]["instructions"] == ["tap"]
     assert "schema_deltas" not in G.edges["n1", "n2"]
@@ -450,7 +450,11 @@ def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> N
     assert "schema_deltas" not in G.edges["n2", "n1"]
 
 
-def test_load_graph_from_json_embeds_reference_screenshots(tmp_path: Path) -> None:
+def test_load_graph_from_json_records_the_reference_screenshot_path(tmp_path: Path) -> None:
+    """The loader stores the screenshot's path, not its bytes: nothing reads the
+    screenshot at load time, only _compute_missing_image_embeddings, lazily,
+    for a node that still needs a vector.
+    """
     path = _write_graph(tmp_path, nodes=[{"id": "n1"}, {"id": "n2"}])
     screenshots = path.parent / "demo_screenshots"
     screenshots.mkdir()
@@ -458,8 +462,8 @@ def test_load_graph_from_json_embeds_reference_screenshots(tmp_path: Path) -> No
 
     G = aitk_translator._load_graph_from_json(path)
 
-    assert G.nodes["n1"]["reference_screenshot"] == base64.b64encode(_SCREENSHOT).decode("ascii")
-    assert G.nodes["n2"]["reference_screenshot"] is None
+    assert G.nodes["n1"]["reference_screenshot_path"] == screenshots / "n1.png"
+    assert G.nodes["n2"]["reference_screenshot_path"] is None
 
 
 def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_path: Path) -> None:
@@ -469,7 +473,7 @@ def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_pat
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
     G = aitk_translator._load_graph_from_json(path)
-    assert G.nodes["n1"]["reference_screenshot"] is not None
+    assert G.nodes["n1"]["reference_screenshot_path"] is not None
 
 
 @pytest.mark.parametrize(
@@ -589,12 +593,12 @@ def test_load_graph_from_json_rejects_an_edge_before_adding_any_edge(tmp_path: P
         aitk_translator._load_graph_from_json(path)
 
 
-def test_load_graph_from_json_rejects_a_bad_edge_before_reading_any_screenshot(
+def test_load_graph_from_json_rejects_a_bad_edge_before_looking_up_any_screenshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A graph rejected for one bad edge must not first pay for every reference
-    screenshot's base64 I/O: edge-endpoint validation runs before the node loop
-    reads any of them, not after.
+    screenshot path lookup: edge-endpoint validation runs before the node loop
+    looks up any of them, not after.
     """
     path = _write_graph(
         tmp_path,
@@ -602,14 +606,14 @@ def test_load_graph_from_json_rejects_a_bad_edge_before_reading_any_screenshot(
         edges=[{"source": "n1", "target": "ghost"}],
     )
     calls = 0
-    original = aitk_translator.reference_screenshot_b64
+    original = aitk_translator.reference_screenshot_path
 
-    def counting_wrapper(graph_path: Path, node_id: str) -> str | None:
+    def counting_wrapper(graph_path: Path, node_id: str) -> Path | None:
         nonlocal calls
         calls += 1
         return original(graph_path, node_id)
 
-    monkeypatch.setattr(aitk_translator, "reference_screenshot_b64", counting_wrapper)
+    monkeypatch.setattr(aitk_translator, "reference_screenshot_path", counting_wrapper)
 
     with pytest.raises(ValueError, match="ghost"):
         aitk_translator._load_graph_from_json(path)
@@ -900,6 +904,77 @@ def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
     assert built._graphs["demo"].nodes["home"]["image_embedding"] == [1.0, 0.0]
     assert "gone" not in built._graphs["demo"]
+
+
+def test_load_all_graphs_opens_no_screenshot_when_the_sidecar_covers_every_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node whose vector is already cached must never have its screenshot
+    opened: the runtime loader stores only the path at load time, and
+    _compute_missing_image_embeddings must encode nothing when every
+    candidate is already covered by the sidecar.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}])
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(b"shot-n1")
+    (screenshots / "n2.png").write_bytes(b"shot-n2")
+    (path.parent / "demo.image_emb.json").write_text(
+        json.dumps({"model": "img-model", "embeddings": {"n1": [1.0, 0.0], "n2": [0.0, 1.0]}}),
+        encoding="utf-8",
+    )
+
+    calls = 0
+    original_encode = aitk_translator.encode_screenshot_b64
+
+    def counting_encode(screenshot_path: Path) -> str:
+        nonlocal calls
+        calls += 1
+        return original_encode(screenshot_path)
+
+    monkeypatch.setattr(aitk_translator, "encode_screenshot_b64", counting_encode)
+
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert set(built._graphs) == {"demo"}
+    assert calls == 0
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_load_all_graphs_streams_screenshot_reads_lazily(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each screenshot is read only right before its own embedding call, not
+    all up front: a cold cache must never hold every node's base64 payload in
+    memory at once.
+    """
+    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}])
+    screenshots = path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+
+    reads_so_far = 0
+    original_encode = aitk_translator.encode_screenshot_b64
+
+    def counting_encode(screenshot_path: Path) -> str:
+        nonlocal reads_so_far
+        reads_so_far += 1
+        return original_encode(screenshot_path)
+
+    monkeypatch.setattr(aitk_translator, "encode_screenshot_b64", counting_encode)
+
+    reads_at_call: list[int] = []
+
+    def fake_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+        reads_at_call.append(reads_so_far)
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+
+    aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert reads_at_call == [1, 2, 3]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1569,7 +1644,7 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
         page_description="a wrong-dimension screen",
         state_schema={},
         last_detail_snapshot={},
-        reference_screenshot=None,
+        reference_screenshot_path=None,
         visit_count=0,
         image_embedding=[1.0, 0.0, 0.0],
     )
