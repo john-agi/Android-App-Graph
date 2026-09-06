@@ -322,12 +322,11 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
         if choice in valid_letters:
             return choice
 
-    # Free text beyond an explicit "Answer:"/</think> form is scanned in its
-    # original case: .upper() would turn a lowercase article ("a") into a false
-    # option letter and a sentence-initial "None" into a false NONE. An actual
-    # uppercase letter always outranks a "NONE" found in the same text, since a
-    # model that names a letter has answered even if it also explained a
-    # rejection ("None of the others fit, so B").
+    # Free text beyond an explicit "Answer:"/</think> form: uppercase letters are
+    # scanned in the original case, so .upper() cannot turn a lowercase article
+    # ("a") into a false option letter. A named letter outranks a NONE found
+    # anywhere in the text, since a model that names a letter has answered even
+    # if it also explained a rejection ("None of the others fit, so B").
     for letter_match in reversed(list(re.finditer(r"\b([A-Z])\b", text))):
         letter = as_str(letter_match.group(1), "")
         # A standalone "A"/"I" immediately followed by a lowercase word is the
@@ -834,6 +833,8 @@ class UIKobeV2Translator(BaseTranslator):
             logger.error("Runtime image embedding failed for current screenshot. Error: %s", exc)
             raise
         candidates: list[tuple[str, float, str]] = []
+        stale_count = 0
+        stale_dims: set[int] = set()
         for node_id, data in G.nodes(data=True):
             if package_from_activity(data.get("activity", "")) != current_pkg:
                 continue
@@ -841,8 +842,24 @@ class UIKobeV2Translator(BaseTranslator):
             node_image_emb = data.get("image_embedding")
             if not node_image_emb:
                 continue
+            if len(node_image_emb) != len(query_image_emb):
+                stale_count += 1
+                stale_dims.add(len(node_image_emb))
+                continue
             sim = cosine_similarity(query_image_emb, node_image_emb)
             candidates.append((str(node_id), sim, data.get("page_description", "")))
+
+        if stale_count:
+            # A model or image_embedding.model change after sidecars were written leaves
+            # cached vectors at a different dimension than the fresh query; scoring them
+            # anyway would rank candidates as garbage with no signal anything was wrong.
+            logger.warning(
+                "[IDENTIFY] image-embedding cache is stale for %d node(s): query dim=%d, "
+                "cached dim(s)=%s; recompute with app-graph-embed",
+                stale_count,
+                len(query_image_emb),
+                sorted(stale_dims),
+            )
 
         candidates.sort(key=lambda x: x[1], reverse=True)
 

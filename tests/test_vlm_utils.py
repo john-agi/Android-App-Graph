@@ -34,6 +34,17 @@ def test_cosine_similarity_with_a_zero_vector_is_zero(a: list[float], b: list[fl
     assert cosine_similarity(a, b) == 0.0
 
 
+def test_cosine_similarity_rejects_vectors_of_different_length() -> None:
+    """Two vectors of different dimension are never scored against each other.
+
+    ``zip`` would otherwise silently truncate to the shorter vector, scoring a
+    cached embedding from a different model's space against the overlapping
+    prefix and ranking it as garbage with no signal that anything went wrong.
+    """
+    with pytest.raises(ValueError, match=r"2 vs 1|1 vs 2"):
+        cosine_similarity([1.0, 0.0], [1.0])
+
+
 @pytest.mark.parametrize(
     ("a", "b"),
     [
@@ -49,15 +60,22 @@ def test_cosine_similarity_clamps_subnormal_rounding_artifacts(
     assert -1.0 <= cosine_similarity(a, b) <= 1.0
 
 
-_finite_vectors = st.lists(
-    st.floats(min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False),
-    min_size=1,
-    max_size=8,
+_finite_float = st.floats(min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False)
+# Same length for both vectors: cosine_similarity rejects a mismatch outright,
+# and this property is about the score, not that guard.
+_same_length_vector_pair = st.integers(min_value=1, max_value=8).flatmap(
+    lambda n: st.tuples(
+        st.lists(_finite_float, min_size=n, max_size=n),
+        st.lists(_finite_float, min_size=n, max_size=n),
+    )
 )
 
 
-@given(a=_finite_vectors, b=_finite_vectors)
-def test_cosine_similarity_is_bounded_and_symmetric(a: list[float], b: list[float]) -> None:
+@given(vectors=_same_length_vector_pair)
+def test_cosine_similarity_is_bounded_and_symmetric(
+    vectors: tuple[list[float], list[float]],
+) -> None:
+    a, b = vectors
     similarity = cosine_similarity(a, b)
     assert -1.0 <= similarity <= 1.0
     assert similarity == pytest.approx(cosine_similarity(b, a))

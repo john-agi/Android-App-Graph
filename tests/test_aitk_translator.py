@@ -1268,6 +1268,38 @@ def test_identify_node_picks_the_model_choice(
     )
 
 
+def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
+    monkeypatch: pytest.MonkeyPatch,
+    identifiable: aitk_translator.UIKobeV2Translator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cached image embedding from a different embedding-model dimension must
+    never be scored against the fresh query vector (see cosine_similarity's
+    ValueError); it is skipped and warned about once, not per candidate.
+    """
+    G = identifiable._graphs["demo"]
+    G.add_node(
+        "stale",
+        activity="com.demo.app/.HomeActivity",
+        page_description="a wrong-dimension screen",
+        state_schema={},
+        last_detail_snapshot={},
+        reference_screenshot=None,
+        visit_count=0,
+        image_embedding=[1.0, 0.0, 0.0],
+    )
+    _use_model(monkeypatch, identifiable, "A")
+
+    with caplog.at_level("WARNING"):
+        node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+
+    assert node_id == "home"
+    stale_warnings = [m for m in caplog.messages if "image-embedding cache is stale" in m]
+    assert len(stale_warnings) == 1
+    assert "query dim=2" in stale_warnings[0]
+    assert "dim(s)=[3]" in stale_warnings[0]
+
+
 def test_identify_node_respects_a_rejection(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:

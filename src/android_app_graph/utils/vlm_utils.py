@@ -33,10 +33,18 @@ MAX_PIXELS = 1_000_000
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Return the cosine similarity of ``a`` and ``b``, clamped to ``[-1.0, 1.0]``.
 
-    A zero norm has no direction and scores 0.0. Subnormal rounding can push the
-    ratio outside the clamp, and a non-finite ratio scores 0.0 so a NaN never wins.
+    Raises ``ValueError`` when the vectors have different lengths: scoring
+    them anyway (as plain ``zip`` would, truncating to the shorter one) treats
+    the overlapping prefix of two unrelated embedding spaces as comparable,
+    e.g. a cached vector computed under a since-changed embedding model.
+    A zero norm has no direction and scores 0.0. Subnormal rounding can push
+    the ratio outside the clamp, and a non-finite ratio scores 0.0 so a NaN
+    never wins.
     """
-    dot = sum(x * y for x, y in zip(a, b))
+    if len(a) != len(b):
+        msg = f"cosine_similarity: vectors have different lengths ({len(a)} vs {len(b)})"
+        raise ValueError(msg)
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if not norm_a or not norm_b:

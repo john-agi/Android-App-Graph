@@ -389,6 +389,29 @@ def test_identify_state_skips_candidates_without_an_embedding(vlm: FakeVlm) -> N
     assert node_id == "s0_home_screen"
 
 
+def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A node whose description embedding was computed under a different
+    embedding_model dimension must never be scored against the fresh query
+    vector (see cosine_similarity's ValueError); it is skipped and warned
+    about once, not once per candidate.
+    """
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        node_id = gm.identify_state(HOME, SHOT_A)
+
+    assert node_id == "s1_home"
+    stale_warnings = [m for m in caplog.messages if "description-embedding cache is stale" in m]
+    assert len(stale_warnings) == 1
+    assert "query dim=3" in stale_warnings[0]
+    assert "dim(s)=[2]" in stale_warnings[0]
+
+
 def test_identify_state_below_the_threshold_creates_a_new_node(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Settings page", {}, []))
     gm = make_manager()
@@ -1611,6 +1634,24 @@ def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
     assert results[0][1] == pytest.approx(1.0)
     assert results[1][1] == pytest.approx(0.0)
     assert vlm.kinds() == ["embed"]
+
+
+def test_find_node_by_description_skips_a_stale_dimension_embedding_and_logs_once(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        results = gm.find_node_by_description("Home screen")
+
+    assert [node_id for node_id, _ in results] == ["s1_home"]
+    assert vlm.kinds() == ["embed"]
+    stale_warnings = [m for m in caplog.messages if "description-embedding cache is stale" in m]
+    assert len(stale_warnings) == 1
+    assert "query dim=3" in stale_warnings[0]
+    assert "dim(s)=[2]" in stale_warnings[0]
 
 
 def test_find_node_by_description_stringifies_non_string_node_ids(vlm: FakeVlm) -> None:
