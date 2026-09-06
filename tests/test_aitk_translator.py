@@ -403,6 +403,48 @@ def test_load_graph_from_json_rejects_a_non_string_edge_endpoint(
         aitk_translator._load_graph_from_json(path)
 
 
+def test_load_graph_from_json_rejects_an_edge_to_an_undefined_node(tmp_path: Path) -> None:
+    """A hand-edited or partially written graph must not grow a phantom neighbour:
+    networkx's add_edge would otherwise silently create an attribute-less node
+    for any endpoint the file's ``nodes`` list does not define.
+    """
+    path = _write_graph(
+        tmp_path,
+        nodes=[{"id": "n1"}],
+        edges=[{"source": "n1", "target": "ghost"}],
+    )
+    with pytest.raises(ValueError, match="ghost"):
+        aitk_translator._load_graph_from_json(path)
+
+
+def test_load_graph_from_json_rejects_an_edge_before_adding_any_edge(tmp_path: Path) -> None:
+    """The check runs before any edge is added: a graph with one valid edge and
+    one edge to an undefined node must load none of its edges, not the valid one.
+    """
+    path = _write_graph(
+        tmp_path,
+        nodes=[{"id": "n1"}, {"id": "n2"}],
+        edges=[
+            {"source": "n1", "target": "n2"},
+            {"source": "n2", "target": "ghost"},
+        ],
+    )
+    with pytest.raises(ValueError, match="ghost"):
+        aitk_translator._load_graph_from_json(path)
+
+
+def test_load_all_graphs_skips_a_graph_with_an_edge_to_an_undefined_node(tmp_path: Path) -> None:
+    _write_graph(
+        tmp_path,
+        app="broken",
+        nodes=[{"id": "n1"}],
+        edges=[{"source": "n1", "target": "ghost"}],
+    )
+    _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+    assert set(built._graphs) == {"demo"}
+
+
 def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) -> None:
     """A corrupt cache file must not take down the whole app graph it caches for."""
     (graph_dir / "demo" / "demo.image_emb.json").write_text("{not json", encoding="utf-8")
