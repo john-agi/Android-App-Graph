@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from aitk.translators.android_app_graph_v2 import UIKobeV2Translator
 from android_world.agents import base_agent
 from android_world.env import adb_utils, interface, json_action
 from PIL import Image
+
+from android_app_graph.adapters.aitk_translator import UIKobeV2Translator
 
 if TYPE_CHECKING:
     import numpy as np
@@ -27,7 +28,12 @@ def _pixels_to_png_b64(pixels: np.ndarray) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _package_from_activity(activity: str) -> str:
+def _component_package(activity: str) -> str:
+    """Return the package before the ``/`` of an Android World activity component.
+
+    Unlike ``package_from_activity`` it keeps every dot-segment: Android World
+    reports the full ``package/component`` form.
+    """
     return activity.split("/", 1)[0] if activity else ""
 
 
@@ -161,7 +167,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         state = self.get_post_transition_state()
         screenshot_b64 = _pixels_to_png_b64(state.pixels)
         activity = self.env.foreground_activity_name
-        package = _package_from_activity(activity)
+        package = _component_package(activity)
 
         response_text = self._runtime._step(
             goal,

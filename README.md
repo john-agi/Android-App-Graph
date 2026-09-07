@@ -27,14 +27,15 @@ The repository has two main uses:
 Android-App-Graph/
 ├── src/
 │   └── android_app_graph/             # The installable package; the only directory in the wheel
+│       ├── adapters/                  # AITK translator, imported by the copy-in shim
 │       ├── cli.py                     # app-graph command
 │       ├── commands/                  # app-graph-audit, app-graph-plot, app-graph-embed
 │       ├── kobe.py                    # Core app explorer
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
-├── aitk_files/                        # Copy-in adapter for AITK, not packaged
-│   └── android_app_graph_v2.py        # AITK translator to copy into AITK
+├── aitk_files/                        # Copy-in shim for AITK, not packaged
+│   └── android_app_graph_v2.py        # 5-line shim to copy into AITK
 ├── aw_files/                          # Copy-in adapter for Android World, not packaged
 │   └── android_app_graph_aw_agent.py  # Android World agent adapter
 └── configs/
@@ -51,7 +52,9 @@ repository root and are not part of the wheel. `scripts/` holds only
 `app-graph-audit`, `app-graph-plot` and `app-graph-embed` commands live in
 `src/android_app_graph/commands/` and ship with the wheel. `aitk_files/` and `aw_files/`
 are copy-in adapters that you copy into an AITK or Android World checkout (see
-the sections below). `configs/` holds example configuration.
+the sections below). `aitk_files/android_app_graph_v2.py` is only a shim: the
+AITK translator itself lives in `src/android_app_graph/adapters/aitk_translator.py`
+and ships with the wheel. `configs/` holds example configuration.
 
 Generated graphs, logs, and outputs are intentionally ignored by git.
 
@@ -64,20 +67,36 @@ Arrows point from importer to imported module; anything not drawn is forbidden.
 ```mermaid
 graph TD;
     pkg["android_app_graph"] --> kobe["android_app_graph.kobe"];
+    adapters["android_app_graph.adapters"] --> pkgs["android_app_graph.android_packages"];
+    adapters --> dev["android_app_graph.device"];
+    adapters --> ec["android_app_graph.embedding_cache"];
+    adapters --> gf["android_app_graph.graph_files"];
+    adapters --> pay["android_app_graph.payloads"];
+    adapters --> retry["android_app_graph.retrying"];
+    adapters --> utils["android_app_graph.utils"];
+    adapters --> vlm["android_app_graph.utils.vlm_utils"];
     cmd["android_app_graph.commands"] --> cli["android_app_graph.cli"];
-    cmd --> dev["android_app_graph.device"];
-    cmd --> pay["android_app_graph.payloads"];
-    cmd --> utils["android_app_graph.utils"];
+    cmd --> dev;
+    cmd --> ec;
+    cmd --> gf;
+    cmd --> utils;
     cmd --> gm["android_app_graph.utils.graph_manager"];
     cmd --> logging["android_app_graph.utils.logging"];
-    cmd --> vlm["android_app_graph.utils.vlm_utils"];
+    cmd --> vlm;
     cli --> dev;
     cli --> kobe;
     cli --> logging;
+    ec --> gf;
+    ec --> pay;
+    ec --> retry;
+    ec --> utils;
+    ec --> vlm;
     kobe --> dev;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
+    gm --> pkgs;
+    gm --> gf;
     gm --> pay;
     gm --> vlm;
     vlm --> pay;
@@ -227,14 +246,24 @@ Precompute native Gemini image embeddings for a graph:
 uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 ```
 
+The sidecar is tagged with the embedding model that wrote it, so switching
+`image_embedding.model` is detected automatically and recomputed without any
+flag; an untagged sidecar left over from an older release is recomputed the
+same way, since its vectors carry no record of which model produced them.
+Pass `--recompute` to discard the sidecar and rebuild every vector regardless
+of its model tag -- for a hand-edited sidecar or a deliberate refresh.
+
 ## Use Android-App-Graph with AITK
 
 AITK loads a translator by module name: `register_translator()` in
 `aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
 from `configs/controller.yaml`, imports it with `importlib.import_module`, and
 calls its `register(translator_args)` function. It cannot import a translator
-from another installed package, so the translator file must be copied into the
-AITK checkout that the environment imports. Verified against AITK commit
+from another installed package, so a module of that name must exist inside the
+AITK checkout that the environment imports. `aitk_files/android_app_graph_v2.py`
+is that module: a five-line shim that re-exports `register` and
+`UIKobeV2Translator` from `android_app_graph.adapters.aitk_translator`, so the
+translator itself stays in the installed package. Verified against AITK commit
 `fd06a28e2286cbc1ae699401c1a6f894ba926c44`, the commit this project pins.
 
 1. Set up AITK first, in its own environment, following AITK's `docs/setup.md`
@@ -267,7 +296,7 @@ AITK checkout that the environment imports. Verified against AITK commit
    `aitk.__file__` points into `site-packages` or the version is not `0.2.1`,
    the wrong `aitk` is installed; fix that before continuing.
 
-4. Copy the translator into the directory printed on the second line:
+4. Copy the shim into the directory printed on the second line:
 
    ```bash
    cp /path/to/Android-App-Graph/aitk_files/android_app_graph_v2.py \
@@ -277,9 +306,14 @@ AITK checkout that the environment imports. Verified against AITK commit
 5. Register it in AITK's `configs/controller.yaml`: set `translator: android_app_graph_v2`
    and pass the graph directory and VLM settings through `translator_args`:
 
+   AITK's own `scripts/interact.py` reads `translator_args.max_pixels`
+   unconditionally, so it must be set even though this translator itself
+   defaults it to `1_000_000` when the key is absent:
+
    ```yaml
    translator_args:
      graph_dir: /path/to/Android-App-Graph/graphs
+     max_pixels: 784000
      vlm_config:
        similarity_threshold: 0.84
        page_detail:
@@ -313,8 +347,20 @@ AITK checkout that the environment imports. Verified against AITK commit
    Expected: `<function register at 0x...>`. Then run AITK as its README
    describes (its own `interact.py` entry point with `configs/controller.yaml`).
 
-The copied translator imports helper functions from the installed `android_app_graph`
-package; that is why Android-App-Graph must be installed in the AITK environment.
+The copied shim imports the translator from the installed `android_app_graph`
+package; that is why Android-App-Graph must be installed in the AITK
+environment. Re-copy the shim only when it changes, which it rarely does:
+changes to the translator reach AITK through `uv pip install` of this project,
+not through step 4. The one exception is upgrading from a release where the
+full translator (rather than this shim) was copied into the AITK checkout:
+that old copy imports a private helper name that no longer exists, so it
+fails to import after the `uv pip install` upgrade until the shim is
+re-copied once.
+
+`UIKobeV2Translator` also no longer accepts a `history_window` constructor
+argument, so a `controller.yaml` upgraded from an older release must drop
+`translator_args.history_window`, or AITK's `register()` call fails with a
+`TypeError`.
 
 ## Use Android-App-Graph with Android World
 
@@ -397,7 +443,7 @@ The core pattern is:
 4. Choose either a graph-guided transition or a free-form fallback action.
 5. Convert that decision into the action format required by your environment.
 
-The two files below show this pattern in concrete systems.
+The two examples below show this pattern in concrete systems.
 
 ### AITK translator
 
@@ -420,8 +466,10 @@ def register(kargs: dict) -> MyTranslator:
     return MyTranslator(**kargs)
 ```
 
-Use `aitk_files/android_app_graph_v2.py` as the full graph-guided AITK example. It shows
-how to load an Android-App-Graph graph, identify the current node, record task-relevant
+Use `src/android_app_graph/adapters/aitk_translator.py` as the full graph-guided AITK
+example (`aitk_files/android_app_graph_v2.py` is only the 5-line shim you copy into an
+AITK checkout; see "Use Android-App-Graph with AITK" above). It shows how to load an
+Android-App-Graph graph, identify the current node, record task-relevant
 information, choose a graph edge, and convert the choice into a low-level AITK
 action. You can transfer the same graph usage to other agent frameworks by
 replacing only the final action-conversion layer.

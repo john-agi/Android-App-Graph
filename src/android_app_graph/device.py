@@ -8,7 +8,16 @@ lets tests pass a fake without adb or an emulator.
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
+
+_SOFT_KEYBOARD_HINT = (
+    " (Note: the soft keyboard is currently visible — a text field is focused "
+    "and ready for typing.)"
+)
 
 
 class DeviceController(Protocol):
@@ -32,3 +41,36 @@ class AvdManager(Protocol):
     def get_running_avd_list(self) -> list[dict[str, Any]] | None: ...
 
     def duplicate_avd(self, avd_name: str) -> None: ...
+
+
+def soft_keyboard_hint() -> str:
+    """Return a note that the soft keyboard is visible, or ``""`` otherwise.
+
+    Shells out to adb rather than going through ``DeviceController``: aitk's
+    controller exposes no shell method, and the translator holds no controller.
+    """
+    try:
+        kb_check = subprocess.run(
+            ["adb", "shell", "dumpsys", "input_method"],
+            capture_output=True,
+            text=True,
+            # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
+            # best-effort probe; replace bad bytes instead of failing to decode them.
+            errors="replace",
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        logger.debug("Soft keyboard probe failed: %s", exc)
+        return ""
+    return _SOFT_KEYBOARD_HINT if "mInputShown=true" in kb_check.stdout else ""
+
+
+def keyboard_status(hint: str) -> str:
+    """Return the planner-prompt sentence for ``hint`` from ``soft_keyboard_hint()``."""
+    if hint:
+        return "Soft keyboard is visible; a text field is focused and ready for typing."
+    return (
+        "No OS keyboard signal detected. Still inspect the screenshot: "
+        "a bottom input/keyboard bar can mean a text field is active."
+    )

@@ -12,7 +12,7 @@ import logging
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import networkx as nx
 import pytest
@@ -25,10 +25,8 @@ from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
     NORMALIZE_EVERY_N_VISITS,
     GraphManager,
-    _cosine_similarity,
     _merge_elements,
     _merge_into_schema,
-    _package_from_activity,
 )
 
 HOME = "com.example.app.HomeActivity"
@@ -166,39 +164,6 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
 def test_network_guard_blocks_outbound_connections() -> None:
     with pytest.raises(RuntimeError, match="network access is disabled"):
         socket.create_connection(("127.0.0.1", 9), timeout=0.1)
-
-
-def test_package_from_activity_keeps_the_first_three_segments() -> None:
-    assert _package_from_activity("com.citymapper.app.home.HomeActivity2") == "com.citymapper.app"
-
-
-def test_package_from_activity_drops_the_component_after_a_slash() -> None:
-    activity = "com.citymapper.app/com.citymapper.app.MainActivity"
-    assert _package_from_activity(activity) == "com.citymapper.app"
-
-
-def test_package_from_activity_returns_short_names_unchanged() -> None:
-    assert _package_from_activity("com.example") == "com.example"
-
-
-def test_package_from_activity_returns_an_empty_string_unchanged() -> None:
-    assert _package_from_activity("") == ""
-
-
-def test_cosine_similarity_of_parallel_vectors_is_one() -> None:
-    assert _cosine_similarity([1.0, 0.0], [2.0, 0.0]) == pytest.approx(1.0)
-
-
-def test_cosine_similarity_of_orthogonal_vectors_is_zero() -> None:
-    assert _cosine_similarity([1.0, 0.0], [0.0, 3.0]) == pytest.approx(0.0)
-
-
-def test_cosine_similarity_with_a_zero_vector_is_zero() -> None:
-    assert _cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
-
-
-def test_cosine_similarity_with_a_zero_second_vector_is_zero() -> None:
-    assert _cosine_similarity([1.0, 1.0], [0.0, 0.0]) == 0.0
 
 
 def test_merge_into_schema_adds_a_new_key_as_a_single_element_list() -> None:
@@ -422,6 +387,50 @@ def test_identify_state_skips_candidates_without_an_embedding(vlm: FakeVlm) -> N
     node_id = gm.identify_state(HOME, SHOT_A)
 
     assert node_id == "s0_home_screen"
+
+
+def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
+    companion ``_embeddings.json`` nor an inline vector; that is a missing
+    embedding, not a stale-dimension one, and must be skipped silently.
+    """
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_empty", "Home screen", description_embedding=[])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        node_id = gm.identify_state(HOME, SHOT_A)
+
+    assert node_id == "s1_home"
+    assert "stale" not in caplog.text
+
+
+def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A node whose description embedding was computed under a different
+    embedding_model dimension must never be scored against the fresh query
+    vector (see cosine_similarity's ValueError); it is skipped and warned
+    about once, not once per candidate.
+    """
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        node_id = gm.identify_state(HOME, SHOT_A)
+
+    assert node_id == "s1_home"
+    stale_warnings = [
+        m for m in caplog.messages if "description-embedding: embedding cache is stale" in m
+    ]
+    assert len(stale_warnings) == 1
+    assert "query dim=3" in stale_warnings[0]
+    assert "dim(s)=[2]" in stale_warnings[0]
 
 
 def test_identify_state_below_the_threshold_creates_a_new_node(vlm: FakeVlm) -> None:
@@ -1533,6 +1542,39 @@ def test_save_graph_omits_an_empty_activity_list_and_embedding(tmp_path: Path) -
     assert json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8")) == {}
 
 
+def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash partway through json.dump must leave the previous complete graph
+    file and its embeddings companion in place, never a truncated mix of the
+    old and new content, and must not leave a stray temp file behind -- the
+    same atomicity save_image_embeddings already had for the sidecar, now
+    shared with the more valuable graph file and its embeddings companion
+    through graph_files.write_json_atomically.
+    """
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    emb_path = tmp_path / "graph.emb.json"
+    original_graph = path.read_text(encoding="utf-8")
+    original_emb = emb_path.read_text(encoding="utf-8")
+
+    def _dump_then_blow_up(_obj: object, fp: IO[str], **_kwargs: object) -> None:
+        fp.write('{"broken"')  # a partial write, as a real crash mid-dump would leave
+        msg = "boom"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(gm_module.json, "dump", _dump_then_blow_up)
+
+    with pytest.raises(ValueError, match="boom"):
+        gm.save_graph(path)
+
+    assert path.read_text(encoding="utf-8") == original_graph
+    assert emb_path.read_text(encoding="utf-8") == original_emb
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["graph.emb.json", "graph.json"]
+
+
 def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
     path = tmp_path / "graph.json"
     path.write_text(
@@ -1565,6 +1607,35 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
     assert gm.total_steps_completed == 0
 
 
+def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
+    tmp_path: Path, vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
+    companion ``_embeddings.json`` nor an inline vector; ``identify_state`` must
+    treat that as a missing embedding, not warn that the cache is stale.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}],
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+    gm.load_graph(path)
+    assert gm.graph.nodes["s0_home"]["description_embedding"] == []
+
+    vlm.descriptions.append(("Home screen", {}, []))
+    with caplog.at_level("WARNING"):
+        node_id = gm.identify_state(HOME, SHOT_A)
+
+    assert node_id == "s0_home_screen"
+    assert "stale" not in caplog.text
+
+
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     source = make_manager()
     add_screen(source, "s0_home", "Home screen")
@@ -1576,6 +1647,62 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     target.load_graph(path)
 
     assert list(target.graph.nodes) == ["s0_home"]
+
+
+def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
+    """load_graph used to accept a file without an "edges" key via
+    ``.get("edges", [])`` before require_graph_shape started rejecting the
+    key as missing; an absent "nodes" or "edges" is an empty list, matching
+    that old behaviour, and only a present non-list value is still rejected.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {"nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}]}
+        ),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+
+    gm.load_graph(path)
+
+    assert list(gm.graph.nodes) == ["s0_home"]
+    assert gm.graph.number_of_edges() == 0
+
+
+def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
+    tmp_path: Path,
+) -> None:
+    """save_graph writes only re-explored nodes into ``<stem>_screenshots``, so an
+    audited graph's screenshots are split between that directory and the app
+    directory's own; a node must be found in either, through the same lookup the
+    runtime translator and the offline precompute use.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    path = app_dir / "demo_audited.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "s0_home", "activity": HOME, "page_description": "Home screen"},
+                    {"id": "s1_cart", "activity": HOME, "page_description": "Cart"},
+                ],
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "demo_screenshots").mkdir()
+    (app_dir / "demo_screenshots" / "s0_home.png").write_bytes(b"screenshot-a")
+    (app_dir / "demo_audited_screenshots").mkdir()
+    (app_dir / "demo_audited_screenshots" / "s1_cart.png").write_bytes(b"screenshot-b")
+
+    gm = make_manager()
+    gm.load_graph(path)
+
+    assert gm.graph.nodes["s0_home"]["reference_screenshot"] == SHOT_A
+    assert gm.graph.nodes["s1_cart"]["reference_screenshot"] == SHOT_B
 
 
 def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
@@ -1599,6 +1726,76 @@ def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: 
     assert list(gm.graph.nodes) == ["s9_stale"]
 
 
+def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path) -> None:
+    """A node missing "id" must surface as this loader's own path-bearing error --
+    the same invariant the runtime loader gives, not a bare KeyError('id') from
+    indexing the node dict -- and must be caught before ``self.graph.clear()``
+    or any counter is overwritten, so a bad file leaves the previously loaded
+    graph and its counters untouched rather than wiping them partway through.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps({"next_id": 99, "nodes": [{"page_description": "x"}], "edges": []}),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+    add_screen(gm, "s9_stale", "Stale screen")
+    gm._next_id = 7
+
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+    assert list(gm.graph.nodes) == ["s9_stale"]
+    assert gm._next_id == 7
+
+
+def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
+    """Confirmed bug: ``"nodes": null`` used to raise a bare, path-less
+    ``TypeError: 'NoneType' object is not iterable`` from ``load_graph``, which
+    has no shape check of its own and relies entirely on the shared validator.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
+    gm = make_manager()
+
+    with pytest.raises(TypeError, match="must contain list fields 'nodes' and 'edges'") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
+    """An int id would otherwise sail through ``require_known_edge_endpoints``,
+    which compares ``str()``-normalised ids, and let ``add_edge`` grow a
+    phantom node with a different (string) id -- the same bug #62 fixed for a
+    genuinely undefined endpoint.
+    """
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps({"nodes": [{"id": 5}], "edges": []}), encoding="utf-8")
+    gm = make_manager()
+
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_load_graph_rejects_an_int_edge_endpoint_naming_the_path(tmp_path: Path) -> None:
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": "n1"}],
+                "edges": [{"source": 5, "target": "n1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    gm = make_manager()
+
+    with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)
+
+
 def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -1611,6 +1808,45 @@ def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
     assert results[0][1] == pytest.approx(1.0)
     assert results[1][1] == pytest.approx(0.0)
     assert vlm.kinds() == ["embed"]
+
+
+def test_find_node_by_description_skips_an_empty_embedding_without_a_stale_warning(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same as ``identify_state``: an empty ``description_embedding`` (what
+    ``load_graph`` produces for a node with no cached vector at all) is a
+    missing embedding, not a stale-dimension one.
+    """
+    gm = make_manager()
+    add_screen(gm, "s0_empty", "Home screen", description_embedding=[])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        results = gm.find_node_by_description("Home screen")
+
+    assert [node_id for node_id, _ in results] == ["s1_home"]
+    assert "stale" not in caplog.text
+    assert vlm.kinds() == ["embed"]
+
+
+def test_find_node_by_description_skips_a_stale_dimension_embedding_and_logs_once(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0])
+    add_screen(gm, "s1_home", "Home feed")
+
+    with caplog.at_level("WARNING"):
+        results = gm.find_node_by_description("Home screen")
+
+    assert [node_id for node_id, _ in results] == ["s1_home"]
+    assert vlm.kinds() == ["embed"]
+    stale_warnings = [
+        m for m in caplog.messages if "description-embedding: embedding cache is stale" in m
+    ]
+    assert len(stale_warnings) == 1
+    assert "query dim=3" in stale_warnings[0]
+    assert "dim(s)=[2]" in stale_warnings[0]
 
 
 def test_find_node_by_description_stringifies_non_string_node_ids(vlm: FakeVlm) -> None:
@@ -1995,3 +2231,12 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
                 assert v in gm.graph
                 assert "page_description" in gm.graph.nodes[u]
                 assert "page_description" in gm.graph.nodes[v]
+
+
+def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path) -> None:
+    path = tmp_path / "graph.json"
+    path.write_text("[]", encoding="utf-8")
+    gm = make_manager()
+    with pytest.raises(TypeError, match="must be an object") as excinfo:
+        gm.load_graph(path)
+    assert str(path) in str(excinfo.value)

@@ -14,16 +14,48 @@ path = "android_app_graph"
 depends_on = ["android_app_graph.kobe"]
 
 [[modules]]
+path = "android_app_graph.adapters"
+depends_on = [
+    "android_app_graph.android_packages",
+    "android_app_graph.device",
+    "android_app_graph.embedding_cache",
+    "android_app_graph.graph_files",
+    "android_app_graph.payloads",
+    "android_app_graph.retrying",
+    "android_app_graph.utils",
+    "android_app_graph.utils.vlm_utils",
+]
+
+[[modules]]
+path = "android_app_graph.android_packages"
+depends_on = []
+
+[[modules]]
 path = "android_app_graph.commands"
 depends_on = [
     "android_app_graph.cli",
     "android_app_graph.device",
-    "android_app_graph.payloads",
+    "android_app_graph.embedding_cache",
+    "android_app_graph.graph_files",
     "android_app_graph.utils",
     "android_app_graph.utils.graph_manager",
     "android_app_graph.utils.logging",
     "android_app_graph.utils.vlm_utils",
 ]
+
+[[modules]]
+path = "android_app_graph.embedding_cache"
+depends_on = [
+    "android_app_graph.graph_files",
+    "android_app_graph.payloads",
+    "android_app_graph.retrying",
+    "android_app_graph.utils",
+    "android_app_graph.utils.vlm_utils",
+]
+
+[[modules]]
+path = "android_app_graph.graph_files"
+depends_on = []
 
 [[modules]]
 path = "android_app_graph.cli"
@@ -48,7 +80,12 @@ depends_on = []
 
 [[modules]]
 path = "android_app_graph.utils.graph_manager"
-depends_on = ["android_app_graph.payloads", "android_app_graph.utils.vlm_utils"]
+depends_on = [
+    "android_app_graph.android_packages",
+    "android_app_graph.graph_files",
+    "android_app_graph.payloads",
+    "android_app_graph.utils.vlm_utils",
+]
 
 [[modules]]
 path = "android_app_graph.utils.vlm_utils"
@@ -64,4 +101,8 @@ depends_on = []
 
 [[modules]]
 path = "android_app_graph.payloads"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.retrying"
 depends_on = []

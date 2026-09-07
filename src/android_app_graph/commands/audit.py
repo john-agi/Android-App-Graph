@@ -35,7 +35,7 @@ import yaml
 from openai import OpenAI
 
 from android_app_graph.cli import launch_app
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
 from android_app_graph.utils import make_client
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.logging import setup_logging
@@ -320,26 +320,8 @@ def re_explore_issues(
                 page_desc = f"{page_desc}\n[AUDIT HINT: {hint}]"
 
             # Check before planning so the planner can choose type vs tap.
-            keyboard_hint = ""
-            input_status = (
-                "No OS keyboard signal detected. Still inspect the screenshot: "
-                "a bottom input/keyboard bar can mean a text field is active."
-            )
-            try:
-                kb_check = subprocess.run(
-                    ["adb", "shell", "dumpsys", "input_method"],
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                    check=False,
-                )
-                if "mInputShown=true" in kb_check.stdout:
-                    keyboard_hint = " (Note: the soft keyboard is currently visible.)"
-                    input_status = (
-                        "Soft keyboard is visible; a text field is focused and ready for typing."
-                    )
-            except (OSError, subprocess.SubprocessError) as exc:
-                logger.debug("Soft keyboard probe failed: %s", exc)
+            keyboard_hint = soft_keyboard_hint()
+            input_status = keyboard_status(keyboard_hint)
 
             instruction = plan_next_action(
                 client=instruction_client,

@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from android_app_graph import embedding_cache, graph_files
 from android_app_graph.commands import embed
+from android_app_graph.embedding_cache import image_embeddings_path
 
 _SCREENSHOT = b"not-really-a-png"
+
+
+class _Interrupted(BaseException):
+    """Stand-in for KeyboardInterrupt/SystemExit that stays clear of pytest's own."""
 
 
 def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = False) -> Path:
@@ -20,7 +27,7 @@ def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = Fals
     app_dir.mkdir(parents=True)
     stem = f"{app}_audited" if audited else app
     (app_dir / f"{stem}.json").write_text(
-        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": ""}]}),
+        json.dumps({"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}], "edges": []}),
         encoding="utf-8",
     )
     screenshots = app_dir / f"{app}_screenshots"
@@ -37,6 +44,12 @@ def test_embed_parser_defaults() -> None:
     assert args.model is None
     assert args.base_url is None
     assert args.api_key is None
+    assert args.recompute is False
+
+
+def test_embed_parser_accepts_recompute() -> None:
+    args = embed.build_parser().parse_args(["--recompute"])
+    assert args.recompute is True
 
 
 def test_embed_main_rejects_missing_config(capsys: pytest.CaptureFixture[str]) -> None:
@@ -57,10 +70,7 @@ def test_embed_main_rejects_missing_graph_root(
     assert "graph root does not exist" in capsys.readouterr().err
 
 
-def test_embed_main_requires_an_api_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)  # conftest removes GEMINI_API_KEY
+def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text(f"experiment:\n  graph_dir: {tmp_path}\n", encoding="utf-8")
     with pytest.raises(SystemExit) as excinfo:
@@ -69,8 +79,7 @@ def test_embed_main_requires_an_api_key(
     assert "missing API key" in capsys.readouterr().err
 
 
-def test_embed_settings_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)  # conftest removes GEMINI_API_KEY
+def test_embed_settings_from_config(tmp_path: Path) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("experiment:\n  graph_dir: my_graphs\n", encoding="utf-8")
     graph_dir, api_key, model, base_url = embed.load_image_embedding_settings(
@@ -142,49 +151,6 @@ def test_embed_settings_read_the_api_key_from_the_environment(
     assert api_key == "from-env"
 
 
-def test_image_embeddings_path() -> None:
-    assert embed.image_embeddings_path(Path("graphs/demo/demo.json")) == Path(
-        "graphs/demo/demo.image_emb.json"
-    )
-
-
-def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
-    graph_path = tmp_path / "demo.json"
-    assert embed.load_image_embeddings(graph_path) == {}
-    embed.save_image_embeddings(graph_path, {"s0_home": [0.5, 1.0]})
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.5, 1.0]}
-
-
-def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
-    graph_path = tmp_path / "demo.json"
-    embed.image_embeddings_path(graph_path).write_text(
-        json.dumps({"s0_home": [1, 2], "s1_bad": "not-a-vector"}), encoding="utf-8"
-    )
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [1.0, 2.0], "s1_bad": []}
-
-
-def test_iter_graph_files_prefers_the_audited_graph(tmp_path: Path) -> None:
-    _write_graph_tree(tmp_path, app="demo")
-    audited = _write_graph_tree(tmp_path, app="other", audited=True)
-    (tmp_path / "other" / "other.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "loose_file.txt").write_text("ignored", encoding="utf-8")
-
-    assert embed.iter_graph_files(tmp_path) == [
-        ("demo", tmp_path / "demo" / "demo.json"),
-        ("other", audited),
-    ]
-
-
-def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
-    graph_path = _write_graph_tree(tmp_path, app="demo")
-    _write_graph_tree(tmp_path, app="other")
-    assert embed.iter_graph_files(tmp_path, "demo") == [("demo", graph_path)]
-
-
-def test_iter_graph_files_skips_an_unknown_app(tmp_path: Path) -> None:
-    assert embed.iter_graph_files(tmp_path, "absent") == []
-
-
 def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
     graph_path.write_text("[1, 2, 3]", encoding="utf-8")
@@ -194,97 +160,111 @@ def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:
 
 def test_reference_screenshot_b64(tmp_path: Path) -> None:
     graph_path = _write_graph_tree(tmp_path)
-    assert embed.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
+    assert graph_files.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
         _SCREENSHOT
     ).decode("ascii")
-    assert embed.reference_screenshot_b64(graph_path, "s1_detail") is None
+    assert graph_files.reference_screenshot_b64(graph_path, "s1_detail") is None
 
 
-@pytest.fixture
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(embed.time, "sleep", lambda _seconds: None)
+def test_reference_screenshot_b64_finds_the_audited_stem_directory(tmp_path: Path) -> None:
+    """GraphManager.save_graph writes re-explored screenshots to ``<stem>_screenshots``
+    (``demo_audited_screenshots`` for an audited graph); offline precompute must look
+    there too, matching what the runtime translator's loader finds.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    graph_path.write_text(json.dumps({"nodes": [{"id": "s0_home"}], "edges": []}), encoding="utf-8")
+    screenshots = app_dir / "demo_audited_screenshots"
+    screenshots.mkdir()
+    (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
+
+    assert graph_files.reference_screenshot_b64(graph_path, "s0_home") == base64.b64encode(
+        _SCREENSHOT
+    ).decode("ascii")
 
 
-@pytest.mark.usefixtures("_no_sleep")
-def test_compute_embedding_with_retry_returns_on_first_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-
-    def fake_embedding(api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
-        calls.append((api_key, screenshot_b64))
-        return [1.0, 2.0]
-
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", fake_embedding)
-
-    assert _retry("key", "shot") == [1.0, 2.0]
-    assert calls == [("key", "shot")]
-
-
-@pytest.mark.usefixtures("_no_sleep")
-def test_compute_embedding_with_retry_recovers_after_a_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts: list[int] = []
-
-    def flaky_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(len(attempts))
-        if len(attempts) == 1:
-            msg = "429 rate limited"
-            raise RuntimeError(msg)
-        return [0.25]
-
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", flaky_embedding)
-
-    assert _retry("key", "shot") == [0.25]
-    assert len(attempts) == 2
-
-
-@pytest.mark.usefixtures("_no_sleep")
-def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts: list[int] = []
-
-    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(len(attempts))
-        msg = "500 upstream error"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", always_failing)
-
-    with pytest.raises(RuntimeError, match="500 upstream error"):
-        _retry("key", "shot")
-    assert len(attempts) == embed.IMAGE_EMBEDDING_RETRIES + 1
-
-
-def _retry(api_key: str, screenshot_b64: str) -> list[float]:
-    return embed.compute_embedding_with_retry(
-        api_key,
-        screenshot_b64,
-        model="gemini-embedding-2",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
-        app_name="demo",
-        node_id="s0_home",
-    )
-
-
-def _precompute(tmp_path: Path, app_name: str | None = None) -> dict[str, int]:
+def _precompute(
+    tmp_path: Path, app_name: str | None = None, *, recompute: bool = False
+) -> dict[str, int]:
     return embed.precompute_graph_image_embeddings(
         tmp_path,
         api_key="key",
         model="gemini-embedding-2",
         base_url="https://generativelanguage.googleapis.com/v1beta",
         app_name=app_name,
+        recompute=recompute,
     )
 
 
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_finds_screenshots_under_the_audited_stem_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node the runtime translator finds via ``<stem>_screenshots`` must not be
+    reported ``skipped_missing_screenshot`` by the offline precompute pass.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo_audited.json").write_text(
+        json.dumps({"nodes": [{"id": "s0_home"}], "edges": []}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_audited_screenshots"
+    screenshots.mkdir()
+    (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["skipped_missing_screenshot"] == 0
+    assert summary["reference_screenshots"] == 1
+    assert summary["computed"] == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_finds_every_node_in_a_partially_audited_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audited graph is split across two screenshot directories: only the
+    nodes ``GraphManager.save_graph`` re-explored land in ``<stem>_screenshots``
+    (here one of three), and the rest stay under the app-name directory. Every
+    node must be found, not just the re-explored one.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo_audited.json").write_text(
+        json.dumps(
+            {"nodes": [{"id": "s0_home"}, {"id": "s1_detail"}, {"id": "s2_cart"}], "edges": []}
+        ),
+        encoding="utf-8",
+    )
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
+    (app_screenshots / "s1_detail.png").write_bytes(_SCREENSHOT)
+    (app_screenshots / "s2_cart.png").write_bytes(_SCREENSHOT)
+    stem_screenshots = app_dir / "demo_audited_screenshots"
+    stem_screenshots.mkdir()
+    (stem_screenshots / "s1_detail.png").write_bytes(_SCREENSHOT)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["skipped_missing_screenshot"] == 0
+    assert summary["reference_screenshots"] == 3
+    assert summary["computed"] == 3
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_computes_caches_and_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph_path = _write_graph_tree(tmp_path)
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2])
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+    )
 
     summary = _precompute(tmp_path)
     assert summary == {
@@ -295,12 +275,209 @@ def test_precompute_computes_caches_and_skips(
         "skipped_missing_screenshot": 1,
         "skipped_failed": 0,
     }
-    assert embed.load_image_embeddings(graph_path) == {"s0_home": [0.1, 0.2]}
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.1, 0.2]}
 
     assert _precompute(tmp_path)["already_cached"] == 1
 
 
-@pytest.mark.usefixtures("_no_sleep")
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node removed from the graph since the sidecar was written must not
+    survive a rewrite: app-graph-embed and the runtime translator share the
+    same pruning in load_image_embeddings, so neither can leave a stale
+    entry behind.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "n1"}], "edges": []}), encoding="utf-8"
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(_SCREENSHOT)
+    image_embeddings_path(app_dir / "demo.json").write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"gone": [0.9, 0.9]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    summary = _precompute(tmp_path)
+
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        app_dir / "demo.json", model="gemini-embedding-2", node_ids={"n1"}
+    ) == {"n1": [0.5, 0.5]}
+    saved = json.loads(image_embeddings_path(app_dir / "demo.json").read_text(encoding="utf-8"))
+    assert "gone" not in saved["embeddings"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dimension match cannot prove the cached vector came from the current
+    model -- a model switch that keeps the same dimension is stale too and
+    undetectable by length -- so ``--recompute`` must recompute every node
+    with a screenshot, not just the ones the length check would flag.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.9, 0.8]
+    )
+
+    summary = _precompute(tmp_path, recompute=True)
+    assert summary["already_cached"] == 0
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.9, 0.8]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar is only rewritten when at least one vector succeeds, so a
+    ``--recompute`` run where every call fails must still discard the stale
+    sidecar it was asked to recompute, not leave it in place untouched. It is
+    discarded by writing an empty tagged payload through the same writer as
+    every other save, not by unlinking the file, so the sidecar still exists
+    afterward -- just emptied.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
+    )
+
+    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+        msg = "503 unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+
+    summary = _precompute(tmp_path, recompute=True)
+    assert summary["computed"] == 0
+    assert summary["skipped_failed"] == 1
+    assert json.loads(image_embeddings_path(graph_path).read_text(encoding="utf-8")) == {
+        "model": "gemini-embedding-2",
+        "embeddings": {},
+    }
+    assert (
+        embed.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        )
+        == {}
+    )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_discards_through_a_symlinked_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``unlink()`` on a symlinked sidecar only detaches the link, leaving the
+    shared target it points at untouched, so the rebuilt vectors would land in
+    a fresh plain file shadowing the stale target rather than replacing it.
+    Discarding through ``save_image_embeddings`` writes through the link
+    instead, like every other sidecar write.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    target = tmp_path / "shared_cache.json"
+    target.write_text(
+        json.dumps({"model": "other-model", "embeddings": {"s0_home": [0.1, 0.2]}}),
+        encoding="utf-8",
+    )
+    sidecar = image_embeddings_path(graph_path)
+    sidecar.symlink_to(target)
+
+    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+        msg = "503 unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+
+    summary = _precompute(tmp_path, recompute=True)
+
+    assert summary["computed"] == 0
+    assert sidecar.is_symlink()
+    assert sidecar.resolve() == target
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "model": "gemini-embedding-2",
+        "embeddings": {},
+    }
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root passes os.access/write for every directory regardless of mode, so a "
+    "chmod 0o500 app directory denies nothing to run as root here",
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recompute_skips_a_graph_whose_sidecar_cannot_be_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graph whose sidecar cannot be discarded cannot be rebuilt either --
+    computing fresh vectors on top of a cache the run could not confirm was
+    emptied would be worse than doing nothing -- so the discard write goes
+    through the same OSError boundary as every other sidecar write: logged
+    and skipped, continuing to the next app rather than aborting the whole
+    --recompute run.
+    """
+    first_path = _write_graph_tree(tmp_path, app="first")
+    second_path = _write_graph_tree(tmp_path, app="second")
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+    )
+
+    first_path.parent.chmod(0o500)
+    try:
+        summary = _precompute(tmp_path, recompute=True)
+    finally:
+        first_path.parent.chmod(0o700)
+
+    assert summary["graphs"] == 2
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        second_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.5, 0.5]}
+
+
+def test_precompute_recompute_logs_and_skips_a_graph_whose_discard_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The discard write's own OSError boundary, exercised independently of
+    the privilege level the test happens to run under (see the skipped
+    chmod-based sibling test above): a graph whose sidecar cannot be
+    discarded must be logged and skipped, not raise out of the whole run.
+    """
+    first_path = _write_graph_tree(tmp_path, app="first")
+
+    def _raise_permission_error(
+        _graph_path: Path, _embeddings: dict[str, list[float]], **_kwargs: object
+    ) -> None:
+        msg = "Permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(embed, "save_image_embeddings", _raise_permission_error)
+
+    with caplog.at_level("ERROR"):
+        summary = _precompute(tmp_path, recompute=True)
+
+    assert summary["graphs"] == 1
+    assert summary["computed"] == 0
+    assert "first" in caplog.text
+    assert str(first_path) in caplog.text
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_precompute_keeps_going_when_a_node_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,9 +487,282 @@ def test_precompute_keeps_going_when_a_node_fails(
         msg = "503 unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(embed, "get_gemini_native_image_embedding", always_failing)
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
 
     summary = _precompute(tmp_path)
     assert summary["skipped_failed"] == 1
     assert summary["computed"] == 0
-    assert embed.load_image_embeddings(graph_path) == {}
+    assert (
+        embed.load_image_embeddings(
+            graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        )
+        == {}
+    )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``reference_screenshot_path`` saw the file, but by the time the lazy
+    generator encodes it the file may be unreadable or gone. That ``OSError``
+    must be caught per candidate inside the generator, not propagate out of
+    the ``for`` line in ``compute_missing_image_embeddings`` -- outside its own
+    per-node ``except`` -- and abort every remaining node and app.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    graph_path.write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+
+    original_encode = embedding_cache.encode_screenshot_b64
+
+    def flaky_encode(path: Path) -> str:
+        if path.stem == "n2":
+            path.unlink()
+            msg = "screenshot vanished"
+            raise OSError(msg)
+        return original_encode(path)
+
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", flaky_encode)
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+    )
+
+    summary = _precompute(tmp_path)
+
+    assert summary["computed"] == 2
+    assert summary["skipped_failed"] == 1
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
+    ) == {
+        "n1": [0.1, 0.2],
+        "n3": [0.1, 0.2],
+    }
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dropped (malformed) cache entry must not be mistaken for "already cached"."""
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": "not-a-vector"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["already_cached"] == 0
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.3, 0.4]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached vector element too large for float() must not crash the run;
+    it is dropped like any other malformed entry and the node is recomputed.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [10**400]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
+    )
+
+    summary = _precompute(tmp_path)
+    assert summary["already_cached"] == 0
+    assert summary["computed"] == 1
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+    ) == {"s0_home": [0.3, 0.4]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rewriting the sidecar after every computed node is O(N^2) for a cold
+    cache, and each write is now a temp-file-and-rename rather than a plain
+    truncation, so the per-node write is also the O(N^2) cost the runtime
+    translator's loop was changed to avoid in a previous round. It must be
+    written once, after the whole node loop, for both callers alike.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+    monkeypatch.setattr(
+        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+    )
+
+    save_calls: list[dict[str, list[float]]] = []
+    original_save = embedding_cache.save_image_embeddings
+
+    def _tracking_save(graph_file: Path, embeddings: dict[str, list[float]], *, model: str) -> None:
+        save_calls.append(dict(embeddings))
+        original_save(graph_file, embeddings, model=model)
+
+    monkeypatch.setattr(embedding_cache, "save_image_embeddings", _tracking_save)
+
+    summary = _precompute(tmp_path)
+
+    assert summary["computed"] == 3
+    assert len(save_calls) == 1
+    assert save_calls[0] == {"n1": [0.1, 0.2], "n2": [0.1, 0.2], "n3": [0.1, 0.2]}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_streams_screenshot_reads_lazily(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The candidate list must not read and base64-encode every uncached
+    screenshot before the first embedding call: each screenshot is read only
+    right before its own call, so a cold cache on a large graph never holds
+    every screenshot's base64 payload in memory at once.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("n1", "n2", "n3"):
+        (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
+
+    reads_so_far = 0
+    original_encode = embedding_cache.encode_screenshot_b64
+
+    def counting_encode(path: Path) -> str:
+        nonlocal reads_so_far
+        reads_so_far += 1
+        return original_encode(path)
+
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", counting_encode)
+
+    reads_at_call: list[int] = []
+
+    def fake_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+        reads_at_call.append(reads_so_far)
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+
+    summary = _precompute(tmp_path)
+    assert summary["computed"] == 3
+    assert reads_at_call == [1, 2, 3]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_never_reads_an_already_cached_screenshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached node's screenshot must never be opened at all: reading and
+    encoding it only to throw the result away was the wasted work this fixes,
+    and here it would also raise, since the screenshot path is a directory
+    (standing in for any read failure) rather than a readable file.
+    """
+    graph_path = _write_graph_tree(tmp_path)
+    image_embeddings_path(graph_path).write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [0.1, 0.2]}}),
+        encoding="utf-8",
+    )
+    screenshot_file = tmp_path / "demo" / "demo_screenshots" / "s0_home.png"
+    screenshot_file.unlink()
+    screenshot_file.mkdir()
+
+    reads = 0
+    original_encode = embedding_cache.encode_screenshot_b64
+
+    def counting_encode(path: Path) -> str:
+        nonlocal reads
+        reads += 1
+        return original_encode(path)
+
+    monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", counting_encode)
+
+    summary = _precompute(tmp_path)
+    assert summary["already_cached"] == 1
+    assert reads == 0
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_persists_progress_before_an_interrupt_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeyboardInterrupt/SystemExit partway through the node loop must not discard
+    the embeddings computed before it -- those are paid API calls. The node loop
+    runs inside a ``finally`` so whatever was computed is written to the sidecar
+    before the interrupt keeps propagating, and it does keep propagating: this
+    is not a reason to drop or swallow it.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    graph_path.write_text(
+        json.dumps({"nodes": [{"id": "n1"}, {"id": "n2"}, {"id": "n3"}], "edges": []}),
+        encoding="utf-8",
+    )
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    shots = {node_id: f"shot-{node_id}".encode() for node_id in ("n1", "n2", "n3")}
+    for node_id, data in shots.items():
+        (screenshots / f"{node_id}.png").write_bytes(data)
+    b64_by_node = {
+        node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
+    }
+
+    def _interrupted_at_n3(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+        if screenshot_b64 == b64_by_node["n3"]:
+            raise _Interrupted
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _interrupted_at_n3)
+
+    with pytest.raises(_Interrupted):
+        _precompute(tmp_path)
+
+    assert embed.load_image_embeddings(
+        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
+    ) == {
+        "n1": [1.0, 0.0],
+        "n2": [1.0, 0.0],
+    }
+
+
+def test_precompute_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
+    """A hand-edited graph file fails through the shared shape check with the
+    path in the message, not with a bare TypeError out of the node loop.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    graph_path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
+
+    with pytest.raises(TypeError, match="list fields") as excinfo:
+        _precompute(tmp_path)
+    assert str(graph_path) in str(excinfo.value)

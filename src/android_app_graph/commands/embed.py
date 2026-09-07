@@ -1,129 +1,54 @@
 """Precompute runtime image embeddings for every graph under a root folder.
 
 Usage:
-    uv run app-graph-embed --config configs/explore.yaml --app <app_name>
+    uv run app-graph-embed --config configs/explore.yaml --app <app_name> [--recompute]
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import logging
-import os
-import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from android_app_graph.payloads import as_float_list, as_str_dict
-from android_app_graph.utils import resolve_env
+from android_app_graph.embedding_cache import (
+    compute_missing_image_embeddings,
+    iter_screenshot_candidates,
+    load_image_embeddings,
+    resolve_image_embedding_settings,
+    save_image_embeddings,
+)
+from android_app_graph.graph_files import (
+    iter_graph_files,
+    reference_screenshot_path,
+    require_graph_shape,
+)
 from android_app_graph.utils.logging import setup_logging
-from android_app_graph.utils.vlm_utils import get_gemini_native_image_embedding
 
 logger = logging.getLogger(__name__)
-
-IMAGE_EMBEDDING_RETRIES = 2
-IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
-
-
-def image_embeddings_path(graph_path: Path) -> Path:
-    return graph_path.with_suffix(".image_emb.json")
-
-
-def load_image_embeddings(graph_path: Path) -> dict[str, list[float]]:
-    """Return the cached embeddings for a graph, or ``{}`` when none were written.
-
-    The payload is narrowed the way ``GraphManager.load_graph`` narrows its own
-    companion embeddings file: a malformed vector becomes ``[]`` rather than
-    propagating ``Any`` into the caller.
-    """
-    emb_path = image_embeddings_path(graph_path)
-    if emb_path.exists():
-        with emb_path.open("r", encoding="utf-8") as f:
-            return {
-                node_id: as_float_list(vector)
-                for node_id, vector in as_str_dict(json.load(f)).items()
-            }
-    return {}
-
-
-def save_image_embeddings(graph_path: Path, embeddings: dict[str, list[float]]) -> None:
-    with image_embeddings_path(graph_path).open("w", encoding="utf-8") as f:
-        json.dump(embeddings, f, ensure_ascii=False)
-
-
-def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
-    selected: list[tuple[str, Path]] = []
-    app_dirs = (
-        [graph_dir / app_name] if app_name else sorted(p for p in graph_dir.iterdir() if p.is_dir())
-    )
-    for app_dir in app_dirs:
-        if not app_dir.is_dir():
-            continue
-        name = app_dir.name
-        audited = app_dir / f"{name}_audited.json"
-        plain = app_dir / f"{name}.json"
-        if audited.exists():
-            selected.append((name, audited))
-        elif plain.exists():
-            selected.append((name, plain))
-    return selected
 
 
 def load_graph_json(graph_path: Path) -> dict[str, Any]:
     with graph_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        msg = f"Graph JSON must be an object: {graph_path}"
-        raise TypeError(msg)
-    return data
+        return require_graph_shape(json.load(f), graph_path)
 
 
-def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
-    screenshot_path = graph_path.parent / f"{graph_path.parent.name}_screenshots" / f"{node_id}.png"
-    if not screenshot_path.exists():
-        return None
-    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+def _pending_candidates(
+    pending: list[tuple[str, Path]], *, app_name: str, summary: dict[str, int]
+) -> Iterator[tuple[str, str]]:
+    """Wrap the shared lazy screenshot generator, counting a failed read into
+    this run's own summary -- the accounting embedding_cache's shared helper
+    has no reason to know about.
+    """
 
+    def _count_failed(_node_id: str) -> None:
+        summary["skipped_failed"] += 1
 
-def compute_embedding_with_retry(
-    api_key: str,
-    screenshot_b64: str,
-    *,
-    model: str,
-    base_url: str,
-    app_name: str,
-    node_id: str,
-) -> list[float]:
-    attempts = IMAGE_EMBEDDING_RETRIES + 1
-    for attempt in range(attempts):
-        try:
-            return get_gemini_native_image_embedding(
-                api_key,
-                screenshot_b64,
-                model=model,
-                base_url=base_url,
-            )
-        # A retry loop is a boundary: re-raise on the last attempt,
-        # log the traceback on every earlier one.
-        except Exception:
-            if attempt >= attempts - 1:
-                raise
-            delay = IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            logger.warning(
-                "[GRAPH] %s/%s: image embedding failed; retrying in %.1fs (%d/%d).",
-                app_name,
-                node_id,
-                delay,
-                attempt + 1,
-                attempts - 1,
-                exc_info=True,
-            )
-            time.sleep(delay)
-    msg = "compute_embedding_with_retry exhausted its attempts without raising"
-    raise RuntimeError(msg)
+    yield from iter_screenshot_candidates(pending, app_name=app_name, on_failed=_count_failed)
 
 
 def precompute_graph_image_embeddings(
@@ -133,6 +58,7 @@ def precompute_graph_image_embeddings(
     model: str,
     base_url: str,
     app_name: str | None = None,
+    recompute: bool = False,
 ) -> dict[str, int]:
     summary: dict[str, int] = {
         "graphs": 0,
@@ -147,47 +73,61 @@ def precompute_graph_image_embeddings(
         summary["graphs"] += 1
         logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
         graph_data = load_graph_json(graph_path)
-        embeddings = load_image_embeddings(graph_path)
+        # --recompute discards the sidecar by writing an empty tagged payload
+        # through the same writer as every other sidecar write, not by unlinking
+        # it: unlink() on a symlinked sidecar detaches the link and leaves the
+        # shared target it points at stale. Writing it up front also keeps the
+        # discard when every call afterwards fails, since the loop only rewrites
+        # the sidecar once a vector succeeds.
+        node_ids = {node["id"] for node in graph_data["nodes"]}
 
-        for node in graph_data.get("nodes", []):
-            node_id = node.get("id")
-            if not node_id:
+        embeddings: dict[str, list[float]]
+        if recompute:
+            try:
+                save_image_embeddings(graph_path, {}, model=model)
+            except OSError:
+                # A graph whose sidecar cannot be discarded cannot be rebuilt
+                # either: computing fresh vectors on top of a cache the run
+                # could not confirm was emptied would be worse than skipping
+                # the graph outright.
+                logger.exception(
+                    "Failed to discard image embedding cache for graph %s at %s",
+                    current_app_name,
+                    graph_path,
+                )
                 continue
-            screenshot_b64 = reference_screenshot_b64(graph_path, node_id)
-            if screenshot_b64 is None:
+            embeddings = {}
+        else:
+            embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
+
+        # A stat, not a read: deciding reference_screenshots/already_cached/
+        # skipped_missing_screenshot must not pay for every uncached node's
+        # base64 encoding before the first API call, and a cached node's
+        # screenshot is never read at all.
+        pending: list[tuple[str, Path]] = []
+        for node in graph_data["nodes"]:
+            node_id = node["id"]
+            screenshot_path = reference_screenshot_path(graph_path, node_id)
+            if screenshot_path is None:
                 summary["skipped_missing_screenshot"] += 1
                 continue
             summary["reference_screenshots"] += 1
             if node_id in embeddings:
                 summary["already_cached"] += 1
                 continue
+            pending.append((node_id, screenshot_path))
 
-            try:
-                started = time.perf_counter()
-                embeddings[node_id] = compute_embedding_with_retry(
-                    api_key,
-                    screenshot_b64,
-                    model=model,
-                    base_url=base_url,
-                    app_name=current_app_name,
-                    node_id=node_id,
-                )
-                save_image_embeddings(graph_path, embeddings)
-                summary["computed"] += 1
-                logger.info(
-                    "[GRAPH] %s/%s: computed image embedding in %.1fs",
-                    current_app_name,
-                    node_id,
-                    time.perf_counter() - started,
-                )
-            except Exception:
-                summary["skipped_failed"] += 1
-                logger.exception(
-                    "Runtime image embedding failed for graph %s node %s after retries; "
-                    "continuing without this node embedding.",
-                    current_app_name,
-                    node_id,
-                )
+        run = compute_missing_image_embeddings(
+            graph_path,
+            embeddings,
+            _pending_candidates(pending, app_name=current_app_name, summary=summary),
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            app_name=current_app_name,
+        )
+        summary["computed"] += run.computed
+        summary["skipped_failed"] += run.failed
 
     return summary
 
@@ -210,27 +150,13 @@ def load_image_embedding_settings(
     )
 
     vlm_config = translator_args.get("vlm_config") or config.get("vlm") or {}
-    image_embedding_cfg = vlm_config.get("image_embedding") or {}
-    model = (
-        resolve_env(model_override)
-        or resolve_env(image_embedding_cfg.get("model"))
-        or "gemini-embedding-2"
+    settings = resolve_image_embedding_settings(
+        vlm_config,
+        model_override=model_override,
+        api_key_override=api_key_override,
+        base_url_override=base_url_override,
     )
-    base_url_cfg = base_url_override or resolve_env(
-        image_embedding_cfg.get("native_base_url") or image_embedding_cfg.get("base_url")
-    )
-    base_url = (
-        base_url_cfg
-        if base_url_cfg and "googleapis.com" in base_url_cfg
-        else "https://generativelanguage.googleapis.com/v1beta"
-    )
-    api_key = (
-        resolve_env(api_key_override)
-        or resolve_env(image_embedding_cfg.get("api_key"))
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-    )
-    return graph_dir, api_key, model, base_url
+    return graph_dir, settings.api_key, settings.model, settings.base_url
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -270,6 +196,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="API key or env reference. Defaults to GEMINI_API_KEY / GOOGLE_API_KEY.",
     )
+    parser.add_argument(
+        "--recompute",
+        action="store_true",
+        help="Discard the existing embedding sidecar and rebuild every vector, "
+        "regardless of its model tag; for a hand-edited sidecar or a deliberate "
+        "refresh. A model change, or a sidecar that predates model tagging, is "
+        "otherwise detected automatically and recomputed with no flag needed.",
+    )
     return parser
 
 
@@ -302,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         model=model,
         base_url=base_url,
         app_name=args.app,
+        recompute=args.recompute,
     )
     logger.info(
         "Done: graphs=%d reference_screenshots=%d already_cached=%d computed=%d "

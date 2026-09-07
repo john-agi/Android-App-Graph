@@ -1,0 +1,477 @@
+"""Tests for android_app_graph.graph_files.
+
+Graph-file discovery, per-node reference-screenshot lookup, atomic JSON
+writing, and graph-structure validation shared by every loader.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import stat
+from pathlib import Path
+from typing import IO, Any
+
+import pytest
+
+from android_app_graph import graph_files
+
+
+def test_write_json_atomically_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"a": 1})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_write_json_atomically_fsyncs_the_temp_file_before_the_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "either the previous complete file or the new one" guarantee only
+    survives a power loss, not just a process crash, if the temp file's data
+    reached disk before the rename -- os.fsync must run once, on the temp
+    file's own descriptor, before os.replace runs -- and if the rename itself
+    reached disk too, which needs a second os.fsync, on the containing
+    directory's descriptor, after os.replace runs.
+    """
+    path = tmp_path / "data.json"
+    calls: list[str] = []
+    opened_fds: list[int] = []
+    fsynced_fds: list[int] = []
+
+    original_open = graph_files.os.open
+
+    def _recording_open(file: Path, flags: int, mode: int = 0o777) -> int:
+        fd = original_open(file, flags, mode)
+        opened_fds.append(fd)
+        return fd
+
+    original_fsync = graph_files.os.fsync
+
+    def _recording_fsync(fd: int) -> None:
+        calls.append("fsync")
+        fsynced_fds.append(fd)
+        original_fsync(fd)
+
+    original_replace = graph_files.os.replace
+
+    def _recording_replace(src: Path, dst: Path) -> None:
+        calls.append("replace")
+        original_replace(src, dst)
+
+    monkeypatch.setattr(graph_files.os, "open", _recording_open)
+    monkeypatch.setattr(graph_files.os, "fsync", _recording_fsync)
+    monkeypatch.setattr(graph_files.os, "replace", _recording_replace)
+
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+
+    assert calls == ["fsync", "replace", "fsync"]
+    assert fsynced_fds == opened_fds
+
+
+def test_write_json_atomically_honours_indent_and_ensure_ascii(tmp_path: Path) -> None:
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"name": "café"}, indent=2, ensure_ascii=False)
+    assert path.read_text(encoding="utf-8") == '{\n  "name": "café"\n}'
+
+
+def test_write_json_atomically_is_atomic_on_a_failed_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-dump must leave the file as either the previous complete
+    version or the new one, never a truncated mix of the two, and must not
+    leave a stray temporary file behind.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0, 2.0]})
+    original = path.read_text(encoding="utf-8")
+
+    def _dump_then_blow_up(_obj: object, fp: IO[str], **_kwargs: object) -> None:
+        fp.write('{"n9": [0.0')  # a partial write, as a real crash mid-dump would leave
+        msg = "boom"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(graph_files.json, "dump", _dump_then_blow_up)
+
+    with pytest.raises(ValueError, match="boom"):
+        graph_files.write_json_atomically(path, {"n1": [9.9]})
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_unlinks_the_temp_file_when_the_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``os.replace`` (EPERM, EBUSY, target is a directory, ...) must not
+    orphan the temp file in the target directory: an unguarded replace leaves a
+    stray ``data.json.<random>.tmp`` behind, and every later run adds another one.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0, 2.0]})
+    original = path.read_text(encoding="utf-8")
+
+    def _raise_replace(_src: object, _dst: object) -> None:
+        msg = "Device or resource busy"
+        raise OSError(msg)
+
+    monkeypatch.setattr(graph_files.os, "replace", _raise_replace)
+
+    with pytest.raises(OSError, match="Device or resource busy"):
+        graph_files.write_json_atomically(path, {"n1": [9.9]})
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_gives_a_fresh_file_the_umask_mode(tmp_path: Path) -> None:
+    """A fresh file must get exactly the mode ``open(path, "w")`` would give,
+    not mkstemp's hardcoded 0600 -- otherwise a graph file written by one user
+    (or a CI job) becomes unreadable to another process reading the same
+    shared graph directory as a different user.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+
+    sibling = tmp_path / "sibling.txt"
+    with sibling.open("w", encoding="utf-8") as f:
+        f.write("x")
+
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(sibling.stat().st_mode)
+
+
+def test_write_json_atomically_preserves_an_existing_files_mode(tmp_path: Path) -> None:
+    """A rewrite must keep the file's current mode, matching what in-place
+    truncation (the pre-atomic-write behaviour) did, so an operator's chmod on
+    a shared graph directory survives a rewrite.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+    path.chmod(0o600)
+
+    graph_files.write_json_atomically(path, {"n1": [2.0]})
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root passes os.access for every file regardless of mode, the same as root's "
+    "in-place write succeeding, so a 0o444 target denies nothing to run as root here",
+)
+def test_write_json_atomically_rejects_a_read_only_target(tmp_path: Path) -> None:
+    """``os.replace`` needs only directory write permission, so without this
+    guard an operator's ``chmod 444`` freeze on a shared graph directory is
+    silently defeated by a rewrite -- the in-place ``open(path, "w")`` this
+    replaced would have raised ``PermissionError`` instead.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+    path.chmod(0o444)
+
+    with pytest.raises(PermissionError) as excinfo:
+        graph_files.write_json_atomically(path, {"n1": [2.0]})
+
+    assert str(path) in str(excinfo.value)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"n1": [1.0]}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_rejects_a_read_only_target_by_os_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard itself, exercised independently of the privilege level the
+    test happens to run under: real ``os.access`` always passes for root
+    regardless of a file's mode (see the skipped chmod-based sibling test
+    above), so a container running the suite as root must not lose coverage
+    of the guard's own behaviour once ``os.access`` reports it unwritable.
+    """
+    path = tmp_path / "data.json"
+    graph_files.write_json_atomically(path, {"n1": [1.0]})
+
+    monkeypatch.setattr(graph_files.os, "access", lambda *_a, **_kw: False)
+
+    with pytest.raises(PermissionError) as excinfo:
+        graph_files.write_json_atomically(path, {"n1": [2.0]})
+
+    assert str(path) in str(excinfo.value)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"n1": [1.0]}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
+    """``os.replace`` over a symlink replaces the link itself: with
+    ``demo.image_emb.json -> shared_cache.json``, writing must land in
+    ``shared_cache.json`` and leave the link a link, not silently detach it
+    into a plain file that shadows the (unchanged) shared target.
+    """
+    target = tmp_path / "shared_cache.json"
+    target.write_text('{"old": 1}', encoding="utf-8")
+    link = tmp_path / "demo.image_emb.json"
+    link.symlink_to(target)
+
+    graph_files.write_json_atomically(link, {"new": 2})
+
+    assert link.is_symlink()
+    assert link.resolve() == target
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
+
+
+def test_iter_graph_files_without_a_graph_dir(tmp_path: Path) -> None:
+    assert graph_files.iter_graph_files(tmp_path / "absent") == []
+
+
+def test_iter_graph_files_prefers_the_audited_graph(tmp_path: Path) -> None:
+    app_dir = tmp_path / "eboox"
+    app_dir.mkdir()
+    (app_dir / "eboox.json").write_text("{}", encoding="utf-8")
+    audited = app_dir / "eboox_audited.json"
+    audited.write_text("{}", encoding="utf-8")
+    assert graph_files.iter_graph_files(tmp_path) == [("eboox", audited)]
+
+
+def test_iter_graph_files_sorts_apps_and_skips_side_files(tmp_path: Path) -> None:
+    for app in ("zebra", "alpha"):
+        app_dir = tmp_path / app
+        app_dir.mkdir()
+        (app_dir / f"{app}.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "alpha" / "alpha_audit_report.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "alpha" / "alpha.image_emb.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "loose.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+
+    assert graph_files.iter_graph_files(tmp_path) == [
+        ("alpha", tmp_path / "alpha" / "alpha.json"),
+        ("zebra", tmp_path / "zebra" / "zebra.json"),
+    ]
+
+
+def test_reference_screenshot_path_finds_the_node_in_the_app_directory(tmp_path: Path) -> None:
+    """Only the app directory exists (a plain, never-audited graph)."""
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "n1.png").write_bytes(b"shot")
+    graph_path = app_dir / "demo.json"
+    assert graph_files.reference_screenshot_path(graph_path, "n1") == app_screenshots / "n1.png"
+
+
+def test_reference_screenshot_path_prefers_the_stem_directory_for_a_reexplored_node(
+    tmp_path: Path,
+) -> None:
+    """``GraphManager.save_graph`` writes a re-explored node's screenshot into
+    ``<stem>_screenshots``; when the node is there it must win over the older
+    copy that may still sit under the app-name directory.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "n1.png").write_bytes(b"stale")
+    stem_screenshots = app_dir / "demo_audited_screenshots"
+    stem_screenshots.mkdir()
+    (stem_screenshots / "n1.png").write_bytes(b"fresh")
+    graph_path = app_dir / "demo_audited.json"
+    assert graph_files.reference_screenshot_path(graph_path, "n1") == stem_screenshots / "n1.png"
+
+
+def test_reference_screenshot_path_falls_back_when_the_node_is_only_in_the_app_directory(
+    tmp_path: Path,
+) -> None:
+    """Both directories exist (some nodes were re-explored, this one was not),
+    so a node missing from ``<stem>_screenshots`` must still resolve to its
+    screenshot under the app-name directory rather than being reported missing.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "n2.png").write_bytes(b"shot")
+    (app_dir / "demo_audited_screenshots").mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    assert graph_files.reference_screenshot_path(graph_path, "n2") == app_screenshots / "n2.png"
+
+
+def test_reference_screenshot_path_does_not_fall_back_for_a_sibling_graph(
+    tmp_path: Path,
+) -> None:
+    """A sibling graph in the same app directory (an operator's ``demo_v1.json``
+    kept next to ``demo.json``) must never borrow another graph's screenshot for
+    a colliding node id. Only the plain graph and its audited pair produce the
+    split layout the app-directory fallback exists for.
+    """
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    app_screenshots = app_dir / "demo_screenshots"
+    app_screenshots.mkdir()
+    (app_screenshots / "s0.png").write_bytes(b"shot")
+    graph_path = app_dir / "demo_v1.json"
+    assert graph_files.reference_screenshot_path(graph_path, "s0") is None
+
+
+def test_reference_screenshot_path_returns_none_when_neither_directory_has_the_node(
+    tmp_path: Path,
+) -> None:
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo_audited.json"
+    assert graph_files.reference_screenshot_path(graph_path, "n1") is None
+
+
+def test_reference_screenshot_b64_reads_and_encodes_the_file(tmp_path: Path) -> None:
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(b"shot-bytes")
+    graph_path = app_dir / "demo.json"
+    assert graph_files.reference_screenshot_b64(graph_path, "n1") == base64.b64encode(
+        b"shot-bytes"
+    ).decode("ascii")
+
+
+def test_reference_screenshot_b64_is_none_without_a_screenshot(tmp_path: Path) -> None:
+    app_dir = tmp_path / "demo"
+    app_dir.mkdir()
+    graph_path = app_dir / "demo.json"
+    assert graph_files.reference_screenshot_b64(graph_path, "n1") is None
+
+
+def test_require_known_edge_endpoints_accepts_a_graph_without_edges() -> None:
+    assert graph_files.require_known_edge_endpoints(
+        {"nodes": [{"id": "n1"}], "edges": []}, Path()
+    ) == {"nodes": [{"id": "n1"}], "edges": []}
+
+
+def test_require_known_edge_endpoints_raises_for_an_unknown_endpoint() -> None:
+    with pytest.raises(ValueError, match="ghost"):
+        graph_files.require_known_edge_endpoints(
+            {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "ghost"}]},
+            Path("g.json"),
+        )
+
+
+def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: Path) -> None:
+    """require_graph_shape runs first, so a node missing "id" entirely is
+    reported here too, with the path, rather than silently skipped and left
+    for a loader that runs later to report as a bare KeyError.
+    """
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_known_edge_endpoints(
+            {"nodes": [{"page_description": "x"}], "edges": []}, path
+        )
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
+    assert graph_files.require_graph_shape(
+        {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}, Path()
+    ) == {"nodes": [{"id": "n1"}], "edges": [{"source": "n1", "target": "n1"}]}
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"edges": []}, {"nodes": [], "edges": []}),
+        ({"nodes": []}, {"nodes": [], "edges": []}),
+        ({}, {"nodes": [], "edges": []}),
+    ],
+)
+def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
+    data: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    """GraphManager.load_graph accepted a file without an "edges" key via
+    ``.get("edges", [])`` before this check existed; an absent key is an
+    empty list here too, not a rejection -- only a present non-list value
+    (``null``, a string, an object) still is.
+    """
+    assert graph_files.require_graph_shape(data, Path()) == expected
+
+
+@pytest.mark.parametrize(
+    ("data", "match"),
+    [
+        ({"nodes": None, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": [], "edges": None}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": {}, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": ["s0"], "edges": []}, "node must be an object"),
+        ({"nodes": [], "edges": ["e0"]}, "edge must be an object"),
+    ],
+)
+def test_require_graph_shape_rejects_a_malformed_shape(
+    tmp_path: Path, data: dict[str, Any], match: str
+) -> None:
+    """Confirmed bugs: ``"nodes": null`` used to raise a bare, path-less
+    ``TypeError: 'NoneType' object is not iterable``, and ``"nodes": ["s0"]``
+    a bare ``AttributeError`` -- neither naming the file. Every shape failure
+    must instead raise a ``TypeError`` naming the path.
+    """
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match=match) as excinfo:
+        graph_files.require_graph_shape(data, path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_graph_shape_rejects_a_non_string_node_id(tmp_path: Path) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_graph_shape({"nodes": [{"id": 5}], "edges": []}, path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+        graph_files.require_graph_shape({"nodes": [{"page_description": "x"}], "edges": []}, path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_require_graph_shape_rejects_an_empty_node_id(tmp_path: Path) -> None:
+    """``embed.py`` used to skip a ``""`` id with ``if not node_id: continue``
+    while ``_load_graph_from_json`` added it as a node -- the two loaders
+    disagreeing on a case ``require_graph_shape`` had already let through.
+    An empty id is now rejected here, the one place both loaders trust.
+    """
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="node id must be a non-empty string") as excinfo:
+        graph_files.require_graph_shape({"nodes": [{"id": ""}], "edges": []}, path)
+    assert str(path) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [{"source": None, "target": "n2"}, {"source": "n1", "target": None}],
+)
+def test_require_graph_shape_rejects_a_non_string_edge_endpoint(
+    tmp_path: Path, edge: dict[str, Any]
+) -> None:
+    path = tmp_path / "demo.json"
+    with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
+        graph_files.require_graph_shape({"nodes": [], "edges": [edge]}, path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
+    for app in ("demo", "other"):
+        app_dir = tmp_path / app
+        app_dir.mkdir()
+        (app_dir / f"{app}.json").write_text("{}", encoding="utf-8")
+    assert graph_files.iter_graph_files(tmp_path, "demo") == [
+        ("demo", tmp_path / "demo" / "demo.json")
+    ]
+
+
+def test_iter_graph_files_skips_an_unknown_app(tmp_path: Path) -> None:
+    assert graph_files.iter_graph_files(tmp_path, "absent") == []
+
+
+def test_require_graph_shape_rejects_a_non_object_document(tmp_path: Path) -> None:
+    """A file whose top level is a list, null or a string fails here with the
+    path, in every loader alike, not with an AttributeError out of ``.get``.
+    """
+    path = tmp_path / "graph.json"
+    with pytest.raises(TypeError, match="must be an object") as excinfo:
+        graph_files.require_graph_shape([], path)
+    assert str(path) in str(excinfo.value)

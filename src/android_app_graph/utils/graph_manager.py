@@ -24,13 +24,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import math
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import networkx as nx
 from openai import OpenAI
 
+from android_app_graph.android_packages import package_from_activity
+from android_app_graph.graph_files import (
+    reference_screenshot_b64,
+    require_known_edge_endpoints,
+    write_json_atomically,
+)
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -38,6 +43,7 @@ from android_app_graph.utils.vlm_utils import (
     describe_page_and_state,
     get_embedding,
     normalize_edge,
+    score_by_cosine,
     verify_same_node,
 )
 
@@ -53,24 +59,6 @@ class _IdentifyCacheEntry(NamedTuple):
     node_id: str
 
 
-def _package_from_activity(activity: str) -> str:
-    """Extract the app package from a full Android activity name.
-
-    ``com.citymapper.app.home.HomeActivity2`` → ``com.citymapper.app``
-    ``com.citymapper.app/com.citymapper.app.MainActivity`` → ``com.citymapper.app``
-
-    Heuristic: take the first 3 dot-segments (``com.company.app``).  This is the
-    standard Android package convention and is enough to group activities that
-    belong to the same app while separating different apps.
-    """
-    if "/" in activity:
-        activity = activity.split("/", maxsplit=1)[0]
-    parts = activity.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[:3])
-    return activity
-
-
 def _node_id(value: object) -> str:
     """Return a graph node ID as ``str``.
 
@@ -79,34 +67,6 @@ def _node_id(value: object) -> str:
     the one place that says so.
     """
     return value if isinstance(value, str) else str(value)
-
-
-def _require_known_edge_endpoints(data: dict[str, Any], path: Path) -> None:
-    """Raise when an edge names a node the same file does not define.
-
-    networkx would create that endpoint bare, so a hand-edited or truncated file
-    would load quietly.  See #62.
-    """
-    node_ids = {_node_id(node["id"]) for node in data.get("nodes", [])}
-    for edge in data.get("edges", []):
-        source = _node_id(edge["source"])
-        target = _node_id(edge["target"])
-        unknown = [node_id for node_id in (source, target) if node_id not in node_ids]
-        if unknown:
-            msg = (
-                f"{path}: edge {source} -> {target} references "
-                f"node(s) absent from the file: {', '.join(unknown)}"
-            )
-            raise ValueError(msg)
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _merge_into_schema(
@@ -220,12 +180,12 @@ class GraphManager:
             logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
             return cached.node_id
 
-        current_pkg = _package_from_activity(activity)
+        current_pkg = package_from_activity(activity)
 
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) == current_pkg:
+            if package_from_activity(data.get("activity", "")) == current_pkg:
                 desc = data.get("page_description", "")
                 if desc and desc not in same_pkg_descriptions:
                     same_pkg_descriptions.append(desc)
@@ -251,18 +211,22 @@ class GraphManager:
             self._require_embedding_client(), page_description, model=self.embedding_model
         )
 
+        same_pkg_candidates = (
+            (_node_id(node_id), data.get("description_embedding"))
+            for node_id, data in self.graph.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
+        )
+        scored = score_by_cosine(
+            description_embedding,
+            same_pkg_candidates,
+            scope="identify_state description-embedding",
+        )
         best_node_id: str | None = None
         best_similarity = -1.0
-        for node_id, data in self.graph.nodes(data=True):
-            if _package_from_activity(data.get("activity", "")) != current_pkg:
-                continue
-            existing_emb = data.get("description_embedding")
-            if existing_emb is None:
-                continue
-            sim = _cosine_similarity(description_embedding, existing_emb)
-            if sim > best_similarity:
-                best_similarity = sim
-                best_node_id = _node_id(node_id)
+        if scored:
+            # max() returns the first maximal element on a tie, matching the
+            # earlier "sim > best_similarity" strict-greater loop's tie behaviour.
+            best_node_id, best_similarity = max(scored, key=lambda kv: kv[1])
 
         matched_node_id: str | None = None
 
@@ -1090,7 +1054,7 @@ class GraphManager:
                 continue
             if package_name:
                 activity = self.graph.nodes[node].get("activity", "")
-                node_pkg = _package_from_activity(activity) if activity else ""
+                node_pkg = package_from_activity(activity) if activity else ""
                 if node_pkg and node_pkg != package_name:
                     continue
             out_degree = self.graph.out_degree(node)
@@ -1125,7 +1089,7 @@ class GraphManager:
 
             if package_name:
                 activity = node_data.get("activity", "")
-                node_pkg = _package_from_activity(activity) if activity else ""
+                node_pkg = package_from_activity(activity) if activity else ""
                 if node_pkg and node_pkg != package_name:
                     continue
 
@@ -1220,12 +1184,10 @@ class GraphManager:
                 edge_data["schema_deltas"] = schema_deltas
             data["edges"].append(edge_data)
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        write_json_atomically(path, data, indent=2, ensure_ascii=False)
 
         emb_path = self._embeddings_path(path)
-        with open(emb_path, "w", encoding="utf-8") as f:
-            json.dump(embeddings, f, ensure_ascii=False)
+        write_json_atomically(emb_path, embeddings, ensure_ascii=False)
 
         if self._dirty_screenshots:
             screenshots_dir = path.parent / (path.stem + "_screenshots")
@@ -1246,10 +1208,11 @@ class GraphManager:
         """Load graph from a JSON file (and companion embeddings file)."""
         path = Path(path)
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        # Before any mutation: a corrupt file must not leave a half-loaded graph.
-        _require_known_edge_endpoints(data, path)
+            raw = json.load(f)
+        # Run before any attribute below is assigned or the graph is cleared: a
+        # corrupt file must leave the previously loaded graph and counters
+        # untouched, not wipe them partway through the node loop.
+        data = require_known_edge_endpoints(raw, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)
@@ -1266,18 +1229,13 @@ class GraphManager:
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.graph.clear()
 
-        screenshots_dir = path.parent / (path.stem + "_screenshots")
-
         for node_data in data.get("nodes", []):
             node_id = node_data["id"]
             # Prefer companion file; fall back to inline (backwards compat)
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             # Backwards compat: old graphs have "activity" only, new ones have "activities" list
             activities = node_data.get("activities", [node_data.get("activity", "")])
-            ref_screenshot = None
-            img_path = screenshots_dir / f"{node_id}.png"
-            if img_path.exists():
-                ref_screenshot = base64.b64encode(img_path.read_bytes()).decode("ascii")
+            ref_screenshot = reference_screenshot_b64(path, node_id)
             self.graph.add_node(
                 node_id,
                 activity=activities[0] if activities else "",
@@ -1325,13 +1283,15 @@ class GraphManager:
         query_emb = get_embedding(
             self._require_embedding_client(), query, model=self.embedding_model
         )
-        results: list[tuple[str, float]] = []
-        for node_id, data in self.graph.nodes(data=True):
-            emb = data.get("description_embedding")
-            if emb is None:
-                continue
-            sim = _cosine_similarity(query_emb, emb)
-            results.append((_node_id(node_id), sim))
+        candidates = (
+            (_node_id(node_id), data.get("description_embedding"))
+            for node_id, data in self.graph.nodes(data=True)
+        )
+        results = score_by_cosine(
+            query_emb,
+            candidates,
+            scope="find_node_by_description description-embedding",
+        )
         results.sort(key=lambda x: x[1], reverse=True)
         return results
 

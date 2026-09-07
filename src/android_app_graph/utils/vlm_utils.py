@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -28,6 +29,74 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_PIXELS = 1_000_000
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Return the cosine similarity of ``a`` and ``b``, clamped to ``[-1.0, 1.0]``.
+
+    Raises ``ValueError`` when the vectors have different lengths: scoring
+    them anyway (as plain ``zip`` would, truncating to the shorter one) treats
+    the overlapping prefix of two unrelated embedding spaces as comparable,
+    e.g. a cached vector computed under a since-changed embedding model.
+    A zero norm has no direction and scores 0.0. Subnormal rounding can push
+    the ratio outside the clamp, and a non-finite ratio scores 0.0 so a NaN
+    never wins.
+    """
+    if len(a) != len(b):
+        msg = f"cosine_similarity: vectors have different lengths ({len(a)} vs {len(b)})"
+        raise ValueError(msg)
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if not norm_a or not norm_b:
+        return 0.0
+    similarity = dot / (norm_a * norm_b)
+    if not math.isfinite(similarity):
+        return 0.0
+    return max(-1.0, min(1.0, similarity))
+
+
+def score_by_cosine[K](
+    query: list[float],
+    candidates: Iterable[tuple[K, list[float] | None]],
+    *,
+    scope: str,
+    remedy: str = "",
+) -> list[tuple[K, float]]:
+    """Score each candidate against ``query`` by cosine similarity, input order kept.
+
+    A missing or empty vector is skipped silently: that is a candidate no
+    embedding was ever computed for, not a stale one. A non-empty vector whose
+    length differs from ``query`` is skipped too, but its dimension is
+    collected and logged in a single warning once scoring is done -- an
+    embedding model changed after these vectors were cached, so they sit in a
+    different space than the fresh query; scoring them anyway would rank
+    candidates as garbage with no signal anything was wrong, and one line beats
+    a warning per candidate.
+    """
+    scored: list[tuple[K, float]] = []
+    stale_count = 0
+    stale_dims: set[int] = set()
+    for key, vector in candidates:
+        if not vector:
+            continue
+        if len(vector) != len(query):
+            stale_count += 1
+            stale_dims.add(len(vector))
+            continue
+        scored.append((key, cosine_similarity(query, vector)))
+
+    if stale_count:
+        logger.warning(
+            "%s: embedding cache is stale for %d node(s): query dim=%d, cached dim(s)=%s%s",
+            scope,
+            stale_count,
+            len(query),
+            sorted(stale_dims),
+            remedy,
+        )
+
+    return scored
 
 
 class TokenTracker:
@@ -167,7 +236,7 @@ def _resize_screenshot(
     return base64.b64encode(buf.getvalue()).decode("ascii"), new_w, new_h, 1.0 / scale
 
 
-def _strip_json_fences(text: str) -> str:
+def strip_json_fences(text: str) -> str:
     """Remove ```json ... ``` markdown fences if present."""
     text = text.strip()
     m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
@@ -522,7 +591,7 @@ def _message_text(resp: ChatCompletion) -> str:
     return content.strip() if content is not None else ""
 
 
-def _build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImageParam:
+def build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImageParam:
     """Build an OpenAI image_url message part from a base64 screenshot."""
     return {
         "type": "image_url",
@@ -595,7 +664,7 @@ def describe_page_and_state(
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                _build_image_message(screenshot_b64),
+                build_image_message(screenshot_b64),
             ],
         }
     ]
@@ -606,7 +675,7 @@ def describe_page_and_state(
         response_format={"type": "json_object"},
     )
     token_tracker.record("page_describe_and_state", model, resp.usage)
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -658,9 +727,9 @@ def verify_same_node(
                 "content": [
                     {"type": "text", "text": prompt},
                     {"type": "text", "text": "First screenshot (existing node):"},
-                    _build_image_message(screenshot_existing_b64),
+                    build_image_message(screenshot_existing_b64),
                     {"type": "text", "text": "Second screenshot (new screen):"},
-                    _build_image_message(screenshot_new_b64),
+                    build_image_message(screenshot_new_b64),
                 ],
             }
         ],
@@ -668,7 +737,7 @@ def verify_same_node(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_verify", model, resp.usage)
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -721,7 +790,7 @@ def normalize_edge(
         response_format={"type": "json_object"},
     )
     token_tracker.record("normalize_edge", model, resp.usage)
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -858,7 +927,7 @@ def audit_merge_nodes(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_merge_audit", model, resp.usage)
-    raw = _strip_json_fences((resp.choices[0].message.content or "").strip())
+    raw = strip_json_fences((resp.choices[0].message.content or "").strip())
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -931,7 +1000,7 @@ def select_exploration_target(
     )
     token_tracker.record("exploration_target", model, resp.usage)
 
-    raw = _strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -976,7 +1045,7 @@ def audit_graph(
     choice = resp.choices[0]
     finish_reason = getattr(choice, "finish_reason", "")
     raw_original = (choice.message.content or "").strip()
-    raw = _strip_json_fences(raw_original)
+    raw = strip_json_fences(raw_original)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -1105,7 +1174,7 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
             return parsed["arguments"]
         return parsed
 
-    inner = _strip_json_fences(inner)
+    inner = strip_json_fences(inner)
     try:
         parsed = json.loads(inner)
     except json.JSONDecodeError:
@@ -1291,7 +1360,7 @@ def plan_next_action(
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                _build_image_message(screenshot_b64),
+                build_image_message(screenshot_b64),
             ],
         }
     ]
@@ -1305,7 +1374,7 @@ def plan_next_action(
     raw = _message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
-    raw_clean = _strip_json_fences(raw)
+    raw_clean = strip_json_fences(raw)
     try:
         result = json.loads(raw_clean)
         if isinstance(result, dict):
@@ -1363,7 +1432,7 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
     if tool_args is not None:
         return tool_args, thought, action_desc
 
-    raw_json = _strip_json_fences(raw)
+    raw_json = strip_json_fences(raw)
     try:
         parsed = json.loads(raw_json)
         if "arguments" in parsed:
@@ -1431,7 +1500,7 @@ def predict_next_action(
             "role": "user",
             "content": [
                 {"type": "text", "text": user_prompt},
-                _build_image_message(screenshot_b64),
+                build_image_message(screenshot_b64),
             ],
         },
     ]
