@@ -9,13 +9,16 @@ import string
 from pathlib import Path
 from typing import Any
 
+import httpx
 import networkx as nx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from openrouter import OpenRouter
 
 from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
+from android_app_graph.payloads import as_list, as_str, as_str_dict
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -729,49 +732,61 @@ def test_memory_numbers_repeated_entries() -> None:
     assert "  1. first\n  2. second" in memory.format()
 
 
-class _FakeMessage:
-    def __init__(self, content: str | None) -> None:
-        self.content = content
+class _RecordedCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def prompt_text(self, index: int = 0) -> str:
+        message = as_str_dict(as_list(self.calls[index]["messages"])[0])
+        part = as_str_dict(as_list(message["content"])[0])
+        return as_str(part["text"], "")
 
 
-class _FakeChoice:
-    def __init__(self, content: str | None) -> None:
-        self.message = _FakeMessage(content)
+class _FakeClient(OpenRouter):
+    """Real SDK serialization/parsing over an offline HTTP transport."""
 
+    def __init__(self, *replies: str | None, no_choices: bool = False) -> None:
+        self.completions = _RecordedCompletions()
+        remaining = list(replies)
 
-class _FakeResponse:
-    def __init__(self, content: str | None) -> None:
-        self.choices = [_FakeChoice(content)]
+        def respond(request: httpx.Request) -> httpx.Response:
+            self.completions.calls.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chat-test",
+                    "created": 0,
+                    "model": "test-model",
+                    "object": "chat.completion",
+                    "system_fingerprint": None,
+                    "choices": []
+                    if no_choices
+                    else [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": remaining.pop(0) if remaining else "",
+                            },
+                        }
+                    ],
+                },
+            )
 
-
-class _FakeCompletions:
-    """Stand-in for ``client.chat.completions`` that replays canned replies."""
-
-    def __init__(self, replies: list[str | None]) -> None:
-        self.replies = list(replies)
-        self.calls: list[dict[str, Any]] = []
-
-    def create(self, **kwargs: Any) -> _FakeResponse:
-        self.calls.append(kwargs)
-        return _FakeResponse(self.replies.pop(0) if self.replies else "")
-
-
-class _FakeChat:
-    def __init__(self, completions: _FakeCompletions) -> None:
-        self.completions = completions
-
-
-class _FakeClient:
-    def __init__(self, *replies: str | None) -> None:
-        self.completions = _FakeCompletions(list(replies))
-        self.chat = _FakeChat(self.completions)
+        super().__init__(
+            api_key="test-key",
+            client=httpx.Client(transport=httpx.MockTransport(respond)),
+            retry_config=None,
+        )
 
 
 def test_chat_completion_content_returns_the_reply_content() -> None:
     client = _FakeClient("first", "second")
     content = aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        client,
         model="m",
+        messages=[{"role": "user", "content": "test"}],
     )
     assert content == "first"
 
@@ -782,8 +797,9 @@ def test_chat_completion_content_makes_exactly_one_completion_call() -> None:
     """
     client = _FakeClient("first", "second")
     aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        client,
         model="m",
+        messages=[{"role": "user", "content": "test"}],
     )
     assert len(client.completions.calls) == 1
 
@@ -791,49 +807,31 @@ def test_chat_completion_content_makes_exactly_one_completion_call() -> None:
 def test_chat_completion_content_turns_a_missing_body_into_an_empty_string() -> None:
     client = _FakeClient(None)
     content = aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        client,
         model="m",
+        messages=[{"role": "user", "content": "test"}],
     )
     assert content == ""
-
-
-class _FakeResponseWithNoChoices:
-    def __init__(self) -> None:
-        self.choices: list[Any] = []
-
-
-class _FakeCompletionsWithNoChoices:
-    def create(self, **_kwargs: Any) -> _FakeResponseWithNoChoices:
-        return _FakeResponseWithNoChoices()
-
-
-class _FakeChatWithNoChoices:
-    def __init__(self) -> None:
-        self.completions = _FakeCompletionsWithNoChoices()
-
-
-class _FakeClientWithNoChoices:
-    def __init__(self) -> None:
-        self.chat = _FakeChatWithNoChoices()
 
 
 def test_chat_completion_content_turns_an_empty_choices_list_into_empty_content() -> None:
     """A filtered or refused completion can come back with zero choices; that must
     be empty content the parse-retry handles, not an IndexError.
     """
-    client = _FakeClientWithNoChoices()
+    client = _FakeClient(no_choices=True)
     content = aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
+        client,
         model="m",
+        messages=[{"role": "user", "content": "test"}],
     )
     assert content == ""
 
 
 def test_make_no_proxy_client_defaults() -> None:
     client, model = aitk_translator._make_no_proxy_client({"api_key": "test-key"})
-    assert model == "gpt-4o"
-    assert client.max_retries == 0
-    assert client.timeout == 60.0
+    assert model == "qwen/qwen3.8-flash"
+    assert client.sdk_configuration.retry_config is None
+    assert client.sdk_configuration.timeout_ms == 60_000
 
 
 def test_make_no_proxy_client_reads_the_config() -> None:
@@ -843,22 +841,21 @@ def test_make_no_proxy_client_reads_the_config() -> None:
             "base_url": "http://localhost:8000/v1",
             "model": "qwen",
             "request_timeout": 12,
-            "max_retries": 3,
         }
     )
     assert model == "qwen"
-    assert str(client.base_url) == "http://localhost:8000/v1/"
-    assert client.timeout == 12.0
-    assert client.max_retries == 3
+    assert client.sdk_configuration.server_url == "http://localhost:8000/v1"
+    assert client.sdk_configuration.timeout_ms == 12_000
 
 
 def test_make_no_proxy_client_prefers_the_timeout_alias() -> None:
     client, _ = aitk_translator._make_no_proxy_client({"api_key": "test-key", "timeout": 5})
-    assert client.timeout == 5.0
+    assert client.sdk_configuration.timeout_ms == 5_000
 
 
 _VLM_CONFIG: dict[str, Any] = {
     "action": {"api_key": "test-key", "model": "action-model"},
+    "instruction": {"api_key": "test-key", "model": "instruction-model"},
     "page_detail": {"api_key": "test-key", "model": "detail-model"},
     "image_embedding": {"api_key": "image-key", "model": "img-model"},
 }
@@ -918,14 +915,14 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     # image_embedding.base_url resolution itself is embedding_cache's
     # resolve_image_embedding_settings; this only checks the translator wires
     # its result through.
-    assert translator.image_embedding_base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert translator.image_embedding_base_url == "https://openrouter.ai/api/v1"
 
 
 @pytest.mark.usefixtures("translator")
 def test_construction_quiets_the_http_client_loggers() -> None:
-    """The httpx/openai per-request loggers are quieted on construction, not on import."""
+    """The httpx/openrouter per-request loggers are quieted on construction, not on import."""
     assert logging.getLogger("httpx").level == logging.WARNING
-    assert logging.getLogger("openai").level == logging.WARNING
+    assert logging.getLogger("openrouter").level == logging.WARNING
 
 
 def test_load_all_graphs_tolerates_a_missing_graph_dir(tmp_path: Path) -> None:
@@ -1018,7 +1015,7 @@ def test_load_all_graphs_streams_screenshot_reads_lazily(
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", fake_embedding)
 
     aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -1061,7 +1058,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
             raise RuntimeError(msg)
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _flaky)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _flaky)
 
     save_calls: list[dict[str, list[float]]] = []
     original_save = embedding_cache.save_image_embeddings
@@ -1115,7 +1112,7 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
             raise _Interrupted
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _interrupted_at_n3)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _interrupted_at_n3)
 
     with pytest.raises(_Interrupted):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
@@ -1142,7 +1139,7 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
     (screenshots / "n1.png").write_bytes(b"shot-n1")
 
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
     )
 
     def _raise_permission_error(
@@ -1341,7 +1338,7 @@ def _use_model(
 ) -> _FakeClient:
     """Answer every chat completion from ``translator.model_client`` with ``replies``."""
     client = _FakeClient(*replies)
-    monkeypatch.setattr(translator, "model_client", client)
+    monkeypatch.setattr(translator, "instruction_client", client)
     return client
 
 
@@ -1497,10 +1494,7 @@ def test_decide_returns_the_chosen_option(
 
     assert decision["type"] == "neighbor"
     assert decision["instruction"] == "tap the shoes result"
-    assert (
-        "State parameters: [query]"
-        in client.completions.calls[0]["messages"][0]["content"][0]["text"]
-    )
+    assert "State parameters: [query]" in client.completions.prompt_text()
 
 
 def test_decide_keeps_the_graph_instruction_when_the_model_omits_one(
@@ -1585,9 +1579,7 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
 ) -> None:
     client = _use_model(monkeypatch, translator, '{"choice": "A"}')
     translator._decide(translator._graphs["demo"], "buy shoes", "results", "screenshot")
-    assert (
-        "State parameters" not in client.completions.calls[0]["messages"][0]["content"][0]["text"]
-    )
+    assert "State parameters" not in client.completions.prompt_text()
 
 
 def test_load_all_graphs_requires_an_api_key_once_per_graph_not_per_node(
@@ -1609,7 +1601,7 @@ def test_load_all_graphs_requires_an_api_key_once_per_graph_not_per_node(
         built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
 
     assert set(built._graphs) == {"demo"}
-    key_errors = [m for m in caplog.messages if "Native Gemini image embedding requires" in m]
+    key_errors = [m for m in caplog.messages if "OpenRouter image embedding requires" in m]
     assert len(key_errors) == 1
     assert not any("Runtime image embedding failed for graph" in m for m in caplog.messages)
 
@@ -1620,7 +1612,7 @@ def test_compute_runtime_image_embedding_with_retry_requires_a_key(graph_dir: Pa
     cache-fill loop (that check is once-per-graph -- see the test above)."""
     config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
-    with pytest.raises(RuntimeError, match="Native Gemini image embedding requires"):
+    with pytest.raises(RuntimeError, match="OpenRouter image embedding requires"):
         built._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
 
 
@@ -1634,7 +1626,7 @@ def test_compute_runtime_image_embedding_with_retry_propagates_a_persistent_fail
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("rate limited")
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="rate limited"):
         translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
 
@@ -1651,7 +1643,7 @@ def identifiable(
     )
     monkeypatch.setattr(
         embedding_cache,
-        "get_gemini_native_image_embedding",
+        "get_openrouter_image_embedding",
         lambda *_args, **_kwargs: [1.0, 0.0],
     )
     G = translator._graphs["demo"]
@@ -1754,8 +1746,8 @@ def test_identify_node_retry_appends_the_parse_hint_and_recovers(
 
     assert node_id == "home"
     assert len(client.completions.calls) == 2
-    first_text = client.completions.calls[0]["messages"][0]["content"][0]["text"]
-    second_text = client.completions.calls[1]["messages"][0]["content"][0]["text"]
+    first_text = client.completions.prompt_text()
+    second_text = client.completions.prompt_text(1)
     assert aitk_translator.V2_PARSE_RETRY_HINT not in first_text
     assert second_text.endswith(aitk_translator.V2_PARSE_RETRY_HINT)
 
@@ -1768,7 +1760,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
 
     assert node_id == "home"
     assert len(client.completions.calls) == 1
-    text = client.completions.calls[0]["messages"][0]["content"][0]["text"]
+    text = client.completions.prompt_text()
     assert aitk_translator.V2_PARSE_RETRY_HINT not in text
 
 
@@ -1824,7 +1816,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
         aitk_translator, "describe_page_and_state", lambda *_a, **_kw: ("home screen", {}, [])
     )
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
     )
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
     G = translator._graphs["demo"]
@@ -1848,7 +1840,7 @@ def test_identify_node_propagates_an_embedding_failure(
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("embedding down")
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
@@ -2218,7 +2210,7 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
     (screenshots / "n1.png").write_bytes(b"shot-n1")
 
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
     )
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
@@ -2228,3 +2220,66 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
         "model": model,
         "embeddings": {"n1": [1.0, 0.0]},
     }
+
+
+def test_v2_approved_defaults_share_openrouter_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert built.desc_model == "openai/gpt-6.1-sol"
+    assert built.instruction_model == "openai/gpt-6.1-sol"
+    assert built.model_name == "qwen/qwen3.8-flash"
+    assert built.image_embedding_model == "google/gemini-embedding-2"
+    assert built.image_embedding_api_key == "shared-router-key"
+    assert built.image_embedding_base_url == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.usefixtures("image_router")
+def test_v2_sdk_migrates_native_cache_and_embeds_runtime_screenshots(
+    tmp_path: Path,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    graph_path = _write_graph(tmp_path)
+    screenshots = graph_path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(_SCREENSHOT)
+    sidecar = embedding_cache.image_embeddings_path(graph_path)
+    sidecar.write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"n1": [1.0, 0.0]}}),
+        encoding="utf-8",
+    )
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [0.25, 0.75]
+    assert json.loads(sidecar.read_text())["model"] == "google/gemini-embedding-2"
+    assert built._compute_runtime_image_embedding_with_retry("live-shot", "demo", "current") == [
+        0.25,
+        0.75,
+    ]
+    assert len(router_requests) == 2
+    for request in router_requests:
+        assert request.headers["authorization"] == "Bearer shared-router-key"
+        assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
+    assert (
+        json.loads(router_requests[1].content)["input"][0]["content"][0]["image_url"]["url"]
+        == "data:image/png;base64,live-shot"
+    )
+
+
+def test_v2_instruction_override_drives_planning(
+    translator: aitk_translator.UIKobeV2Translator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _use_model(monkeypatch, translator, "Tap Search")
+    assert (
+        translator._plan_free_action("find shoes", "shot", "missing graph path", []) == "Tap Search"
+    )
+    assert client.completions.calls[0]["model"] == "instruction-model"
+    assert "temperature" not in client.completions.calls[0]
+    assert client.completions.calls[0]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS

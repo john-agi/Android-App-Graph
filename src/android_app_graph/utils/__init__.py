@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from collections.abc import Mapping
 
 import httpx
-from openai import OpenAI
+from openrouter import OpenRouter
+
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_PAGE_DETAIL_MODEL = "openai/gpt-6.1-sol"
+DEFAULT_EMBEDDING_MODEL = "google/gemini-embedding-2"
+DEFAULT_INSTRUCTION_MODEL = "openai/gpt-6.1-sol"
+DEFAULT_ACTION_MODEL = "qwen/qwen3.8-flash"
 
 
-def resolve_env(value: str | None) -> str | None:
+def resolve_env(value: object) -> str | None:
     """Resolve ``${ENV_VAR}`` references in a string."""
     if value is None:
         return None
@@ -21,38 +27,33 @@ def resolve_env(value: str | None) -> str | None:
 
 
 def make_client(
-    cfg: dict[str, Any] | None,
+    cfg: Mapping[str, object] | None,
     *,
+    default_model: str = DEFAULT_PAGE_DETAIL_MODEL,
     http_client: httpx.Client | None = None,
     timeout: float | None = None,
-    max_retries: int | None = None,
-) -> tuple[OpenAI, str]:
-    """Create an OpenAI client from a per-call config block.
+) -> tuple[OpenRouter, str]:
+    """Create the official SDK client with per-role overrides and a shared key.
 
-    Args:
-        cfg: Dict with keys ``model``, ``base_url``, ``api_key`` (all optional).
-        http_client: Optional ``httpx.Client`` forwarded to the SDK, e.g. to
-            build a client that ignores ``HTTP(S)_PROXY`` for a locally
-            forwarded endpoint.
-        timeout: Optional request timeout in seconds forwarded to the SDK.
-        max_retries: Optional SDK-level retry count forwarded to the SDK.
-
-    Returns:
-        (client, model_name)
+    Timeouts are configured in seconds here and milliseconds in the SDK.
+    The application owns bounded retries; the SDK's hour-long retry window
+    must not multiply those attempts.
     """
     cfg = cfg or {}
-    api_key = resolve_env(cfg.get("api_key")) or os.environ.get("OPENAI_API_KEY")
-    base_url = resolve_env(cfg.get("base_url"))
-    model = resolve_env(cfg.get("model")) or "gpt-4o"
-
-    kwargs: dict[str, Any] = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
-    if http_client is not None:
-        kwargs["http_client"] = http_client
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    if max_retries is not None:
-        kwargs["max_retries"] = max_retries
-
-    return OpenAI(**kwargs), model
+    api_key = resolve_env(cfg.get("api_key")) or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("Missing API key: configure api_key or set OPENROUTER_API_KEY")
+    base_url = resolve_env(cfg.get("base_url")) or DEFAULT_BASE_URL
+    model = resolve_env(cfg.get("model")) or default_model
+    request_timeout = (
+        timeout
+        if timeout is not None
+        else float(resolve_env(cfg.get("request_timeout", cfg.get("timeout", 60))) or "60")
+    )
+    return OpenRouter(
+        api_key=api_key,
+        server_url=base_url.rstrip("/"),
+        client=http_client,
+        timeout_ms=int(request_timeout * 1000),
+        retry_config=None,
+    ), model

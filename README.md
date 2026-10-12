@@ -165,14 +165,17 @@ Do not put API keys directly in config files. Use a local `.env` file instead:
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your provider credentials. The template uses the
-previous Android-App-Graph demo defaults:
+The official [OpenRouter Python SDK](https://openrouter.ai/docs/client-sdks/python/overview)
+is installed by `uv sync --locked`. Set `OPENROUTER_API_KEY` in `.env`; one
+key covers chat, text embeddings and screenshot embeddings. The approved
+starting defaults are:
 
 ```bash
-APP_GRAPH_PAGE_DETAIL_MODEL=gpt-5.4
-APP_GRAPH_EMBEDDING_MODEL=gemini-embedding-2-preview
-APP_GRAPH_INSTRUCTION_MODEL=gpt-5.4
-APP_GRAPH_ACTION_MODEL=qwen3.5-plus-2026-02-15
+OPENROUTER_API_KEY=your-key
+APP_GRAPH_PAGE_DETAIL_MODEL=openai/gpt-6.1-sol
+APP_GRAPH_EMBEDDING_MODEL=google/gemini-embedding-2
+APP_GRAPH_INSTRUCTION_MODEL=openai/gpt-6.1-sol
+APP_GRAPH_ACTION_MODEL=qwen/qwen3.8-flash
 ```
 
 Load the file before running commands:
@@ -183,9 +186,39 @@ source .env
 set +a
 ```
 
-`.env` is ignored by git. You can use any OpenAI-compatible endpoint for the
-chat and text embedding providers; update model names and base URLs in `.env`
-to match your provider.
+`.env` is ignored by git. To compare models, change the corresponding
+`APP_GRAPH_*_MODEL` to an exact OpenRouter model ID and restart the command.
+Each role's base URL defaults to `https://openrouter.ai/api/v1`; its optional
+API-key override takes precedence over `OPENROUTER_API_KEY`. The template's
+role keys reference `${OPENROUTER_API_KEY}`. A missing model reference falls
+back to that role's default, including an embedding model for embedding calls.
+Requests omit temperature so models such as Sol can use their supported
+parameters. `request_timeout` (or `timeout`) in a role's YAML block is in
+seconds; requests default to 60 seconds and retry at most twice with backoff.
+SDK retries are disabled to avoid multiplying attempts; legacy SDK
+`max_retries` settings are superseded by this application retry budget.
+
+These defaults were approved from OpenRouter's catalog on 2026-10-12 based
+on documented capabilities; Android-task improvements have not been measured.
+Check a replacement model's supported input modalities and parameters in the
+[chat catalog](https://openrouter.ai/api/v1/models) or
+[embedding catalog](https://openrouter.ai/api/v1/embeddings/models).
+
+The v2 runtime and `app-graph-embed` both use OpenRouter's
+[multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
+`vlm.image_embedding` inherits the `embedding` role when omitted; use its
+`model`, `base_url` and `api_key` fields to override screenshots separately.
+Image embeddings require an image-capable embedding model. Remove legacy
+`native_base_url` and Google API-key settings from existing configurations.
+
+Screenshot sidecars (`*.image_emb.json`) carry the exact embedding model ID.
+Old native Gemini tags (including `gemini-embedding-2`) differ from the new
+`google/gemini-embedding-2` ID and are discarded automatically, as are
+untagged caches. Runtime loading recomputes missing vectors. Precompute them
+ahead of time with `uv run --locked app-graph-embed --config configs/explore.yaml`;
+use `--recompute` to force a refresh under the same ID. Changing the text
+embedding model also requires rebuilding or re-exploring graphs containing
+stored text vectors; screenshot sidecars do not migrate those vectors.
 
 ## Explore an App
 
@@ -240,7 +273,7 @@ Run the graph audit utility:
 uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 ```
 
-Precompute native Gemini image embeddings for a graph:
+Precompute OpenRouter image embeddings for a graph:
 
 ```bash
 uv run app-graph-embed --config configs/explore.yaml --app <app_name>
@@ -333,9 +366,9 @@ translator itself stays in the installed package. Verified against AITK commit
          base_url: ${APP_GRAPH_ACTION_BASE_URL}
          api_key: ${APP_GRAPH_ACTION_API_KEY}
        image_embedding:
-         model: models/gemini-embedding-exp-03-07
-         native_base_url: https://generativelanguage.googleapis.com/v1beta
-         api_key: ${GEMINI_API_KEY}
+         model: ${APP_GRAPH_EMBEDDING_MODEL}
+         base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
+         api_key: ${OPENROUTER_API_KEY}
    ```
 
 6. Smoke-test the import without a device:

@@ -12,7 +12,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from openrouter.errors.openroutererror import OpenRouterError
 
 from android_app_graph import embedding_cache
 
@@ -27,19 +29,19 @@ def test_save_and_load_image_embeddings_round_trip(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
     assert (
         embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids=set()
+            graph_path, model="google/gemini-embedding-2", node_ids=set()
         )
         == {}
     )
     embedding_cache.save_image_embeddings(
-        graph_path, {"n1": [0.5, 0.25]}, model="gemini-embedding-2"
+        graph_path, {"n1": [0.5, 0.25]}, model="google/gemini-embedding-2"
     )
     sidecar = json.loads(
         embedding_cache.image_embeddings_path(graph_path).read_text(encoding="utf-8")
     )
-    assert sidecar == {"model": "gemini-embedding-2", "embeddings": {"n1": [0.5, 0.25]}}
+    assert sidecar == {"model": "google/gemini-embedding-2", "embeddings": {"n1": [0.5, 0.25]}}
     assert embedding_cache.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"n1"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"n1"}
     ) == {"n1": [0.5, 0.25]}
 
 
@@ -58,12 +60,12 @@ def test_load_image_embeddings_drops_a_vector_for_a_node_not_in_node_ids(
     """
     graph_path = tmp_path / "demo.json"
     embedding_cache.save_image_embeddings(
-        graph_path, {"n1": [0.1, 0.2], "gone": [0.3, 0.4]}, model="gemini-embedding-2"
+        graph_path, {"n1": [0.1, 0.2], "gone": [0.3, 0.4]}, model="google/gemini-embedding-2"
     )
 
     with caplog.at_level("DEBUG"):
         result = embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"n1"}
         )
 
     assert result == {"n1": [0.1, 0.2]}
@@ -106,7 +108,7 @@ def test_load_image_embeddings_discards_a_legacy_bare_dict(
 
     with caplog.at_level("WARNING"):
         result = embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"n1"}
         )
 
     assert result == {}
@@ -133,24 +135,26 @@ def test_save_image_embeddings_goes_through_write_json_atomically(
 
     monkeypatch.setattr(embedding_cache, "write_json_atomically", _tracking)
 
-    embedding_cache.save_image_embeddings(graph_path, {"n1": [0.5]}, model="gemini-embedding-2")
+    embedding_cache.save_image_embeddings(
+        graph_path, {"n1": [0.5]}, model="google/gemini-embedding-2"
+    )
 
     assert calls == [
         (
             embedding_cache.image_embeddings_path(graph_path),
-            {"model": "gemini-embedding-2", "embeddings": {"n1": [0.5]}},
+            {"model": "google/gemini-embedding-2", "embeddings": {"n1": [0.5]}},
             False,
         )
     ]
     assert embedding_cache.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"n1"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"n1"}
     ) == {"n1": [0.5]}
 
 
 def test_load_image_embeddings_without_a_sidecar(tmp_path: Path) -> None:
     assert (
         embedding_cache.load_image_embeddings(
-            tmp_path / "demo.json", model="gemini-embedding-2", node_ids=set()
+            tmp_path / "demo.json", model="google/gemini-embedding-2", node_ids=set()
         )
         == {}
     )
@@ -161,7 +165,7 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
     embedding_cache.image_embeddings_path(graph_path).write_text(
         json.dumps(
             {
-                "model": "gemini-embedding-2",
+                "model": "google/gemini-embedding-2",
                 "embeddings": {
                     "n1": [1.0, 2.0],
                     "n2": "not a vector",
@@ -173,7 +177,7 @@ def test_load_image_embeddings_drops_malformed_entries(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert embedding_cache.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3", "n4"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"n1", "n2", "n3", "n4"}
     ) == {"n1": [1.0, 2.0]}
 
 
@@ -190,7 +194,7 @@ def test_load_image_embeddings_drops_a_nan_entry(
     embedding_cache.image_embeddings_path(graph_path).write_text(
         json.dumps(
             {
-                "model": "gemini-embedding-2",
+                "model": "google/gemini-embedding-2",
                 "embeddings": {"n1": [1.0, 2.0], "n2": [1.0, float("nan")]},
             }
         ),
@@ -198,7 +202,7 @@ def test_load_image_embeddings_drops_a_nan_entry(
     )
     with caplog.at_level("WARNING"):
         embeddings = embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1", "n2"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"n1", "n2"}
         )
     assert embeddings == {"n1": [1.0, 2.0]}
     assert "n2" in caplog.text
@@ -214,13 +218,16 @@ def test_load_image_embeddings_drops_an_element_too_large_for_a_float(
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
         json.dumps(
-            {"model": "gemini-embedding-2", "embeddings": {"n1": [1.0, 2.0], "n2": [10**400]}}
+            {
+                "model": "google/gemini-embedding-2",
+                "embeddings": {"n1": [1.0, 2.0], "n2": [10**400]},
+            }
         ),
         encoding="utf-8",
     )
     with caplog.at_level("WARNING"):
         embeddings = embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1", "n2"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"n1", "n2"}
         )
     assert embeddings == {"n1": [1.0, 2.0]}
     assert "n2" in caplog.text
@@ -232,13 +239,16 @@ def test_load_image_embeddings_warns_about_each_dropped_entry(
     graph_path = tmp_path / "demo.json"
     embedding_cache.image_embeddings_path(graph_path).write_text(
         json.dumps(
-            {"model": "gemini-embedding-2", "embeddings": {"n1": [1.0, 2.0], "n2": "not a vector"}}
+            {
+                "model": "google/gemini-embedding-2",
+                "embeddings": {"n1": [1.0, 2.0], "n2": "not a vector"},
+            }
         ),
         encoding="utf-8",
     )
     with caplog.at_level("WARNING"):
         embedding_cache.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"n1", "n2"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"n1", "n2"}
         )
     assert "n2" in caplog.text
 
@@ -255,7 +265,7 @@ def test_load_image_embeddings_warns_when_the_sidecar_is_not_an_object(
     with caplog.at_level("WARNING"):
         assert (
             embedding_cache.load_image_embeddings(
-                graph_path, model="gemini-embedding-2", node_ids=set()
+                graph_path, model="google/gemini-embedding-2", node_ids=set()
             )
             == {}
         )
@@ -270,7 +280,7 @@ def test_load_image_embeddings_treats_a_corrupt_sidecar_as_no_cache(
     with caplog.at_level("WARNING"):
         assert (
             embedding_cache.load_image_embeddings(
-                graph_path, model="gemini-embedding-2", node_ids=set()
+                graph_path, model="google/gemini-embedding-2", node_ids=set()
             )
             == {}
         )
@@ -291,7 +301,7 @@ def test_load_image_embeddings_treats_invalid_utf8_as_no_cache(
     with caplog.at_level("WARNING"):
         assert (
             embedding_cache.load_image_embeddings(
-                graph_path, model="gemini-embedding-2", node_ids={"n1"}
+                graph_path, model="google/gemini-embedding-2", node_ids={"n1"}
             )
             == {}
         )
@@ -312,7 +322,7 @@ def test_load_image_embeddings_treats_an_unreadable_file_as_no_cache(
     with caplog.at_level("WARNING"):
         assert (
             embedding_cache.load_image_embeddings(
-                graph_path, model="gemini-embedding-2", node_ids=set()
+                graph_path, model="google/gemini-embedding-2", node_ids=set()
             )
             == {}
         )
@@ -323,8 +333,8 @@ def _retry(api_key: str, screenshot_b64: str) -> list[float]:
     return embedding_cache.compute_embedding_with_retry(
         api_key,
         screenshot_b64,
-        model="gemini-embedding-2",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
+        model="google/gemini-embedding-2",
+        base_url="https://openrouter.ai/api/v1",
         app_name="demo",
         node_id="s0_home",
     )
@@ -340,7 +350,7 @@ def test_compute_embedding_with_retry_returns_on_first_success(
         calls.append((api_key, screenshot_b64))
         return [1.0, 2.0]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", fake_embedding)
 
     assert _retry("key", "shot") == [1.0, 2.0]
     assert calls == [("key", "shot")]
@@ -359,7 +369,7 @@ def test_compute_embedding_with_retry_recovers_after_a_failure(
             raise RuntimeError(msg)
         return [0.25]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", flaky_embedding)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", flaky_embedding)
 
     assert _retry("key", "shot") == [0.25]
     assert len(attempts) == 2
@@ -376,7 +386,7 @@ def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
         msg = "500 upstream error"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", always_failing)
 
     with pytest.raises(RuntimeError, match="500 upstream error"):
         _retry("key", "shot")
@@ -385,9 +395,9 @@ def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
 
 def test_resolve_image_embedding_settings_defaults() -> None:
     settings = embedding_cache.resolve_image_embedding_settings({})
-    assert settings.model == "gemini-embedding-2"
+    assert settings.model == "google/gemini-embedding-2"
     assert settings.api_key is None
-    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert settings.base_url == "https://openrouter.ai/api/v1"
 
 
 def test_resolve_image_embedding_settings_reads_config_values() -> None:
@@ -396,7 +406,7 @@ def test_resolve_image_embedding_settings_reads_config_values() -> None:
             "image_embedding": {
                 "model": "config-model",
                 "api_key": "config-key",
-                "native_base_url": "https://config.googleapis.com/v1",
+                "base_url": "https://config.googleapis.com/v1",
             }
         }
     )
@@ -405,19 +415,17 @@ def test_resolve_image_embedding_settings_reads_config_values() -> None:
     )
 
 
-def test_resolve_image_embedding_settings_base_url_defaults_to_google() -> None:
-    """A base URL that is not a googleapis.com host falls back to the native
-    default, since get_gemini_native_image_embedding only speaks that API.
-    """
+def test_resolve_image_embedding_settings_preserves_endpoint_override() -> None:
+
     settings = embedding_cache.resolve_image_embedding_settings(
         {"image_embedding": {"base_url": "http://localhost:9000/v1"}}
     )
-    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert settings.base_url == "http://localhost:9000/v1"
 
 
-def test_resolve_image_embedding_settings_keeps_a_google_base_url_override() -> None:
+def test_resolve_image_embedding_settings_keeps_a_base_url_override() -> None:
     settings = embedding_cache.resolve_image_embedding_settings(
-        {"image_embedding": {"native_base_url": "https://eu.googleapis.com/v1beta"}}
+        {"image_embedding": {"base_url": "https://eu.googleapis.com/v1beta"}}
     )
     assert settings.base_url == "https://eu.googleapis.com/v1beta"
 
@@ -425,7 +433,7 @@ def test_resolve_image_embedding_settings_keeps_a_google_base_url_override() -> 
 def test_resolve_image_embedding_settings_reads_the_api_key_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "from-env")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     settings = embedding_cache.resolve_image_embedding_settings({})
     assert settings.api_key == "from-env"
 
@@ -436,51 +444,45 @@ def test_resolve_image_embedding_settings_overrides_win_over_config() -> None:
             "image_embedding": {
                 "model": "config-model",
                 "api_key": "config-key",
-                "native_base_url": "https://config.googleapis.com/v1",
+                "base_url": "https://config.googleapis.com/v1",
             }
         },
         model_override="cli-model",
         api_key_override="cli-key",
         base_url_override="https://cli.example.com/v1",
     )
-    # A base URL override that is not a googleapis.com host still falls back to
-    # the native default, same as one read from config.
     assert settings == embedding_cache.ImageEmbeddingSettings(
         api_key="cli-key",
         model="cli-model",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
+        base_url="https://cli.example.com/v1",
     )
 
 
 def test_resolve_image_embedding_settings_resolves_an_env_reference_base_url_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``--base-url '${GEMINI_BASE_URL}'`` must resolve through the environment
-    like ``model_override`` and ``api_key_override`` already do, not keep the
-    literal ``${...}`` string (which fails the googleapis.com check and
-    silently falls back to the default endpoint).
-    """
-    monkeypatch.setenv("GEMINI_BASE_URL", "https://eu.googleapis.com/v1beta")
+    """CLI endpoint references must resolve through the environment."""
+    monkeypatch.setenv("APP_GRAPH_IMAGE_BASE_URL", "https://eu.googleapis.com/v1beta")
     settings = embedding_cache.resolve_image_embedding_settings(
-        {}, base_url_override="${GEMINI_BASE_URL}"
+        {}, base_url_override="${APP_GRAPH_IMAGE_BASE_URL}"
     )
     assert settings.base_url == "https://eu.googleapis.com/v1beta"
 
 
-def test_resolve_image_embedding_settings_falls_back_for_an_unresolved_or_non_google_env_override(
+def test_resolve_image_embedding_settings_resolves_optional_env_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
+    monkeypatch.delenv("APP_GRAPH_IMAGE_BASE_URL", raising=False)
     settings = embedding_cache.resolve_image_embedding_settings(
-        {}, base_url_override="${GEMINI_BASE_URL}"
+        {}, base_url_override="${APP_GRAPH_IMAGE_BASE_URL}"
     )
-    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert settings.base_url == "https://openrouter.ai/api/v1"
 
-    monkeypatch.setenv("GEMINI_BASE_URL", "https://not-google.example.com/v1")
+    monkeypatch.setenv("APP_GRAPH_IMAGE_BASE_URL", "https://router.example.com/v1")
     settings = embedding_cache.resolve_image_embedding_settings(
-        {}, base_url_override="${GEMINI_BASE_URL}"
+        {}, base_url_override="${APP_GRAPH_IMAGE_BASE_URL}"
     )
-    assert settings.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert settings.base_url == "https://router.example.com/v1"
 
 
 def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(
@@ -502,3 +504,82 @@ def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(
         )
     assert loaded == {}
     assert "predates model tagging" in caplog.text
+
+
+def test_image_settings_inherit_embedding_role_and_shared_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
+    config = {
+        "embedding": {
+            "model": "google/gemini-embedding-2",
+            "base_url": "https://router.example/v1",
+            "api_key": "${APP_GRAPH_EMBEDDING_API_KEY}",
+        }
+    }
+    assert embedding_cache.resolve_image_embedding_settings(
+        config
+    ) == embedding_cache.ImageEmbeddingSettings(
+        "shared-key",
+        "google/gemini-embedding-2",
+        "https://router.example/v1",
+    )
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_API_KEY", "embedding-key")
+    assert embedding_cache.resolve_image_embedding_settings(config).api_key == "embedding-key"
+    config["image_embedding"] = {
+        "model": "provider/image-model",
+        "api_key": "image-key",
+        "base_url": "https://image.example/v1",
+    }
+    assert embedding_cache.resolve_image_embedding_settings(
+        config
+    ) == embedding_cache.ImageEmbeddingSettings(
+        "image-key",
+        "provider/image-model",
+        "https://image.example/v1",
+    )
+
+
+@pytest.mark.usefixtures("image_router")
+def test_image_cache_retry_uses_real_sdk_and_counts_usage(
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from android_app_graph.utils import vlm_utils
+
+    tracker = vlm_utils.TokenTracker()
+    monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
+    router_responses.extend(
+        [
+            httpx.Response(429, json={"error": {"code": 429, "message": "rate limited"}}),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    assert _retry("test-key", "shot") == [0.25, 0.75]
+    assert len(router_requests) == 2
+    assert no_sleep == [2.0]
+    assert tracker.snapshot() == {
+        "prompt_tokens": 5,
+        "completion_tokens": 0,
+        "total_tokens": 5,
+        "calls": 1,
+    }
+
+
+@pytest.mark.usefixtures("image_router")
+def test_image_cache_sdk_errors_are_bounded(
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    no_sleep: list[float],
+) -> None:
+    router_responses.extend(
+        httpx.Response(500, json={"error": {"code": 500, "message": "provider failure"}})
+        for _ in range(3)
+    )
+    with pytest.raises(OpenRouterError, match="provider failure"):
+        _retry("test-key", "shot")
+    assert len(router_requests) == 3
+    assert no_sleep == [2.0, 4.0]

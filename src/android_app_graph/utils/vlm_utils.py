@@ -11,20 +11,31 @@ import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-import httpx
-from openai import OpenAI, OpenAIError
+from openrouter import OpenRouter
+from openrouter.components.chatcontenttext import ChatContentText
+from openrouter.components.chatresult import ChatResult
+from openrouter.components.chatusage import ChatUsage
+from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from PIL import Image
 
 from android_app_graph.payloads import as_float_list, as_int, as_str
+from android_app_graph.retrying import call_with_retry
+from android_app_graph.utils import (
+    DEFAULT_ACTION_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_INSTRUCTION_MODEL,
+    DEFAULT_PAGE_DETAIL_MODEL,
+    make_client,
+)
 
 if TYPE_CHECKING:
-    from openai.types import CompletionUsage
-    from openai.types.chat import (
-        ChatCompletion,
-        ChatCompletionContentPartImageParam,
-        ChatCompletionMessageParam,
+    from openrouter.components.chatcontentimage import ChatContentImageTypedDict
+    from openrouter.components.chatmessages import ChatMessagesTypedDict
+    from openrouter.components.chatrequest import ResponseFormatTypedDict
+    from openrouter.operations.createembeddings import (
+        CreateEmbeddingsResponse,
+        CreateEmbeddingsUsage,
     )
-    from openai.types.create_embedding_response import Usage as EmbeddingUsage
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +120,7 @@ class TokenTracker:
         self,
         call_type: str,
         model: str,
-        usage: CompletionUsage | EmbeddingUsage | None,
+        usage: ChatUsage | CreateEmbeddingsUsage | None,
     ) -> None:
         """Record token usage from an API response.
 
@@ -129,9 +140,11 @@ class TokenTracker:
                 "total_tokens": 0,
                 "calls": 0,
             }
-        self._usage[key]["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-        self._usage[key]["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
-        self._usage[key]["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
+        self._usage[key]["prompt_tokens"] += usage.prompt_tokens
+        self._usage[key]["completion_tokens"] += (
+            usage.completion_tokens if isinstance(usage, ChatUsage) else 0
+        )
+        self._usage[key]["total_tokens"] += usage.total_tokens
         self._usage[key]["calls"] += 1
 
     def snapshot(self) -> dict[str, int]:
@@ -574,25 +587,46 @@ Your task: {instruction}
 Look at the screenshot and execute the SINGLE next action to complete the task above.
 Focus on the task instruction. The overall goal is only for context when the instruction is ambiguous."""
 
-DEFAULT_PAGE_DETAIL_MODEL = "gpt-5.4"
-DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2-preview"
-DEFAULT_INSTRUCTION_MODEL = "gpt-5.4"
-DEFAULT_ACTION_MODEL = "qwen3.5-plus-2026-02-15"
+
+def send_chat(
+    client: OpenRouter,
+    *,
+    model: str,
+    messages: list[ChatMessagesTypedDict],
+    response_format: ResponseFormatTypedDict | None = None,
+    max_tokens: int | None = None,
+) -> ChatResult:
+    """Send a typed, non-streaming completion with bounded application retries."""
+    response: object = call_with_retry(
+        "[API] chat completion",
+        lambda: client.chat.send(
+            model=model,
+            messages=messages,
+            response_format=response_format,
+            max_tokens=max_tokens,
+            stream=False,
+            retries=None,
+        ),
+    )
+    if not isinstance(response, ChatResult):
+        raise TypeError("Expected a non-streaming OpenRouter chat response")
+    return response
 
 
-def _message_text(resp: ChatCompletion) -> str:
-    """Return the assistant text of a completion, stripped.
-
-    ``message.content`` is ``None`` when the model answered with tool calls or
-    with nothing at all; the callers all treat unparsable text as a parse
-    failure and fall back, so an empty string is the honest value here.
-    """
+def _message_text(resp: ChatResult) -> str:
+    """Read text, multipart text, null or omitted content from the SDK response."""
+    if not resp.choices:
+        return ""
     content = resp.choices[0].message.content
-    return content.strip() if content is not None else ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(part.text for part in content if isinstance(part, ChatContentText)).strip()
+    return ""
 
 
-def build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImageParam:
-    """Build an OpenAI image_url message part from a base64 screenshot."""
+def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
+    """Build an OpenRouter image_url message part from a base64 screenshot."""
     return {
         "type": "image_url",
         "image_url": {
@@ -602,7 +636,7 @@ def build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImagePa
 
 
 def describe_page_and_state(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_b64: str,
     existing_nodes: list[str] | None = None,
     existing_keys: list[str] | None = None,
@@ -659,7 +693,7 @@ def describe_page_and_state(
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
     )
-    messages: list[ChatCompletionMessageParam] = [
+    messages: list[ChatMessagesTypedDict] = [
         {
             "role": "user",
             "content": [
@@ -668,10 +702,10 @@ def describe_page_and_state(
             ],
         }
     ]
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=messages,
-        temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("page_describe_and_state", model, resp.usage)
@@ -696,7 +730,7 @@ def describe_page_and_state(
 
 
 def verify_same_node(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_new_b64: str,
     screenshot_existing_b64: str,
     existing_description: str,
@@ -719,7 +753,8 @@ def verify_same_node(
     screenshot_existing_b64, *_ = _resize_screenshot(screenshot_existing_b64)
 
     prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=[
             {
@@ -733,7 +768,6 @@ def verify_same_node(
                 ],
             }
         ],
-        temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_verify", model, resp.usage)
@@ -749,7 +783,7 @@ def verify_same_node(
 
 
 def normalize_edge(
-    client: OpenAI,
+    client: OpenRouter,
     instructions: list[str],
     target_observations: list[str] | None = None,
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
@@ -778,7 +812,8 @@ def normalize_edge(
             input_text += f' → Observation: "{obs}"'
         input_text += "\n"
 
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=[
             {
@@ -786,7 +821,6 @@ def normalize_edge(
                 "content": f"{NORMALIZE_EDGE_PROMPT}\n\n{input_text}",
             }
         ],
-        temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("normalize_edge", model, resp.usage)
@@ -910,7 +944,7 @@ Return ONLY a JSON object:
 
 
 def audit_merge_nodes(
-    client: OpenAI,
+    client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
@@ -920,14 +954,14 @@ def audit_merge_nodes(
         app_name=app_name,
         graph_description=graph_summary,
     )
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_merge_audit", model, resp.usage)
-    raw = strip_json_fences((resp.choices[0].message.content or "").strip())
+    raw = strip_json_fences(_message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -963,7 +997,7 @@ Return ONLY a JSON object:
 
 
 def select_exploration_target(
-    client: OpenAI,
+    client: OpenRouter,
     app_name: str,
     candidates: list[dict[str, Any]],
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
@@ -992,10 +1026,10 @@ def select_exploration_target(
         app_name=app_name,
         candidates="\n".join(candidate_lines),
     )
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("exploration_target", model, resp.usage)
@@ -1018,7 +1052,7 @@ def select_exploration_target(
 
 
 def audit_graph(
-    client: OpenAI,
+    client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
@@ -1035,16 +1069,15 @@ def audit_graph(
         app_name=app_name,
         graph_description=graph_summary,
     )
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
         response_format={"type": "json_object"},
     )
     token_tracker.record("graph_audit", model, resp.usage)
-    choice = resp.choices[0]
-    finish_reason = getattr(choice, "finish_reason", "")
-    raw_original = (choice.message.content or "").strip()
+    finish_reason = resp.choices[0].finish_reason if resp.choices else ""
+    raw_original = _message_text(resp)
     raw = strip_json_fences(raw_original)
     try:
         return json.loads(raw)
@@ -1058,101 +1091,75 @@ def audit_graph(
         return {"issues": [], "summary": "parse error"}
 
 
-def get_embedding(client: OpenAI, text: str, model: str = DEFAULT_EMBEDDING_MODEL) -> list[float]:
-    """Get an embedding vector for a text string."""
-    resp = client.embeddings.create(model=model, input=text)
-    token_tracker.record("embedding", model, resp.usage)
-    return resp.data[0].embedding
+def _embedding_vector(response: CreateEmbeddingsResponse) -> list[float]:
+    if not isinstance(response, CreateEmbeddingsResponseBody):
+        raise TypeError("Expected an OpenRouter JSON embedding response")
+    if len(response.data) != 1:
+        raise ValueError("Expected one embedding vector from OpenRouter")
+    vector = as_float_list(response.data[0].embedding)
+    if not vector:
+        raise ValueError("OpenRouter returned an empty, non-finite or non-float embedding")
+    return vector
+
+
+def get_embedding(
+    client: OpenRouter, text: str, model: str = DEFAULT_EMBEDDING_MODEL
+) -> list[float]:
+    """Get a text embedding through the official OpenRouter SDK."""
+    response = call_with_retry(
+        "[API] text embedding",
+        lambda: client.embeddings.generate(
+            model=model, input=text, encoding_format="float", retries=None
+        ),
+    )
+    vector = _embedding_vector(response)
+    if isinstance(response, CreateEmbeddingsResponseBody):
+        token_tracker.record("embedding", model, response.usage)
+    return vector
 
 
 def get_image_embedding(
-    client: OpenAI, screenshot_b64: str, model: str = DEFAULT_EMBEDDING_MODEL
+    client: OpenRouter, screenshot_b64: str, model: str = DEFAULT_EMBEDDING_MODEL
 ) -> list[float]:
-    """Get an embedding vector for a screenshot.
+    """Embed a screenshot using OpenRouter's documented multimodal content array.
 
-    Multimodal embedding providers expose image inputs through different
-    OpenAI-compatible shapes. Try common OpenAI image_url and Gemini content
-    shapes before surfacing the provider error.
+    The shared image-cache loop owns retries for both runtime and offline use.
     """
-    data_url = f"data:image/png;base64,{screenshot_b64}"
-    # Provider-specific shapes that the SDK's own `input` type does not describe.
-    attempts: list[Any] = [
-        [{"type": "image_url", "image_url": {"url": data_url}}],
-        {"type": "image_url", "image_url": {"url": data_url}},
-        [{"mime_type": "image/png", "data": screenshot_b64}],
-        {"mime_type": "image/png", "data": screenshot_b64},
-        [{"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]}],
-        {"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]},
-        [
+    response = client.embeddings.generate(
+        model=model,
+        input=[
             {
-                "content": {
-                    "parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]
-                }
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                    }
+                ]
             }
         ],
-        {
-            "content": {
-                "parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]
-            }
-        },
-    ]
-
-    errors = []
-    for input_payload in attempts:
-        try:
-            resp = client.embeddings.create(model=model, input=input_payload)
-            token_tracker.record("image_embedding", model, resp.usage)
-            return resp.data[0].embedding
-        except (OpenAIError, TypeError, ValueError) as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
-
-    raise RuntimeError(
-        "Image embedding request failed for all known payload formats: " + " | ".join(errors)
+        encoding_format="float",
+        retries=None,
     )
+    vector = _embedding_vector(response)
+    if isinstance(response, CreateEmbeddingsResponseBody):
+        token_tracker.record("image_embedding", model, response.usage)
+    return vector
 
 
-def get_gemini_native_image_embedding(
+def get_openrouter_image_embedding(
     api_key: str,
     screenshot_b64: str,
-    model: str = "gemini-embedding-2",
-    base_url: str = "https://generativelanguage.googleapis.com/v1beta",
+    *,
+    model: str,
+    base_url: str,
 ) -> list[float]:
-    """Get an image embedding through Gemini's native REST API."""
-    base_url = base_url.rstrip("/")
-    model_name = model if model.startswith("models/") else f"models/{model}"
-    url = f"{base_url}/{model_name}:embedContent"
-    payload = {
-        "content": {
-            "parts": [
-                {
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": screenshot_b64,
-                    },
-                }
-            ],
-        },
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
-    }
-    resp = httpx.post(url, headers=headers, json=payload, timeout=60)
-    try:
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeError(f"{resp.status_code} {resp.text}") from exc
-
-    data = resp.json()
-    values = data.get("embedding", {}).get("values")
-    if not values and data.get("embeddings"):
-        values = data["embeddings"][0].get("values")
-    embedding = as_float_list(values)
-    if not embedding:
-        raise RuntimeError(
-            f"Gemini native image embedding response missing embedding values: {data}"
-        )
-    return embedding
+    """Share SDK setup between runtime retrieval and offline precomputation."""
+    client, model = make_client(
+        {"api_key": api_key, "model": model, "base_url": base_url},
+        default_model=DEFAULT_EMBEDDING_MODEL,
+    )
+    with client:
+        return get_image_embedding(client, screenshot_b64, model=model)
 
 
 def _parse_tool_call(raw: str) -> dict[str, Any] | None:
@@ -1291,7 +1298,7 @@ def _tool_call_to_aitk(
 
 
 def plan_next_action(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_b64: str,
     page_description: str,
     explored_edges: list[dict[str, Any]],
@@ -1355,7 +1362,7 @@ def plan_next_action(
         unexplored_elements_section=unexplored_section,
     )
 
-    messages: list[ChatCompletionMessageParam] = [
+    messages: list[ChatMessagesTypedDict] = [
         {
             "role": "user",
             "content": [
@@ -1364,10 +1371,10 @@ def plan_next_action(
             ],
         }
     ]
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=messages,
-        temperature=0.0,
     )
 
     token_tracker.record("instruction", model, resp.usage)
@@ -1390,7 +1397,7 @@ def plan_next_action(
     return instruction
 
 
-def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, str, str]:
+def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, Any] | None, str, str]:
     """Parse an action agent VLM response.
 
     Handles both XML <tool_call> responses and native tool calling.
@@ -1398,24 +1405,21 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
     Returns:
         (tool_args, thought, action_desc) or (None, "", "") on failure.
     """
-    raw_content = resp.choices[0].message.content
-    if raw_content is None:
-        tool_calls = resp.choices[0].message.tool_calls
-        if tool_calls:
-            logger.info("  Agent used native tool calling")
-            tool_call = tool_calls[0]
-            if tool_call.type != "function":
-                logger.error("Action agent returned an unsupported %s tool call", tool_call.type)
-                return None, "", ""
-            try:
-                tool_args = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError:
-                return None, "", ""
-            return tool_args, "", str(tool_args)
+    if not resp.choices:
+        return None, "", ""
+    tool_calls = resp.choices[0].message.tool_calls
+    if tool_calls:
+        logger.info("  Agent used native tool calling")
+        tool_call = tool_calls[0]
+        try:
+            tool_args = json.loads(tool_call.function.arguments)
+        except json.JSONDecodeError:
+            return None, "", ""
+        return tool_args, "", str(tool_args)
+    raw = _message_text(resp)
+    if not raw:
         logger.error("Action agent returned empty response (no content, no tool_calls)")
         return None, "", ""
-
-    raw = raw_content.strip()
     logger.debug("  Agent raw output: %s", raw)
 
     thought = ""
@@ -1444,7 +1448,7 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
 
 
 def predict_next_action(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_b64: str,
     instruction: str,
     screen_w: int = 1080,
@@ -1494,7 +1498,7 @@ def predict_next_action(
         history_section=history_section,
     )
 
-    messages: list[ChatCompletionMessageParam] = [
+    messages: list[ChatMessagesTypedDict] = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
@@ -1504,10 +1508,10 @@ def predict_next_action(
             ],
         },
     ]
-    resp = client.chat.completions.create(
+    resp = send_chat(
+        client,
         model=model,
         messages=messages,
-        temperature=0.0,
     )
 
     token_tracker.record("action", model, resp.usage)

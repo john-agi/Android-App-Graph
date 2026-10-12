@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
+
 import httpx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from openrouter.components.security import Security
 
+from android_app_graph.kobe import Kobe
 from android_app_graph.utils import make_client, resolve_env
+
+
+def test_openrouter_default_and_shared_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    client, model = make_client({})
+    assert model == "openai/gpt-6.1-sol"
+    assert type(client).__name__ == "OpenRouter"
 
 
 def test_none_passes_through() -> None:
@@ -31,8 +44,9 @@ def test_reference_to_unset_variable_is_none() -> None:
 
 def test_make_client_defaults() -> None:
     client, model = make_client({"api_key": "test-key"})
-    assert model == "gpt-4o"
-    assert client.api_key == "test-key"
+    assert model == "openai/gpt-6.1-sol"
+    assert isinstance(client.sdk_configuration.security, Security)
+    assert client.sdk_configuration.security.api_key == "test-key"
 
 
 def test_make_client_reads_the_config() -> None:
@@ -40,16 +54,18 @@ def test_make_client_reads_the_config() -> None:
         {"api_key": "test-key", "base_url": "http://localhost:8000/v1", "model": "qwen"}
     )
     assert model == "qwen"
-    assert client.api_key == "test-key"
-    assert str(client.base_url) == "http://localhost:8000/v1/"
+    assert isinstance(client.sdk_configuration.security, Security)
+    assert client.sdk_configuration.security.api_key == "test-key"
+    assert client.sdk_configuration.server_url == "http://localhost:8000/v1"
 
 
-def test_make_client_falls_back_to_the_openai_api_key_env_var(
+def test_make_client_falls_back_to_the_openrouter_api_key_env_var(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "from-env")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     client, _ = make_client({})
-    assert client.api_key == "from-env"
+    assert isinstance(client.sdk_configuration.security, Security)
+    assert client.sdk_configuration.security.api_key == "from-env"
 
 
 def test_make_client_resolves_env_references(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,13 +74,141 @@ def test_make_client_resolves_env_references(monkeypatch: pytest.MonkeyPatch) ->
     assert model == "from-env"
 
 
-def test_make_client_forwards_timeout_and_max_retries() -> None:
-    client, _ = make_client({"api_key": "test-key"}, timeout=12.0, max_retries=3)
-    assert client.timeout == 12.0
-    assert client.max_retries == 3
+def test_make_client_forwards_timeout_and_disables_sdk_retries() -> None:
+    client, _ = make_client({"api_key": "test-key"}, timeout=12.0)
+    assert client.sdk_configuration.timeout_ms == 12_000
+    assert client.sdk_configuration.retry_config is None
 
 
 def test_make_client_forwards_the_http_client() -> None:
     http_client = httpx.Client(trust_env=False)
     client, _ = make_client({"api_key": "test-key"}, http_client=http_client)
-    assert client._client is http_client  # the SDK exposes no public accessor for this
+    assert (
+        client.sdk_configuration.client is http_client
+    )  # the SDK exposes no public accessor for this
+
+
+@pytest.mark.parametrize(
+    "api_key", ["explicit-key", "${APP_GRAPH_TEST_KEY}", "${APP_GRAPH_TEST_UNSET}", None, ""]
+)
+def test_credential_precedence_on_the_wire(
+    api_key: str | None,
+    router_http: httpx.Client,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-key")
+    monkeypatch.setenv("APP_GRAPH_TEST_KEY", "role-key")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    client, model = make_client(
+        {"api_key": api_key, "model": "google/gemini-embedding-2"}, http_client=router_http
+    )
+    client.embeddings.generate(model=model, input="hello")
+    expected = {"explicit-key": "explicit-key", "${APP_GRAPH_TEST_KEY}": "role-key"}.get(
+        api_key or "", "shared-key"
+    )
+    assert router_requests[0].headers["authorization"] == f"Bearer {expected}"
+    assert str(router_requests[0].url) == "https://openrouter.ai/api/v1/embeddings"
+
+
+def test_missing_openrouter_key_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-key")
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        make_client({})
+
+
+@pytest.mark.parametrize(
+    ("role", "default_model"),
+    [
+        ("PAGE_DETAIL", "openai/gpt-6.1-sol"),
+        ("INSTRUCTION", "openai/gpt-6.1-sol"),
+        ("ACTION", "qwen/qwen3.8-flash"),
+        ("EMBEDDING", "google/gemini-embedding-2"),
+    ],
+)
+def test_role_model_env_override_and_missing_reference(
+    role: str,
+    default_model: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
+    cfg = {"model": f"${{APP_GRAPH_{role}_MODEL}}"}
+    _, model = make_client(cfg, default_model=default_model)
+    assert model == default_model
+    monkeypatch.setenv(f"APP_GRAPH_{role}_MODEL", "provider/comparison-model")
+    _, model = make_client(cfg, default_model=default_model)
+    assert model == "provider/comparison-model"
+
+
+def test_custom_endpoint_and_timeout_are_sent_to_transport(
+    router_http: httpx.Client,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    client, model = make_client(
+        {
+            "api_key": "role-key",
+            "base_url": "https://proxy.example/api/v1/",
+            "model": "google/gemini-embedding-2",
+            "request_timeout": 12,
+        },
+        http_client=router_http,
+    )
+    client.embeddings.generate(model=model, input="hello")
+    request = router_requests[0]
+    assert str(request.url) == "https://proxy.example/api/v1/embeddings"
+    assert request.extensions["timeout"] == {
+        "connect": 12.0,
+        "read": 12.0,
+        "write": 12.0,
+        "pool": 12.0,
+    }
+    assert json.loads(request.content)["model"] == model
+
+
+class _IdleDevice:
+    def __init__(self) -> None:
+        self.w = 100
+        self.h = 200
+        self.config: dict[str, object] = {}
+
+    def get_state(self) -> dict[str, object]:
+        raise AssertionError("model setup must not access the device")
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        raise AssertionError(f"model setup must not execute device action {action}")
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_exploration_resolves_all_role_models_before_device_access(
+    override: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    config: dict[str, object] = {}
+    for role in ("page_detail", "embedding", "instruction", "action"):
+        config[role] = {"model": f"${{APP_GRAPH_{role.upper()}_MODEL}}"}
+        if override:
+            monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
+    agent = Kobe(
+        _IdleDevice(),
+        "demo",
+        "com.demo.app",
+        logging.getLogger("test"),
+        vlm_config=config,
+        graph_dir=tmp_path,
+    )
+    assert agent.page_detail_model == ("provider/page_detail" if override else "openai/gpt-6.1-sol")
+    assert agent.embedding_model == (
+        "provider/embedding" if override else "google/gemini-embedding-2"
+    )
+    assert agent.instruction_model == ("provider/instruction" if override else "openai/gpt-6.1-sol")
+    assert agent.action_model == ("provider/action" if override else "qwen/qwen3.8-flash")
+    assert agent.graph.embedding_model == agent.embedding_model
+    assert agent.graph.page_detail_model == agent.page_detail_model

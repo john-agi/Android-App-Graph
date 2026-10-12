@@ -33,12 +33,12 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, override
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
 
 import httpx
 import networkx as nx
 from aitk.translators.base import BaseTranslator
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph import device
 from android_app_graph.android_packages import package_from_activity
@@ -55,15 +55,24 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
-from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import make_client
 from android_app_graph.utils.vlm_utils import (
+    DEFAULT_ACTION_MODEL,
+    DEFAULT_INSTRUCTION_MODEL,
+    DEFAULT_PAGE_DETAIL_MODEL,
+    _message_text,
     build_image_message,
     describe_page_and_state,
     predict_next_action,
     score_by_cosine,
+    send_chat,
     strip_json_fences,
+    token_tracker,
 )
+
+if TYPE_CHECKING:
+    from openrouter.components.chatmessages import ChatMessagesTypedDict
+    from openrouter.components.chatusermessage import ChatUserMessageContentTypedDict
 
 logger = logging.getLogger("AITK - Android-App-Graph")
 
@@ -543,35 +552,25 @@ def _parse_decide_output(raw: str) -> dict[str, Any] | None:
 
 
 def _chat_completion_content(
-    client: OpenAI,
-    **kwargs: Any,
+    client: OpenRouter,
+    *,
+    model: str,
+    messages: list[ChatMessagesTypedDict],
+    max_tokens: int | None = None,
 ) -> str:
-    """Run one chat completion and return its content."""
-    resp = call_with_retry(
-        "[API] chat completion",
-        lambda: client.chat.completions.create(**kwargs),
-    )
-    # A filtered or refused completion can come back with zero choices; that
-    # is empty content for the parse-retry to handle, not an IndexError.
-    return as_str(resp.choices[0].message.content, "") if resp.choices else ""
+    """Run a typed completion, account for usage and return assistant text."""
+    resp = send_chat(client, model=model, messages=messages, max_tokens=max_tokens)
+    token_tracker.record("v2_chat", model, resp.usage)
+    return _message_text(resp)
 
 
-def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
-    """Create an OpenAI SDK client for non-embedding v2 calls.
-
-    Native Google image embedding uses httpx directly and keeps the environment
-    proxy. The OpenAI-compatible action/page-detail endpoints are often SSH
-    forwarded locally, so they must ignore HTTP(S)_PROXY.
-    """
-    cfg = cfg or {}
-    request_timeout = float(cfg.get("request_timeout", cfg.get("timeout", 60)))
-    max_retries = int(cfg.get("max_retries", 0))
-    return make_client(
-        cfg,
-        http_client=httpx.Client(trust_env=False),
-        timeout=request_timeout,
-        max_retries=max_retries,
-    )
+def _make_no_proxy_client(
+    cfg: dict[str, Any] | None,
+    *,
+    default_model: str = DEFAULT_ACTION_MODEL,
+) -> tuple[OpenRouter, str]:
+    """Ignore environment proxies for locally forwarded role endpoints."""
+    return make_client(cfg, default_model=default_model, http_client=httpx.Client(trust_env=False))
 
 
 class Memory:
@@ -626,7 +625,7 @@ class UIKobeV2Translator(BaseTranslator):
         super().__init__()
         # Set here, not at import time, so importing this module has no global side effect.
         logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("openai").setLevel(logging.WARNING)
+        logging.getLogger("openrouter").setLevel(logging.WARNING)
 
         self.graph_dir = Path(graph_dir)
         # Accepted because AITK forwards every translator_args key and its controller.yaml
@@ -634,9 +633,13 @@ class UIKobeV2Translator(BaseTranslator):
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
 
-        # The planner and the action agent share one model, configured under "action".
         self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
-        self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
+        self.desc_client, self.desc_model = _make_no_proxy_client(
+            vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL
+        )
+        self.instruction_client, self.instruction_model = _make_no_proxy_client(
+            vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL
+        )
         image_embedding_settings = resolve_image_embedding_settings(vlm_config)
         self.image_embedding_model = image_embedding_settings.model
         self.image_embedding_api_key = image_embedding_settings.api_key
@@ -664,11 +667,10 @@ class UIKobeV2Translator(BaseTranslator):
         app_name: str,
         node_id: str,
     ) -> list[float]:
-        """Use native Gemini image embeddings for runtime node retrieval, with retry."""
+        """Use OpenRouter image embeddings for runtime node retrieval, with retry."""
         if not self.image_embedding_api_key:
             raise RuntimeError(
-                "Native Gemini image embedding requires image_embedding.api_key "
-                "or GEMINI_API_KEY/GOOGLE_API_KEY."
+                "OpenRouter image embedding requires image_embedding.api_key or OPENROUTER_API_KEY."
             )
         return compute_embedding_with_retry(
             self.image_embedding_api_key,
@@ -708,8 +710,7 @@ class UIKobeV2Translator(BaseTranslator):
             return
         if not self.image_embedding_api_key:
             logger.error(
-                "Native Gemini image embedding requires image_embedding.api_key "
-                "or GEMINI_API_KEY/GOOGLE_API_KEY."
+                "OpenRouter image embedding requires image_embedding.api_key or OPENROUTER_API_KEY."
             )
             return
         # Encoded lazily, one screenshot at a time, the same as offline
@@ -803,25 +804,22 @@ class UIKobeV2Translator(BaseTranslator):
         ``parse`` must return ``None`` to request a retry; any other value
         (including a falsy one such as ``{}`` or ``""``) is accepted as success.
         Pass ``screenshot`` to ground the question in a screenshot; ``None`` sends
-        the prompt as plain text. A retry resends the identical prompt at
-        temperature 0.0, so a reply the parser could not read would otherwise come
-        back the same way; every attempt after the first appends a strict-format
-        reminder (``V2_PARSE_RETRY_HINT``) to give the retry an actual chance.
+        the prompt as plain text. Every attempt after the first appends a strict-format reminder
+        (``V2_PARSE_RETRY_HINT``) to help the model repair an unreadable reply.
         """
         result: T | None = None
         raw = ""
         for attempt in range(V2_PARSE_RETRIES + 1):
             text = prompt if attempt == 0 else f"{prompt}\n\n{V2_PARSE_RETRY_HINT}"
-            content: str | list[Any] = text
+            content: ChatUserMessageContentTypedDict = text
             if screenshot is not None:
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
             raw = _chat_completion_content(
-                self.model_client,
-                model=self.model_name,
+                self.instruction_client,
+                model=self.instruction_model,
                 messages=[{"role": "user", "content": content}],
                 max_tokens=V2_CHAT_MAX_TOKENS,
-                temperature=0.0,
             )
             result = parse(raw)
             if result is not None:
@@ -879,15 +877,12 @@ class UIKobeV2Translator(BaseTranslator):
         )
 
         started = time.perf_counter()
-        page_desc, _detail_snapshot, _elements = call_with_retry(
-            "[API] page describe and state",
-            lambda: describe_page_and_state(
-                self.desc_client,
-                screenshot,
-                existing_nodes=same_pkg_descriptions or None,
-                existing_keys=same_pkg_keys or None,
-                model=self.desc_model,
-            ),
+        page_desc, _detail_snapshot, _elements = describe_page_and_state(
+            self.desc_client,
+            screenshot,
+            existing_nodes=same_pkg_descriptions or None,
+            existing_keys=same_pkg_keys or None,
+            model=self.desc_model,
         )
         logger.info(
             '[IDENTIFY] screen_description="%s" describe_time=%.1fs',
@@ -1291,18 +1286,15 @@ class UIKobeV2Translator(BaseTranslator):
     ) -> tuple[dict[str, Any], str, str]:
         keyboard_hint = device.soft_keyboard_hint()
 
-        aitk_action, history_entry = call_with_retry(
-            "[API] action agent",
-            lambda: predict_next_action(
-                self.model_client,
-                screenshot,
-                task + keyboard_hint,
-                screen_w=self._screen_w,
-                screen_h=self._screen_h,
-                action_history=action_history,
-                model=self.model_name,
-                overall_task=overall_task,
-            ),
+        aitk_action, history_entry = predict_next_action(
+            self.model_client,
+            screenshot,
+            task + keyboard_hint,
+            screen_w=self._screen_w,
+            screen_h=self._screen_h,
+            action_history=action_history,
+            model=self.model_name,
+            overall_task=overall_task,
         )
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry

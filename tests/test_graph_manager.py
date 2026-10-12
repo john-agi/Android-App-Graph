@@ -18,7 +18,7 @@ import networkx as nx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
@@ -44,7 +44,7 @@ EMBEDDINGS: dict[str, list[float]] = {
 }
 UNKNOWN_EMBEDDING = [0.5, 0.5, 0.5]
 
-FAKE_CLIENT = cast("OpenAI", object())  # never used: every consumer is patched
+FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
 
 
 def b64(data: bytes) -> str:
@@ -100,7 +100,7 @@ class FakeVlm:
 
     def describe_page_and_state(
         self,
-        client: OpenAI | None,
+        client: OpenRouter | None,
         screenshot_b64: str,
         existing_nodes: list[str] | None = None,
         existing_keys: list[str] | None = None,
@@ -113,7 +113,7 @@ class FakeVlm:
 
     def verify_same_node(
         self,
-        client: OpenAI | None,
+        client: OpenRouter | None,
         screenshot_new_b64: str,
         screenshot_existing_b64: str,
         existing_description: str,
@@ -124,7 +124,7 @@ class FakeVlm:
         self.calls.append(("verify", call))
         return self.verdicts.pop(0)
 
-    def get_embedding(self, client: OpenAI | None, text: str, model: str = "") -> list[float]:
+    def get_embedding(self, client: OpenRouter | None, text: str, model: str = "") -> list[float]:
         self.calls.append(("embed", {"client": client, "text": text, "model": model}))
         return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)
 
@@ -141,7 +141,7 @@ class FakeAudit:
 
     def __call__(
         self,
-        client: OpenAI | None,
+        client: OpenRouter | None,
         graph_summary: str,
         app_name: str = "",
         model: str = "",
@@ -921,7 +921,7 @@ class FakeNormalizer:
 
     def __call__(
         self,
-        _client: OpenAI | None,
+        _client: OpenRouter | None,
         instructions: list[str],
         target_observations: list[str] | None = None,
         model: str = "",
@@ -2204,7 +2204,7 @@ operations = st.lists(
 )
 
 
-def fake_get_embedding(_client: OpenAI | None, text: str, **_kwargs: Any) -> list[float]:
+def fake_get_embedding(_client: OpenRouter | None, text: str, **_kwargs: Any) -> list[float]:
     """Module-level fake for property tests; `model=` arrives through **_kwargs."""
     return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)
 

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import networkx as nx
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph.android_packages import package_from_activity
 from android_app_graph.graph_files import (
@@ -38,6 +38,8 @@ from android_app_graph.graph_files import (
 )
 from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
 from android_app_graph.utils.vlm_utils import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_PAGE_DETAIL_MODEL,
     audit_graph,
     audit_merge_nodes,
     describe_page_and_state,
@@ -119,10 +121,10 @@ class GraphManager:
 
     def __init__(
         self,
-        page_detail_client: OpenAI | None = None,
-        page_detail_model: str = "gpt-5.4",
-        embedding_client: OpenAI | None = None,
-        embedding_model: str = "text-embedding-3-small",
+        page_detail_client: OpenRouter | None = None,
+        page_detail_model: str = DEFAULT_PAGE_DETAIL_MODEL,
+        embedding_client: OpenRouter | None = None,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     ) -> None:
         self.graph = nx.DiGraph()
@@ -136,14 +138,14 @@ class GraphManager:
         self._last_identify_cache: _IdentifyCacheEntry | None = None
         self.total_steps_completed = 0
 
-    def _require_page_detail_client(self) -> OpenAI:
+    def _require_page_detail_client(self) -> OpenRouter:
         """Return the page-detail client, or raise when none was configured."""
         if self.page_detail_client is None:
             msg = "GraphManager needs a page_detail_client for this operation"
             raise RuntimeError(msg)
         return self.page_detail_client
 
-    def _require_embedding_client(self) -> OpenAI:
+    def _require_embedding_client(self) -> OpenRouter:
         """Return the embedding client, or raise when none was configured."""
         if self.embedding_client is None:
             msg = "GraphManager needs an embedding_client for this operation"

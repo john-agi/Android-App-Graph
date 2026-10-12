@@ -162,7 +162,7 @@ def load_image_embedding_settings(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="app-graph-embed",
-        description="Precompute Gemini image embeddings for graph screenshots.",
+        description="Precompute OpenRouter image embeddings for graph screenshots.",
     )
     parser.add_argument(
         "--config",
@@ -188,13 +188,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-url",
         type=str,
         default=None,
-        help="Override native Gemini API base URL.",
+        help="Override OpenRouter API base URL.",
     )
     parser.add_argument(
         "--api-key",
         type=str,
         default=None,
-        help="API key or env reference. Defaults to GEMINI_API_KEY / GOOGLE_API_KEY.",
+        help="API key or env reference. Defaults to OPENROUTER_API_KEY.",
     )
     parser.add_argument(
         "--recompute",
@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"graph root does not exist: {graph_dir}")
 
     if not api_key:
-        parser.error("missing API key: pass --api-key or set GEMINI_API_KEY/GOOGLE_API_KEY")
+        parser.error("missing API key: pass --api-key or set OPENROUTER_API_KEY")
 
     setup_logging(level=logging.INFO)
 

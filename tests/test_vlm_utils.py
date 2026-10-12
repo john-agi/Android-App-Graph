@@ -7,12 +7,17 @@ exercise them end to end, so this module owns their unit tests.
 
 from __future__ import annotations
 
+import json
 import math
 
+import httpx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from openrouter import OpenRouter
+from openrouter.errors.openroutererror import OpenRouterError
 
+from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 
 
@@ -134,3 +139,330 @@ def test_score_by_cosine_keeps_the_scored_order_equal_to_the_input_order() -> No
     candidates = [("c", [0.0, 1.0]), ("a", [1.0, 0.0]), ("b", [1.0, 1.0])]
     scored = score_by_cosine([1.0, 0.0], candidates, scope="test")
     assert [key for key, _ in scored] == ["c", "a", "b"]
+
+
+@pytest.fixture
+def tracked_usage(monkeypatch: pytest.MonkeyPatch) -> vlm.TokenTracker:
+    tracker = vlm.TokenTracker()
+    monkeypatch.setattr(vlm, "token_tracker", tracker)
+    return tracker
+
+
+@pytest.mark.parametrize(
+    ("operation", "call_type", "model", "content", "expected"),
+    [
+        (
+            "page",
+            "page_describe_and_state",
+            "openai/gpt-6.1-sol",
+            '{"page_description":"home","state":{"tab":"all"},"elements":[]}',
+            ("home", {"tab": "all"}, []),
+        ),
+        ("verify", "node_verify", "openai/gpt-6.1-sol", '{"same":true}', {"same": True}),
+        (
+            "normalize",
+            "normalize_edge",
+            "openai/gpt-6.1-sol",
+            '{"instruction_template":"search {query}"}',
+            {"instruction_template": "search {query}"},
+        ),
+        (
+            "merge",
+            "node_merge_audit",
+            "openai/gpt-6.1-sol",
+            '{"issues":[],"summary":"fine"}',
+            {"issues": [], "summary": "fine"},
+        ),
+        (
+            "audit",
+            "graph_audit",
+            "openai/gpt-6.1-sol",
+            '{"issues":[],"summary":"fine"}',
+            {"issues": [], "summary": "fine"},
+        ),
+        ("target", "exploration_target", "openai/gpt-6.1-sol", '{"node_id":"home"}', "home"),
+        (
+            "planner",
+            "instruction",
+            "openai/gpt-6.1-sol",
+            '```json\n{"instruction":"Tap Search"}\n```',
+            "Tap Search",
+        ),
+        (
+            "action",
+            "action",
+            "qwen/qwen3.8-flash",
+            '{"action":"wait"}',
+            ({"action": "wait", "time": 3}, "{'action': 'wait', 'time': 3}"),
+        ),
+    ],
+)
+def test_role_helpers_serialize_and_parse_real_sdk_responses(
+    operation: str,
+    call_type: str,
+    model: str,
+    content: str,
+    expected: object,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+    tracked_usage: vlm.TokenTracker,
+) -> None:
+    chat_body["choices"] = [
+        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}
+    ]
+    router_responses.append(httpx.Response(200, json=chat_body))
+    result: object
+    match operation:
+        case "page":
+            result = vlm.describe_page_and_state(router_client, png_screenshot)
+        case "verify":
+            result = vlm.verify_same_node(router_client, png_screenshot, png_screenshot, "home")
+        case "normalize":
+            result = vlm.normalize_edge(router_client, ["search milk"])
+        case "merge":
+            result = vlm.audit_merge_nodes(router_client, "home")
+        case "audit":
+            result = vlm.audit_graph(router_client, "home")
+        case "target":
+            result = vlm.select_exploration_target(router_client, "demo", [{"node_id": "home"}])
+        case "planner":
+            result = vlm.plan_next_action(
+                router_client, png_screenshot, "home", [], app_name="demo"
+            )
+        case _:
+            result = vlm.predict_next_action(router_client, png_screenshot, "wait")
+    assert result == expected
+    body = json.loads(router_requests[0].content)
+    assert body["model"] == model
+    assert body["stream"] is False
+    assert "temperature" not in body
+    if operation in {"page", "verify", "planner", "action"}:
+        parts = body["messages"][-1]["content"]
+        images = [part for part in parts if part["type"] == "image_url"]
+        assert len(images) == (2 if operation == "verify" else 1)
+        assert images[0]["image_url"]["url"] == f"data:image/png;base64,{png_screenshot}"
+    if operation not in {"planner", "action"}:
+        assert body["response_format"] == {"type": "json_object"}
+    assert tracked_usage.summary()[f"{call_type}:{model}"] == {
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+        "total_tokens": 10,
+        "calls": 1,
+    }
+
+
+@pytest.mark.parametrize("content", [None, "", "calling action", "omitted"])
+def test_native_tool_calls_survive_sdk_parsing(
+    content: str | None,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+) -> None:
+    message: dict[str, object] = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "mobile_action",
+                    "arguments": '{"action":"click","coordinate":[500,500]}',
+                },
+            }
+        ],
+    }
+    if content != "omitted":
+        message["content"] = content
+    chat_body["choices"] = [{"index": 0, "finish_reason": "tool_calls", "message": message}]
+    router_responses.append(httpx.Response(200, json=chat_body))
+    action, _ = vlm.predict_next_action(
+        router_client, png_screenshot, "tap", screen_w=100, screen_h=200
+    )
+    assert action == {"action": "tap", "x": 50, "y": 100}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "omitted", [{"type": "text", "text": "  hello "}, {"type": "text", "text": "world "}]],
+)
+def test_sdk_assistant_content_variants(
+    content: object,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_body: dict[str, object],
+) -> None:
+    message = {"role": "assistant"}
+    if content != "omitted":
+        message["content"] = content
+    chat_body["choices"] = [{"index": 0, "finish_reason": "stop", "message": message}]
+    router_responses.append(httpx.Response(200, json=chat_body))
+    response = vlm.send_chat(
+        router_client, model="provider/other", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert vlm._message_text(response) == ("hello \nworld" if isinstance(content, list) else "")
+
+
+@pytest.mark.parametrize("image", [False, True])
+def test_text_and_image_embeddings_use_the_documented_sdk_format(
+    image: bool,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    tracked_usage: vlm.TokenTracker,
+) -> None:
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    vector = (
+        vlm.get_image_embedding(router_client, "shot")
+        if image
+        else vlm.get_embedding(router_client, "home")
+    )
+    assert vector == [0.25, 0.75]
+    body = json.loads(router_requests[0].content)
+    assert body["model"] == "google/gemini-embedding-2"
+    assert body["encoding_format"] == "float"
+    assert body["input"] == (
+        [{"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,shot"}}]}]
+        if image
+        else "home"
+    )
+    assert tracked_usage.snapshot() == {
+        "prompt_tokens": 5,
+        "completion_tokens": 0,
+        "total_tokens": 5,
+        "calls": 1,
+    }
+    assert tracked_usage.snapshot_by_type() == {"image_embedding" if image else "embedding": 5}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        [{"object": "embedding", "embedding": "base64-vector"}],
+        [{"object": "embedding", "embedding": []}],
+        [{"object": "embedding", "embedding": [math.inf]}],
+    ],
+)
+def test_sdk_embedding_shapes_are_rejected_explicitly(
+    data: list[dict[str, object]],
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    embedding_body["data"] = data
+    router_responses.append(
+        httpx.Response(
+            200, text=json.dumps(embedding_body), headers={"content-type": "application/json"}
+        )
+    )
+    with pytest.raises(ValueError, match="embedding"):
+        vlm.get_image_embedding(router_client, "shot")
+
+
+def test_non_json_embedding_response_is_rejected(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+) -> None:
+    router_responses.append(
+        httpx.Response(200, text="data: unexpected", headers={"content-type": "text/event-stream"})
+    )
+    with pytest.raises(TypeError, match="JSON embedding response"):
+        vlm.get_image_embedding(router_client, "shot")
+
+
+@pytest.mark.parametrize("operation", ["chat", "embedding"])
+@pytest.mark.parametrize("status", [401, 429, 500])
+def test_sdk_errors_exhaust_bounded_application_retries(
+    operation: str,
+    status: int,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    no_sleep: list[float],
+    tracked_usage: vlm.TokenTracker,
+) -> None:
+    router_responses.extend(
+        httpx.Response(status, json={"error": {"code": status, "message": "upstream failed"}})
+        for _ in range(3)
+    )
+    if operation == "chat":
+        with pytest.raises(OpenRouterError, match="upstream failed"):
+            vlm.send_chat(
+                router_client, model="provider/other", messages=[{"role": "user", "content": "hi"}]
+            )
+    else:
+        with pytest.raises(OpenRouterError, match="upstream failed"):
+            vlm.get_embedding(router_client, "home")
+    assert len(router_requests) == 3
+    assert no_sleep == [2.0, 4.0]
+    assert tracked_usage.snapshot()["calls"] == 0
+
+
+@pytest.mark.parametrize("operation", ["chat", "embedding"])
+def test_sdk_retry_recovers_and_counts_only_completed_responses(
+    operation: str,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_body: dict[str, object],
+    embedding_body: dict[str, object],
+    no_sleep: list[float],
+    tracked_usage: vlm.TokenTracker,
+) -> None:
+    router_responses.extend(
+        [
+            httpx.Response(429, json={"error": {"code": 429, "message": "rate limited"}}),
+            httpx.Response(200, json=chat_body if operation == "chat" else embedding_body),
+        ]
+    )
+    if operation == "chat":
+        vlm.audit_graph(router_client, "home")
+    else:
+        vlm.get_embedding(router_client, "home")
+    assert len(router_requests) == 2
+    assert no_sleep == [2.0]
+    assert tracked_usage.snapshot()["calls"] == 1
+
+
+def test_transport_timeouts_have_a_bounded_retry_budget(no_sleep: list[float]) -> None:
+    attempts: list[httpx.Request] = []
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        raise httpx.ReadTimeout("provider timed out", request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(timeout)) as http_client,
+        OpenRouter(api_key="test-key", client=http_client) as client,
+        pytest.raises(httpx.ReadTimeout, match="provider timed out"),
+    ):
+        vlm.send_chat(client, model="provider/other", messages=[{"role": "user", "content": "hi"}])
+    assert len(attempts) == 3
+    assert no_sleep == [2.0, 4.0]
+
+
+@pytest.mark.parametrize("operation", ["audit", "planner", "action"])
+def test_unreadable_or_refused_sdk_response_keeps_parse_fallbacks(
+    operation: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+) -> None:
+    chat_body["choices"] = []
+    chat_body.pop("usage")
+    router_responses.append(httpx.Response(200, json=chat_body))
+    if operation == "audit":
+        assert vlm.audit_graph(router_client, "home") == {"issues": [], "summary": "parse error"}
+    elif operation == "planner":
+        assert vlm.plan_next_action(router_client, png_screenshot, "home", []) == ""
+    else:
+        assert vlm.predict_next_action(router_client, png_screenshot, "tap") == (
+            {"action": "wait", "time": 1},
+            "Failed to parse action response -> wait",
+        )

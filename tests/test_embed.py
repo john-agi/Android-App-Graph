@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from android_app_graph import embedding_cache, graph_files
@@ -91,8 +92,8 @@ def test_embed_settings_from_config(tmp_path: Path) -> None:
     )
     assert graph_dir == Path("my_graphs")
     assert api_key is None
-    assert model == "gemini-embedding-2"
-    assert base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert model == "google/gemini-embedding-2"
+    assert base_url == "https://openrouter.ai/api/v1"
 
 
 def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> None:
@@ -103,7 +104,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
         "  vlm_config:\n"
         "    image_embedding:\n"
         "      model: config-model\n"
-        "      native_base_url: https://config.googleapis.com/v1\n"
+        "      base_url: https://config.googleapis.com/v1\n"
         "      api_key: config-key\n",
         encoding="utf-8",
     )
@@ -126,19 +127,18 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
         model_override="cli-model",
         base_url_override="https://cli.example.com/v1",
     )
-    # A base URL that is not a googleapis.com host falls back to the native default.
     assert overridden == (
         Path("cli_graphs"),
         "cli-key",
         "cli-model",
-        "https://generativelanguage.googleapis.com/v1beta",
+        "https://cli.example.com/v1",
     )
 
 
 def test_embed_settings_read_the_api_key_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "from-env")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     config = tmp_path / "explore.yaml"
     config.write_text("{}\n", encoding="utf-8")
     _graph_dir, api_key, _model, _base_url = embed.load_image_embedding_settings(
@@ -190,8 +190,8 @@ def _precompute(
     return embed.precompute_graph_image_embeddings(
         tmp_path,
         api_key="key",
-        model="gemini-embedding-2",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
+        model="google/gemini-embedding-2",
+        base_url="https://openrouter.ai/api/v1",
         app_name=app_name,
         recompute=recompute,
     )
@@ -213,7 +213,7 @@ def test_precompute_finds_screenshots_under_the_audited_stem_directory(
     screenshots.mkdir()
     (screenshots / "s0_home.png").write_bytes(_SCREENSHOT)
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
     )
 
     summary = _precompute(tmp_path)
@@ -248,7 +248,7 @@ def test_precompute_finds_every_node_in_a_partially_audited_graph(
     stem_screenshots.mkdir()
     (stem_screenshots / "s1_detail.png").write_bytes(_SCREENSHOT)
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
     )
 
     summary = _precompute(tmp_path)
@@ -263,7 +263,7 @@ def test_precompute_computes_caches_and_skips(
 ) -> None:
     graph_path = _write_graph_tree(tmp_path)
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
     )
 
     summary = _precompute(tmp_path)
@@ -276,7 +276,7 @@ def test_precompute_computes_caches_and_skips(
         "skipped_failed": 0,
     }
     assert embed.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
     ) == {"s0_home": [0.1, 0.2]}
 
     assert _precompute(tmp_path)["already_cached"] == 1
@@ -300,18 +300,18 @@ def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
     image_embeddings_path(app_dir / "demo.json").write_text(
-        json.dumps({"model": "gemini-embedding-2", "embeddings": {"gone": [0.9, 0.9]}}),
+        json.dumps({"model": "google/gemini-embedding-2", "embeddings": {"gone": [0.9, 0.9]}}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
     )
 
     summary = _precompute(tmp_path)
 
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
-        app_dir / "demo.json", model="gemini-embedding-2", node_ids={"n1"}
+        app_dir / "demo.json", model="google/gemini-embedding-2", node_ids={"n1"}
     ) == {"n1": [0.5, 0.5]}
     saved = json.loads(image_embeddings_path(app_dir / "demo.json").read_text(encoding="utf-8"))
     assert "gone" not in saved["embeddings"]
@@ -331,14 +331,14 @@ def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
         json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
     )
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.9, 0.8]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.9, 0.8]
     )
 
     summary = _precompute(tmp_path, recompute=True)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
     ) == {"s0_home": [0.9, 0.8]}
 
 
@@ -362,18 +362,18 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
         msg = "503 unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", always_failing)
 
     summary = _precompute(tmp_path, recompute=True)
     assert summary["computed"] == 0
     assert summary["skipped_failed"] == 1
     assert json.loads(image_embeddings_path(graph_path).read_text(encoding="utf-8")) == {
-        "model": "gemini-embedding-2",
+        "model": "google/gemini-embedding-2",
         "embeddings": {},
     }
     assert (
         embed.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
         )
         == {}
     )
@@ -402,7 +402,7 @@ def test_precompute_recompute_discards_through_a_symlinked_sidecar(
         msg = "503 unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", always_failing)
 
     summary = _precompute(tmp_path, recompute=True)
 
@@ -410,7 +410,7 @@ def test_precompute_recompute_discards_through_a_symlinked_sidecar(
     assert sidecar.is_symlink()
     assert sidecar.resolve() == target
     assert json.loads(target.read_text(encoding="utf-8")) == {
-        "model": "gemini-embedding-2",
+        "model": "google/gemini-embedding-2",
         "embeddings": {},
     }
 
@@ -434,7 +434,7 @@ def test_precompute_recompute_skips_a_graph_whose_sidecar_cannot_be_discarded(
     first_path = _write_graph_tree(tmp_path, app="first")
     second_path = _write_graph_tree(tmp_path, app="second")
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.5, 0.5]
     )
 
     first_path.parent.chmod(0o500)
@@ -446,7 +446,7 @@ def test_precompute_recompute_skips_a_graph_whose_sidecar_cannot_be_discarded(
     assert summary["graphs"] == 2
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
-        second_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        second_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
     ) == {"s0_home": [0.5, 0.5]}
 
 
@@ -487,14 +487,14 @@ def test_precompute_keeps_going_when_a_node_fails(
         msg = "503 unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", always_failing)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", always_failing)
 
     summary = _precompute(tmp_path)
     assert summary["skipped_failed"] == 1
     assert summary["computed"] == 0
     assert (
         embed.load_image_embeddings(
-            graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+            graph_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
         )
         == {}
     )
@@ -533,7 +533,7 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
 
     monkeypatch.setattr(embedding_cache, "encode_screenshot_b64", flaky_encode)
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
     )
 
     summary = _precompute(tmp_path)
@@ -541,7 +541,7 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
     assert summary["computed"] == 2
     assert summary["skipped_failed"] == 1
     assert embed.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"n1", "n2", "n3"}
     ) == {
         "n1": [0.1, 0.2],
         "n3": [0.1, 0.2],
@@ -555,18 +555,20 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     """A dropped (malformed) cache entry must not be mistaken for "already cached"."""
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
-        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": "not-a-vector"}}),
+        json.dumps(
+            {"model": "google/gemini-embedding-2", "embeddings": {"s0_home": "not-a-vector"}}
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
     )
 
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
     ) == {"s0_home": [0.3, 0.4]}
 
 
@@ -579,18 +581,18 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     """
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
-        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [10**400]}}),
+        json.dumps({"model": "google/gemini-embedding-2", "embeddings": {"s0_home": [10**400]}}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.3, 0.4]
     )
 
     summary = _precompute(tmp_path)
     assert summary["already_cached"] == 0
     assert summary["computed"] == 1
     assert embed.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"s0_home", "s1_detail"}
     ) == {"s0_home": [0.3, 0.4]}
 
 
@@ -615,7 +617,7 @@ def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     for node_id in ("n1", "n2", "n3"):
         (screenshots / f"{node_id}.png").write_bytes(f"shot-{node_id}".encode())
     monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
+        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [0.1, 0.2]
     )
 
     save_calls: list[dict[str, list[float]]] = []
@@ -670,7 +672,7 @@ def test_precompute_streams_screenshot_reads_lazily(
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", fake_embedding)
 
     summary = _precompute(tmp_path)
     assert summary["computed"] == 3
@@ -688,7 +690,7 @@ def test_precompute_never_reads_an_already_cached_screenshot(
     """
     graph_path = _write_graph_tree(tmp_path)
     image_embeddings_path(graph_path).write_text(
-        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [0.1, 0.2]}}),
+        json.dumps({"model": "google/gemini-embedding-2", "embeddings": {"s0_home": [0.1, 0.2]}}),
         encoding="utf-8",
     )
     screenshot_file = tmp_path / "demo" / "demo_screenshots" / "s0_home.png"
@@ -741,13 +743,13 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
             raise _Interrupted
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _interrupted_at_n3)
+    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _interrupted_at_n3)
 
     with pytest.raises(_Interrupted):
         _precompute(tmp_path)
 
     assert embed.load_image_embeddings(
-        graph_path, model="gemini-embedding-2", node_ids={"n1", "n2", "n3"}
+        graph_path, model="google/gemini-embedding-2", node_ids={"n1", "n2", "n3"}
     ) == {
         "n1": [1.0, 0.0],
         "n2": [1.0, 0.0],
@@ -766,3 +768,47 @@ def test_precompute_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -
     with pytest.raises(TypeError, match="list fields") as excinfo:
         _precompute(tmp_path)
     assert str(graph_path) in str(excinfo.value)
+
+
+@pytest.mark.usefixtures("image_router")
+def test_offline_sdk_recomputes_native_cache_using_shared_openrouter_key(
+    tmp_path: Path,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    graph_path = _write_graph_tree(tmp_path)
+    sidecar = image_embeddings_path(graph_path)
+    sidecar.write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"s0_home": [1.0, 0.0]}}),
+        encoding="utf-8",
+    )
+    config = tmp_path / "explore.yaml"
+    config.write_text(f"experiment:\n  graph_dir: {tmp_path}\n", encoding="utf-8")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    assert embed.main(["--config", str(config)]) == 0
+    assert json.loads(sidecar.read_text()) == {
+        "model": "google/gemini-embedding-2",
+        "embeddings": {"s0_home": [0.25, 0.75]},
+    }
+    assert len(router_requests) == 1
+    request = router_requests[0]
+    assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
+    assert request.headers["authorization"] == "Bearer shared-router-key"
+    assert json.loads(request.content)["input"] == [
+        {
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,"
+                        + base64.b64encode(_SCREENSHOT).decode("ascii")
+                    },
+                }
+            ]
+        }
+    ]
+    assert embed.main(["--config", str(config)]) == 0
+    assert len(router_requests) == 1

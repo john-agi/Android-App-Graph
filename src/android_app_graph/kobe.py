@@ -12,6 +12,10 @@ from android_app_graph.device import DeviceController, keyboard_status, soft_key
 from android_app_graph.utils import make_client
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
+    DEFAULT_ACTION_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_INSTRUCTION_MODEL,
+    DEFAULT_PAGE_DETAIL_MODEL,
     plan_next_action,
     predict_next_action,
     select_exploration_target,
@@ -76,10 +80,18 @@ class Kobe:
 
         vlm_config = vlm_config or {}
 
-        self.page_detail_client, self.page_detail_model = make_client(vlm_config.get("page_detail"))
-        self.embedding_client, self.embedding_model = make_client(vlm_config.get("embedding"))
-        self.instruction_client, self.instruction_model = make_client(vlm_config.get("instruction"))
-        self.action_client, self.action_model = make_client(vlm_config.get("action"))
+        self.page_detail_client, self.page_detail_model = make_client(
+            vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL
+        )
+        self.embedding_client, self.embedding_model = make_client(
+            vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL
+        )
+        self.instruction_client, self.instruction_model = make_client(
+            vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL
+        )
+        self.action_client, self.action_model = make_client(
+            vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL
+        )
 
         similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
 

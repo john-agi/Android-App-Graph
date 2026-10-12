@@ -7,16 +7,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
 from android_app_graph.utils.graph_manager import GraphManager
 
 
 @pytest.fixture
-def client() -> OpenAI:
-    """An OpenAI client that is never called: every VLM helper is monkeypatched."""
-    return OpenAI(api_key="not-a-real-key")
+def client() -> OpenRouter:
+    """An OpenRouter client that is never called: every VLM helper is monkeypatched."""
+    return OpenRouter(api_key="not-a-real-key")
 
 
 def _unreachable_verifier(**_kwargs: Any) -> dict[str, Any]:
@@ -148,7 +148,7 @@ def _merge_issue(node_a: str = "s0_home", node_b: str = "s1_home") -> dict[str, 
 
 
 def test_verify_and_merge_nodes_merges_confirmed_pair(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
@@ -175,7 +175,7 @@ def test_verify_and_merge_nodes_merges_confirmed_pair(
 
 
 def test_verify_and_merge_nodes_keeps_separate(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home"}),
@@ -195,7 +195,7 @@ def test_verify_and_merge_nodes_keeps_separate(
 
 
 def test_verify_and_merge_nodes_skips_missing_screenshot(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa"}),
@@ -210,7 +210,7 @@ def test_verify_and_merge_nodes_skips_missing_screenshot(
 
 
 def test_verify_and_merge_nodes_skips_a_self_pair(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression for #48: an auditor naming one node twice used to delete it."""
     graph = _graph_with_nodes(
@@ -228,7 +228,7 @@ def test_verify_and_merge_nodes_skips_a_self_pair(
 
 
 def test_verify_and_merge_nodes_skips_removed_node(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(("s0_home", {"reference_screenshot": "aaa"}))
     monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
@@ -317,7 +317,7 @@ def _fake_device(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None
 
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_retries_explores_and_skips(
-    client: OpenAI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph, graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
@@ -353,7 +353,7 @@ def test_re_explore_issues_retries_explores_and_skips(
 
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_skips_unreachable_nodes(
-    client: OpenAI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "find_path", lambda *_args: None)
@@ -381,7 +381,9 @@ def test_re_explore_issues_skips_unreachable_nodes(
 
 
 @pytest.mark.usefixtures("_fake_device")
-def test_re_explore_issues_returns_early_for_an_empty_graph(client: OpenAI, tmp_path: Path) -> None:
+def test_re_explore_issues_returns_early_for_an_empty_graph(
+    client: OpenRouter, tmp_path: Path
+) -> None:
     assert (
         audit.re_explore_issues(
             GraphManager(),

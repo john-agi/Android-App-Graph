@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import socket
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, NoReturn
 
+import httpx
 import pytest
 from hypothesis import settings
+from openrouter import OpenRouter
+from PIL import Image
+
+from android_app_graph.utils import make_client, vlm_utils
 
 # The built-in "ci" profile (deterministic, no deadline, no example database) is
 # selected automatically when CI is set; re-registered here with more examples.
@@ -17,7 +24,9 @@ settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
 
 _CREDENTIAL_PREFIXES = ("APP_GRAPH_",)
-_CREDENTIAL_NAMES = frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"})
+_CREDENTIAL_NAMES = frozenset(
+    {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"}
+)
 
 
 @pytest.fixture(autouse=True)
@@ -56,3 +65,79 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
     return delays
+
+
+@pytest.fixture
+def router_requests() -> list[httpx.Request]:
+    return []
+
+
+@pytest.fixture
+def router_responses() -> list[httpx.Response]:
+    return []
+
+
+@pytest.fixture
+def router_http(
+    router_requests: list[httpx.Request], router_responses: list[httpx.Response]
+) -> Iterator[httpx.Client]:
+    def respond(request: httpx.Request) -> httpx.Response:
+        router_requests.append(request)
+        return router_responses.pop(0)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        yield http_client
+
+
+@pytest.fixture
+def router_client(router_http: httpx.Client) -> Iterator[OpenRouter]:
+    client, _ = make_client({"api_key": "test-router-key"}, http_client=router_http)
+    with client:
+        yield client
+
+
+@pytest.fixture
+def chat_body() -> dict[str, object]:
+    return {
+        "id": "chat-test",
+        "created": 0,
+        "model": "test-model",
+        "object": "chat.completion",
+        "system_fingerprint": None,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "test reply",
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+    }
+
+
+@pytest.fixture
+def embedding_body() -> dict[str, object]:
+    return {
+        "object": "list",
+        "model": "google/gemini-embedding-2",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
+        "usage": {"prompt_tokens": 5, "total_tokens": 5},
+    }
+
+
+@pytest.fixture
+def png_screenshot() -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.fixture
+def image_router(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> None:
+    def factory(cfg: Mapping[str, object] | None, *, default_model: str) -> tuple[OpenRouter, str]:
+        return make_client(cfg, default_model=default_model, http_client=router_http)
+
+    monkeypatch.setattr(vlm_utils, "make_client", factory)

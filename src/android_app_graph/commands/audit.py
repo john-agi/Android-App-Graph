@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import yaml
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph.cli import launch_app
 from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
@@ -40,6 +40,10 @@ from android_app_graph.utils import make_client
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
+    DEFAULT_ACTION_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_INSTRUCTION_MODEL,
+    DEFAULT_PAGE_DETAIL_MODEL,
     plan_next_action,
     predict_next_action,
     token_tracker,
@@ -115,7 +119,7 @@ def select_apps_for_audit(
 def verify_and_merge_nodes(
     graph: GraphManager,
     merge_issues: list[dict[str, Any]],
-    page_detail_client: OpenAI,
+    page_detail_client: OpenRouter,
     page_detail_model: str,
 ) -> list[dict[str, Any]]:
     """Verify merge candidates using screenshot comparison, then merge confirmed pairs.
@@ -220,9 +224,9 @@ def re_explore_issues(
     app_name: str,
     package_name: str,
     graph_path: Path,
-    instruction_client: OpenAI,
+    instruction_client: OpenRouter,
     instruction_model: str,
-    action_client: OpenAI,
+    action_client: OpenRouter,
     action_model: str,
     steps_per_issue: int = 5,
 ) -> list[dict[str, Any]]:
@@ -503,9 +507,9 @@ class ReExploreSession(NamedTuple):
     """
 
     controller: DeviceController
-    instruction_client: OpenAI
+    instruction_client: OpenRouter
     instruction_model: str
-    action_client: OpenAI
+    action_client: OpenRouter
     action_model: str
 
 
@@ -528,8 +532,12 @@ def _open_re_explore_session(
             "Install it first, then rerun the command.\n",
         )
 
-    instruction_client, instruction_model = make_client(vlm_config.get("instruction"))
-    action_client, action_model = make_client(vlm_config.get("action"))
+    instruction_client, instruction_model = make_client(
+        vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL
+    )
+    action_client, action_model = make_client(
+        vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL
+    )
     return ReExploreSession(
         controller=ADBController(config, logger),
         instruction_client=instruction_client,
@@ -604,8 +612,12 @@ def main(argv: list[str] | None = None) -> int:
 
     session = _open_re_explore_session(parser, config, vlm_config) if args.re_explore else None
 
-    page_detail_client, page_detail_model = make_client(vlm_config.get("page_detail"))
-    embedding_client, embedding_model = make_client(vlm_config.get("embedding"))
+    page_detail_client, page_detail_model = make_client(
+        vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL
+    )
+    embedding_client, embedding_model = make_client(
+        vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL
+    )
 
     for app in selected_apps:
         app_name = app["name"]
