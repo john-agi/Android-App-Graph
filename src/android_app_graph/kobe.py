@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -80,41 +81,47 @@ class Kobe:
 
         vlm_config = vlm_config or {}
 
-        self.page_detail_client, self.page_detail_model = make_client(
-            vlm_config.get("page_detail"),
-            default_model=DEFAULT_PAGE_DETAIL_MODEL,
-            role="page_detail",
-        )
-        self.embedding_client, self.embedding_model = make_client(
-            vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL, role="embedding"
-        )
-        self.instruction_client, self.instruction_model = make_client(
-            vlm_config.get("instruction"),
-            default_model=DEFAULT_INSTRUCTION_MODEL,
-            role="instruction",
-        )
-        self.action_client, self.action_model = make_client(
-            vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
-        )
+        with ExitStack() as clients:
+            self.page_detail_client, self.page_detail_model = make_client(
+                vlm_config.get("page_detail"),
+                default_model=DEFAULT_PAGE_DETAIL_MODEL,
+                role="page_detail",
+            )
+            clients.enter_context(self.page_detail_client)
+            self.embedding_client, self.embedding_model = make_client(
+                vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL, role="embedding"
+            )
+            clients.enter_context(self.embedding_client)
+            self.instruction_client, self.instruction_model = make_client(
+                vlm_config.get("instruction"),
+                default_model=DEFAULT_INSTRUCTION_MODEL,
+                role="instruction",
+            )
+            clients.enter_context(self.instruction_client)
+            self.action_client, self.action_model = make_client(
+                vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
+            )
 
-        similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
+            clients.enter_context(self.action_client)
 
-        self.graph = GraphManager(
-            page_detail_client=self.page_detail_client,
-            page_detail_model=self.page_detail_model,
-            embedding_client=self.embedding_client,
-            embedding_model=self.embedding_model,
-            similarity_threshold=similarity_threshold,
-        )
+            similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
 
-        base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
-        self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
+            self.graph = GraphManager(
+                page_detail_client=self.page_detail_client,
+                page_detail_model=self.page_detail_model,
+                embedding_client=self.embedding_client,
+                embedding_model=self.embedding_model,
+                similarity_threshold=similarity_threshold,
+            )
 
-        if self.graph_path.exists():
-            self.graph.load_graph(self.graph_path)
-            self.logger.info("Graph loaded from %s", self.graph_path)
-        else:
-            self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
+            base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
+            self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
+
+            if self.graph_path.exists():
+                self.graph.load_graph(self.graph_path)
+                self.logger.info("Graph loaded from %s", self.graph_path)
+            else:
+                self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
 
     def _maybe_continue_from_coverage_checkpoint(
         self,
@@ -319,6 +326,17 @@ class Kobe:
 
         The graph is auto-saved after every step so crashes lose at most one step.
         """
+        with ExitStack() as clients:
+            for client in (
+                self.page_detail_client,
+                self.embedding_client,
+                self.instruction_client,
+                self.action_client,
+            ):
+                clients.enter_context(client)
+            self._explore(max_steps=max_steps, resume_from=resume_from)
+
+    def _explore(self, max_steps: int | None, resume_from: str | None) -> None:
         max_steps = max_steps if max_steps is not None else self.max_steps
         start_step = self.graph.total_steps_completed
 

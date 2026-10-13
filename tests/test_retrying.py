@@ -81,3 +81,41 @@ def test_call_with_retry_logs_the_traceback_on_a_retried_failure(
         assert retrying.call_with_retry("action agent", flaky) == "ok"
     assert "action agent" in caplog.text
     assert caplog.records[0].exc_info is not None
+
+
+@pytest.mark.parametrize("status", [200, 400, 401, 402, 403, 404, 422])
+def test_sdk_validation_retries_only_successful_or_transient_responses(
+    status: int, no_sleep: list[float]
+) -> None:
+    import httpx
+    from openrouter.errors import ResponseValidationError
+
+    attempts: list[int] = []
+    error = ResponseValidationError(
+        "invalid schema", httpx.Response(status), ValueError("missing field")
+    )
+
+    def request() -> str:
+        attempts.append(1)
+        raise error
+
+    with pytest.raises(ResponseValidationError):
+        retrying.call_with_retry("schema", request)
+    assert len(attempts) == (3 if status == 200 else 1)
+    assert no_sleep == ([2.0, 4.0] if status == 200 else [])
+
+
+def test_generic_sdk_error_with_success_status_is_not_retried(no_sleep: list[float]) -> None:
+    import httpx
+    from openrouter.errors import OpenRouterError
+
+    attempts: list[int] = []
+
+    def request() -> str:
+        attempts.append(1)
+        raise OpenRouterError("unexpected provider error", httpx.Response(200))
+
+    with pytest.raises(OpenRouterError):
+        retrying.call_with_retry("error", request)
+    assert attempts == [1]
+    assert no_sleep == []

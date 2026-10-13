@@ -16,6 +16,7 @@ from hypothesis import settings
 from openrouter import OpenRouter
 from PIL import Image
 
+from android_app_graph.adapters import aitk_translator
 from android_app_graph.utils import make_client, vlm_utils
 
 # The built-in "ci" profile (deterministic, no deadline, no example database) is
@@ -91,7 +92,9 @@ def router_http(
 
 @pytest.fixture
 def router_client(router_http: httpx.Client) -> Iterator[OpenRouter]:
-    client, _ = make_client({"api_key": "test-router-key"}, http_client=router_http)
+    client, _ = make_client(
+        {"api_key": "test-router-key"}, http_client=router_http, role="page_detail"
+    )
     with client:
         yield client
 
@@ -138,8 +141,30 @@ def png_screenshot() -> str:
 @pytest.fixture
 def image_router(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> None:
     def factory(
-        cfg: Mapping[str, object] | None, *, default_model: str, role: str = "chat"
+        cfg: Mapping[str, object] | None, *, default_model: str, role: str
     ) -> tuple[OpenRouter, str]:
         return make_client(cfg, default_model=default_model, role=role, http_client=router_http)
 
     monkeypatch.setattr(vlm_utils, "make_client", factory)
+    monkeypatch.setattr(aitk_translator, "make_client", factory)
+
+
+@pytest.fixture
+def owned_router_clients(
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[httpx.Client]:
+    clients: list[httpx.Client] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        router_requests.append(request)
+        return router_responses.pop(0)
+
+    class TrackingClient(httpx.Client):
+        def __init__(self, *, trust_env: bool = True) -> None:
+            super().__init__(trust_env=trust_env, transport=httpx.MockTransport(respond))
+            clients.append(self)
+
+    monkeypatch.setattr(httpx, "Client", TrackingClient)
+    return clients

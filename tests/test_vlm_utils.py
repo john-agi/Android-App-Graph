@@ -303,7 +303,7 @@ def test_sdk_assistant_content_variants(
     response = vlm.send_chat(
         router_client, model="provider/other", messages=[{"role": "user", "content": "hi"}]
     )
-    assert vlm._message_text(response) == ("hello \nworld" if isinstance(content, list) else "")
+    assert vlm.message_text(response) == ("hello \nworld" if isinstance(content, list) else "")
 
 
 @pytest.mark.parametrize("image", [False, True])

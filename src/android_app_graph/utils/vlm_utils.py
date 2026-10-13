@@ -8,13 +8,16 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from openrouter import OpenRouter
 from openrouter.components.chatcontenttext import ChatContentText
 from openrouter.components.chatresult import ChatResult
 from openrouter.components.chatusage import ChatUsage
+from openrouter.errors import ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 from PIL import Image
@@ -606,7 +609,7 @@ def send_chat(
             model=model,
             messages=messages,
             response_format=response_format,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens if max_tokens is not None else UNSET,
             temperature=client.temperature
             if isinstance(client, ConfiguredOpenRouter) and client.temperature is not None
             else UNSET,
@@ -620,7 +623,7 @@ def send_chat(
     return response
 
 
-def _message_text(resp: ChatResult) -> str:
+def message_text(resp: ChatResult) -> str:
     """Read text, multipart text, null or omitted content from the SDK response."""
     if not resp.choices:
         return ""
@@ -716,7 +719,7 @@ def describe_page_and_state(
         response_format={"type": "json_object"},
     )
     token_tracker.record("page_describe_and_state", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -778,7 +781,7 @@ def verify_same_node(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_verify", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -831,7 +834,7 @@ def normalize_edge(
         response_format={"type": "json_object"},
     )
     token_tracker.record("normalize_edge", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -968,7 +971,7 @@ def audit_merge_nodes(
         response_format={"type": "json_object"},
     )
     token_tracker.record("node_merge_audit", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -1041,7 +1044,7 @@ def select_exploration_target(
     )
     token_tracker.record("exploration_target", model, resp.usage)
 
-    raw = strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -1084,7 +1087,7 @@ def audit_graph(
     )
     token_tracker.record("graph_audit", model, resp.usage)
     finish_reason = resp.choices[0].finish_reason if resp.choices else ""
-    raw_original = _message_text(resp)
+    raw_original = message_text(resp)
     raw = strip_json_fences(raw_original)
     try:
         return json.loads(raw)
@@ -1098,7 +1101,9 @@ def audit_graph(
         return {"issues": [], "summary": "parse error"}
 
 
-def _embedding_vector(response: CreateEmbeddingsResponse) -> list[float]:
+def _embedding_result(
+    response: CreateEmbeddingsResponse,
+) -> tuple[list[float], CreateEmbeddingsUsage | None]:
     if not isinstance(response, CreateEmbeddingsResponseBody):
         raise TypeError("Expected an OpenRouter JSON embedding response")
     if len(response.data) != 1:
@@ -1106,7 +1111,7 @@ def _embedding_vector(response: CreateEmbeddingsResponse) -> list[float]:
     vector = as_float_list(response.data[0].embedding)
     if not vector:
         raise ValueError("OpenRouter returned an empty, non-finite or non-float embedding")
-    return vector
+    return vector, response.usage
 
 
 def get_embedding(
@@ -1119,9 +1124,8 @@ def get_embedding(
             model=model, input=text, encoding_format="float", retries=None
         ),
     )
-    vector = _embedding_vector(response)
-    if isinstance(response, CreateEmbeddingsResponseBody):
-        token_tracker.record("embedding", model, response.usage)
+    vector, usage = _embedding_result(response)
+    token_tracker.record("embedding", model, usage)
     return vector
 
 
@@ -1147,10 +1151,40 @@ def get_image_embedding(
         encoding_format="float",
         retries=None,
     )
-    vector = _embedding_vector(response)
-    if isinstance(response, CreateEmbeddingsResponseBody):
-        token_tracker.record("image_embedding", model, response.usage)
+    vector, usage = _embedding_result(response)
+    token_tracker.record("image_embedding", model, usage)
     return vector
+
+
+@contextmanager
+def image_embedding_client(
+    api_key: str,
+    *,
+    model: str,
+    base_url: str,
+    client: OpenRouter | None = None,
+) -> Iterator[OpenRouter]:
+    """Own a standalone/batch connection, or borrow a client from an active scope."""
+    if client is not None:
+        http_client = client.sdk_configuration.client
+        if (
+            isinstance(client, ConfiguredOpenRouter)
+            and client.owns_http_client
+            and isinstance(http_client, httpx.Client)
+            and http_client.is_closed
+        ):
+            with client:
+                yield client
+        else:
+            yield client
+        return
+    created, _ = make_client(
+        {"api_key": api_key, "model": model, "base_url": base_url},
+        default_model=DEFAULT_EMBEDDING_MODEL,
+        role="image_embedding",
+    )
+    with created:
+        yield created
 
 
 def get_openrouter_image_embedding(
@@ -1159,15 +1193,11 @@ def get_openrouter_image_embedding(
     *,
     model: str,
     base_url: str,
+    client: OpenRouter | None = None,
 ) -> list[float]:
     """Share SDK setup between runtime retrieval and offline precomputation."""
-    client, model = make_client(
-        {"api_key": api_key, "model": model, "base_url": base_url},
-        default_model=DEFAULT_EMBEDDING_MODEL,
-        role="image_embedding",
-    )
-    with client:
-        return get_image_embedding(client, screenshot_b64, model=model)
+    with image_embedding_client(api_key, model=model, base_url=base_url, client=client) as scoped:
+        return get_image_embedding(scoped, screenshot_b64, model=model)
 
 
 def _parse_tool_call(raw: str) -> dict[str, Any] | None:
@@ -1201,8 +1231,8 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
 
 
 def _tool_call_to_aitk(
-    args: dict[str, Any], screen_w: int = 1080, screen_h: int = 1920
-) -> dict[str, Any]:
+    args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
+) -> dict[str, object]:
     """Convert a mobile_use tool-call argument dict to AITK action format.
 
     Follows the same conversion logic as qwen3_vl.py's to_device() and the
@@ -1211,14 +1241,20 @@ def _tool_call_to_aitk(
     The VLM outputs coordinates in a normalized 0–1000 range.
     We convert them to actual device pixels: x_pixel = x_norm / 1000 * screen_w.
     """
-    if isinstance(args.get("arguments"), dict):
-        args = {**args, **args["arguments"]}
+    nested = args.get("arguments")
+    if isinstance(nested, dict):
+        args = {**args, **as_object_dict(nested)}
 
     action = args.get("action", "")
 
-    def _scale(coord: list[Any]) -> tuple[int, int]:
-        x = int(coord[0] / 1000 * screen_w)
-        y = int(coord[1] / 1000 * screen_h)
+    def _scale(coord: object) -> tuple[int, int]:
+        if not isinstance(coord, list) or len(coord) != 2:
+            raise _MalformedActionOutput("Action coordinates must be two finite numbers")
+        values = as_float_list(coord)
+        if not values:
+            raise _MalformedActionOutput("Action coordinates must be two finite numbers")
+        x = int(values[0] / 1000 * screen_w)
+        y = int(values[1] / 1000 * screen_h)
         return x, y
 
     def _get_duration() -> int:
@@ -1230,22 +1266,18 @@ def _tool_call_to_aitk(
 
     if action == "click":
         coord = args.get("coordinate")
-        if not coord or len(coord) < 2:
-            return {"action": "end"}
         x, y = _scale(coord)
         return {"action": "tap", "x": x, "y": y}
 
     if action == "long_press":
         coord = args.get("coordinate")
-        if not coord or len(coord) < 2:
-            return {"action": "end"}
         x, y = _scale(coord)
         return {"action": "long_press", "x": x, "y": y, "duration": _get_duration()}
 
     if action == "swipe":
-        if args.get("coordinate") is not None and args.get("coordinate2") is not None:
-            x1, y1 = _scale(args["coordinate"])
-            x2, y2 = _scale(args["coordinate2"])
+        if "coordinate" in args or "coordinate2" in args:
+            x1, y1 = _scale(args.get("coordinate"))
+            x2, y2 = _scale(args.get("coordinate2"))
         elif args.get("direction") is not None:
             direction = args["direction"]
             if direction == "up":
@@ -1263,7 +1295,7 @@ def _tool_call_to_aitk(
             else:
                 return {"action": "end"}
         else:
-            return {"action": "end"}
+            raise _MalformedActionOutput("Swipe requires coordinates or a supported direction")
         return {
             "action": "swipe",
             "x1": x1,
@@ -1386,7 +1418,7 @@ def plan_next_action(
     )
 
     token_tracker.record("instruction", model, resp.usage)
-    raw = _message_text(resp)
+    raw = message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
     raw_clean = strip_json_fences(raw)
@@ -1415,7 +1447,7 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, s
     """
     if not resp.choices:
         return None, "", ""
-    raw = _message_text(resp)
+    raw = message_text(resp)
     tool_calls = resp.choices[0].message.tool_calls
     if not raw and not tool_calls:
         logger.error("Action agent returned empty response (no content, no tool_calls)")
@@ -1530,7 +1562,12 @@ def predict_next_action(
 
     def request_action() -> tuple[dict[str, object], str]:
         # The outer boundary shares one budget between HTTP and model-output failures.
-        resp = send_chat(client, model=model, messages=messages, retries=0)
+        try:
+            resp = send_chat(client, model=model, messages=messages, retries=0)
+        except ResponseValidationError as exc:
+            if 200 <= exc.status_code < 300:
+                raise _MalformedActionOutput("Action response failed SDK validation") from exc
+            raise
         token_tracker.record("action", model, resp.usage)
         try:
             tool_args, thought, action_desc = _parse_agent_response(resp)

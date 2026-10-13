@@ -212,12 +212,16 @@ not guarantee deterministic output.
 
 `request_timeout` (or `timeout`) in a role's YAML block is in seconds;
 requests default to 60 seconds and retry at most twice with backoff for
-transient HTTP failures, rate limits and transport timeouts. Permanent HTTP
-errors such as 400, 401 and 402 fail immediately. Action-output parsing and
+transient HTTP failures, rate limits, transport timeouts and SDK validation
+failures on successful HTTP responses. Permanent HTTP errors such as 400,
+401 and 402 fail immediately. Action-output parsing and
 conversion can request a corrected response within the same three-attempt
 budget, then fall back to a short wait if output remains malformed.
 SDK retries are disabled to avoid multiplying attempts; legacy SDK
 `max_retries` settings are superseded by this application retry budget.
+Compatible chat endpoints may omit the nullable `system_fingerprint` field;
+other required response fields are still validated. Chat and embedding calls
+propagate persistent SDK validation failures after their bounded retries.
 Public endpoints honor environment proxy settings (including `NO_PROXY`);
 loopback endpoints such as `localhost`, `127.0.0.1` and `::1` connect directly
 for local forwarding.
@@ -243,6 +247,8 @@ The v2 runtime and `app-graph-embed` both use OpenRouter's
 `model`, `base_url` and `api_key` fields to override screenshots separately.
 Image embeddings require an image-capable embedding model. Remove legacy
 `native_base_url` and Google API-key settings from existing configurations.
+The `embedding.native_base_url` and `image_embedding.native_base_url` fields
+are rejected explicitly before credentials are sent.
 Native Google Gemini and Vertex embedding URLs do not accept OpenRouter's
 request format and are rejected before requests are sent. Replace them with
 `https://openrouter.ai/api/v1`, use `OPENROUTER_API_KEY`, and select

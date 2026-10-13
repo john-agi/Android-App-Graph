@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import math
 import os
 import re
 from collections.abc import Mapping
+from typing import Self, override
 from urllib.parse import urlsplit
 
 import httpx
 from openrouter import OpenRouter
+from openrouter._hooks.sdkhooks import SDKHooks
+from openrouter._hooks.types import AfterSuccessContext, AfterSuccessHook
+
+from android_app_graph.payloads import as_object_dict
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_PAGE_DETAIL_MODEL = "openai/gpt-6.1-sol"
@@ -20,9 +26,72 @@ DEFAULT_ACTION_MODEL = "qwen/qwen3.8-flash"
 
 
 class ConfiguredOpenRouter(OpenRouter):
-    """Keep optional chat parameters on the client belonging to each role."""
+    """Keep role settings and explicitly own application-created HTTP clients."""
 
     temperature: float | None = None
+    owns_http_client: bool = False
+    trust_env: bool = True
+
+    @override
+    def __enter__(self) -> Self:
+        client = self.sdk_configuration.client
+        if self.owns_http_client and isinstance(client, httpx.Client) and client.is_closed:
+            self.sdk_configuration.client = httpx.Client(trust_env=self.trust_env)
+        return self
+
+    @override
+    def __exit__(self, *_args: object, **_kwargs: object) -> None:
+        if self.owns_http_client and self.sdk_configuration.client is not None:
+            self.sdk_configuration.client.close()
+
+
+class _ChatFingerprintCompatibility(AfterSuccessHook):
+    @override
+    def after_success(
+        self, hook_ctx: AfterSuccessContext, response: httpx.Response
+    ) -> httpx.Response:
+        if (
+            hook_ctx.operation_id != "sendChatCompletionRequest"
+            or not response.is_success
+            or "application/json" not in response.headers.get("content-type", "")
+        ):
+            return response
+        try:
+            payload = as_object_dict(response.json())
+            request_payload = as_object_dict(json.loads(response.request.content))
+        except ValueError, UnicodeDecodeError:
+            return response
+        if (
+            payload.get("object") != "chat.completion"
+            or "error" in payload
+            or "system_fingerprint" in payload
+            or request_payload.get("stream") is True
+        ):
+            return response
+        # SDK 1.3.43 requires this nullable field; compatible servers may omit it.
+        headers = dict(response.headers)
+        headers.pop("content-length", None)
+        headers.pop("content-encoding", None)
+        adjusted = httpx.Response(
+            response.status_code,
+            json={**payload, "system_fingerprint": None},
+            headers=headers,
+            request=response.request,
+            extensions=response.extensions,
+        )
+        response.close()
+        return adjusted
+
+
+def validate_embedding_config(cfg: Mapping[str, object], *, role: str) -> None:
+    """Reject obsolete endpoint fields before resolving or sending credentials."""
+    if "native_base_url" in cfg:
+        raise ValueError(
+            f"{role}.native_base_url is unsupported. Set {role}.base_url to "
+            f"{DEFAULT_BASE_URL} (or a compatible endpoint), configure {role}.api_key "
+            f"with OPENROUTER_API_KEY (or that endpoint's credential), and select "
+            f"{DEFAULT_EMBEDDING_MODEL} (or a model supported by that endpoint)."
+        )
 
 
 def validate_embedding_endpoint(base_url: str, *, role: str) -> None:
@@ -64,10 +133,10 @@ def resolve_env(value: object) -> str | None:
 def make_client(
     cfg: Mapping[str, object] | None,
     *,
+    role: str,
     default_model: str = DEFAULT_PAGE_DETAIL_MODEL,
     http_client: httpx.Client | None = None,
     timeout: float | None = None,
-    role: str = "chat",
 ) -> tuple[OpenRouter, str]:
     """Create the official SDK client with per-role overrides and a shared key.
 
@@ -76,10 +145,9 @@ def make_client(
     must not multiply those attempts.
     """
     cfg = cfg or {}
-    if role == "chat" and default_model == DEFAULT_EMBEDDING_MODEL:
-        role = "embedding"
     base_url = resolve_env(cfg.get("base_url")) or DEFAULT_BASE_URL
     if role in {"embedding", "image_embedding"}:
+        validate_embedding_config(cfg, role=role)
         validate_embedding_endpoint(base_url, role=role)
     api_key = resolve_env(cfg.get("api_key")) or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -96,14 +164,25 @@ def make_client(
     temperature = float(temperature_value) if temperature_value is not None else None
     if temperature is not None and (not math.isfinite(temperature) or not 0 <= temperature <= 2):
         raise ValueError(f"{role}.temperature must be a finite number between 0 and 2")
-    client = ConfiguredOpenRouter(
-        api_key=api_key,
-        server_url=base_url.rstrip("/"),
-        client=http_client
-        if http_client is not None
-        else httpx.Client(trust_env=_trust_environment(base_url)),
-        timeout_ms=int(request_timeout * 1000),
-        retry_config=None,
-    )
+    trust_env = _trust_environment(base_url)
+    transport_client = http_client if http_client is not None else httpx.Client(trust_env=trust_env)
+    try:
+        client = ConfiguredOpenRouter(
+            api_key=api_key,
+            server_url=base_url.rstrip("/"),
+            client=transport_client,
+            timeout_ms=int(request_timeout * 1000),
+            retry_config=None,
+        )
+        hooks: object = client.sdk_configuration.__dict__["_hooks"]
+        if not isinstance(hooks, SDKHooks):
+            raise TypeError("Expected OpenRouter SDK hooks")
+        hooks.register_after_success_hook(_ChatFingerprintCompatibility())
+    except BaseException:
+        if http_client is None:
+            transport_client.close()
+        raise
+    client.owns_http_client = http_client is None
+    client.trust_env = trust_env
     client.temperature = temperature
     return client, model

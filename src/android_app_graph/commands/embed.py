@@ -28,6 +28,7 @@ from android_app_graph.graph_files import (
     require_graph_shape,
 )
 from android_app_graph.utils.logging import setup_logging
+from android_app_graph.utils.vlm_utils import image_embedding_client
 
 logger = logging.getLogger(__name__)
 
@@ -69,65 +70,67 @@ def precompute_graph_image_embeddings(
         "skipped_failed": 0,
     }
 
-    for current_app_name, graph_path in iter_graph_files(graph_dir, app_name):
-        summary["graphs"] += 1
-        logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
-        graph_data = load_graph_json(graph_path)
-        # --recompute discards the sidecar by writing an empty tagged payload
-        # through the same writer as every other sidecar write, not by unlinking
-        # it: unlink() on a symlinked sidecar detaches the link and leaves the
-        # shared target it points at stale. Writing it up front also keeps the
-        # discard when every call afterwards fails, since the loop only rewrites
-        # the sidecar once a vector succeeds.
-        node_ids = {node["id"] for node in graph_data["nodes"]}
+    with image_embedding_client(api_key, model=model, base_url=base_url) as client:
+        for current_app_name, graph_path in iter_graph_files(graph_dir, app_name):
+            summary["graphs"] += 1
+            logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
+            graph_data = load_graph_json(graph_path)
+            # --recompute discards the sidecar by writing an empty tagged payload
+            # through the same writer as every other sidecar write, not by unlinking
+            # it: unlink() on a symlinked sidecar detaches the link and leaves the
+            # shared target it points at stale. Writing it up front also keeps the
+            # discard when every call afterwards fails, since the loop only rewrites
+            # the sidecar once a vector succeeds.
+            node_ids = {node["id"] for node in graph_data["nodes"]}
 
-        embeddings: dict[str, list[float]]
-        if recompute:
-            try:
-                save_image_embeddings(graph_path, {}, model=model)
-            except OSError:
-                # A graph whose sidecar cannot be discarded cannot be rebuilt
-                # either: computing fresh vectors on top of a cache the run
-                # could not confirm was emptied would be worse than skipping
-                # the graph outright.
-                logger.exception(
-                    "Failed to discard image embedding cache for graph %s at %s",
-                    current_app_name,
-                    graph_path,
-                )
-                continue
-            embeddings = {}
-        else:
-            embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
+            embeddings: dict[str, list[float]]
+            if recompute:
+                try:
+                    save_image_embeddings(graph_path, {}, model=model)
+                except OSError:
+                    # A graph whose sidecar cannot be discarded cannot be rebuilt
+                    # either: computing fresh vectors on top of a cache the run
+                    # could not confirm was emptied would be worse than skipping
+                    # the graph outright.
+                    logger.exception(
+                        "Failed to discard image embedding cache for graph %s at %s",
+                        current_app_name,
+                        graph_path,
+                    )
+                    continue
+                embeddings = {}
+            else:
+                embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
 
-        # A stat, not a read: deciding reference_screenshots/already_cached/
-        # skipped_missing_screenshot must not pay for every uncached node's
-        # base64 encoding before the first API call, and a cached node's
-        # screenshot is never read at all.
-        pending: list[tuple[str, Path]] = []
-        for node in graph_data["nodes"]:
-            node_id = node["id"]
-            screenshot_path = reference_screenshot_path(graph_path, node_id)
-            if screenshot_path is None:
-                summary["skipped_missing_screenshot"] += 1
-                continue
-            summary["reference_screenshots"] += 1
-            if node_id in embeddings:
-                summary["already_cached"] += 1
-                continue
-            pending.append((node_id, screenshot_path))
+            # A stat, not a read: deciding reference_screenshots/already_cached/
+            # skipped_missing_screenshot must not pay for every uncached node's
+            # base64 encoding before the first API call, and a cached node's
+            # screenshot is never read at all.
+            pending: list[tuple[str, Path]] = []
+            for node in graph_data["nodes"]:
+                node_id = node["id"]
+                screenshot_path = reference_screenshot_path(graph_path, node_id)
+                if screenshot_path is None:
+                    summary["skipped_missing_screenshot"] += 1
+                    continue
+                summary["reference_screenshots"] += 1
+                if node_id in embeddings:
+                    summary["already_cached"] += 1
+                    continue
+                pending.append((node_id, screenshot_path))
 
-        run = compute_missing_image_embeddings(
-            graph_path,
-            embeddings,
-            _pending_candidates(pending, app_name=current_app_name, summary=summary),
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-            app_name=current_app_name,
-        )
-        summary["computed"] += run.computed
-        summary["skipped_failed"] += run.failed
+            run = compute_missing_image_embeddings(
+                graph_path,
+                embeddings,
+                _pending_candidates(pending, app_name=current_app_name, summary=summary),
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                app_name=current_app_name,
+                client=client,
+            )
+            summary["computed"] += run.computed
+            summary["skipped_failed"] += run.failed
 
     return summary
 

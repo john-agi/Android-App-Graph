@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 
-from openrouter.errors import OpenRouterError
+from openrouter.errors import OpenRouterError, ResponseValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ def call_with_retry[T](
         except Exception as exc:
             if (
                 isinstance(exc, OpenRouterError)
+                and not (isinstance(exc, ResponseValidationError) and 200 <= exc.status_code < 300)
                 and exc.status_code not in {408, 409, 425, 429}
                 and not 500 <= exc.status_code < 600
             ):

@@ -31,6 +31,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
@@ -59,9 +60,9 @@ from android_app_graph.utils.vlm_utils import (
     DEFAULT_ACTION_MODEL,
     DEFAULT_INSTRUCTION_MODEL,
     DEFAULT_PAGE_DETAIL_MODEL,
-    _message_text,
     build_image_message,
     describe_page_and_state,
+    message_text,
     predict_next_action,
     score_by_cosine,
     send_chat,
@@ -560,17 +561,7 @@ def _chat_completion_content(
     """Run a typed completion, account for usage and return assistant text."""
     resp = send_chat(client, model=model, messages=messages, max_tokens=max_tokens)
     token_tracker.record("v2_chat", model, resp.usage)
-    return _message_text(resp)
-
-
-def _make_no_proxy_client(
-    cfg: dict[str, Any] | None,
-    *,
-    default_model: str = DEFAULT_ACTION_MODEL,
-    role: str = "action",
-) -> tuple[OpenRouter, str]:
-    """Use endpoint-aware proxy settings for each v2 role."""
-    return make_client(cfg, default_model=default_model, role=role)
+    return message_text(resp)
 
 
 class Memory:
@@ -633,25 +624,39 @@ class UIKobeV2Translator(BaseTranslator):
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
 
-        self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
-        self.desc_client, self.desc_model = _make_no_proxy_client(
-            vlm_config.get("page_detail"),
-            default_model=DEFAULT_PAGE_DETAIL_MODEL,
-            role="page_detail",
-        )
-        self.instruction_client, self.instruction_model = _make_no_proxy_client(
-            vlm_config.get("instruction"),
-            default_model=DEFAULT_INSTRUCTION_MODEL,
-            role="instruction",
-        )
         image_embedding_settings = resolve_image_embedding_settings(vlm_config)
         self.image_embedding_model = image_embedding_settings.model
         self.image_embedding_api_key = image_embedding_settings.api_key
         self.image_embedding_base_url = image_embedding_settings.base_url
 
-        self._graphs: dict[str, nx.DiGraph] = {}
-        self._package_to_app: dict[str, str] = {}
-        self._load_all_graphs()
+        with ExitStack() as clients:
+            self.model_client, self.model_name = make_client(
+                vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
+            )
+            clients.enter_context(self.model_client)
+            self.desc_client, self.desc_model = make_client(
+                vlm_config.get("page_detail"),
+                default_model=DEFAULT_PAGE_DETAIL_MODEL,
+                role="page_detail",
+            )
+            clients.enter_context(self.desc_client)
+            self.instruction_client, self.instruction_model = make_client(
+                vlm_config.get("instruction"),
+                default_model=DEFAULT_INSTRUCTION_MODEL,
+                role="instruction",
+            )
+            clients.enter_context(self.instruction_client)
+            self.image_embedding_client: OpenRouter | None = None
+            if self.image_embedding_api_key:
+                self.image_embedding_client, _ = make_client(
+                    image_embedding_settings._asdict(),
+                    default_model=self.image_embedding_model,
+                    role="image_embedding",
+                )
+                clients.enter_context(self.image_embedding_client)
+            self._graphs: dict[str, nx.DiGraph] = {}
+            self._package_to_app: dict[str, str] = {}
+            self._load_all_graphs()
 
         # A device property: only to_device updates it, and a task reset must not.
         self._screen_w = 1080
@@ -683,6 +688,7 @@ class UIKobeV2Translator(BaseTranslator):
             base_url=self.image_embedding_base_url,
             app_name=app_name,
             node_id=node_id,
+            client=self.image_embedding_client,
         )
 
     def _compute_missing_image_embeddings(
@@ -729,6 +735,7 @@ class UIKobeV2Translator(BaseTranslator):
             model=self.image_embedding_model,
             base_url=self.image_embedding_base_url,
             app_name=app_name,
+            client=self.image_embedding_client,
         )
         for node_id, _screenshot_path in pending:
             if node_id in embeddings:
@@ -1436,9 +1443,15 @@ class UIKobeV2Translator(BaseTranslator):
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
-        if not history.get("actions", []):
-            self._reset_task_state()
-        return self._step(task, state, history)
+        # AITK exposes callbacks, not translator teardown; each turn owns its connections.
+        with ExitStack() as clients:
+            for client in (self.model_client, self.desc_client, self.instruction_client):
+                clients.enter_context(client)
+            if self.image_embedding_client is not None:
+                clients.enter_context(self.image_embedding_client)
+            if not history.get("actions", []):
+                self._reset_task_state()
+            return self._step(task, state, history)
 
     @override
     def to_device(self, action: str, width: int, height: int) -> dict[str, Any]:

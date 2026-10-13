@@ -15,13 +15,21 @@ from collections.abc import Callable, Collection, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from openrouter import OpenRouter
+
 from android_app_graph.graph_files import encode_screenshot_b64, write_json_atomically
 from android_app_graph.payloads import as_float_list, as_str_dict
 from android_app_graph.retrying import call_with_retry
-from android_app_graph.utils import DEFAULT_BASE_URL, resolve_env, validate_embedding_endpoint
+from android_app_graph.utils import (
+    DEFAULT_BASE_URL,
+    resolve_env,
+    validate_embedding_config,
+    validate_embedding_endpoint,
+)
 from android_app_graph.utils.vlm_utils import (
     DEFAULT_EMBEDDING_MODEL,
     get_openrouter_image_embedding,
+    image_embedding_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +54,8 @@ def resolve_image_embedding_settings(
     """Resolve image overrides, then the embedding role, then OpenRouter defaults."""
     image_embedding_cfg = vlm_config.get("image_embedding") or {}
     embedding_cfg = vlm_config.get("embedding") or {}
+    validate_embedding_config(image_embedding_cfg, role="image_embedding")
+    validate_embedding_config(embedding_cfg, role="embedding")
     model = (
         resolve_env(model_override)
         or resolve_env(image_embedding_cfg.get("model"))
@@ -194,19 +204,22 @@ def compute_embedding_with_retry(
     base_url: str,
     app_name: str,
     node_id: str,
+    client: OpenRouter | None = None,
 ) -> list[float]:
     """Get an OpenRouter image embedding, retrying on failure with backoff."""
-    return call_with_retry(
-        f"[GRAPH] {app_name}/{node_id}: image embedding",
-        lambda: get_openrouter_image_embedding(
-            api_key,
-            screenshot_b64,
-            model=model,
-            base_url=base_url,
-        ),
-        retries=IMAGE_EMBEDDING_RETRIES,
-        base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
-    )
+    with image_embedding_client(api_key, model=model, base_url=base_url, client=client) as scoped:
+        return call_with_retry(
+            f"[GRAPH] {app_name}/{node_id}: image embedding",
+            lambda: get_openrouter_image_embedding(
+                api_key,
+                screenshot_b64,
+                model=model,
+                base_url=base_url,
+                client=scoped,
+            ),
+            retries=IMAGE_EMBEDDING_RETRIES,
+            base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
+        )
 
 
 def iter_screenshot_candidates(
@@ -261,6 +274,7 @@ def compute_missing_image_embeddings(
     model: str,
     base_url: str,
     app_name: str,
+    client: OpenRouter | None = None,
 ) -> ImageEmbeddingRun:
     """Compute an image embedding for every ``(node_id, screenshot_b64)`` candidate.
 
@@ -281,41 +295,43 @@ def compute_missing_image_embeddings(
     """
     computed = 0
     failed = 0
-    try:
-        for node_id, screenshot_b64 in candidates:
-            try:
-                started = time.perf_counter()
-                embeddings[node_id] = compute_embedding_with_retry(
-                    api_key,
-                    screenshot_b64,
-                    model=model,
-                    base_url=base_url,
-                    app_name=app_name,
-                    node_id=node_id,
-                )
-                computed += 1
-                logger.info(
-                    "[GRAPH] %s/%s: computed image embedding in %.1fs",
-                    app_name,
-                    node_id,
-                    time.perf_counter() - started,
-                )
-            except Exception:
-                failed += 1
-                logger.exception(
-                    "Runtime image embedding failed for graph %s node %s after retries; "
-                    "continuing without this node embedding.",
-                    app_name,
-                    node_id,
-                )
-    finally:
-        if computed:
-            try:
-                save_image_embeddings(graph_path, embeddings, model=model)
-            except OSError:
-                logger.exception(
-                    "Failed to write image embedding cache for graph %s at %s",
-                    app_name,
-                    graph_path,
-                )
+    with image_embedding_client(api_key, model=model, base_url=base_url, client=client) as scoped:
+        try:
+            for node_id, screenshot_b64 in candidates:
+                try:
+                    started = time.perf_counter()
+                    embeddings[node_id] = compute_embedding_with_retry(
+                        api_key,
+                        screenshot_b64,
+                        model=model,
+                        base_url=base_url,
+                        app_name=app_name,
+                        node_id=node_id,
+                        client=scoped,
+                    )
+                    computed += 1
+                    logger.info(
+                        "[GRAPH] %s/%s: computed image embedding in %.1fs",
+                        app_name,
+                        node_id,
+                        time.perf_counter() - started,
+                    )
+                except Exception:
+                    failed += 1
+                    logger.exception(
+                        "Runtime image embedding failed for graph %s node %s after retries; "
+                        "continuing without this node embedding.",
+                        app_name,
+                        node_id,
+                    )
+        finally:
+            if computed:
+                try:
+                    save_image_embeddings(graph_path, embeddings, model=model)
+                except OSError:
+                    logger.exception(
+                        "Failed to write image embedding cache for graph %s at %s",
+                        app_name,
+                        graph_path,
+                    )
     return ImageEmbeddingRun(computed=computed, failed=failed)
