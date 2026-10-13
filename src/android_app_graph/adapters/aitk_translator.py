@@ -1,28 +1,4 @@
-"""Android-App-Graph v2 translator for AITK.
-
-Loop-based architecture with a single small model (7-9B):
-
-  Step 0 — Open app.
-
-  Step 1+ — Reactive loop (every AITK step):
-    1. IDENTIFY: Match current screen to a graph node (embedding similarity
-       + model picks from top-K candidates).
-    2. RECORD: Model checks if the screen has important info to remember.
-    3. DECIDE: Model sees current node, 1-hop neighbors (with edge
-       descriptions), self-loop actions, task, and memory — picks the next
-       action: stay (execute a self-loop / free action) or go to a neighbor.
-    4. EXECUTE: Action agent converts the refined instruction into one low-level
-       action dictionary for this AITK turn.
-    5. Loop back to step 1.
-
-  Memory module stores:
-    - Completed actions (what's been done)
-    - Extracted information (prices, times, names read from screens)
-    - Observations (anything the model flags as task-relevant)
-
-  Key design: every model call is multiple-choice, slot-filling, or short
-  extraction — never open-ended planning over the full graph.
-"""
+"""AITK v2 translator; setup and runtime flow: README.md#use-android-app-graph-with-aitk."""
 
 from __future__ import annotations
 

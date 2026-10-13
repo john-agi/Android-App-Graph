@@ -75,23 +75,15 @@ def precompute_graph_image_embeddings(
             summary["graphs"] += 1
             logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
             graph_data = load_graph_json(graph_path)
-            # --recompute discards the sidecar by writing an empty tagged payload
-            # through the same writer as every other sidecar write, not by unlinking
-            # it: unlink() on a symlinked sidecar detaches the link and leaves the
-            # shared target it points at stale. Writing it up front also keeps the
-            # discard when every call afterwards fails, since the loop only rewrites
-            # the sidecar once a vector succeeds.
             node_ids = {node["id"] for node in graph_data["nodes"]}
 
             embeddings: dict[str, list[float]]
             if recompute:
                 try:
+                    # Preserve symlink targets and invalidate stale data even if every call fails.
                     save_image_embeddings(graph_path, {}, model=model)
                 except OSError:
-                    # A graph whose sidecar cannot be discarded cannot be rebuilt
-                    # either: computing fresh vectors on top of a cache the run
-                    # could not confirm was emptied would be worse than skipping
-                    # the graph outright.
+                    # Avoid mixing fresh vectors with a cache we could not invalidate.
                     logger.exception(
                         "Failed to discard image embedding cache for graph %s at %s",
                         current_app_name,
@@ -102,10 +94,7 @@ def precompute_graph_image_embeddings(
             else:
                 embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
 
-            # A stat, not a read: deciding reference_screenshots/already_cached/
-            # skipped_missing_screenshot must not pay for every uncached node's
-            # base64 encoding before the first API call, and a cached node's
-            # screenshot is never read at all.
+            # Defer encoding to keep memory bounded and avoid reading cached screenshots.
             pending: list[tuple[str, Path]] = []
             for node in graph_data["nodes"]:
                 node_id = node["id"]

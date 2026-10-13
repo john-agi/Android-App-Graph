@@ -87,9 +87,7 @@ def test_make_client_forwards_timeout_and_disables_sdk_retries() -> None:
 def test_make_client_forwards_the_http_client() -> None:
     http_client = httpx.Client(trust_env=False)
     client, _ = make_client({"api_key": "test-key"}, http_client=http_client, role="page_detail")
-    assert (
-        client.sdk_configuration.client is http_client
-    )  # the SDK exposes no public accessor for this
+    assert client.sdk_configuration.client is http_client
 
 
 @pytest.mark.parametrize(

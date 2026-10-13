@@ -1,4 +1,4 @@
-"""Android-App-Graph utilities."""
+"""Client configuration; settings and defaults: README.md#configure-api-credentials."""
 
 from __future__ import annotations
 

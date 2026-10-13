@@ -1234,14 +1234,7 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
 def _tool_call_to_aitk(
     args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
 ) -> dict[str, object]:
-    """Convert a mobile_use tool-call argument dict to AITK action format.
-
-    Follows the same conversion logic as qwen3_vl.py's to_device() and the
-    AITK UIKobeTranslator._convert_action().
-
-    The VLM outputs coordinates in a normalized 0–1000 range.
-    We convert them to actual device pixels: x_pixel = x_norm / 1000 * screen_w.
-    """
+    """Convert mobile_use arguments using the contract in README.md#action-responses."""
     nested = args.get("arguments")
     if isinstance(nested, dict):
         args = {**args, **as_object_dict(nested)}
@@ -1566,7 +1559,7 @@ def predict_next_action(
     ]
 
     def request_action() -> tuple[dict[str, object], str]:
-        # The outer boundary shares one budget between HTTP and model-output failures.
+        # Disable inner retries so transport and malformed output cannot multiply attempts.
         try:
             resp = send_chat(client, model=model, messages=messages, retries=0)
         except ResponseValidationError as exc:

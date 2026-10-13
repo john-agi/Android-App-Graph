@@ -1339,7 +1339,7 @@ def _use_model(
     translator: aitk_translator.UIKobeV2Translator,
     *replies: str | None,
 ) -> _FakeClient:
-    """Answer every chat completion from ``translator.model_client`` with ``replies``."""
+    """Answer every planning completion with ``replies``."""
     client = _FakeClient(*replies)
     monkeypatch.setattr(translator, "instruction_client", client)
     return client

@@ -717,7 +717,6 @@ def main(argv: list[str] | None = None) -> int:
                     json.dump(re_results, f, indent=2, ensure_ascii=False)
                 logger.info("Re-exploration results saved to %s", results_path)
 
-            # Runs even when the auditor reported no structural issues.
             normalize_and_save_audited_graph(graph, audited_graph_path)
 
     token_tracker.print_summary()
