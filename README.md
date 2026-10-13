@@ -166,19 +166,15 @@ cp .env.example .env
 ```
 
 The official [OpenRouter Python SDK](https://openrouter.ai/docs/client-sdks/python/overview)
-is installed by `uv sync --locked`. Set `OPENROUTER_API_KEY` in `.env`; one
-key covers chat, text embeddings and screenshot embeddings. The approved
-starting defaults are:
+is installed by `uv sync --locked`. The only required credential setting in
+`.env` is `OPENROUTER_API_KEY`; one key covers chat, text embeddings and
+screenshot embeddings:
 
 ```bash
 OPENROUTER_API_KEY=your-key
-APP_GRAPH_PAGE_DETAIL_MODEL=openai/gpt-6.1-sol
-APP_GRAPH_EMBEDDING_MODEL=google/gemini-embedding-2
-APP_GRAPH_INSTRUCTION_MODEL=openai/gpt-6.1-sol
-APP_GRAPH_ACTION_MODEL=qwen/qwen3.8-flash
 ```
 
-Load the file before running commands:
+Export `.env` into the environment before running commands:
 
 ```bash
 set -a
@@ -186,12 +182,25 @@ source .env
 set +a
 ```
 
-`.env` is ignored by git. To compare models, change the corresponding
-`APP_GRAPH_*_MODEL` to an exact OpenRouter model ID and restart the command.
-Each role's base URL defaults to `https://openrouter.ai/api/v1`; its optional
-API-key override takes precedence over `OPENROUTER_API_KEY`. The template's
-role keys reference `${OPENROUTER_API_KEY}`. A missing model reference falls
-back to that role's default, including an embedding model for embedding calls.
+`.env` is ignored by git. The four model environment variables are optional
+overrides; leave them unset to use the approved starting defaults:
+
+| Optional environment variable | Default model |
+|---|---|
+| `APP_GRAPH_PAGE_DETAIL_MODEL` | `openai/gpt-6.1-sol` |
+| `APP_GRAPH_EMBEDDING_MODEL` | `google/gemini-embedding-2` |
+| `APP_GRAPH_INSTRUCTION_MODEL` | `openai/gpt-6.1-sol` |
+| `APP_GRAPH_ACTION_MODEL` | `qwen/qwen3.8-flash` |
+
+The sample YAML keeps `${APP_GRAPH_*_MODEL}` references so the factory can
+resolve an override or fall back to the role's default when it is unset. To
+compare models, add the corresponding variable with an exact OpenRouter model
+ID to `.env`, export it again and restart the command.
+
+Each role's base URL defaults to `https://openrouter.ai/api/v1`. For advanced
+configurations, each role still accepts explicit `api_key` and `base_url` YAML
+values, including `${ENV_VAR}` references. A role's `api_key` takes precedence
+over `OPENROUTER_API_KEY`.
 Requests omit temperature so models such as Sol can use their supported
 parameters. `request_timeout` (or `timeout`) in a role's YAML block is in
 seconds; requests default to 60 seconds and retry at most twice with backoff.
@@ -351,24 +360,12 @@ translator itself stays in the installed package. Verified against AITK commit
        similarity_threshold: 0.84
        page_detail:
          model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
-         base_url: ${APP_GRAPH_PAGE_DETAIL_BASE_URL}
-         api_key: ${APP_GRAPH_PAGE_DETAIL_API_KEY}
        embedding:
          model: ${APP_GRAPH_EMBEDDING_MODEL}
-         base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
-         api_key: ${APP_GRAPH_EMBEDDING_API_KEY}
        instruction:
          model: ${APP_GRAPH_INSTRUCTION_MODEL}
-         base_url: ${APP_GRAPH_INSTRUCTION_BASE_URL}
-         api_key: ${APP_GRAPH_INSTRUCTION_API_KEY}
        action:
          model: ${APP_GRAPH_ACTION_MODEL}
-         base_url: ${APP_GRAPH_ACTION_BASE_URL}
-         api_key: ${APP_GRAPH_ACTION_API_KEY}
-       image_embedding:
-         model: ${APP_GRAPH_EMBEDDING_MODEL}
-         base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
-         api_key: ${OPENROUTER_API_KEY}
    ```
 
 6. Smoke-test the import without a device:

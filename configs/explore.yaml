@@ -23,26 +23,12 @@ vlm:
 
   page_detail:
     model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
-    base_url: ${APP_GRAPH_PAGE_DETAIL_BASE_URL}
-    api_key: ${OPENROUTER_API_KEY}
 
   embedding:
     model: ${APP_GRAPH_EMBEDDING_MODEL}
-    base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
-    api_key: ${OPENROUTER_API_KEY}
 
   instruction:
     model: ${APP_GRAPH_INSTRUCTION_MODEL}
-    base_url: ${APP_GRAPH_INSTRUCTION_BASE_URL}
-    api_key: ${OPENROUTER_API_KEY}
 
   action:
     model: ${APP_GRAPH_ACTION_MODEL}
-    base_url: ${APP_GRAPH_ACTION_BASE_URL}
-    api_key: ${OPENROUTER_API_KEY}
-
-  # Inherits embedding settings when omitted; override for image-capable model comparisons.
-  image_embedding:
-    model: ${APP_GRAPH_EMBEDDING_MODEL}
-    base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
-    api_key: ${OPENROUTER_API_KEY}
