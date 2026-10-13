@@ -47,6 +47,53 @@ def action_response(
     )
 
 
+@pytest.mark.parametrize("content", ["[]", "null", '"screen"', "42", "true"])
+def test_page_description_retries_non_object_json(
+    content: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+    no_sleep: list[float],
+) -> None:
+    router_responses.extend(
+        [
+            action_response(chat_body, content),
+            action_response(chat_body, '{"page_description":"home","state":{},"elements":[]}'),
+        ]
+    )
+    assert vlm_utils.describe_page_and_state(router_client, png_screenshot) == ("home", {}, [])
+    assert len(router_requests) == 2
+    assert no_sleep == [2.0]
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_page_description_http_and_parse_errors_share_one_budget(
+    recover: bool,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+    no_sleep: list[float],
+) -> None:
+    router_responses.extend(
+        [
+            httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}),
+            action_response(chat_body, "[]"),
+            action_response(chat_body, '{"page_description":"home"}' if recover else "null"),
+        ]
+    )
+    if recover:
+        assert vlm_utils.describe_page_and_state(router_client, png_screenshot) == ("home", {}, [])
+    else:
+        with pytest.raises(TypeError, match=r"page description.*JSON object"):
+            vlm_utils.describe_page_and_state(router_client, png_screenshot)
+    assert len(router_requests) == 3
+    assert no_sleep == [2.0, 4.0]
+
+
 @pytest.mark.parametrize(
     "first", ['{"action":"click","coordinate":["500","500"]}', "not JSON", "[]"]
 )
@@ -97,7 +144,7 @@ def test_action_http_and_parse_failures_share_one_budget(
 
 
 @pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 422, 408, 409, 425, 429, 500, 503])
-@pytest.mark.parametrize("operation", ["chat", "text", "image", "action"])
+@pytest.mark.parametrize("operation", ["chat", "text", "image", "action", "description"])
 def test_http_status_controls_attempts_and_backoff(
     status: int,
     operation: str,
@@ -122,6 +169,8 @@ def test_http_status_controls_attempts_and_backoff(
             vlm_utils.get_embedding(router_client, "hi")
         elif operation == "action":
             vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
+        elif operation == "description":
+            vlm_utils.describe_page_and_state(router_client, png_screenshot)
         else:
             monkeypatch.setattr(
                 embedding_cache,

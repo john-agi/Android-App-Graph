@@ -206,13 +206,16 @@ def main(argv: list[str] | None = None) -> int:
     if not args.config.expanduser().is_file():
         parser.error(f"config file not found: {args.config}")
 
-    graph_dir, api_key, model, base_url = load_image_embedding_settings(
-        args.config.expanduser(),
-        graphs_override=args.graphs.expanduser() if args.graphs else None,
-        api_key_override=args.api_key,
-        model_override=args.model,
-        base_url_override=args.base_url,
-    )
+    try:
+        graph_dir, api_key, model, base_url = load_image_embedding_settings(
+            args.config.expanduser(),
+            graphs_override=args.graphs.expanduser() if args.graphs else None,
+            api_key_override=args.api_key,
+            model_override=args.model,
+            base_url_override=args.base_url,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     graph_dir = graph_dir.expanduser()
     if not graph_dir.exists():
         parser.error(f"graph root does not exist: {graph_dir}")

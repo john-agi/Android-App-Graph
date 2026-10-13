@@ -22,7 +22,7 @@ from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 from PIL import Image
 
-from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
+from android_app_graph.payloads import as_float_list, as_int, as_list, as_object_dict, as_str
 from android_app_graph.retrying import DEFAULT_RETRIES, call_with_retry
 from android_app_graph.utils import (
     DEFAULT_ACTION_MODEL,
@@ -652,7 +652,7 @@ def describe_page_and_state(
     existing_keys: list[str] | None = None,
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
 ) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
-    """Call VLM once to get a fresh page description, dynamic state, and interactable elements.
+    """Describe a screen, retrying failed requests and non-object JSON replies.
 
     The model always writes its own description based on what it sees. Existing
     node descriptions are provided as context so the model can disambiguate
@@ -712,27 +712,30 @@ def describe_page_and_state(
             ],
         }
     ]
-    resp = send_chat(
-        client,
-        model=model,
-        messages=messages,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("page_describe_and_state", model, resp.usage)
-    raw = strip_json_fences(message_text(resp))
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse page+state JSON. Raw:\n%s", raw)
-        return raw[:100], {}, []
 
+    def request_description() -> dict[str, object]:
+        resp = send_chat(
+            client,
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            retries=0,
+        )
+        token_tracker.record("page_describe_and_state", model, resp.usage)
+        raw = strip_json_fences(message_text(resp))
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse page+state JSON. Raw:\n%s", raw)
+            return {"page_description": raw[:100]}
+        if not isinstance(result, dict):
+            raise TypeError("Expected page description to be a JSON object")
+        return as_object_dict(result)
+
+    result = call_with_retry("[API] page describe and state", request_description)
     page_description = as_str(result.get("page_description"), "unknown screen")
-    state = result.get("state", {})
-    if not isinstance(state, dict):
-        state = {}
-    elements = result.get("elements", [])
-    if not isinstance(elements, list):
-        elements = []
+    state = as_object_dict(result.get("state"))
+    elements = as_list(result.get("elements"))
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))

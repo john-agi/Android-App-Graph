@@ -232,7 +232,8 @@ requests default to 60 seconds and retry at most twice, after 2 and 4 seconds, f
 transient HTTP failures, rate limits, transport timeouts and SDK validation
 failures on successful HTTP responses. Text embedding vector validation shares
 that same attempt budget, including empty and non-finite vectors. Permanent HTTP
-errors such as 400, 401 and 402 fail immediately. Action-output parsing and
+errors such as 400, 401 and 402 fail immediately. Page-description replies with
+non-object JSON are retried within that same attempt budget. Action-output parsing and
 conversion can request a corrected response within the same three-attempt
 budget, then fall back to a one-second wait if output remains malformed.
 SDK retries are disabled to avoid multiplying attempts; legacy SDK

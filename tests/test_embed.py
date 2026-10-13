@@ -80,6 +80,33 @@ def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFi
     assert "missing API key" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ("native_base_url: https://generativelanguage.googleapis.com/v1beta", "native_base_url"),
+        ("base_url: https://generativelanguage.googleapis.com/v1beta", "native Google"),
+        ("base_url: invalid", "absolute HTTP or HTTPS"),
+    ],
+)
+def test_embed_main_reports_invalid_embedding_config(
+    settings: str,
+    message: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    router_requests: list[httpx.Request],
+) -> None:
+    config = tmp_path / "explore.yaml"
+    config.write_text(f"vlm:\n  image_embedding:\n    {settings}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as caught:
+        embed.main(["--config", str(config)])
+    assert caught.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "app-graph-embed: error:" in stderr
+    assert message in stderr
+    assert "Traceback" not in stderr
+    assert router_requests == []
+
+
 def test_embed_settings_from_config(tmp_path: Path) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("experiment:\n  graph_dir: my_graphs\n", encoding="utf-8")
