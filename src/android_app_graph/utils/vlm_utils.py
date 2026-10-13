@@ -1118,13 +1118,14 @@ def get_embedding(
     client: OpenRouter, text: str, model: str = DEFAULT_EMBEDDING_MODEL
 ) -> list[float]:
     """Get a text embedding through the official OpenRouter SDK."""
-    response = call_with_retry(
-        "[API] text embedding",
-        lambda: client.embeddings.generate(
+
+    def request_embedding() -> tuple[list[float], CreateEmbeddingsUsage | None]:
+        response = client.embeddings.generate(
             model=model, input=text, encoding_format="float", retries=None
-        ),
-    )
-    vector, usage = _embedding_result(response)
+        )
+        return _embedding_result(response)
+
+    vector, usage = call_with_retry("[API] text embedding", request_embedding)
     token_tracker.record("embedding", model, usage)
     return vector
 
@@ -1275,10 +1276,14 @@ def _tool_call_to_aitk(
         return {"action": "long_press", "x": x, "y": y, "duration": _get_duration()}
 
     if action == "swipe":
-        if "coordinate" in args or "coordinate2" in args:
-            x1, y1 = _scale(args.get("coordinate"))
-            x2, y2 = _scale(args.get("coordinate2"))
+        start, end = args.get("coordinate"), args.get("coordinate2")
+        if start is not None and end is not None:
+            x1, y1 = _scale(start)
+            x2, y2 = _scale(end)
         elif args.get("direction") is not None:
+            for coordinate in (start, end):
+                if coordinate is not None:
+                    _scale(coordinate)
             direction = args["direction"]
             if direction == "up":
                 x1, y1 = screen_w // 2, screen_h * 3 // 4

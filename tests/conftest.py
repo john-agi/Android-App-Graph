@@ -162,8 +162,12 @@ def owned_router_clients(
         return router_responses.pop(0)
 
     class TrackingClient(httpx.Client):
-        def __init__(self, *, trust_env: bool = True) -> None:
-            super().__init__(trust_env=trust_env, transport=httpx.MockTransport(respond))
+        def __init__(self, *, trust_env: bool = True, follow_redirects: bool = False) -> None:
+            super().__init__(
+                trust_env=trust_env,
+                follow_redirects=follow_redirects,
+                transport=httpx.MockTransport(respond),
+            )
             clients.append(self)
 
     monkeypatch.setattr(httpx, "Client", TrackingClient)

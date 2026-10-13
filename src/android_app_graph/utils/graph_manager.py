@@ -196,7 +196,11 @@ class GraphManager:
             return cached.node_id
 
         current_pkg = package_from_activity(activity)
-
+        same_pkg_candidates = [
+            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
+            for node_id, data in self.graph.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
+        ]
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
@@ -226,11 +230,6 @@ class GraphManager:
             self._require_embedding_client(), page_description, model=self.embedding_model
         )
 
-        same_pkg_candidates = (
-            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
-            for node_id, data in self.graph.nodes(data=True)
-            if package_from_activity(data.get("activity", "")) == current_pkg
-        )
         scored = score_by_cosine(
             description_embedding,
             same_pkg_candidates,
@@ -1309,12 +1308,12 @@ class GraphManager:
 
         Returns a list of (node_id, similarity) sorted descending.
         """
-        query_emb = get_embedding(
-            self._require_embedding_client(), query, model=self.embedding_model
-        )
-        candidates = (
+        candidates = [
             (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
             for node_id, data in self.graph.nodes(data=True)
+        ]
+        query_emb = get_embedding(
+            self._require_embedding_client(), query, model=self.embedding_model
         )
         results = score_by_cosine(
             query_emb,

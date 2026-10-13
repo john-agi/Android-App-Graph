@@ -36,7 +36,9 @@ class ConfiguredOpenRouter(OpenRouter):
     def __enter__(self) -> Self:
         client = self.sdk_configuration.client
         if self.owns_http_client and isinstance(client, httpx.Client) and client.is_closed:
-            self.sdk_configuration.client = httpx.Client(trust_env=self.trust_env)
+            self.sdk_configuration.client = httpx.Client(
+                trust_env=self.trust_env, follow_redirects=True
+            )
         return self
 
     @override
@@ -130,6 +132,39 @@ def resolve_env(value: object) -> str | None:
     return str(value)
 
 
+def resolve_endpoint_base_url(
+    value: object, *, default: str = DEFAULT_BASE_URL, api_key: object = None
+) -> str:
+    """Do not redirect an explicit credential when its endpoint variable is missing."""
+    base_url = resolve_env(value)
+    if value and not base_url and resolve_env(api_key):
+        raise ValueError(
+            "Cannot resolve endpoint for an explicit API key; set the endpoint variable "
+            "before using this credential."
+        )
+    return base_url or default
+
+
+def _endpoint_origin(base_url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Model endpoints must be absolute HTTP or HTTPS URLs")
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, parsed.hostname, port
+
+
+def resolve_endpoint_api_key(base_url: str, *credentials: tuple[str, object]) -> str | None:
+    """Inherit a credential only within its configured URL origin."""
+    origin = _endpoint_origin(base_url)
+    for endpoint, value in (*credentials, (DEFAULT_BASE_URL, "${OPENROUTER_API_KEY}")):
+        key = resolve_env(value)
+        if key and _endpoint_origin(endpoint) == origin:
+            return key
+    return None
+
+
 def make_client(
     cfg: Mapping[str, object] | None,
     *,
@@ -145,14 +180,15 @@ def make_client(
     must not multiply those attempts.
     """
     cfg = cfg or {}
-    base_url = resolve_env(cfg.get("base_url")) or DEFAULT_BASE_URL
+    base_url = resolve_endpoint_base_url(cfg.get("base_url"), api_key=cfg.get("api_key"))
     if role in {"embedding", "image_embedding"}:
         validate_embedding_config(cfg, role=role)
         validate_embedding_endpoint(base_url, role=role)
-    api_key = resolve_env(cfg.get("api_key")) or os.environ.get("OPENROUTER_API_KEY")
+    api_key = resolve_endpoint_api_key(base_url, (base_url, cfg.get("api_key")))
     if not api_key:
         raise ValueError(
-            f"Missing API key for {role}: configure {role}.api_key or set OPENROUTER_API_KEY"
+            f"Missing API key for {role}: configure {role}.api_key for this endpoint. "
+            "OPENROUTER_API_KEY is inherited only by the HTTPS OpenRouter origin."
         )
     model = resolve_env(cfg.get("model")) or default_model
     request_timeout = (
@@ -165,7 +201,11 @@ def make_client(
     if temperature is not None and (not math.isfinite(temperature) or not 0 <= temperature <= 2):
         raise ValueError(f"{role}.temperature must be a finite number between 0 and 2")
     trust_env = _trust_environment(base_url)
-    transport_client = http_client if http_client is not None else httpx.Client(trust_env=trust_env)
+    transport_client = (
+        http_client
+        if http_client is not None
+        else httpx.Client(trust_env=trust_env, follow_redirects=True)
+    )
     try:
         client = ConfiguredOpenRouter(
             api_key=api_key,

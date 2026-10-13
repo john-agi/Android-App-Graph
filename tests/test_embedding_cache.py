@@ -506,7 +506,7 @@ def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(
     assert "predates model tagging" in caplog.text
 
 
-def test_image_settings_inherit_embedding_role_and_shared_credentials(
+def test_image_settings_inherit_embedding_role_credentials_at_the_same_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
@@ -520,7 +520,7 @@ def test_image_settings_inherit_embedding_role_and_shared_credentials(
     assert embedding_cache.resolve_image_embedding_settings(
         config
     ) == embedding_cache.ImageEmbeddingSettings(
-        "shared-key",
+        None,
         "google/gemini-embedding-2",
         "https://router.example/v1",
     )

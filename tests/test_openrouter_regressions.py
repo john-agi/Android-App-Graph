@@ -310,6 +310,7 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
     chat_body: dict[str, object],
     embedding_body: dict[str, object],
     png_screenshot: str,
@@ -353,8 +354,10 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
         else:
             manager.identify_state("com.demo.Home", png_screenshot)
 
-    with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):
-        compare()
+    for _ in range(2):
+        with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):
+            compare()
+        assert router_requests == []
 
 
 def test_text_embedding_model_survives_save_load(

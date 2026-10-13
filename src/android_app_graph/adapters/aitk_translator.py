@@ -679,7 +679,8 @@ class UIKobeV2Translator(BaseTranslator):
         """Use OpenRouter image embeddings for runtime node retrieval, with retry."""
         if not self.image_embedding_api_key:
             raise RuntimeError(
-                "OpenRouter image embedding requires image_embedding.api_key or OPENROUTER_API_KEY."
+                "OpenRouter image embedding requires image_embedding.api_key for the selected "
+                "endpoint. OPENROUTER_API_KEY is inherited only by HTTPS OpenRouter."
             )
         return compute_embedding_with_retry(
             self.image_embedding_api_key,
@@ -720,7 +721,8 @@ class UIKobeV2Translator(BaseTranslator):
             return
         if not self.image_embedding_api_key:
             logger.error(
-                "OpenRouter image embedding requires image_embedding.api_key or OPENROUTER_API_KEY."
+                "OpenRouter image embedding requires image_embedding.api_key for the selected "
+                "endpoint. OPENROUTER_API_KEY is inherited only by HTTPS OpenRouter."
             )
             return
         # Encoded lazily, one screenshot at a time, the same as offline

@@ -9,19 +9,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 from openrouter import OpenRouter
 
 from android_app_graph.graph_files import encode_screenshot_b64, write_json_atomically
-from android_app_graph.payloads import as_float_list, as_str_dict
+from android_app_graph.payloads import as_float_list, as_object_dict, as_str_dict
 from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import (
-    DEFAULT_BASE_URL,
+    resolve_endpoint_api_key,
+    resolve_endpoint_base_url,
     resolve_env,
     validate_embedding_config,
     validate_embedding_endpoint,
@@ -45,15 +45,15 @@ class ImageEmbeddingSettings(NamedTuple):
 
 
 def resolve_image_embedding_settings(
-    vlm_config: dict[str, Any],
+    vlm_config: Mapping[str, object],
     *,
     model_override: str | None = None,
     api_key_override: str | None = None,
     base_url_override: str | None = None,
 ) -> ImageEmbeddingSettings:
-    """Resolve image overrides, then the embedding role, then OpenRouter defaults."""
-    image_embedding_cfg = vlm_config.get("image_embedding") or {}
-    embedding_cfg = vlm_config.get("embedding") or {}
+    """Resolve image settings while keeping inherited keys with their URL origin."""
+    image_embedding_cfg = as_object_dict(vlm_config.get("image_embedding"))
+    embedding_cfg = as_object_dict(vlm_config.get("embedding"))
     validate_embedding_config(image_embedding_cfg, role="image_embedding")
     validate_embedding_config(embedding_cfg, role="embedding")
     model = (
@@ -62,18 +62,23 @@ def resolve_image_embedding_settings(
         or resolve_env(embedding_cfg.get("model"))
         or DEFAULT_EMBEDDING_MODEL
     )
-    base_url = (
-        resolve_env(base_url_override)
-        or resolve_env(image_embedding_cfg.get("base_url"))
-        or resolve_env(embedding_cfg.get("base_url"))
-        or DEFAULT_BASE_URL
+    embedding_base_url = resolve_endpoint_base_url(
+        embedding_cfg.get("base_url"), api_key=embedding_cfg.get("api_key")
+    )
+    image_base_url = resolve_endpoint_base_url(
+        image_embedding_cfg.get("base_url"),
+        default=embedding_base_url,
+        api_key=image_embedding_cfg.get("api_key"),
+    )
+    base_url = resolve_endpoint_base_url(
+        base_url_override, default=image_base_url, api_key=api_key_override
     )
     validate_embedding_endpoint(base_url, role="image_embedding")
-    api_key = (
-        resolve_env(api_key_override)
-        or resolve_env(image_embedding_cfg.get("api_key"))
-        or resolve_env(embedding_cfg.get("api_key"))
-        or os.environ.get("OPENROUTER_API_KEY")
+    api_key = resolve_endpoint_api_key(
+        base_url,
+        (base_url, api_key_override),
+        (image_base_url, image_embedding_cfg.get("api_key")),
+        (embedding_base_url, embedding_cfg.get("api_key")),
     )
     return ImageEmbeddingSettings(api_key=api_key, model=model, base_url=base_url)
 

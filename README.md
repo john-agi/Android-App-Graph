@@ -200,7 +200,13 @@ ID to `.env`, export it again and restart the command.
 Each role's base URL defaults to `https://openrouter.ai/api/v1`. For advanced
 configurations, each role still accepts explicit `api_key` and `base_url` YAML
 values, including `${ENV_VAR}` references. A role's `api_key` takes precedence
-over `OPENROUTER_API_KEY`.
+over `OPENROUTER_API_KEY`. The shared key is inherited only for
+`https://openrouter.ai` on its default HTTPS port. Custom endpoints require an
+explicit role key; use `api_key: ${OPENROUTER_API_KEY}` only if that endpoint is
+intended to receive your OpenRouter credential.
+An unset or empty endpoint variable paired with an explicit key is rejected
+before requests; it cannot silently redirect that key to the default endpoint.
+
 Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
 `temperature` in its YAML block, including `0.0` or an `${ENV_VAR}` reference.
 It is omitted by default, including for Sol. Only set it when the selected
@@ -213,8 +219,9 @@ not guarantee deterministic output.
 `request_timeout` (or `timeout`) in a role's YAML block is in seconds;
 requests default to 60 seconds and retry at most twice with backoff for
 transient HTTP failures, rate limits, transport timeouts and SDK validation
-failures on successful HTTP responses. Permanent HTTP errors such as 400,
-401 and 402 fail immediately. Action-output parsing and
+failures on successful HTTP responses. Text embedding vector validation shares
+that same attempt budget, including empty and non-finite vectors. Permanent HTTP
+errors such as 400, 401 and 402 fail immediately. Action-output parsing and
 conversion can request a corrected response within the same three-attempt
 budget, then fall back to a short wait if output remains malformed.
 SDK retries are disabled to avoid multiplying attempts; legacy SDK
@@ -225,6 +232,12 @@ propagate persistent SDK validation failures after their bounded retries.
 Public endpoints honor environment proxy settings (including `NO_PROXY`);
 loopback endpoints such as `localhost`, `127.0.0.1` and `::1` connect directly
 for local forwarding.
+
+Application-created clients follow redirects and retain HTTPX's removal of
+authorization on redirects to another origin. Caller-supplied HTTP clients
+retain their own redirect and ownership policies. AITK connections are scoped
+to each `to_agent` callback because its translator interface has no teardown
+callback; retries and screenshot batches reuse connections within that scope.
 
 The instruction planner now has its own `instruction` role in v2 as well as
 exploration. If a legacy configuration supplied only an action credential or
@@ -245,6 +258,10 @@ The v2 runtime and `app-graph-embed` both use OpenRouter's
 [multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
 `vlm.image_embedding` inherits the `embedding` role when omitted; use its
 `model`, `base_url` and `api_key` fields to override screenshots separately.
+Keys are inherited only across URLs with the same scheme, hostname and effective
+port. Changing the image endpoint to a different origin requires its own
+`image_embedding.api_key`. Likewise, an `app-graph-embed --base-url` override to a
+different origin requires `--api-key` (or a configured key for that origin).
 Image embeddings require an image-capable embedding model. Remove legacy
 `native_base_url` and Google API-key settings from existing configurations.
 The `embedding.native_base_url` and `image_embedding.native_base_url` fields
@@ -266,8 +283,10 @@ Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
 as `{node_id: {"model": model_id, "embedding": vector}}`. Legacy bare vectors
 and inline vectors without model metadata have unknown provenance. Graphs
 can still be loaded for inspection, but text comparisons reject unknown or
-mismatched models even when dimensions match. Rebuild or re-explore into a
-new graph directory with the configured embedding model before resuming
+mismatched models even when dimensions match. These checks run before description
+or embedding requests, so a rejected graph does not spend on model calls.
+Rebuild or re-explore into a new graph directory with the configured embedding
+model before resuming
 text matching; do not relabel old vectors. The screenshot-only
 `app-graph-embed` command does not migrate text vectors. Newly generated or
 renamed descriptions carry their model metadata through save/load.

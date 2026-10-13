@@ -229,7 +229,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"graph root does not exist: {graph_dir}")
 
     if not api_key:
-        parser.error("missing API key: pass --api-key or set OPENROUTER_API_KEY")
+        parser.error(
+            "missing API key: pass --api-key for the selected endpoint or configure "
+            "image_embedding.api_key. OPENROUTER_API_KEY is inherited only by HTTPS OpenRouter."
+        )
 
     setup_logging(level=logging.INFO)
 
