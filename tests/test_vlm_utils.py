@@ -376,7 +376,7 @@ def test_non_json_embedding_response_is_rejected(
 
 
 @pytest.mark.parametrize("operation", ["chat", "embedding"])
-@pytest.mark.parametrize("status", [401, 429, 500])
+@pytest.mark.parametrize("status", [429, 500])
 def test_sdk_errors_exhaust_bounded_application_retries(
     operation: str,
     status: int,
@@ -453,10 +453,13 @@ def test_unreadable_or_refused_sdk_response_keeps_parse_fallbacks(
     router_responses: list[httpx.Response],
     chat_body: dict[str, object],
     png_screenshot: str,
+    no_sleep: list[float],
 ) -> None:
     chat_body["choices"] = []
     chat_body.pop("usage")
-    router_responses.append(httpx.Response(200, json=chat_body))
+    router_responses.extend(
+        httpx.Response(200, json=chat_body) for _ in range(3 if operation == "action" else 1)
+    )
     if operation == "audit":
         assert vlm.audit_graph(router_client, "home") == {"issues": [], "summary": "parse error"}
     elif operation == "planner":
@@ -466,3 +469,4 @@ def test_unreadable_or_refused_sdk_response_keeps_parse_fallbacks(
             {"action": "wait", "time": 1},
             "Failed to parse action response -> wait",
         )
+        assert no_sleep == [2.0, 4.0]

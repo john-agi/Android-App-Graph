@@ -10,6 +10,7 @@ import httpx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from openrouter import OpenRouter
 from openrouter.components.security import Security
 
 from android_app_graph.kobe import Kobe
@@ -20,7 +21,7 @@ def test_openrouter_default_and_shared_credentials(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
     client, model = make_client({})
     assert model == "openai/gpt-6.1-sol"
-    assert type(client).__name__ == "OpenRouter"
+    assert isinstance(client, OpenRouter)
 
 
 def test_none_passes_through() -> None:

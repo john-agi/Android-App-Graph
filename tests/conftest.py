@@ -137,7 +137,9 @@ def png_screenshot() -> str:
 
 @pytest.fixture
 def image_router(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    def factory(cfg: Mapping[str, object] | None, *, default_model: str) -> tuple[OpenRouter, str]:
-        return make_client(cfg, default_model=default_model, http_client=router_http)
+    def factory(
+        cfg: Mapping[str, object] | None, *, default_model: str, role: str = "chat"
+    ) -> tuple[OpenRouter, str]:
+        return make_client(cfg, default_model=default_model, role=role, http_client=router_http)
 
     monkeypatch.setattr(vlm_utils, "make_client", factory)

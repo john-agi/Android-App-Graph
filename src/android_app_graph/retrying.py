@@ -6,6 +6,8 @@ import logging
 import time
 from collections.abc import Callable
 
+from openrouter.errors import OpenRouterError
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRIES = 2
@@ -29,7 +31,13 @@ def call_with_retry[T](
     for attempt in range(attempts):
         try:
             return func()
-        except Exception:
+        except Exception as exc:
+            if (
+                isinstance(exc, OpenRouterError)
+                and exc.status_code not in {408, 409, 425, 429}
+                and not 500 <= exc.status_code < 600
+            ):
+                raise
             if attempt >= attempts - 1:
                 raise
             delay = base_delay * (2**attempt)

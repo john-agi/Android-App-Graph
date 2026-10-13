@@ -201,11 +201,35 @@ Each role's base URL defaults to `https://openrouter.ai/api/v1`. For advanced
 configurations, each role still accepts explicit `api_key` and `base_url` YAML
 values, including `${ENV_VAR}` references. A role's `api_key` takes precedence
 over `OPENROUTER_API_KEY`.
-Requests omit temperature so models such as Sol can use their supported
-parameters. `request_timeout` (or `timeout`) in a role's YAML block is in
-seconds; requests default to 60 seconds and retry at most twice with backoff.
+Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
+`temperature` in its YAML block, including `0.0` or an `${ENV_VAR}` reference.
+It is omitted by default, including for Sol. Only set it when the selected
+model and provider support it; check the model's supported parameters and
+[OpenRouter's parameter guidance](https://openrouter.ai/docs/api_reference/parameters).
+For example, `action: {temperature: 0.0}` configures only action requests;
+planning and page analysis retain their own settings. Zero temperature does
+not guarantee deterministic output.
+
+`request_timeout` (or `timeout`) in a role's YAML block is in seconds;
+requests default to 60 seconds and retry at most twice with backoff for
+transient HTTP failures, rate limits and transport timeouts. Permanent HTTP
+errors such as 400, 401 and 402 fail immediately. Action-output parsing and
+conversion can request a corrected response within the same three-attempt
+budget, then fall back to a short wait if output remains malformed.
 SDK retries are disabled to avoid multiplying attempts; legacy SDK
 `max_retries` settings are superseded by this application retry budget.
+Public endpoints honor environment proxy settings (including `NO_PROXY`);
+loopback endpoints such as `localhost`, `127.0.0.1` and `::1` connect directly
+for local forwarding.
+
+The instruction planner now has its own `instruction` role in v2 as well as
+exploration. If a legacy configuration supplied only an action credential or
+used the action model for planning, add an `instruction` block with its own
+`model`, `api_key` and compatible `base_url`, or export `OPENROUTER_API_KEY`
+and use the approved instruction default. To retain a supported custom model
+for planning, explicitly copy that model and endpoint into `instruction`.
+Missing-credential errors identify the affected role; action credentials are
+not implicitly reused for instruction requests.
 
 These defaults were approved from OpenRouter's catalog on 2026-10-12 based
 on documented capabilities; Android-task improvements have not been measured.
@@ -219,15 +243,28 @@ The v2 runtime and `app-graph-embed` both use OpenRouter's
 `model`, `base_url` and `api_key` fields to override screenshots separately.
 Image embeddings require an image-capable embedding model. Remove legacy
 `native_base_url` and Google API-key settings from existing configurations.
+Native Google Gemini and Vertex embedding URLs do not accept OpenRouter's
+request format and are rejected before requests are sent. Replace them with
+`https://openrouter.ai/api/v1`, use `OPENROUTER_API_KEY`, and select
+`google/gemini-embedding-2` or another supported OpenRouter model.
+OpenRouter-compatible custom endpoint overrides remain supported.
 
 Screenshot sidecars (`*.image_emb.json`) carry the exact embedding model ID.
 Old native Gemini tags (including `gemini-embedding-2`) differ from the new
 `google/gemini-embedding-2` ID and are discarded automatically, as are
 untagged caches. Runtime loading recomputes missing vectors. Precompute them
 ahead of time with `uv run --locked app-graph-embed --config configs/explore.yaml`;
-use `--recompute` to force a refresh under the same ID. Changing the text
-embedding model also requires rebuilding or re-exploring graphs containing
-stored text vectors; screenshot sidecars do not migrate those vectors.
+use `--recompute` to force a refresh under the same ID.
+
+Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
+as `{node_id: {"model": model_id, "embedding": vector}}`. Legacy bare vectors
+and inline vectors without model metadata have unknown provenance. Graphs
+can still be loaded for inspection, but text comparisons reject unknown or
+mismatched models even when dimensions match. Rebuild or re-explore into a
+new graph directory with the configured embedding model before resuming
+text matching; do not relabel old vectors. The screenshot-only
+`app-graph-embed` command does not migrate text vectors. Newly generated or
+renamed descriptions carry their model metadata through save/load.
 
 ## Explore an App
 

@@ -35,7 +35,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
 
-import httpx
 import networkx as nx
 from aitk.translators.base import BaseTranslator
 from openrouter import OpenRouter
@@ -568,9 +567,10 @@ def _make_no_proxy_client(
     cfg: dict[str, Any] | None,
     *,
     default_model: str = DEFAULT_ACTION_MODEL,
+    role: str = "action",
 ) -> tuple[OpenRouter, str]:
-    """Ignore environment proxies for locally forwarded role endpoints."""
-    return make_client(cfg, default_model=default_model, http_client=httpx.Client(trust_env=False))
+    """Use endpoint-aware proxy settings for each v2 role."""
+    return make_client(cfg, default_model=default_model, role=role)
 
 
 class Memory:
@@ -635,10 +635,14 @@ class UIKobeV2Translator(BaseTranslator):
 
         self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
         self.desc_client, self.desc_model = _make_no_proxy_client(
-            vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL
+            vlm_config.get("page_detail"),
+            default_model=DEFAULT_PAGE_DETAIL_MODEL,
+            role="page_detail",
         )
         self.instruction_client, self.instruction_model = _make_no_proxy_client(
-            vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL
+            vlm_config.get("instruction"),
+            default_model=DEFAULT_INSTRUCTION_MODEL,
+            role="instruction",
         )
         image_embedding_settings = resolve_image_embedding_settings(vlm_config)
         self.image_embedding_model = image_embedding_settings.model

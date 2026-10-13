@@ -80,6 +80,7 @@ def add_screen(
         "last_detail_snapshot": {},
         "interactable_elements": [],
         "description_embedding": EMBEDDINGS.get(description, UNKNOWN_EMBEDDING),
+        "description_embedding_model": gm.embedding_model,
         "reference_screenshot": None,
         "last_normalized_visit_milestone": 0,
         "visit_count": 0,
@@ -1527,7 +1528,10 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     assert data["nodes"][0]["visit_count"] == 3
     assert data["edges"][0]["schema_deltas"] == [{"tab": {"after": "settings"}}]
     embeddings = json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8"))
-    assert embeddings["s0_home"] == EMBEDDINGS["Home screen"]
+    assert embeddings["s0_home"] == {
+        "embedding": EMBEDDINGS["Home screen"],
+        "model": gm.embedding_model,
+    }
 
 
 def test_save_graph_omits_an_empty_activity_list_and_embedding(tmp_path: Path) -> None:
@@ -1851,7 +1855,9 @@ def test_find_node_by_description_skips_a_stale_dimension_embedding_and_logs_onc
 
 def test_find_node_by_description_stringifies_non_string_node_ids(vlm: FakeVlm) -> None:
     gm = make_manager()
-    gm.graph.add_node(7, description_embedding=[1.0, 0.0, 0.0])
+    gm.graph.add_node(
+        7, description_embedding=[1.0, 0.0, 0.0], description_embedding_model=gm.embedding_model
+    )
 
     results = gm.find_node_by_description("Home screen")
 

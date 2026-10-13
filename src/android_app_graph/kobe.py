@@ -81,16 +81,20 @@ class Kobe:
         vlm_config = vlm_config or {}
 
         self.page_detail_client, self.page_detail_model = make_client(
-            vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL
+            vlm_config.get("page_detail"),
+            default_model=DEFAULT_PAGE_DETAIL_MODEL,
+            role="page_detail",
         )
         self.embedding_client, self.embedding_model = make_client(
-            vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL
+            vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL, role="embedding"
         )
         self.instruction_client, self.instruction_model = make_client(
-            vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL
+            vlm_config.get("instruction"),
+            default_model=DEFAULT_INSTRUCTION_MODEL,
+            role="instruction",
         )
         self.action_client, self.action_model = make_client(
-            vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL
+            vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
         )
 
         similarity_threshold = vlm_config.get("similarity_threshold", 0.85)

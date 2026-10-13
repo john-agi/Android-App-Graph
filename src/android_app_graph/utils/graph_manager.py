@@ -36,7 +36,7 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
     write_json_atomically,
 )
-from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
+from android_app_graph.payloads import as_float_list, as_int_list, as_str, as_str_dict
 from android_app_graph.utils.vlm_utils import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_PAGE_DETAIL_MODEL,
@@ -152,6 +152,19 @@ class GraphManager:
             raise RuntimeError(msg)
         return self.embedding_client
 
+    def _text_embedding(self, node_id: str, data: dict[str, object]) -> list[float]:
+        vector = data.get("description_embedding")
+        model = data.get("description_embedding_model")
+        if vector and model != self.embedding_model:
+            msg = (
+                f"Text embedding for node {node_id!r} has model provenance {model!r}; "
+                f"the configured model is {self.embedding_model!r}. Rebuild or re-explore "
+                "the graph with the configured embedding model before comparing text vectors. "
+                "Do not relabel existing vectors."
+            )
+            raise ValueError(msg)
+        return as_float_list(vector)
+
     def identify_state(self, activity: str, screenshot_b64: str) -> str:
         """Identify which node the current screen belongs to, or create a new one.
 
@@ -214,7 +227,7 @@ class GraphManager:
         )
 
         same_pkg_candidates = (
-            (_node_id(node_id), data.get("description_embedding"))
+            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
             for node_id, data in self.graph.nodes(data=True)
             if package_from_activity(data.get("activity", "")) == current_pkg
         )
@@ -324,6 +337,7 @@ class GraphManager:
                 state_schema={},
                 interactable_elements=init_elements,
                 description_embedding=description_embedding,
+                description_embedding_model=self.embedding_model,
                 reference_screenshot=screenshot_b64,
                 last_normalized_visit_milestone=0,
                 visit_count=0,
@@ -404,6 +418,7 @@ class GraphManager:
         node_data["description_embedding"] = get_embedding(
             self._require_embedding_client(), page_description, model=self.embedding_model
         )
+        node_data["description_embedding_model"] = self.embedding_model
 
         if new_node_id != node_id:
             nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
@@ -1149,7 +1164,7 @@ class GraphManager:
             "edges": [],
         }
 
-        embeddings: dict[str, list[float]] = {}
+        embeddings: dict[str, dict[str, object]] = {}
 
         for node_id, attrs in self.graph.nodes(data=True):
             activities = attrs.get("activities", [attrs.get("activity", "")])
@@ -1168,7 +1183,10 @@ class GraphManager:
 
             emb = attrs.get("description_embedding")
             if emb:
-                embeddings[node_id] = emb
+                embeddings[node_id] = {
+                    "model": attrs.get("description_embedding_model"),
+                    "embedding": emb,
+                }
 
         for source, target, attrs in self.graph.edges(data=True):
             edge_data = {
@@ -1219,12 +1237,16 @@ class GraphManager:
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)
         embeddings: dict[str, list[float]] = {}
+        embedding_models: dict[str, str] = {}
         if emb_path.exists():
             with open(emb_path, "r", encoding="utf-8") as f:
-                embeddings = {
-                    node_id: as_float_list(vector)
-                    for node_id, vector in as_str_dict(json.load(f)).items()
-                }
+                for node_id, entry in as_str_dict(json.load(f)).items():
+                    if isinstance(entry, dict):
+                        tagged = as_str_dict(entry)
+                        embeddings[node_id] = as_float_list(tagged.get("embedding"))
+                        embedding_models[node_id] = as_str(tagged.get("model"), "")
+                    else:
+                        embeddings[node_id] = as_float_list(entry)
 
         self._next_id = data.get("next_id", 0)
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
@@ -1247,6 +1269,11 @@ class GraphManager:
                 last_detail_snapshot=node_data.get("last_detail_snapshot", {}),
                 interactable_elements=node_data.get("interactable_elements", []),
                 description_embedding=emb,
+                description_embedding_model=(
+                    embedding_models.get(node_id, "")
+                    if node_id in embeddings
+                    else as_str(node_data.get("description_embedding_model"), "")
+                ),
                 reference_screenshot=ref_screenshot,
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
@@ -1286,7 +1313,7 @@ class GraphManager:
             self._require_embedding_client(), query, model=self.embedding_model
         )
         candidates = (
-            (_node_id(node_id), data.get("description_embedding"))
+            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
             for node_id, data in self.graph.nodes(data=True)
         )
         results = score_by_cosine(

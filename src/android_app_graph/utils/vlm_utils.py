@@ -16,15 +16,17 @@ from openrouter.components.chatcontenttext import ChatContentText
 from openrouter.components.chatresult import ChatResult
 from openrouter.components.chatusage import ChatUsage
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
+from openrouter.types import UNSET
 from PIL import Image
 
-from android_app_graph.payloads import as_float_list, as_int, as_str
-from android_app_graph.retrying import call_with_retry
+from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
+from android_app_graph.retrying import DEFAULT_RETRIES, call_with_retry
 from android_app_graph.utils import (
     DEFAULT_ACTION_MODEL,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_INSTRUCTION_MODEL,
     DEFAULT_PAGE_DETAIL_MODEL,
+    ConfiguredOpenRouter,
     make_client,
 )
 
@@ -595,6 +597,7 @@ def send_chat(
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
     max_tokens: int | None = None,
+    retries: int = DEFAULT_RETRIES,
 ) -> ChatResult:
     """Send a typed, non-streaming completion with bounded application retries."""
     response: object = call_with_retry(
@@ -604,9 +607,13 @@ def send_chat(
             messages=messages,
             response_format=response_format,
             max_tokens=max_tokens,
+            temperature=client.temperature
+            if isinstance(client, ConfiguredOpenRouter) and client.temperature is not None
+            else UNSET,
             stream=False,
             retries=None,
         ),
+        retries=retries,
     )
     if not isinstance(response, ChatResult):
         raise TypeError("Expected a non-streaming OpenRouter chat response")
@@ -1157,6 +1164,7 @@ def get_openrouter_image_embedding(
     client, model = make_client(
         {"api_key": api_key, "model": model, "base_url": base_url},
         default_model=DEFAULT_EMBEDDING_MODEL,
+        role="image_embedding",
     )
     with client:
         return get_image_embedding(client, screenshot_b64, model=model)
@@ -1397,7 +1405,7 @@ def plan_next_action(
     return instruction
 
 
-def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, Any] | None, str, str]:
+def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
     Handles both XML <tool_call> responses and native tool calling.
@@ -1407,17 +1415,9 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, Any] | None, str,
     """
     if not resp.choices:
         return None, "", ""
-    tool_calls = resp.choices[0].message.tool_calls
-    if tool_calls:
-        logger.info("  Agent used native tool calling")
-        tool_call = tool_calls[0]
-        try:
-            tool_args = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError:
-            return None, "", ""
-        return tool_args, "", str(tool_args)
     raw = _message_text(resp)
-    if not raw:
+    tool_calls = resp.choices[0].message.tool_calls
+    if not raw and not tool_calls:
         logger.error("Action agent returned empty response (no content, no tool_calls)")
         return None, "", ""
     logger.debug("  Agent raw output: %s", raw)
@@ -1425,26 +1425,45 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, Any] | None, str,
     thought = ""
     thought_m = re.search(r"Thought:\s*(.+?)(?:\n|$)", raw)
     if thought_m:
-        thought = thought_m.group(1).strip()
+        thought = as_str(thought_m.group(1), "").strip()
 
     action_desc = ""
     action_m = re.search(r"Action:\s*(.+?)(?:\n|$)", raw)
     if action_m:
-        action_desc = action_m.group(1).strip()
+        action_desc = as_str(action_m.group(1), "").strip()
+
+    if tool_calls:
+        logger.info("  Agent used native tool calling")
+        try:
+            native_args = json.loads(tool_calls[0].function.arguments)
+        except json.JSONDecodeError:
+            return None, thought, action_desc
+        if not isinstance(native_args, dict):
+            return None, thought, action_desc
+        tool_args = as_object_dict(native_args)
+        return tool_args, thought, action_desc or str(tool_args)
 
     tool_args = _parse_tool_call(raw)
     if tool_args is not None:
-        return tool_args, thought, action_desc
+        return as_object_dict(tool_args), thought, action_desc
 
     raw_json = strip_json_fences(raw)
     try:
         parsed = json.loads(raw_json)
+        if not isinstance(parsed, dict):
+            return None, thought, action_desc
         if "arguments" in parsed:
             parsed = parsed["arguments"]
-        return parsed, thought, action_desc
+        if not isinstance(parsed, dict):
+            return None, thought, action_desc
+        return as_object_dict(parsed), thought, action_desc
     except json.JSONDecodeError:
         logger.warning("Failed to parse action agent response. Raw:\n%s", raw)
         return None, thought, action_desc
+
+
+class _MalformedActionOutput(ValueError):
+    """An action response can be repaired by requesting a new completion."""
 
 
 def predict_next_action(
@@ -1508,23 +1527,28 @@ def predict_next_action(
             ],
         },
     ]
-    resp = send_chat(
-        client,
-        model=model,
-        messages=messages,
-    )
 
-    token_tracker.record("action", model, resp.usage)
+    def request_action() -> tuple[dict[str, object], str]:
+        # The outer boundary shares one budget between HTTP and model-output failures.
+        resp = send_chat(client, model=model, messages=messages, retries=0)
+        token_tracker.record("action", model, resp.usage)
+        try:
+            tool_args, thought, action_desc = _parse_agent_response(resp)
+            if tool_args is None:
+                raise _MalformedActionOutput("Action response has no usable arguments")
+            action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
+        except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
+            raise _MalformedActionOutput(
+                "Action response could not be parsed or converted"
+            ) from exc
+        history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
+        logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
+        return as_object_dict(action), history_entry
 
-    tool_args, thought, action_desc = _parse_agent_response(resp)
-    if tool_args is None:
-        logger.warning("Action agent parse failure, falling back to 'wait'")
+    try:
+        return call_with_retry("[API] action response", request_action)
+    except _MalformedActionOutput:
+        logger.warning(
+            "Action agent parse attempts exhausted, falling back to 'wait'", exc_info=True
+        )
         return {"action": "wait", "time": 1}, "Failed to parse action response -> wait"
-
-    action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
-
-    history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
-
-    logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
-
-    return action, history_entry

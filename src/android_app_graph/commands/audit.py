@@ -533,10 +533,10 @@ def _open_re_explore_session(
         )
 
     instruction_client, instruction_model = make_client(
-        vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL
+        vlm_config.get("instruction"), default_model=DEFAULT_INSTRUCTION_MODEL, role="instruction"
     )
     action_client, action_model = make_client(
-        vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL
+        vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
     )
     return ReExploreSession(
         controller=ADBController(config, logger),
@@ -613,10 +613,10 @@ def main(argv: list[str] | None = None) -> int:
     session = _open_re_explore_session(parser, config, vlm_config) if args.re_explore else None
 
     page_detail_client, page_detail_model = make_client(
-        vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL
+        vlm_config.get("page_detail"), default_model=DEFAULT_PAGE_DETAIL_MODEL, role="page_detail"
     )
     embedding_client, embedding_model = make_client(
-        vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL
+        vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL, role="embedding"
     )
 
     for app in selected_apps:

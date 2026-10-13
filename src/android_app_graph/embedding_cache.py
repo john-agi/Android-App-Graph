@@ -18,7 +18,7 @@ from typing import Any, NamedTuple
 from android_app_graph.graph_files import encode_screenshot_b64, write_json_atomically
 from android_app_graph.payloads import as_float_list, as_str_dict
 from android_app_graph.retrying import call_with_retry
-from android_app_graph.utils import DEFAULT_BASE_URL, resolve_env
+from android_app_graph.utils import DEFAULT_BASE_URL, resolve_env, validate_embedding_endpoint
 from android_app_graph.utils.vlm_utils import (
     DEFAULT_EMBEDDING_MODEL,
     get_openrouter_image_embedding,
@@ -58,6 +58,7 @@ def resolve_image_embedding_settings(
         or resolve_env(embedding_cfg.get("base_url"))
         or DEFAULT_BASE_URL
     )
+    validate_embedding_endpoint(base_url, role="image_embedding")
     api_key = (
         resolve_env(api_key_override)
         or resolve_env(image_embedding_cfg.get("api_key"))
