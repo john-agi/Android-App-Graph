@@ -439,6 +439,9 @@ class Kobe:
                     self.logger.info("  Action agent requested wait")
                     time.sleep(1)
                     device_state = self.controller.get_state()
+                    step += 1
+                    self.graph.total_steps_completed = step
+                    self.save_graph()
                     continue
                 else:
                     self.controller.exe_action(action)

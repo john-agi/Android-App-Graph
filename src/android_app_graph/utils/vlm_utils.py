@@ -12,17 +12,15 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-import httpx
 from openrouter import OpenRouter
 from openrouter.components.chatcontenttext import ChatContentText
 from openrouter.components.chatresult import ChatResult
 from openrouter.components.chatusage import ChatUsage
-from openrouter.errors import ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 from PIL import Image
 
-from android_app_graph.payloads import as_float_list, as_int, as_list, as_object_dict, as_str
+from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
 from android_app_graph.retrying import DEFAULT_RETRIES, call_with_retry
 from android_app_graph.utils import (
     DEFAULT_ACTION_MODEL,
@@ -30,6 +28,7 @@ from android_app_graph.utils import (
     DEFAULT_INSTRUCTION_MODEL,
     DEFAULT_PAGE_DETAIL_MODEL,
     ConfiguredOpenRouter,
+    client_scope,
     make_client,
 )
 
@@ -603,21 +602,22 @@ def send_chat(
     retries: int = DEFAULT_RETRIES,
 ) -> ChatResult:
     """Send a typed, non-streaming completion with bounded application retries."""
-    response: object = call_with_retry(
-        "[API] chat completion",
-        lambda: client.chat.send(
-            model=model,
-            messages=messages,
-            response_format=response_format,
-            max_tokens=max_tokens if max_tokens is not None else UNSET,
-            temperature=client.temperature
-            if isinstance(client, ConfiguredOpenRouter) and client.temperature is not None
-            else UNSET,
-            stream=False,
-            retries=None,
-        ),
-        retries=retries,
-    )
+    with client_scope(client):
+        response: object = call_with_retry(
+            "[API] chat completion",
+            lambda: client.chat.send(
+                model=model,
+                messages=messages,
+                response_format=response_format,
+                max_tokens=max_tokens if max_tokens is not None else UNSET,
+                temperature=client.temperature
+                if isinstance(client, ConfiguredOpenRouter) and client.temperature is not None
+                else UNSET,
+                stream=False,
+                retries=None,
+            ),
+            retries=retries,
+        )
     if not isinstance(response, ChatResult):
         raise TypeError("Expected a non-streaming OpenRouter chat response")
     return response
@@ -651,8 +651,8 @@ def describe_page_and_state(
     existing_nodes: list[str] | None = None,
     existing_keys: list[str] | None = None,
     model: str = DEFAULT_PAGE_DETAIL_MODEL,
-) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
-    """Describe a screen, retrying failed requests and non-object JSON replies.
+) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+    """Describe a screen, retrying failed requests and malformed descriptions.
 
     The model always writes its own description based on what it sees. Existing
     node descriptions are provided as context so the model can disambiguate
@@ -713,7 +713,7 @@ def describe_page_and_state(
         }
     ]
 
-    def request_description() -> dict[str, object]:
+    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]]]:
         resp = send_chat(
             client,
             model=model,
@@ -723,19 +723,32 @@ def describe_page_and_state(
         )
         token_tracker.record("page_describe_and_state", model, resp.usage)
         raw = strip_json_fences(message_text(resp))
-        try:
-            result = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse page+state JSON. Raw:\n%s", raw)
-            return {"page_description": raw[:100]}
+        result = json.loads(raw)
         if not isinstance(result, dict):
             raise TypeError("Expected page description to be a JSON object")
-        return as_object_dict(result)
+        payload = as_object_dict(result)
+        description = payload.get("page_description")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("Expected a non-empty page_description string")
+        state = payload.get("state", {})
+        if not isinstance(state, dict):
+            raise TypeError("Expected page state to be a JSON object")
+        raw_elements = payload.get("elements", [])
+        if not isinstance(raw_elements, list):
+            raise TypeError("Expected page elements to be a JSON array")
+        elements: list[dict[str, str]] = []
+        for raw_element in raw_elements:
+            element = as_object_dict(raw_element)
+            label, position = element.get("description"), element.get("position")
+            if not isinstance(label, str) or not isinstance(position, str):
+                raise TypeError("Expected element description and position strings")
+            elements.append({"description": label, "position": position})
+        return description, as_object_dict(state), elements
 
-    result = call_with_retry("[API] page describe and state", request_description)
-    page_description = as_str(result.get("page_description"), "unknown screen")
-    state = as_object_dict(result.get("state"))
-    elements = as_list(result.get("elements"))
+    with client_scope(client):
+        page_description, state, elements = call_with_retry(
+            "[API] page describe and state", request_description
+        )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
@@ -1128,7 +1141,8 @@ def get_embedding(
         )
         return _embedding_result(response)
 
-    vector, usage = call_with_retry("[API] text embedding", request_embedding)
+    with client_scope(client):
+        vector, usage = call_with_retry("[API] text embedding", request_embedding)
     token_tracker.record("embedding", model, usage)
     return vector
 
@@ -1140,21 +1154,22 @@ def get_image_embedding(
 
     The shared image-cache loop owns retries for both runtime and offline use.
     """
-    response = client.embeddings.generate(
-        model=model,
-        input=[
-            {
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
-                    }
-                ]
-            }
-        ],
-        encoding_format="float",
-        retries=None,
-    )
+    with client_scope(client):
+        response = client.embeddings.generate(
+            model=model,
+            input=[
+                {
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                        }
+                    ]
+                }
+            ],
+            encoding_format="float",
+            retries=None,
+        )
     vector, usage = _embedding_result(response)
     token_tracker.record("image_embedding", model, usage)
     return vector
@@ -1167,23 +1182,20 @@ def image_embedding_client(
     model: str,
     base_url: str,
     client: OpenRouter | None = None,
+    request_timeout: float = 60.0,
 ) -> Iterator[OpenRouter]:
     """Own a standalone/batch connection, or borrow a client from an active scope."""
     if client is not None:
-        http_client = client.sdk_configuration.client
-        if (
-            isinstance(client, ConfiguredOpenRouter)
-            and client.owns_http_client
-            and isinstance(http_client, httpx.Client)
-            and http_client.is_closed
-        ):
-            with client:
-                yield client
-        else:
+        with client_scope(client):
             yield client
         return
     created, _ = make_client(
-        {"api_key": api_key, "model": model, "base_url": base_url},
+        {
+            "api_key": api_key,
+            "model": model,
+            "base_url": base_url,
+            "request_timeout": request_timeout,
+        },
         default_model=DEFAULT_EMBEDDING_MODEL,
         role="image_embedding",
     )
@@ -1294,7 +1306,7 @@ def _tool_call_to_aitk(
                 x1, y1 = screen_w // 5, screen_h // 2
                 x2, y2 = screen_w * 4 // 5, screen_h // 2
             else:
-                return {"action": "end"}
+                raise _MalformedActionOutput("Swipe requires a supported direction")
         else:
             raise _MalformedActionOutput("Swipe requires coordinates or a supported direction")
         return {
@@ -1307,9 +1319,10 @@ def _tool_call_to_aitk(
         }
 
     if action == "type":
-        if "text" in args:
-            return {"action": "type", "text": args["text"]}
-        return {"action": "end"}
+        text = args.get("text")
+        if not isinstance(text, str):
+            raise _MalformedActionOutput("Type requires a text string")
+        return {"action": "type", "text": text}
 
     if action == "system_button":
         button = args.get("button", "")
@@ -1319,7 +1332,7 @@ def _tool_call_to_aitk(
             return {"action": "home"}
         if button == "Enter":
             return {"action": "enter"}
-        return {"action": "end"}
+        raise _MalformedActionOutput("System button must be Back, Home or Enter")
 
     if action == "wait":
         t = args.get("time") or args.get("duration") or 3
@@ -1334,8 +1347,7 @@ def _tool_call_to_aitk(
     if action == "error":
         return {"action": "end"}
 
-    logger.warning("Unknown action: %s", action)
-    return {"action": "end"}
+    raise _MalformedActionOutput(f"Unknown action: {action}")
 
 
 def plan_next_action(
@@ -1563,12 +1575,7 @@ def predict_next_action(
 
     def request_action() -> tuple[dict[str, object], str]:
         # Disable inner retries so transport and malformed output cannot multiply attempts.
-        try:
-            resp = send_chat(client, model=model, messages=messages, retries=0)
-        except ResponseValidationError as exc:
-            if 200 <= exc.status_code < 300:
-                raise _MalformedActionOutput("Action response failed SDK validation") from exc
-            raise
+        resp = send_chat(client, model=model, messages=messages, retries=0)
         token_tracker.record("action", model, resp.usage)
         try:
             tool_args, thought, action_desc = _parse_agent_response(resp)
@@ -1584,7 +1591,8 @@ def predict_next_action(
         return as_object_dict(action), history_entry
 
     try:
-        return call_with_retry("[API] action response", request_action)
+        with client_scope(client):
+            return call_with_retry("[API] action response", request_action)
     except _MalformedActionOutput:
         logger.warning(
             "Action agent parse attempts exhausted, falling back to 'wait'", exc_info=True

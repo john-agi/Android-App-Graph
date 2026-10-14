@@ -95,7 +95,18 @@ def test_page_description_http_and_parse_errors_share_one_budget(
 
 
 @pytest.mark.parametrize(
-    "first", ['{"action":"click","coordinate":["500","500"]}', "not JSON", "[]"]
+    "first",
+    [
+        '{"action":"click","coordinate":["500","500"]}',
+        '{"action":"swipe","direction":"north"}',
+        '{"action":"swipe","direction":"Up"}',
+        '{"action":"type"}',
+        '{"action":"type","text":null}',
+        '{"action":"system_button","button":"Power"}',
+        '{"action":"invented"}',
+        "not JSON",
+        "[]",
+    ],
 )
 def test_malformed_action_requests_another_response(
     first: str,
@@ -474,10 +485,10 @@ def test_sdk_validation_uses_bounded_application_recovery(
             router_client, model="test", messages=[{"role": "user", "content": "hello"}]
         )
 
-    if recover or operation == "action":
+    if recover:
         result = request()
         if operation == "action":
-            assert result == {"action": "wait", "time": 2 if recover else 1}
+            assert result == {"action": "wait", "time": 2}
         elif operation in {"text", "image"}:
             assert result == [0.25, 0.75]
         else:
@@ -514,7 +525,7 @@ def test_action_schema_http_and_output_share_total_budget(
             }[last],
         ]
     )
-    if last == "http":
+    if last in {"http", "schema"}:
         with pytest.raises(OpenRouterError):
             vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
     else:

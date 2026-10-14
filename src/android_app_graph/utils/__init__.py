@@ -7,7 +7,8 @@ import json
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Self, override
 from urllib.parse import urlsplit
 
@@ -31,6 +32,7 @@ class ConfiguredOpenRouter(OpenRouter):
     temperature: float | None = None
     owns_http_client: bool = False
     trust_env: bool = True
+    _scope_depth: int = 0
 
     @override
     def __enter__(self) -> Self:
@@ -39,12 +41,28 @@ class ConfiguredOpenRouter(OpenRouter):
             self.sdk_configuration.client = httpx.Client(
                 trust_env=self.trust_env, follow_redirects=True
             )
+        self._scope_depth += 1
         return self
 
     @override
     def __exit__(self, *_args: object, **_kwargs: object) -> None:
-        if self.owns_http_client and self.sdk_configuration.client is not None:
+        self._scope_depth -= 1
+        if (
+            self._scope_depth == 0
+            and self.owns_http_client
+            and self.sdk_configuration.client is not None
+        ):
             self.sdk_configuration.client.close()
+
+
+@contextmanager
+def client_scope(client: OpenRouter) -> Iterator[OpenRouter]:
+    """Reuse an active application scope; leave externally supplied SDK clients alone."""
+    if isinstance(client, ConfiguredOpenRouter):
+        with client:
+            yield client
+    else:
+        yield client
 
 
 class _ChatFingerprintCompatibility(AfterSuccessHook):
@@ -60,15 +78,19 @@ class _ChatFingerprintCompatibility(AfterSuccessHook):
             return response
         try:
             payload = as_object_dict(response.json())
-            request_payload = as_object_dict(json.loads(response.request.content))
         except ValueError, UnicodeDecodeError:
             return response
         if (
             payload.get("object") != "chat.completion"
             or "error" in payload
             or "system_fingerprint" in payload
-            or request_payload.get("stream") is True
         ):
+            return response
+        try:
+            request_payload = as_object_dict(json.loads(response.request.content))
+        except ValueError, UnicodeDecodeError:
+            return response
+        if request_payload.get("stream") is True:
             return response
         # SDK 1.3.43 requires this nullable field; compatible servers may omit it.
         headers = dict(response.headers)
@@ -165,6 +187,18 @@ def resolve_endpoint_api_key(base_url: str, *credentials: tuple[str, object]) ->
     return None
 
 
+def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
+    """Validate seconds before opening connections or sending requests."""
+    message = f"{role}.request_timeout must be a positive finite number of seconds"
+    try:
+        value = float(resolve_env(cfg.get("request_timeout", cfg.get("timeout"))) or "60")
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(message)
+    return value
+
+
 def make_client(
     cfg: Mapping[str, object] | None,
     *,
@@ -191,10 +225,8 @@ def make_client(
             "OPENROUTER_API_KEY is inherited only by the HTTPS OpenRouter origin."
         )
     model = resolve_env(cfg.get("model")) or default_model
-    request_timeout = (
-        timeout
-        if timeout is not None
-        else float(resolve_env(cfg.get("request_timeout", cfg.get("timeout", 60))) or "60")
+    request_timeout = resolve_request_timeout(
+        {"request_timeout": timeout} if timeout is not None else cfg, role=role
     )
     temperature_value = resolve_env(cfg.get("temperature"))
     temperature = float(temperature_value) if temperature_value is not None else None

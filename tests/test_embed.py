@@ -110,7 +110,7 @@ def test_embed_main_reports_invalid_embedding_config(
 def test_embed_settings_from_config(tmp_path: Path) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("experiment:\n  graph_dir: my_graphs\n", encoding="utf-8")
-    graph_dir, api_key, model, base_url = embed.load_image_embedding_settings(
+    graph_dir, api_key, model, base_url, timeout = embed.load_image_embedding_settings(
         config,
         graphs_override=None,
         api_key_override=None,
@@ -121,6 +121,7 @@ def test_embed_settings_from_config(tmp_path: Path) -> None:
     assert api_key is None
     assert model == "google/gemini-embedding-2"
     assert base_url == "https://openrouter.ai/api/v1"
+    assert timeout == 60.0
 
 
 def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> None:
@@ -135,7 +136,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
         "      api_key: config-key\n",
         encoding="utf-8",
     )
-    graph_dir, api_key, model, base_url = embed.load_image_embedding_settings(
+    graph_dir, api_key, model, base_url, timeout = embed.load_image_embedding_settings(
         config,
         graphs_override=None,
         api_key_override=None,
@@ -146,6 +147,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
     assert api_key == "config-key"
     assert model == "config-model"
     assert base_url == "https://config.googleapis.com/v1"
+    assert timeout == 60.0
 
     overridden = embed.load_image_embedding_settings(
         config,
@@ -159,6 +161,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
         "cli-key",
         "cli-model",
         "https://cli.example.com/v1",
+        60.0,
     )
 
 
@@ -168,7 +171,7 @@ def test_embed_settings_read_the_api_key_from_the_environment(
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     config = tmp_path / "explore.yaml"
     config.write_text("{}\n", encoding="utf-8")
-    _graph_dir, api_key, _model, _base_url = embed.load_image_embedding_settings(
+    _graph_dir, api_key, _model, _base_url, _timeout = embed.load_image_embedding_settings(
         config,
         graphs_override=None,
         api_key_override=None,

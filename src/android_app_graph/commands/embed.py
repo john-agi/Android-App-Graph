@@ -60,6 +60,7 @@ def precompute_graph_image_embeddings(
     base_url: str,
     app_name: str | None = None,
     recompute: bool = False,
+    request_timeout: float = 60.0,
 ) -> dict[str, int]:
     summary: dict[str, int] = {
         "graphs": 0,
@@ -70,7 +71,9 @@ def precompute_graph_image_embeddings(
         "skipped_failed": 0,
     }
 
-    with image_embedding_client(api_key, model=model, base_url=base_url) as client:
+    with image_embedding_client(
+        api_key, model=model, base_url=base_url, request_timeout=request_timeout
+    ) as client:
         for current_app_name, graph_path in iter_graph_files(graph_dir, app_name):
             summary["graphs"] += 1
             logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
@@ -131,7 +134,7 @@ def load_image_embedding_settings(
     api_key_override: str | None,
     model_override: str | None,
     base_url_override: str | None,
-) -> tuple[Path, str | None, str, str]:
+) -> tuple[Path, str | None, str, str, float]:
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
@@ -148,7 +151,7 @@ def load_image_embedding_settings(
         api_key_override=api_key_override,
         base_url_override=base_url_override,
     )
-    return graph_dir, settings.api_key, settings.model, settings.base_url
+    return graph_dir, settings.api_key, settings.model, settings.base_url, settings.request_timeout
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -207,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"config file not found: {args.config}")
 
     try:
-        graph_dir, api_key, model, base_url = load_image_embedding_settings(
+        graph_dir, api_key, model, base_url, request_timeout = load_image_embedding_settings(
             args.config.expanduser(),
             graphs_override=args.graphs.expanduser() if args.graphs else None,
             api_key_override=args.api_key,
@@ -235,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url=base_url,
         app_name=args.app,
         recompute=args.recompute,
+        request_timeout=request_timeout,
     )
     logger.info(
         "Done: graphs=%d reference_screenshots=%d already_cached=%d computed=%d "

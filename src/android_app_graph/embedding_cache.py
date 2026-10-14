@@ -23,6 +23,7 @@ from android_app_graph.utils import (
     resolve_endpoint_api_key,
     resolve_endpoint_base_url,
     resolve_env,
+    resolve_request_timeout,
     validate_embedding_config,
     validate_embedding_endpoint,
 )
@@ -42,6 +43,7 @@ class ImageEmbeddingSettings(NamedTuple):
     api_key: str | None
     model: str
     base_url: str
+    request_timeout: float = 60.0
 
 
 def resolve_image_embedding_settings(
@@ -80,7 +82,20 @@ def resolve_image_embedding_settings(
         (image_base_url, image_embedding_cfg.get("api_key")),
         (embedding_base_url, embedding_cfg.get("api_key")),
     )
-    return ImageEmbeddingSettings(api_key=api_key, model=model, base_url=base_url)
+    timeout = image_embedding_cfg.get(
+        "request_timeout",
+        image_embedding_cfg.get(
+            "timeout", embedding_cfg.get("request_timeout", embedding_cfg.get("timeout"))
+        ),
+    )
+    return ImageEmbeddingSettings(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        request_timeout=resolve_request_timeout(
+            {"request_timeout": timeout}, role="image_embedding"
+        ),
+    )
 
 
 def image_embeddings_path(graph_path: Path) -> Path:

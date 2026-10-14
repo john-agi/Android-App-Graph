@@ -227,22 +227,31 @@ not guarantee deterministic output.
 
 ### Requests and recovery
 
-Chat and text embedding roles accept `request_timeout` (or `timeout`) in seconds;
-requests default to 60 seconds and retry at most twice, after 2 and 4 seconds, for
+All model roles accept a positive, finite `request_timeout` (or `timeout`) in
+seconds. Image embeddings inherit the text embedding timeout unless overridden,
+in both runtime retrieval and `app-graph-embed`. Requests default to 60 seconds
+and retry at most twice, after 2 and 4 seconds, for
 transient HTTP failures, rate limits, transport timeouts and SDK validation
 failures on successful HTTP responses. Text embedding vector validation shares
 that same attempt budget, including empty and non-finite vectors. Permanent HTTP
 errors such as 400, 401 and 402 fail immediately. Page-description replies with
-non-object JSON are retried within that same attempt budget. Action-output parsing and
+invalid JSON, an empty or missing description, or malformed state/elements are
+retried within that same attempt budget; exhausted attempts raise before the
+graph is updated. Action-output parsing and
 conversion can request a corrected response within the same three-attempt
 budget, then fall back to a one-second wait if output remains malformed.
+Exploration counts waits toward `max_steps`, including recovery waits, so
+repeated malformed actions cannot keep the run alive indefinitely.
 SDK retries are disabled to avoid multiplying attempts; legacy SDK
 `max_retries` settings are superseded by this application retry budget.
 V2 planning caps each completion at 3000 tokens and permits one format-correction
 retry with a prompt reminder; each completion has its own request retry budget.
 Compatible chat endpoints may omit the nullable `system_fingerprint` field;
-other required response fields are still validated. Chat and embedding calls
-propagate persistent SDK validation failures after their bounded retries.
+other required response fields are still validated. All calls, including action
+prediction, propagate persistent SDK validation failures after their bounded
+retries. A broken endpoint response cannot become an action's fallback wait.
+The SDK is pinned to the tested version because the fingerprint compatibility
+hook uses its private hook interface; SDK upgrades require compatibility testing.
 Public endpoints honor environment proxy settings (including `NO_PROXY`);
 loopback endpoints such as `localhost`, `127.0.0.1` and `::1` connect directly
 for local forwarding.
@@ -252,6 +261,9 @@ authorization on redirects to another origin. Caller-supplied HTTP clients
 retain their own redirect and ownership policies. AITK connections are scoped
 to each `to_agent` callback because its translator interface has no teardown
 callback; retries and screenshot batches reuse connections within that scope.
+Nested operations keep their caller's connection open. Standalone public calls,
+including graph identification and navigation, open and close their own request
+scope when no outer scope is active.
 
 ### Upgrading provider configuration
 
@@ -311,7 +323,9 @@ provided; otherwise `up`, `down`, `left` or `right` works with omitted, null or
 one valid coordinate pair. Supplied malformed coordinates still trigger
 [action recovery](#requests-and-recovery). For swipes and long presses, a
 numeric `time` takes precedence over `duration`; the default is 1000 milliseconds.
-Explicit `end` and `terminate` actions still end the task.
+Unsupported swipe directions, unknown actions or system buttons, and type
+actions without a text string trigger the same bounded action recovery.
+Explicit `end` and `terminate` remain end signals for the calling runtime to handle.
 
 ## Explore an App
 
