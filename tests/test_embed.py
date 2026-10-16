@@ -85,28 +85,72 @@ def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFi
 @pytest.mark.parametrize(
     ("settings", "message"),
     [
-        ("native_base_url: https://generativelanguage.googleapis.com/v1beta", "native_base_url"),
-        ("base_url: https://generativelanguage.googleapis.com/v1beta", "native Google"),
-        ("base_url: invalid", "absolute HTTP or HTTPS"),
+        (
+            {
+                "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
+                "api_key": "${GEMINI_API_KEY}",
+            },
+            "image_embedding.native_base_url",
+        ),
+        ({"base_url": "https://generativelanguage.googleapis.com/v1beta"}, "native Google"),
+        ({"base_url": "invalid"}, "absolute HTTP or HTTPS"),
+        (
+            {"model": "provider/image", "timeout": "nan"},
+            "image_embedding.request_timeout must be a positive finite number",
+        ),
     ],
 )
 def test_embed_main_reports_invalid_embedding_config(
-    settings: str,
+    settings: dict[str, str],
     message: str,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     router_requests: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    secret = "dummy-google-secret-never-log"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
     config = tmp_path / "explore.yaml"
-    config.write_text(f"vlm:\n  image_embedding:\n    {settings}\n", encoding="utf-8")
+    config.write_text(json.dumps({"vlm": {"image_embedding": settings}}), encoding="utf-8")
     with pytest.raises(SystemExit) as caught:
         embed.main(["--config", str(config)])
     assert caught.value.code == 2
     stderr = capsys.readouterr().err
     assert "app-graph-embed: error:" in stderr
     assert message in stderr
+    assert secret not in stderr
     assert "Traceback" not in stderr
     assert router_requests == []
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_embed_main_sends_the_image_timeout_with_each_request(
+    tmp_path: Path,
+    owned_router_clients: list[httpx.Client],
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    _write_graph_tree(tmp_path)
+    config = tmp_path / "explore.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "vlm": {"image_embedding": {"request_timeout": 2.25}},
+                "experiment": {"graph_dir": str(tmp_path)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    assert embed.main(["--config", str(config), "--app", "demo"]) == 0
+    assert len(router_requests) == 1
+    assert router_requests[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 2.25
+    )
+    assert all(client.is_closed for client in owned_router_clients)
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -135,7 +179,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
         "  vlm_config:\n"
         "    image_embedding:\n"
         "      model: config-model\n"
-        "      base_url: https://config.googleapis.com/v1\n"
+        "      base_url: https://config.example/v1\n"
         "      api_key: config-key\n",
         encoding="utf-8",
     )
@@ -149,7 +193,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
     assert graph_dir == Path("from_translator")
     assert api_key == "config-key"
     assert model == "config-model"
-    assert base_url == "https://config.googleapis.com/v1"
+    assert base_url == "https://config.example/v1"
     assert timeout == 60.0
 
     overridden = embed.load_image_embedding_settings(
@@ -805,7 +849,7 @@ def test_precompute_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -
 
 
 @pytest.mark.usefixtures("image_router")
-def test_offline_sdk_recomputes_native_cache_using_shared_openrouter_key(
+def test_offline_sdk_recomputes_another_models_cache_using_shared_openrouter_key(
     tmp_path: Path,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],

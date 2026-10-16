@@ -10,22 +10,9 @@ import httpx
 import pytest
 from openrouter import OpenRouter
 
-from android_app_graph.embedding_cache import resolve_image_embedding_settings
 from android_app_graph.utils.graph_manager import GraphManager
 
 _CLICK = '{"action":"click","coordinate":[500,500]}'
-
-
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "https://generativelanguage.googleapis.com/v1beta",
-        "https://us-central1-aiplatform.googleapis.com/v1",
-    ],
-)
-def test_native_google_embedding_config_rejected_before_requests(endpoint: str) -> None:
-    with pytest.raises(ValueError, match=r"image_embedding.*OpenRouter"):
-        resolve_image_embedding_settings({"image_embedding": {"base_url": endpoint}})
 
 
 @pytest.mark.parametrize("storage", ["inline", "sidecar"])
@@ -114,35 +101,6 @@ def test_text_embedding_model_survives_save_load(
     manager.load_graph(path)
     router_responses.append(httpx.Response(200, json=embedding_body))
     assert manager.find_node_by_description("home") == [("home", pytest.approx(1.0))]
-
-
-@pytest.mark.parametrize("role", ["embedding", "image_embedding"])
-@pytest.mark.usefixtures("model_environment")
-def test_legacy_native_url_rejected_before_requests(
-    role: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from android_app_graph.commands import embed
-
-    secret = "dummy-google-secret-never-log"
-    monkeypatch.setenv("GEMINI_API_KEY", secret)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router-key")
-    path = tmp_path / "legacy.yaml"
-    path.write_text(
-        f"vlm:\n  {role}:\n    native_base_url: https://generativelanguage.googleapis.com/v1beta\n    api_key: '${{GEMINI_API_KEY}}'\n    model: gemini-embedding-2\n"
-    )
-    with pytest.raises(ValueError, match=rf"{role}\.native_base_url") as caught:
-        embed.load_image_embedding_settings(
-            path,
-            graphs_override=None,
-            api_key_override=None,
-            model_override=None,
-            base_url_override=None,
-        )
-    assert secret not in str(caught.value)
-    assert "base_url" in str(caught.value)
-    assert "OPENROUTER_API_KEY" in str(caught.value)
 
 
 @pytest.mark.parametrize("exceptional", [False, True])
