@@ -1,9 +1,9 @@
 """Tests for android_app_graph.retrying.call_with_retry.
 
-The single retry-with-backoff policy shared by adapters.aitk_translator (chat
-completion, page describe/state, action agent) and
-embedding_cache.compute_embedding_with_retry; this module owns its tests so
-the callers cannot drift on the policy.
+The single retry-with-backoff policy shared by utils.vlm_utils (chat
+completions, page descriptions, text embeddings, action responses) and
+embedding_cache.compute_embedding_with_retry; this module owns its tests,
+including which SDK errors are retried, so the callers cannot drift on it.
 """
 
 from __future__ import annotations
