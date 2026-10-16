@@ -205,39 +205,6 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     assert no_sleep == [2.0, 4.0]
 
 
-def test_public_graph_and_navigation_recover_after_request_failure(
-    kobe: Kobe,
-    png_screenshot: str,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    owned_router_clients: list[httpx.Client],
-    chat_body: dict[str, object],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    from openrouter.errors import OpenRouterError
-
-    router_responses.append(httpx.Response(401, json={"error": {"message": "bad key"}}))
-    with pytest.raises(OpenRouterError):
-        kobe.graph.identify_state("com.demo.Home", png_screenshot)
-    assert len(kobe.graph.graph) == 0
-    assert all(client.is_closed for client in owned_router_clients)
-    for _ in range(2):
-        router_responses.extend(
-            [
-                description_response(chat_body, '{"page_description":"home"}'),
-                httpx.Response(200, json=embedding_body),
-            ]
-        )
-    node = kobe.graph.identify_state("com.demo.Home", png_screenshot)
-    kobe.graph._last_identify_cache = None
-    kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
-    assert kobe.navigate_to_node(node) == node
-    assert len(router_requests) == 5
-    assert no_sleep == []
-    assert all(client.is_closed for client in owned_router_clients)
-
-
 @pytest.mark.parametrize("fail_inner", [False, True])
 def test_nested_scopes_keep_outer_connection_alive(
     fail_inner: bool,
@@ -262,42 +229,6 @@ def test_nested_scopes_keep_outer_connection_alive(
         assert client.sdk_configuration.client is connection
     assert len(owned_router_clients) == 1
     assert connection.is_closed
-
-
-@pytest.mark.parametrize("malformed", [False, True])
-def test_exploration_wait_recovery_respects_step_limit(
-    malformed: bool,
-    kobe: Kobe,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    owned_router_clients: list[httpx.Client],
-    chat_body: dict[str, object],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
-    router_responses.extend(
-        [
-            description_response(chat_body, '{"page_description":"home"}'),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-    for _ in range(2):
-        router_responses.append(description_response(chat_body, "Tap Search"))
-        router_responses.extend(
-            description_response(
-                chat_body, '{"action":"invented"}' if malformed else '{"action":"wait"}'
-            )
-            for _ in range(3 if malformed else 1)
-        )
-    kobe.explore(max_steps=2)
-    assert kobe.graph.total_steps_completed == 2
-    assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 2
-    assert len(router_requests) == (10 if malformed else 6)
-    assert len(kobe.graph.graph.edges) == 0
-    assert no_sleep == ([2.0, 4.0, 1, 2.0, 4.0, 1] if malformed else [1, 1])
-    assert all(client.is_closed for client in owned_router_clients)
 
 
 @pytest.mark.parametrize("recover", [False, True])

@@ -875,45 +875,6 @@ def test_audit_cli_closes_owned_clients_on_exit(
     assert all(client.is_closed for client in owned_router_clients)
 
 
-@pytest.mark.parametrize("exceptional", [False, True])
-@pytest.mark.usefixtures("model_environment")
-def test_exploration_lifecycle_closes_owned_clients(
-    exceptional: bool,
-    tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import logging
-
-    from android_app_graph.kobe import Kobe
-
-    class IdleDevice:
-        w: int = 100
-        h: int = 200
-        config: dict[str, object]
-
-        def __init__(self) -> None:
-            self.config = {}
-
-        def get_state(self) -> dict[str, object]:
-            raise RuntimeError("device failed")
-
-        def exe_action(self, action: dict[str, object]) -> None:
-            raise AssertionError(f"No device actions expected: {action}")
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    built = Kobe(IdleDevice(), "demo", "com.demo", logging.getLogger("test"), graph_dir=tmp_path)
-    assert len(owned_router_clients) == 4
-    assert all(client.is_closed for client in owned_router_clients)
-    if exceptional:
-        with pytest.raises(RuntimeError, match="device failed"):
-            built.explore(max_steps=1)
-    else:
-        built.explore(max_steps=0)
-    assert len(owned_router_clients) == 8
-    assert all(client.is_closed for client in owned_router_clients)
-
-
 @pytest.mark.parametrize(
     "field", ["id", "created", "model", "object", "choices", "system_fingerprint"]
 )

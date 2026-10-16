@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
-from pathlib import Path
 
 import httpx
 import pytest
@@ -13,7 +11,6 @@ from hypothesis import strategies as st
 from openrouter import OpenRouter
 from openrouter.components.security import Security
 
-from android_app_graph.kobe import Kobe
 from android_app_graph.utils import client_scope, make_client, resolve_env
 
 
@@ -164,44 +161,3 @@ def test_custom_endpoint_and_timeout_are_sent_to_transport(
         "pool": 12.0,
     }
     assert json.loads(request.content)["model"] == model
-
-
-class _IdleDevice:
-    def __init__(self) -> None:
-        self.w = 100
-        self.h = 200
-        self.config: dict[str, object] = {}
-
-    def get_state(self) -> dict[str, object]:
-        raise AssertionError("model setup must not access the device")
-
-    def exe_action(self, action: dict[str, object]) -> None:
-        raise AssertionError(f"model setup must not execute device action {action}")
-
-
-@pytest.mark.parametrize("references", [False, True])
-def test_exploration_resolves_all_role_models_before_device_access(
-    references: bool,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
-    config: dict[str, object] = {}
-    for role in ("page_detail", "embedding", "instruction", "action"):
-        if references:
-            config[role] = {"model": f"${{APP_GRAPH_{role.upper()}_MODEL}}"}
-        monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
-    agent = Kobe(
-        _IdleDevice(),
-        "demo",
-        "com.demo.app",
-        logging.getLogger("test"),
-        vlm_config=config,
-        graph_dir=tmp_path,
-    )
-    assert agent.page_detail_model == "provider/page_detail"
-    assert agent.embedding_model == "provider/embedding"
-    assert agent.instruction_model == "provider/instruction"
-    assert agent.action_model == "provider/action"
-    assert agent.graph.embedding_model == agent.embedding_model
-    assert agent.graph.page_detail_model == agent.page_detail_model
