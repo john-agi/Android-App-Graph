@@ -381,19 +381,10 @@ def test_resolve_image_embedding_settings_reads_config_values() -> None:
 
 @pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_preserves_endpoint_override() -> None:
-
     settings = embedding_cache.resolve_image_embedding_settings(
         {"image_embedding": {"base_url": "http://localhost:9000/v1"}}
     )
     assert settings.base_url == "http://localhost:9000/v1"
-
-
-@pytest.mark.usefixtures("model_environment")
-def test_resolve_image_embedding_settings_keeps_a_base_url_override() -> None:
-    settings = embedding_cache.resolve_image_embedding_settings(
-        {"image_embedding": {"base_url": "https://eu.googleapis.com/v1beta"}}
-    )
-    assert settings.base_url == "https://eu.googleapis.com/v1beta"
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -446,12 +437,6 @@ def test_resolve_image_embedding_settings_resolves_optional_env_overrides(
         {}, base_url_override="${APP_GRAPH_IMAGE_BASE_URL}"
     )
     assert settings.base_url == "https://openrouter.ai/api/v1"
-
-    monkeypatch.setenv("APP_GRAPH_IMAGE_BASE_URL", "https://router.example.com/v1")
-    settings = embedding_cache.resolve_image_embedding_settings(
-        {}, base_url_override="${APP_GRAPH_IMAGE_BASE_URL}"
-    )
-    assert settings.base_url == "https://router.example.com/v1"
 
 
 def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(

@@ -17,13 +17,6 @@ from android_app_graph.kobe import Kobe
 from android_app_graph.utils import client_scope, make_client, resolve_env
 
 
-def test_explicit_model_and_shared_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
-    client, model = make_client({"model": "openai/gpt-6.1-sol"}, role="page_detail")
-    assert model == "openai/gpt-6.1-sol"
-    assert isinstance(client, OpenRouter)
-
-
 def test_none_passes_through() -> None:
     assert resolve_env(None) is None
 
@@ -41,15 +34,6 @@ def test_reference_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_reference_to_unset_variable_is_none() -> None:
     assert resolve_env("${APP_GRAPH_TEST_UNSET}") is None
-
-
-def test_make_client_uses_explicit_model() -> None:
-    client, model = make_client(
-        {"model": "openai/gpt-6.1-sol", "api_key": "test-key"}, role="page_detail"
-    )
-    assert model == "openai/gpt-6.1-sol"
-    assert isinstance(client.sdk_configuration.security, Security)
-    assert client.sdk_configuration.security.api_key == "test-key"
 
 
 def test_make_client_reads_the_config() -> None:

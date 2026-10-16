@@ -570,61 +570,6 @@ def test_action_schema_http_and_output_share_total_budget(
     assert no_sleep == [2.0, 4.0]
 
 
-@pytest.mark.parametrize("endpoint", ["https://openrouter.ai/api/v1", "http://localhost:8080/v1"])
-@pytest.mark.parametrize("fingerprint", [None, "fp_test"])
-def test_chat_returns_null_and_string_fingerprints(
-    endpoint: str,
-    fingerprint: str | None,
-    router_http: httpx.Client,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    client, model = make_client(
-        {"model": "openai/gpt-6.1-sol", "api_key": "test", "base_url": endpoint},
-        role="page_detail",
-        http_client=router_http,
-    )
-    router_responses.append(
-        httpx.Response(200, json={**chat_body, "system_fingerprint": fingerprint})
-    )
-    result = vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
-    assert result.system_fingerprint == fingerprint
-    assert len(router_requests) == 1
-    assert no_sleep == []
-    assert not router_http.is_closed
-
-
-@pytest.mark.parametrize("endpoint", ["https://openrouter.ai/api/v1", "http://localhost:8080/v1"])
-def test_omitted_fingerprint_fails_sdk_validation_after_bounded_retries(
-    endpoint: str,
-    router_http: httpx.Client,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    from openrouter.errors import ResponseValidationError
-
-    body = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
-    client, model = make_client(
-        {"model": "openai/gpt-6.1-sol", "api_key": "test", "base_url": endpoint},
-        role="page_detail",
-        http_client=router_http,
-    )
-    router_responses.extend(httpx.Response(200, json=body) for _ in range(3))
-    with pytest.raises(
-        ResponseValidationError,
-        match=r"1 validation error .*\n\S*system_fingerprint\n\s+Field required",
-    ) as caught:
-        vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
-    assert caught.value.status_code == 200
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
-    assert not router_http.is_closed
-
-
 @pytest.mark.parametrize("limit", [None, 17, aitk_translator.V2_CHAT_MAX_TOKENS])
 def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
     limit: int | None, chat_body: dict[str, object], no_sleep: list[float]

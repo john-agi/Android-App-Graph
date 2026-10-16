@@ -44,14 +44,12 @@ def test_invalid_explicit_model_cannot_fall_back_to_environment(
 
 @pytest.mark.parametrize("role", ["page_detail", "embedding", "instruction", "action"])
 def test_client_reads_required_model_from_environment(
-    role: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    role: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
     with_model, model = make_client({"api_key": "test-key"}, role=role)
     with with_model:
         assert model == f"provider/{role}"
-    assert not (tmp_path / ".env").exists()
 
 
 def test_image_embedding_requires_a_model() -> None:

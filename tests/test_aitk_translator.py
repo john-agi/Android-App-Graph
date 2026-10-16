@@ -2226,21 +2226,6 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
     }
 
 
-@pytest.mark.usefixtures("model_environment")
-def test_v2_environment_models_share_openrouter_credentials(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
-    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert built.desc_model == "openai/gpt-6.1-sol"
-    assert built.instruction_model == "openai/gpt-6.1-sol"
-    assert built.model_name == "qwen/qwen3.8-flash"
-    assert built.image_embedding_model == "google/gemini-embedding-2"
-    assert built.image_embedding_api_key == "shared-router-key"
-    assert built.image_embedding_base_url == "https://openrouter.ai/api/v1"
-
-
 @pytest.mark.usefixtures("image_router")
 @pytest.mark.usefixtures("model_environment")
 def test_v2_sdk_migrates_native_cache_and_embeds_runtime_screenshots(

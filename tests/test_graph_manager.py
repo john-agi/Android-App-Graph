@@ -414,10 +414,11 @@ def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
 def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     vlm: FakeVlm, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A node whose description embedding was computed under a different
-    embedding_model dimension must never be scored against the fresh query
-    vector (see cosine_similarity's ValueError); it is skipped and warned
-    about once, not once per candidate.
+    """A vector tagged with the configured embedding model but of a different
+    dimension must never be scored against the fresh query vector (see
+    cosine_similarity's ValueError); it is skipped and warned about once, not
+    once per candidate. A vector tagged with a different model never gets
+    here: its provenance is rejected first.
     """
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
