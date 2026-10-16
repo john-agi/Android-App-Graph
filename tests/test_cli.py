@@ -1,7 +1,8 @@
-"""app-graph argument parsing, exercised without AITK, adb or an emulator."""
+"""app-graph argument parsing, model checks and run order, without AITK, adb or an emulator."""
 
 from __future__ import annotations
 
+import builtins
 import json
 import logging
 import sys
@@ -111,3 +112,31 @@ def test_main_passes_resolved_models_to_exploration(
     )
     main()
     assert events == ["avd", "device", "terminate", "launch", "explore", "save"]
+
+
+def test_explorer_reports_all_missing_models_before_importing_device_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "explore.yaml"
+    config.write_text("vlm: {}\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["app-graph", "--config", str(config)])
+    original_import = builtins.__import__
+
+    def guarded_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> object:
+        assert not name.startswith("aitk"), "configuration must be checked before device setup"
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with pytest.raises(SystemExit) as caught:
+        main()
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    for role in ("PAGE_DETAIL", "EMBEDDING", "INSTRUCTION", "ACTION"):
+        assert f"APP_GRAPH_{role}_MODEL" in error
+    assert "Traceback" not in error
