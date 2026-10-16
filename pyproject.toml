@@ -9,7 +9,9 @@ description = "Android-App-Graph: graph-based Android app exploration and runtim
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.14"
+# openrouter requires pydantic<2.13, whose pydantic-core cannot build on Python 3.15;
+# lift this cap once an openrouter release allows pydantic>=2.14.
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "networkx>=3.7",
     "pyyaml>=6.0.3",
