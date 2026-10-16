@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -16,35 +17,7 @@ from android_app_graph.embedding_cache import resolve_image_embedding_settings
 from android_app_graph.utils import make_client, vlm_utils
 from android_app_graph.utils.graph_manager import GraphManager
 
-
-def action_response(
-    body: dict[str, object], content: str, *, native: bool = False
-) -> httpx.Response:
-    message: dict[str, object] = {"role": "assistant", "content": content}
-    if native:
-        message["tool_calls"] = [
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {
-                    "name": "mobile_action",
-                    "arguments": '{"action":"click","coordinate":[500,500]}',
-                },
-            }
-        ]
-    return httpx.Response(
-        200,
-        json={
-            **body,
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "tool_calls" if native else "stop",
-                    "message": message,
-                }
-            ],
-        },
-    )
+_CLICK = '{"action":"click","coordinate":[500,500]}'
 
 
 @pytest.mark.parametrize("content", ["[]", "null", '"screen"', "42", "true"])
@@ -53,14 +26,14 @@ def test_page_description_retries_non_object_json(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend(
         [
-            action_response(chat_body, content),
-            action_response(chat_body, '{"page_description":"home","state":{},"elements":[]}'),
+            chat_response(content=content),
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
         ]
     )
     assert vlm_utils.describe_page_and_state(
@@ -76,15 +49,15 @@ def test_page_description_http_and_parse_errors_share_one_budget(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend(
         [
             httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}),
-            action_response(chat_body, "[]"),
-            action_response(chat_body, '{"page_description":"home"}' if recover else "null"),
+            chat_response(content="[]"),
+            chat_response(content='{"page_description":"home"}' if recover else "null"),
         ]
     )
     if recover:
@@ -119,14 +92,14 @@ def test_malformed_action_requests_another_response(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend(
         [
-            action_response(chat_body, first),
-            action_response(chat_body, '{"action":"click","coordinate":[500,500]}'),
+            chat_response(content=first),
+            chat_response(content='{"action":"click","coordinate":[500,500]}'),
         ]
     )
     action, _ = vlm_utils.predict_next_action(
@@ -141,15 +114,15 @@ def test_action_http_and_parse_failures_share_one_budget(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend(
         [
             httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}),
-            action_response(chat_body, '{"action":"click","coordinate":["500","500"]}'),
-            action_response(chat_body, '{"action":"wait"}'),
+            chat_response(content='{"action":"click","coordinate":["500","500"]}'),
+            chat_response(content='{"action":"wait"}'),
         ]
     )
     assert vlm_utils.predict_next_action(
@@ -245,13 +218,13 @@ def test_action_text_observations_survive_native_calls(
     native: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
     png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     text = (
         'Thought: Search is visible\nAction: Tap Search\n<tool_call>{"action":"wait"}</tool_call>'
     )
-    router_responses.append(action_response(chat_body, text, native=native))
+    router_responses.append(chat_response(content=text, tool_arguments=_CLICK if native else None))
     action, history = vlm_utils.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
@@ -292,6 +265,7 @@ def test_temperatures_are_independent_across_roles(
     chat_body: dict[str, object],
     png_screenshot: str,
     monkeypatch: pytest.MonkeyPatch,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     def factory(cfg: dict[str, object] | None, *, role: str) -> tuple[OpenRouter, str]:
         return make_client(cfg, role=role, http_client=router_http)
@@ -307,8 +281,8 @@ def test_temperatures_are_independent_across_roles(
     )
     router_responses.extend(
         [
-            action_response(chat_body, '{"action":"wait"}'),
-            action_response(chat_body, '{"page_description":"home","state":{},"elements":[]}'),
+            chat_response(content='{"action":"wait"}'),
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
             httpx.Response(200, json=chat_body),
         ]
     )
@@ -330,12 +304,12 @@ def test_malformed_action_exhausts_budget_and_falls_back(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend(
-        action_response(chat_body, '{"action":"click","coordinate":["bad",500]}') for _ in range(3)
+        chat_response(content='{"action":"click","coordinate":["bad",500]}') for _ in range(3)
     )
     assert vlm_utils.predict_next_action(
         router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
@@ -387,9 +361,9 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     embedding_body: dict[str, object],
     png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     path = tmp_path / "demo.json"
     node: dict[str, object] = {
@@ -422,7 +396,7 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
     manager.load_graph(path)
     router_responses.extend(
         [
-            action_response(chat_body, '{"page_description":"home","state":{},"elements":[]}'),
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
             httpx.Response(200, json=embedding_body),
         ]
         if operation == "identify"
@@ -476,6 +450,7 @@ def test_sdk_validation_uses_bounded_application_recovery(
     embedding_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     from openrouter.errors import ResponseValidationError
 
@@ -486,7 +461,7 @@ def test_sdk_validation_uses_bounded_application_recovery(
         router_responses.append(
             httpx.Response(200, json=good)
             if operation != "action"
-            else action_response(chat_body, '{"action":"wait","time":2}')
+            else chat_response(content='{"action":"wait","time":2}')
         )
 
     def request() -> object:
@@ -537,6 +512,7 @@ def test_action_schema_http_and_output_share_total_budget(
     chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     bad = {key: value for key, value in chat_body.items() if key != "model"}
     http_error = httpx.Response(503, json={"error": {"code": 503, "message": "busy"}})
@@ -545,9 +521,9 @@ def test_action_schema_http_and_output_share_total_budget(
             http_error,
             httpx.Response(200, json=bad),
             {
-                "success": action_response(chat_body, '{"action":"click","coordinate":[500,300]}'),
+                "success": chat_response(content='{"action":"click","coordinate":[500,300]}'),
                 "schema": httpx.Response(200, json=bad),
-                "output": action_response(chat_body, "unreadable"),
+                "output": chat_response(content="unreadable"),
                 "http": http_error,
             }[last],
         ]
@@ -632,20 +608,16 @@ def test_malformed_coordinates_recover_or_wait(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    response = action_response(chat_body, json.dumps(args), native=native)
-    if native:
-        body = response.json()
-        body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = json.dumps(args)
-        response = httpx.Response(200, json=body)
-    router_responses.extend(response for _ in range(1 if recover else 3))
+    router_responses.extend(
+        chat_response(content=json.dumps(args), tool_arguments=json.dumps(args) if native else None)
+        for _ in range(1 if recover else 3)
+    )
     if recover:
-        router_responses.append(
-            action_response(chat_body, '{"action":"click","coordinate":[500,300]}')
-        )
+        router_responses.append(chat_response(content='{"action":"click","coordinate":[500,300]}'))
     action, _ = vlm_utils.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
@@ -902,18 +874,15 @@ def test_multipart_content_preserves_text_and_native_actions(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    body = action_response(
-        chat_body,
-        'Thought: Search\nAction: Tap\n<tool_call>{"action":"click","coordinate":[500,500]}</tool_call>',
-        native=native,
-    ).json()
-    body["choices"][0]["message"]["content"] = [
-        {"type": "text", "text": body["choices"][0]["message"]["content"]}
-    ]
-    router_responses.append(httpx.Response(200, json=body))
+    text = 'Thought: Search\nAction: Tap\n<tool_call>{"action":"click","coordinate":[500,500]}</tool_call>'
+    router_responses.append(
+        chat_response(
+            content=[{"type": "text", "text": text}], tool_arguments=_CLICK if native else None
+        )
+    )
     action, history = vlm_utils.predict_next_action(
         router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
     )
@@ -1031,16 +1000,16 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    body = action_response(
-        chat_body, f"<tool_call>{json.dumps(args)}</tool_call>", native=native
-    ).json()
-    if native:
-        body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = json.dumps(args)
-    router_responses.append(httpx.Response(200, json=body))
+    router_responses.append(
+        chat_response(
+            content=f"<tool_call>{json.dumps(args)}</tool_call>",
+            tool_arguments=json.dumps(args) if native else None,
+        )
+    )
     assert (
         vlm_utils.predict_next_action(
             router_client,

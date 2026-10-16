@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -13,22 +14,6 @@ from android_app_graph.adapters import aitk_translator
 from android_app_graph.commands import embed
 from android_app_graph.kobe import Kobe
 from android_app_graph.utils import make_client, vlm_utils
-
-
-def description_response(body: dict[str, object], text: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            **body,
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": text},
-                }
-            ],
-        },
-    )
 
 
 @pytest.fixture
@@ -159,6 +144,7 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     png_screenshot: str,
     no_sleep: list[float],
     monkeypatch: pytest.MonkeyPatch,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     from openrouter.errors import ResponseValidationError
 
@@ -171,8 +157,8 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     for turn in range(2):
         router_responses.extend(
             [
-                description_response(chat_body, "nothing"),
-                description_response(chat_body, "Tap Search"),
+                chat_response(content="nothing"),
+                chat_response(content="Tap Search"),
             ]
         )
         if turn == 0:
@@ -181,12 +167,12 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
                     200, json={key: val for key, val in chat_body.items() if key != "id"}
                 )
                 if schema_failure
-                else description_response(chat_body, '{"action":"system_button","button":"Power"}')
+                else chat_response(content='{"action":"system_button","button":"Power"}')
                 for _ in range(3)
             )
         else:
             router_responses.append(
-                description_response(chat_body, '{"action":"click","coordinate":[500,500]}')
+                chat_response(content='{"action":"click","coordinate":[500,500]}')
             )
         if turn == 0 and schema_failure:
             with pytest.raises(ResponseValidationError):
@@ -250,18 +236,16 @@ def test_malformed_description_cannot_become_a_graph_node(
     png_screenshot: str,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     embedding_body: dict[str, object],
     no_sleep: list[float],
     owned_router_clients: list[httpx.Client],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.extend(
-        description_response(chat_body, malformed) for _ in range(1 if recover else 3)
-    )
+    router_responses.extend(chat_response(content=malformed) for _ in range(1 if recover else 3))
     if recover:
         router_responses.extend(
             [
-                description_response(chat_body, '{"page_description":"home"}'),
+                chat_response(content='{"page_description":"home"}'),
                 httpx.Response(200, json=embedding_body),
             ]
         )

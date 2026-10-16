@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -206,14 +207,11 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
     png_screenshot: str,
     tracked_usage: vlm.TokenTracker,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    chat_body["choices"] = [
-        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}
-    ]
-    router_responses.append(httpx.Response(200, json=chat_body))
+    router_responses.append(chat_response(content=content))
     result: object
     match operation:
         case "page":
@@ -272,26 +270,13 @@ def test_native_tool_calls_survive_sdk_parsing(
     content: str | None,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
     png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    message: dict[str, object] = {
-        "role": "assistant",
-        "tool_calls": [
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {
-                    "name": "mobile_action",
-                    "arguments": '{"action":"click","coordinate":[500,500]}',
-                },
-            }
-        ],
-    }
-    if content != "omitted":
-        message["content"] = content
-    chat_body["choices"] = [{"index": 0, "finish_reason": "tool_calls", "message": message}]
-    router_responses.append(httpx.Response(200, json=chat_body))
+    message: dict[str, object] = {} if content == "omitted" else {"content": content}
+    router_responses.append(
+        chat_response(tool_arguments='{"action":"click","coordinate":[500,500]}', **message)
+    )
     action, _ = vlm.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
@@ -306,13 +291,11 @@ def test_sdk_assistant_content_variants(
     content: object,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    message = {"role": "assistant"}
-    if content != "omitted":
-        message["content"] = content
-    chat_body["choices"] = [{"index": 0, "finish_reason": "stop", "message": message}]
-    router_responses.append(httpx.Response(200, json=chat_body))
+    router_responses.append(
+        chat_response() if content == "omitted" else chat_response(content=content)
+    )
     response = vlm.send_chat(
         router_client, model="provider/other", messages=[{"role": "user", "content": "hi"}]
     )

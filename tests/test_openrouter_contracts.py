@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -32,29 +33,17 @@ def test_directional_swipes_accept_optional_coordinates(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    args = {"action": "swipe", "direction": direction, **coordinates}
-    message: dict[str, object] = {"role": "assistant", "content": json.dumps(args)}
-    if native:
-        message = {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "swipe",
-                    "type": "function",
-                    "function": {"name": "mobile_use", "arguments": json.dumps(args)},
-                }
-            ],
-        }
-    body = {
-        **chat_body,
-        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
-    }
-    router_responses.extend(httpx.Response(200, json=body) for _ in range(3))
+    arguments = json.dumps({"action": "swipe", "direction": direction, **coordinates})
+    router_responses.extend(
+        chat_response(content=None, tool_arguments=arguments)
+        if native
+        else chat_response(content=arguments)
+        for _ in range(3)
+    )
     action, _ = vlm_utils.predict_next_action(
         router_client,
         png_screenshot,
@@ -148,9 +137,9 @@ def test_graph_preflight_allows_empty_vectors_and_unrelated_packages(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     embedding_body: dict[str, object],
     png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     manager = GraphManager(
         page_detail_client=router_client,
@@ -163,21 +152,11 @@ def test_graph_preflight_allows_empty_vectors_and_unrelated_packages(
         activity="com.other.Home" if other_package else "com.demo.Home",
         description_embedding=[0.25, 0.75] if other_package else [],
     )
-    body = {
-        **chat_body,
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {
-                    "role": "assistant",
-                    "content": '{"page_description":"home","state":{},"elements":[]}',
-                },
-            }
-        ],
-    }
     router_responses.extend(
-        [httpx.Response(200, json=body), httpx.Response(200, json=embedding_body)]
+        [
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
+            httpx.Response(200, json=embedding_body),
+        ]
     )
     node = manager.identify_state("com.demo.Home", png_screenshot)
     assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model

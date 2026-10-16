@@ -1,4 +1,5 @@
-"""Shared pytest configuration: Hypothesis profiles, credential and network guards."""
+"""Shared pytest configuration: Hypothesis profiles, credential and network guards,
+and fixtures that answer OpenRouter SDK requests from an offline mock transport."""
 
 from __future__ import annotations
 
@@ -24,15 +25,15 @@ from android_app_graph.utils import make_client, vlm_utils
 settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
 
-_CREDENTIAL_PREFIXES = ("APP_GRAPH_",)
-_CREDENTIAL_NAMES = frozenset(
-    {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"}
-)
+# The OpenRouter SDK also reads OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPEN_ROUTER_* and
+# OPENROUTER_DEBUG, so the whole prefix is cleared, not only the key.
+_CREDENTIAL_PREFIXES = ("APP_GRAPH_", "OPENROUTER_")
+_CREDENTIAL_NAMES = frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"})
 
 
 @pytest.fixture(autouse=True)
 def _clear_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove provider credentials so tests can never use real keys or endpoints."""
+    """Remove provider credentials and SDK settings so tests never use real keys or endpoints."""
     for name in list(os.environ):
         if name.startswith(_CREDENTIAL_PREFIXES) or name in _CREDENTIAL_NAMES:
             monkeypatch.delenv(name)
@@ -71,7 +72,7 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record retry back-off delays instead of waiting for them.
 
     The retry-with-backoff policy (android_app_graph.retrying, used by
-    adapters.aitk_translator and embedding_cache) does ``import time`` and calls
+    utils.vlm_utils and embedding_cache) does ``import time`` and calls
     ``time.sleep(...)``, so patching the shared stdlib module here covers every
     caller of it without a per-caller fixture.
     """
