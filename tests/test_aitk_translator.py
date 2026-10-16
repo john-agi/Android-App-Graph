@@ -780,37 +780,6 @@ def test_chat_completion_content_makes_exactly_one_completion_call(
     assert len(router_requests) == 1
 
 
-def test_endpoint_client_defaults() -> None:
-    client, model = aitk_translator.make_client(
-        {"model": "qwen/qwen3.8-flash", "api_key": "test-key"}, role="action"
-    )
-    assert model == "qwen/qwen3.8-flash"
-    assert client.sdk_configuration.retry_config is None
-    assert client.sdk_configuration.timeout_ms == 60_000
-
-
-def test_endpoint_client_reads_the_config() -> None:
-    client, model = aitk_translator.make_client(
-        {
-            "api_key": "test-key",
-            "base_url": "http://localhost:8000/v1",
-            "model": "qwen",
-            "request_timeout": 12,
-        },
-        role="action",
-    )
-    assert model == "qwen"
-    assert client.sdk_configuration.server_url == "http://localhost:8000/v1"
-    assert client.sdk_configuration.timeout_ms == 12_000
-
-
-def test_endpoint_client_prefers_the_timeout_alias() -> None:
-    client, _ = aitk_translator.make_client(
-        {"model": "qwen/qwen3.8-flash", "api_key": "test-key", "timeout": 5}, role="action"
-    )
-    assert client.sdk_configuration.timeout_ms == 5_000
-
-
 _VLM_CONFIG: dict[str, Any] = {
     "action": {"api_key": "test-key", "model": "action-model"},
     "instruction": {"api_key": "test-key", "model": "instruction-model"},

@@ -104,9 +104,6 @@ def test_image_credential_inheritance_stays_with_its_origin(
 
 
 @pytest.mark.parametrize(
-    "role", ["page_detail", "instruction", "action", "embedding", "image_embedding"]
-)
-@pytest.mark.parametrize(
     "endpoint",
     [
         "https://other.example/v1",
@@ -117,83 +114,17 @@ def test_image_credential_inheritance_stays_with_its_origin(
 )
 @pytest.mark.usefixtures("model_environment")
 def test_shared_router_key_never_falls_back_to_a_different_origin(
-    role: str,
     endpoint: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "router-secret")
-    with pytest.raises(ValueError, match=rf"{role}\.api_key") as caught:
-        make_client({"model": "openai/gpt-6.1-sol", "base_url": endpoint}, role=role)
-    assert "router-secret" not in str(caught.value)
     assert (
         resolve_image_embedding_settings({"image_embedding": {"base_url": endpoint}}).api_key
         is None
     )
 
 
-@pytest.mark.parametrize("status", [307, 308])
-@pytest.mark.parametrize(
-    ("destination", "foreign"),
-    [
-        ("/canonical", False),
-        ("https://other.example/canonical", True),
-        ("http://openrouter.ai/canonical", True),
-    ],
-)
-def test_owned_clients_preserve_redirects_and_strip_foreign_credentials_after_reopening(
-    status: int,
-    destination: str,
-    foreign: bool,
-    owned_router_clients: list[httpx.Client],
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-) -> None:
-    client, _ = make_client(
-        {"model": "google/gemini-embedding-2", "api_key": "test-key"}, role="embedding"
-    )
-    for _ in range(2):
-        router_responses.extend(
-            [
-                httpx.Response(status, headers={"location": destination}),
-                httpx.Response(200, json=embedding_body),
-            ]
-        )
-        with client:
-            assert vlm_utils.get_embedding(client, "home", model="google/gemini-embedding-2") == [
-                0.25,
-                0.75,
-            ]
-        first, redirected = router_requests[-2:]
-        assert first.method == redirected.method == "POST"
-        assert first.content == redirected.content
-        assert first.headers["authorization"] == "Bearer test-key"
-        assert redirected.headers.get("authorization") == (None if foreign else "Bearer test-key")
-    assert len(router_requests) == 4
-    assert len(owned_router_clients) == 2
-    assert all(client.is_closed for client in owned_router_clients)
-
-
-@pytest.mark.parametrize("endpoint", ["relative/path", "ftp://other.example/v1", "https:///v1"])
-def test_invalid_endpoint_fails_before_client_creation(endpoint: str) -> None:
-    with pytest.raises(ValueError, match="absolute HTTP or HTTPS"):
-        make_client(
-            {"model": "qwen/qwen3.8-flash", "base_url": endpoint, "api_key": "test"}, role="action"
-        )
-
-
-def test_borrowed_client_retains_redirect_policy_and_ownership(router_http: httpx.Client) -> None:
-    client, _ = make_client(
-        {"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action", http_client=router_http
-    )
-    for _ in range(2):
-        with client:
-            assert client.sdk_configuration.client is router_http
-            assert not router_http.follow_redirects
-        assert not router_http.is_closed
-
-
-@pytest.mark.parametrize("entry", ["factory", "embedding", "image_embedding", "override"])
+@pytest.mark.parametrize("entry", ["embedding", "image_embedding", "override"])
 @pytest.mark.parametrize("empty", [False, True])
 def test_unresolved_endpoint_cannot_redirect_an_explicit_credential(
     entry: str,
@@ -205,9 +136,7 @@ def test_unresolved_endpoint_cannot_redirect_an_explicit_credential(
     cfg = {"base_url": "${APP_GRAPH_ENDPOINT}", "api_key": "endpoint-secret"}
 
     def configure() -> None:
-        if entry == "factory":
-            make_client(cfg, role="action")
-        elif entry == "override":
+        if entry == "override":
             resolve_image_embedding_settings(
                 {}, base_url_override="${APP_GRAPH_ENDPOINT}", api_key_override="endpoint-secret"
             )

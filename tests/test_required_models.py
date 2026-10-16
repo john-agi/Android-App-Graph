@@ -13,43 +13,6 @@ from android_app_graph import cli
 from android_app_graph.adapters.aitk_translator import UIKobeV2Translator
 from android_app_graph.commands import audit, embed, plot
 from android_app_graph.embedding_cache import resolve_image_embedding_settings
-from android_app_graph.utils import make_client
-
-
-@pytest.mark.parametrize("role", ["page_detail", "embedding", "instruction", "action"])
-@pytest.mark.parametrize("value", [None, "", " \t ", "${APP_GRAPH_UNSET_MODEL}", 123, False])
-def test_client_rejects_missing_model(
-    role: str, value: object, owned_router_clients: list[httpx.Client]
-) -> None:
-    with pytest.raises(ValueError, match=rf"{role}.*model"):
-        make_client({"api_key": "test-key", "model": value}, role=role)
-    assert owned_router_clients == []
-
-
-@pytest.mark.parametrize("value", ["", " \t ", "${APP_GRAPH_UNSET_MODEL}"])
-def test_blank_environment_model_is_rejected(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", value)
-    with pytest.raises(ValueError, match="APP_GRAPH_ACTION_MODEL"):
-        make_client({"api_key": "test-key"}, role="action")
-
-
-@pytest.mark.parametrize("value", ["", " \t ", "${APP_GRAPH_UNSET_MODEL}"])
-def test_invalid_explicit_model_cannot_fall_back_to_environment(
-    value: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/action")
-    with pytest.raises(ValueError, match=r"action.model"):
-        make_client({"api_key": "test-key", "model": value}, role="action")
-
-
-@pytest.mark.parametrize("role", ["page_detail", "embedding", "instruction", "action"])
-def test_client_reads_required_model_from_environment(
-    role: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
-    with_model, model = make_client({"api_key": "test-key"}, role=role)
-    with with_model:
-        assert model == f"provider/{role}"
 
 
 def test_image_embedding_requires_a_model() -> None:

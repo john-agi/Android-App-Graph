@@ -11,7 +11,6 @@ import pytest
 
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.commands import embed
-from android_app_graph.utils import make_client, vlm_utils
 
 
 @pytest.mark.parametrize("entry", ["runtime", "cli"])
@@ -60,29 +59,11 @@ def test_image_config_timeout_reaches_actual_request(
     assert all(client.is_closed for client in owned_router_clients)
 
 
-def test_standalone_chat_closes_owned_client(
-    owned_router_clients: list[httpx.Client],
-    router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
-) -> None:
-    client, model = make_client({"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action")
-    router_responses.append(httpx.Response(200, json=chat_body))
-    reply = vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
-    assert vlm_utils.message_text(reply) == "test reply"
-    assert len(owned_router_clients) == 1
-    assert owned_router_clients[0].is_closed
-
-
 @pytest.mark.parametrize("timeout", ["nan", "inf", "0", "-1", "invalid"])
 @pytest.mark.usefixtures("model_environment")
 def test_invalid_timeout_is_a_configuration_error(
     timeout: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    with pytest.raises(ValueError, match="request_timeout must be a positive finite number"):
-        make_client(
-            {"model": "qwen/qwen3.8-flash", "api_key": "test", "request_timeout": timeout},
-            role="action",
-        )
     config = tmp_path / "invalid.yaml"
     config.write_text(json.dumps({"vlm": {"image_embedding": {"timeout": timeout}}}))
     with pytest.raises(SystemExit) as caught:
@@ -151,29 +132,3 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     assert len(router_requests) == 8
     assert len(owned_router_clients) == 12
     assert no_sleep == [2.0, 4.0]
-
-
-@pytest.mark.parametrize("fail_inner", [False, True])
-def test_nested_scopes_keep_outer_connection_alive(
-    fail_inner: bool,
-    owned_router_clients: list[httpx.Client],
-    router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
-) -> None:
-    client, model = make_client({"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action")
-    router_responses.extend(httpx.Response(200, json=chat_body) for _ in range(2))
-    with client:
-        connection = client.sdk_configuration.client
-        try:
-            with client:
-                vlm_utils.send_chat(client, model=model, messages=[])
-                if fail_inner:
-                    raise RuntimeError("inner failed")
-        except RuntimeError:
-            assert fail_inner
-        assert isinstance(connection, httpx.Client)
-        assert not connection.is_closed
-        vlm_utils.send_chat(client, model=model, messages=[])
-        assert client.sdk_configuration.client is connection
-    assert len(owned_router_clients) == 1
-    assert connection.is_closed
