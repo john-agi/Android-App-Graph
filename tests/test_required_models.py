@@ -10,7 +10,6 @@ import httpx
 import pytest
 
 from android_app_graph import cli
-from android_app_graph.adapters.aitk_translator import UIKobeV2Translator
 from android_app_graph.commands import audit, embed, plot
 from android_app_graph.embedding_cache import resolve_image_embedding_settings
 
@@ -34,34 +33,6 @@ def test_invalid_cli_image_model_cannot_fall_back_to_configuration(value: str) -
         resolve_image_embedding_settings(
             {"image_embedding": {"model": "provider/image"}}, model_override=value
         )
-
-
-def test_runtime_reports_missing_models_before_creating_clients(
-    tmp_path: Path, owned_router_clients: list[httpx.Client]
-) -> None:
-    with pytest.raises(ValueError, match="Invalid model configuration") as caught:
-        UIKobeV2Translator(graph_dir=str(tmp_path))
-    for role in ("PAGE_DETAIL", "EMBEDDING", "INSTRUCTION", "ACTION"):
-        assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
-    assert owned_router_clients == []
-
-
-def test_runtime_keeps_caller_environment_references(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    config: dict[str, object] = {}
-    for role in ("page_detail", "embedding", "instruction", "action"):
-        variable = f"APP_GRAPH_{role.upper()}_MODEL"
-        monkeypatch.setenv(variable, f"provider/{role}")
-        config[role] = {"model": f"${{{variable}}}"}
-    first = UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
-    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/new-action")
-    second = UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
-    assert first.model_name == "provider/action"
-    assert second.model_name == "provider/new-action"
-    assert config["action"] == {"model": "${APP_GRAPH_ACTION_MODEL}"}
-    assert "image_embedding" not in config
 
 
 @pytest.mark.parametrize("re_explore", [False, True])

@@ -1,4 +1,5 @@
-"""Pure helpers of the AITK translator, exercised without adb, emulator, network or keys."""
+"""Tests for the AITK translator: its parsing helpers, graph loading, the decision loop,
+and the runtime client lifecycle over the real SDK and an offline transport."""
 
 from __future__ import annotations
 
@@ -16,11 +17,12 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
+from openrouter.errors import ResponseValidationError
 
 from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.payloads import as_list, as_str, as_str_dict
-from android_app_graph.utils import make_client
+from android_app_graph.utils import make_client, vlm_utils
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -2166,7 +2168,7 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
 
 @pytest.mark.usefixtures("image_router")
 @pytest.mark.usefixtures("model_environment")
-def test_v2_sdk_migrates_native_cache_and_embeds_runtime_screenshots(
+def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_screenshots(
     tmp_path: Path,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -2201,14 +2203,220 @@ def test_v2_sdk_migrates_native_cache_and_embeds_runtime_screenshots(
     )
 
 
-def test_v2_instruction_override_drives_planning(
-    translator: aitk_translator.UIKobeV2Translator,
-    use_model: _UseModel,
+@pytest.mark.usefixtures("image_router", "model_environment")
+def test_v2_roles_send_their_own_models_and_temperatures(
+    tmp_path: Path,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    completions = use_model(translator, "Tap Search")
-    assert (
-        translator._plan_free_action("find shoes", "shot", "missing graph path", []) == "Tap Search"
+    translator = aitk_translator.UIKobeV2Translator(
+        graph_dir=str(tmp_path),
+        vlm_config={
+            "action": {"api_key": "test", "temperature": 0.0},
+            "page_detail": {"api_key": "test", "temperature": 0.4},
+            "instruction": {"api_key": "test", "temperature": 0.8, "model": "provider/planner"},
+        },
     )
-    assert completions.calls[0]["model"] == "instruction-model"
-    assert "temperature" not in completions.calls[0]
-    assert completions.calls[0]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
+    router_responses.extend(
+        [
+            chat_response(content='{"action":"wait"}'),
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
+            chat_response(content="Tap Search"),
+        ]
+    )
+    vlm_utils.predict_next_action(
+        translator.model_client, png_screenshot, "wait", model=translator.model_name
+    )
+    vlm_utils.describe_page_and_state(
+        translator.desc_client, png_screenshot, model=translator.desc_model
+    )
+    assert (
+        translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
+        == "Tap Search"
+    )
+    bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
+    assert [(body["model"], body["temperature"]) for body in bodies] == [
+        ("qwen/qwen3.8-flash", 0.0),
+        ("openai/gpt-6.1-sol", 0.4),
+        ("provider/planner", 0.8),
+    ]
+    assert bodies[2]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
+
+
+def test_runtime_reports_missing_models_before_creating_clients(
+    tmp_path: Path, owned_router_clients: list[httpx.Client]
+) -> None:
+    with pytest.raises(ValueError, match="Invalid model configuration") as caught:
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    for role in ("PAGE_DETAIL", "EMBEDDING", "INSTRUCTION", "ACTION"):
+        assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
+    assert owned_router_clients == []
+
+
+def test_runtime_keeps_caller_environment_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config: dict[str, object] = {}
+    for role in ("page_detail", "embedding", "instruction", "action"):
+        variable = f"APP_GRAPH_{role.upper()}_MODEL"
+        monkeypatch.setenv(variable, f"provider/{role}")
+        config[role] = {"model": f"${{{variable}}}"}
+    first = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
+    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/new-action")
+    second = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
+    assert first.model_name == "provider/action"
+    assert second.model_name == "provider/new-action"
+    assert config["action"] == {"model": "${APP_GRAPH_ACTION_MODEL}"}
+    assert "image_embedding" not in config
+
+
+@pytest.mark.parametrize("missing", ["page_detail", "instruction"])
+@pytest.mark.usefixtures("model_environment")
+def test_v2_partial_initialization_closes_created_clients(
+    missing: str, tmp_path: Path, owned_router_clients: list[httpx.Client]
+) -> None:
+    roles = ("action", "page_detail", "instruction")
+    created = roles.index(missing)
+    with pytest.raises(ValueError, match=rf"{missing}\.api_key.*OPENROUTER_API_KEY"):
+        aitk_translator.UIKobeV2Translator(
+            graph_dir=str(tmp_path),
+            vlm_config={role: {"api_key": "test"} for role in roles[:created]},
+        )
+    assert len(owned_router_clients) == created
+    assert all(client.is_closed for client in owned_router_clients)
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_v2_runtime_rejects_a_legacy_native_embedding_url(
+    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "dummy-google-secret-never-log"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router-key")
+    legacy = {
+        "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-embedding-2",
+    }
+    with pytest.raises(ValueError, match=r"image_embedding\.native_base_url") as caught:
+        aitk_translator.UIKobeV2Translator(
+            graph_dir=str(tmp_path), vlm_config={"image_embedding": legacy}
+        )
+    assert secret not in str(caught.value)
+    assert owned_router_clients == []
+
+
+@pytest.mark.usefixtures("model_environment", "owned_router_clients")
+def test_v2_runtime_image_requests_use_the_image_timeout(
+    tmp_path: Path,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    runtime = aitk_translator.UIKobeV2Translator(
+        graph_dir=str(tmp_path), vlm_config={"image_embedding": {"request_timeout": 2.25}}
+    )
+    assert runtime._compute_runtime_image_embedding_with_retry(png_screenshot, "demo", "home") == [
+        0.25,
+        0.75,
+    ]
+    assert router_requests[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 2.25
+    )
+
+
+@pytest.mark.parametrize("exceptional", [False, True])
+@pytest.mark.usefixtures("model_environment")
+def test_v2_invoked_callback_closes_clients_and_reuses_image_client(
+    exceptional: bool,
+    tmp_path: Path,
+    owned_router_clients: list[httpx.Client],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert all(client.is_closed for client in owned_router_clients)
+    initial_count = len(owned_router_clients)
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(4))
+
+    def step(_task: str, _state: dict[str, object], _history: dict[str, object]) -> str:
+        for screenshot in ("one", "two"):
+            assert built._compute_runtime_image_embedding_with_retry(
+                screenshot, "demo", "current"
+            ) == [0.25, 0.75]
+        if exceptional:
+            raise RuntimeError("callback failed")
+        return "ok"
+
+    monkeypatch.setattr(built, "_step", step)
+    for _ in range(2):
+        if exceptional:
+            with pytest.raises(RuntimeError, match="callback failed"):
+                built.to_agent("task", {}, {})
+        else:
+            assert built.to_agent("task", {}, {}) == "ok"
+        assert all(client.is_closed for client in owned_router_clients)
+    assert len(owned_router_clients) == initial_count + 8
+
+
+@pytest.mark.parametrize("schema_failure", [False, True])
+@pytest.mark.usefixtures("model_environment", "owned_router_clients")
+def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
+    schema_failure: bool,
+    tmp_path: Path,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
+    runtime = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    runtime._app_opened = True
+    state: dict[str, object] = {"screenshot": png_screenshot, "activity": "com.demo.Home"}
+    history: dict[str, object] = {"actions": ["started"]}
+    for turn in range(2):
+        router_responses.extend(
+            [
+                chat_response(content="nothing"),
+                chat_response(content="Tap Search"),
+            ]
+        )
+        if turn == 0:
+            router_responses.extend(
+                httpx.Response(
+                    200, json={key: val for key, val in chat_body.items() if key != "id"}
+                )
+                if schema_failure
+                else chat_response(content='{"action":"system_button","button":"Power"}')
+                for _ in range(3)
+            )
+        else:
+            router_responses.append(
+                chat_response(content='{"action":"click","coordinate":[500,500]}')
+            )
+        if turn == 0 and schema_failure:
+            with pytest.raises(ResponseValidationError):
+                runtime.to_agent("Find search", state, history)
+            assert runtime._memory.actions == []
+        else:
+            result = json.loads(runtime.to_agent("Find search", state, history))
+            assert result["aitk_action"] == (
+                {"action": "wait", "time": 1}
+                if turn == 0
+                else {"action": "tap", "x": 540, "y": 960}
+            )
+    assert len(router_requests) == 8
+    assert no_sleep == [2.0, 4.0]
