@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import math
 import os
 import re
@@ -14,8 +13,6 @@ from urllib.parse import urlsplit
 
 import httpx
 from openrouter import OpenRouter
-from openrouter._hooks.sdkhooks import SDKHooks
-from openrouter._hooks.types import AfterSuccessContext, AfterSuccessHook
 
 from android_app_graph.payloads import as_object_dict
 
@@ -59,48 +56,6 @@ def client_scope(client: OpenRouter) -> Iterator[OpenRouter]:
             yield client
     else:
         yield client
-
-
-class _ChatFingerprintCompatibility(AfterSuccessHook):
-    @override
-    def after_success(
-        self, hook_ctx: AfterSuccessContext, response: httpx.Response
-    ) -> httpx.Response:
-        if (
-            hook_ctx.operation_id != "sendChatCompletionRequest"
-            or not response.is_success
-            or "application/json" not in response.headers.get("content-type", "")
-        ):
-            return response
-        try:
-            payload = as_object_dict(response.json())
-        except ValueError, UnicodeDecodeError:
-            return response
-        if (
-            payload.get("object") != "chat.completion"
-            or "error" in payload
-            or "system_fingerprint" in payload
-        ):
-            return response
-        try:
-            request_payload = as_object_dict(json.loads(response.request.content))
-        except ValueError, UnicodeDecodeError:
-            return response
-        if request_payload.get("stream") is True:
-            return response
-        # SDK 1.3.43 requires this nullable field; compatible servers may omit it.
-        headers = dict(response.headers)
-        headers.pop("content-length", None)
-        headers.pop("content-encoding", None)
-        adjusted = httpx.Response(
-            response.status_code,
-            json={**payload, "system_fingerprint": None},
-            headers=headers,
-            request=response.request,
-            extensions=response.extensions,
-        )
-        response.close()
-        return adjusted
 
 
 def validate_embedding_config(cfg: Mapping[str, object], *, role: str) -> None:
@@ -276,10 +231,6 @@ def make_client(
             timeout_ms=int(request_timeout * 1000),
             retry_config=None,
         )
-        hooks: object = client.sdk_configuration.__dict__["_hooks"]
-        if not isinstance(hooks, SDKHooks):
-            raise TypeError("Expected OpenRouter SDK hooks")
-        hooks.register_after_success_hook(_ChatFingerprintCompatibility())
     except BaseException:
         if http_client is None:
             transport_client.close()

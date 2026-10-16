@@ -113,21 +113,17 @@ def test_image_config_timeout_reaches_actual_request(
     assert all(client.is_closed for client in owned_router_clients)
 
 
-def test_complete_chat_reply_does_not_decode_large_request(
+def test_standalone_chat_closes_owned_client(
     owned_router_clients: list[httpx.Client],
     router_responses: list[httpx.Response],
     chat_body: dict[str, object],
 ) -> None:
-    from unittest.mock import patch
-
     client, model = make_client({"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action")
     router_responses.append(httpx.Response(200, json=chat_body))
-    with patch("android_app_graph.utils.json.loads", wraps=json.loads) as loads:
-        vlm_utils.send_chat(
-            client, model=model, messages=[{"role": "user", "content": "A" * 4_000_000}]
-        )
-    assert all(len(call.args[0]) < 4_000_000 for call in loads.call_args_list)
-    assert all(client.is_closed for client in owned_router_clients)
+    reply = vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
+    assert vlm_utils.message_text(reply) == "test reply"
+    assert len(owned_router_clients) == 1
+    assert owned_router_clients[0].is_closed
 
 
 @pytest.mark.parametrize("timeout", ["nan", "inf", "0", "-1", "invalid"])

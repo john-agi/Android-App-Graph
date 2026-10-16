@@ -257,8 +257,8 @@ SDK retries are disabled to avoid multiplying attempts; legacy SDK
 `max_retries` settings are superseded by this application retry budget.
 V2 planning caps each completion at 3000 tokens and permits one format-correction
 retry with a prompt reminder; each completion has its own request retry budget.
-Compatible chat endpoints may omit the nullable `system_fingerprint` field;
-other required response fields are still validated. All calls, including action
+Chat responses must include every field the SDK requires, including
+`system_fingerprint`, which may be `null` but not omitted. All calls, including action
 prediction, propagate persistent SDK validation failures after their bounded
 retries. A broken endpoint response cannot become an action's fallback wait.
 The SDK is pinned to the tested version because the fingerprint compatibility

@@ -571,8 +571,8 @@ def test_action_schema_http_and_output_share_total_budget(
 
 
 @pytest.mark.parametrize("endpoint", ["https://openrouter.ai/api/v1", "http://localhost:8080/v1"])
-@pytest.mark.parametrize("fingerprint", ["omitted", None, "fp_test"])
-def test_chat_fingerprint_compatibility_is_scoped(
+@pytest.mark.parametrize("fingerprint", [None, "fp_test"])
+def test_chat_returns_null_and_string_fingerprints(
     endpoint: str,
     fingerprint: str | None,
     router_http: httpx.Client,
@@ -581,21 +581,47 @@ def test_chat_fingerprint_compatibility_is_scoped(
     chat_body: dict[str, object],
     no_sleep: list[float],
 ) -> None:
-    body = dict(chat_body)
-    if fingerprint == "omitted":
-        del body["system_fingerprint"]
-    else:
-        body["system_fingerprint"] = fingerprint
     client, model = make_client(
         {"model": "openai/gpt-6.1-sol", "api_key": "test", "base_url": endpoint},
         role="page_detail",
         http_client=router_http,
     )
-    router_responses.append(httpx.Response(200, json=body))
+    router_responses.append(
+        httpx.Response(200, json={**chat_body, "system_fingerprint": fingerprint})
+    )
     result = vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
-    assert result.system_fingerprint == (None if fingerprint == "omitted" else fingerprint)
+    assert result.system_fingerprint == fingerprint
     assert len(router_requests) == 1
     assert no_sleep == []
+    assert not router_http.is_closed
+
+
+@pytest.mark.parametrize("endpoint", ["https://openrouter.ai/api/v1", "http://localhost:8080/v1"])
+def test_omitted_fingerprint_fails_sdk_validation_after_bounded_retries(
+    endpoint: str,
+    router_http: httpx.Client,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_body: dict[str, object],
+    no_sleep: list[float],
+) -> None:
+    from openrouter.errors import ResponseValidationError
+
+    body = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
+    client, model = make_client(
+        {"model": "openai/gpt-6.1-sol", "api_key": "test", "base_url": endpoint},
+        role="page_detail",
+        http_client=router_http,
+    )
+    router_responses.extend(httpx.Response(200, json=body) for _ in range(3))
+    with pytest.raises(
+        ResponseValidationError,
+        match=r"1 validation error .*\n\S*system_fingerprint\n\s+Field required",
+    ) as caught:
+        vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
+    assert caught.value.status_code == 200
+    assert len(router_requests) == 3
+    assert no_sleep == [2.0, 4.0]
     assert not router_http.is_closed
 
 
@@ -759,8 +785,7 @@ def test_borrowed_client_and_hooks_survive_sdk_scope(
         role="page_detail",
         http_client=router_http,
     )
-    body = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
-    router_responses.append(httpx.Response(200, json=body))
+    router_responses.append(httpx.Response(200, json=chat_body))
     with client:
         vlm_utils.send_chat(client, model=model, messages=[])
     assert not router_http.is_closed
@@ -944,26 +969,20 @@ def test_exploration_lifecycle_closes_owned_clients(
     assert all(client.is_closed for client in owned_router_clients)
 
 
-def test_omitted_fingerprint_does_not_default_another_required_field(
+@pytest.mark.parametrize(
+    "field", ["id", "created", "model", "object", "choices", "system_fingerprint"]
+)
+def test_missing_required_chat_field_is_retried(
+    field: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     chat_body: dict[str, object],
     no_sleep: list[float],
 ) -> None:
-    body = {
-        key: value for key, value in chat_body.items() if key not in {"system_fingerprint", "model"}
-    }
+    incomplete = {key: value for key, value in chat_body.items() if key != field}
     router_responses.extend(
-        [
-            httpx.Response(200, json=body),
-            httpx.Response(
-                200,
-                json={
-                    key: value for key, value in chat_body.items() if key != "system_fingerprint"
-                },
-            ),
-        ]
+        [httpx.Response(200, json=incomplete), httpx.Response(200, json=chat_body)]
     )
     reply = vlm_utils.send_chat(router_client, model="test", messages=[])
     assert vlm_utils.message_text(reply) == "test reply"
@@ -972,7 +991,7 @@ def test_omitted_fingerprint_does_not_default_another_required_field(
 
 
 @pytest.mark.parametrize("native", [False, True])
-def test_omitted_fingerprint_preserves_multipart_and_native_actions(
+def test_multipart_content_preserves_text_and_native_actions(
     native: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -985,7 +1004,6 @@ def test_omitted_fingerprint_preserves_multipart_and_native_actions(
         'Thought: Search\nAction: Tap\n<tool_call>{"action":"click","coordinate":[500,500]}</tool_call>',
         native=native,
     ).json()
-    del body["system_fingerprint"]
     body["choices"][0]["message"]["content"] = [
         {"type": "text", "text": body["choices"][0]["message"]["content"]}
     ]
