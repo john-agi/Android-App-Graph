@@ -6,39 +6,10 @@ import builtins
 import sys
 from pathlib import Path
 
-import httpx
 import pytest
 
 from android_app_graph import cli
 from android_app_graph.commands import audit, embed, plot
-
-
-@pytest.mark.parametrize("re_explore", [False, True])
-def test_audit_requires_only_the_models_it_uses(
-    re_explore: bool,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    owned_router_clients: list[httpx.Client],
-) -> None:
-    config = tmp_path / "audit.yaml"
-    config.write_text("apps: []\n", encoding="utf-8")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("APP_GRAPH_PAGE_DETAIL_MODEL", "provider/detail")
-    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "provider/embedding")
-    args = ["--config", str(config)]
-    if re_explore:
-        with pytest.raises(SystemExit) as caught:
-            audit.main([*args, "--re-explore"])
-        assert caught.value.code == 2
-        error = capsys.readouterr().err
-        assert "APP_GRAPH_INSTRUCTION_MODEL" in error
-        assert "APP_GRAPH_ACTION_MODEL" in error
-        assert owned_router_clients == []
-    else:
-        assert audit.main(args) == 0
-        assert len(owned_router_clients) == 2
-        assert all(client.is_closed for client in owned_router_clients)
 
 
 @pytest.mark.parametrize("command", ["audit", "embed", "plot"])

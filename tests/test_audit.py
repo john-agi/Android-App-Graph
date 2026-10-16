@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from openrouter import OpenRouter
 
@@ -399,3 +400,60 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
         )
         == []
     )
+
+
+@pytest.mark.parametrize("re_explore", [False, True])
+def test_audit_requires_only_the_models_it_uses(
+    re_explore: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    owned_router_clients: list[httpx.Client],
+) -> None:
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("APP_GRAPH_PAGE_DETAIL_MODEL", "provider/detail")
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "provider/embedding")
+    args = ["--config", str(config)]
+    if re_explore:
+        with pytest.raises(SystemExit) as caught:
+            audit.main([*args, "--re-explore"])
+        assert caught.value.code == 2
+        error = capsys.readouterr().err
+        assert "APP_GRAPH_INSTRUCTION_MODEL" in error
+        assert "APP_GRAPH_ACTION_MODEL" in error
+        assert owned_router_clients == []
+    else:
+        assert audit.main(args) == 0
+
+
+@pytest.mark.parametrize("exceptional", [False, True])
+@pytest.mark.usefixtures("model_environment")
+def test_audit_cli_closes_owned_clients_on_exit(
+    exceptional: bool,
+    tmp_path: Path,
+    owned_router_clients: list[httpx.Client],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    app_dir = graph_dir / "demo"
+    app_dir.mkdir(parents=True)
+    (app_dir / "demo.json").write_text('{"nodes":[],"edges":[]}')
+    config = _write_config(tmp_path, str(graph_dir))
+
+    def audit_graph(_graph: GraphManager, _app: str, _path: Path) -> dict[str, object]:
+        if exceptional:
+            raise RuntimeError("audit failed")
+        return {"issues": []}
+
+    monkeypatch.setattr(audit, "run_audit", audit_graph)
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+    if exceptional:
+        with pytest.raises(RuntimeError, match="audit failed"):
+            audit.main(["-c", str(config)])
+    else:
+        assert audit.main(["-c", str(config)]) == 0
+    assert len(owned_router_clients) == 2
+    assert all(client.is_closed for client in owned_router_clients)

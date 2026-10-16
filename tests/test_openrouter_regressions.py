@@ -101,39 +101,3 @@ def test_text_embedding_model_survives_save_load(
     manager.load_graph(path)
     router_responses.append(httpx.Response(200, json=embedding_body))
     assert manager.find_node_by_description("home") == [("home", pytest.approx(1.0))]
-
-
-@pytest.mark.parametrize("exceptional", [False, True])
-@pytest.mark.usefixtures("model_environment")
-def test_audit_cli_closes_owned_clients_on_exit(
-    exceptional: bool,
-    tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from android_app_graph.commands import audit
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    graph_dir = tmp_path / "graphs"
-    app_dir = graph_dir / "demo"
-    app_dir.mkdir(parents=True)
-    (app_dir / "demo.json").write_text('{"nodes":[],"edges":[]}')
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        f"experiment:\n  graph_dir: {graph_dir}\napps:\n  - name: demo\n    package_name: com.demo\n"
-    )
-
-    def audit_graph(_graph: GraphManager, _app: str, _path: Path) -> dict[str, object]:
-        if exceptional:
-            raise RuntimeError("audit failed")
-        return {"issues": []}
-
-    monkeypatch.setattr(audit, "run_audit", audit_graph)
-    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
-    if exceptional:
-        with pytest.raises(RuntimeError, match="audit failed"):
-            audit.main(["-c", str(config)])
-    else:
-        assert audit.main(["-c", str(config)]) == 0
-    assert len(owned_router_clients) == 2
-    assert all(client.is_closed for client in owned_router_clients)
