@@ -1,7 +1,8 @@
 """Tests for android_app_graph.utils.graph_manager.
 
-All VLM and embedding calls are replaced by scripted fakes patched onto the
-graph_manager module namespace; no test needs a device, the network or keys.
+Most VLM and embedding calls are replaced by scripted fakes patched onto the
+graph_manager module namespace; the text-embedding provenance tests run the real
+SDK over the offline mock transport. No test needs a device, the network or keys.
 """
 
 from __future__ import annotations
@@ -10,10 +11,12 @@ import base64
 import json
 import logging
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, cast
 
+import httpx
 import networkx as nx
 import pytest
 from hypothesis import given
@@ -1496,12 +1499,14 @@ def test_save_writes_dirty_screenshots_once_and_load_restores_them(
     assert png.read_bytes() == b"screenshot-a"
     assert (graph_path.parent / "graph.emb.json").is_file()
 
-    loaded = GraphManager()
+    loaded = make_manager()
     loaded.load_graph(graph_path)
     restored = loaded.get_node(node_id)
     assert restored is not None
     assert restored["reference_screenshot"] == SHOT_A
     assert restored["description_embedding"] == EMBEDDINGS["Home screen"]
+    assert restored["description_embedding_model"] == gm.embedding_model
+    assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
 
     png.unlink()
     gm.save_graph(graph_path)
@@ -2249,3 +2254,92 @@ def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path
     with pytest.raises(TypeError, match="must be an object") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
+
+
+@pytest.mark.parametrize("other_package", [False, True])
+def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
+    other_package: bool,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    manager = GraphManager(
+        page_detail_client=router_client,
+        embedding_client=router_client,
+        page_detail_model="openai/gpt-6.1-sol",
+        embedding_model="google/gemini-embedding-2",
+    )
+    manager.graph.add_node(
+        "old",
+        activity="com.other.Home" if other_package else "com.demo.Home",
+        description_embedding=[0.25, 0.75] if other_package else [],
+    )
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    node = manager.identify_state("com.demo.Home", png_screenshot)
+    assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model
+    assert len(router_requests) == 2
+
+
+@pytest.mark.parametrize("stored", ["inline untagged", "bare sidecar", "mismatched sidecar"])
+@pytest.mark.parametrize("operation", ["find", "identify"])
+def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
+    stored: str,
+    operation: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    path = tmp_path / "demo.json"
+    node: dict[str, object] = {
+        "id": "home",
+        "activity": "com.demo.Home",
+        "page_description": "home",
+    }
+    if stored == "inline untagged":
+        node["description_embedding"] = [0.25, 0.75]
+    path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    if stored != "inline untagged":
+        entry: object = (
+            [0.25, 0.75]
+            if stored == "bare sidecar"
+            else {"model": "provider/old-same-dimensions", "embedding": [0.25, 0.75]}
+        )
+        path.with_suffix(".emb.json").write_text(json.dumps({"home": entry}), encoding="utf-8")
+    manager = GraphManager(
+        page_detail_client=router_client,
+        embedding_client=router_client,
+        page_detail_model="openai/gpt-6.1-sol",
+        embedding_model="google/gemini-embedding-2",
+    )
+    manager.load_graph(path)
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+        if operation == "identify"
+        else [httpx.Response(200, json=embedding_body)]
+    )
+
+    def compare() -> None:
+        if operation == "find":
+            manager.find_node_by_description("home")
+        else:
+            manager.identify_state("com.demo.Home", png_screenshot)
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):
+            compare()
+        assert router_requests == []
