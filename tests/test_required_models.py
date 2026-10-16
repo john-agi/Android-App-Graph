@@ -11,28 +11,6 @@ import pytest
 
 from android_app_graph import cli
 from android_app_graph.commands import audit, embed, plot
-from android_app_graph.embedding_cache import resolve_image_embedding_settings
-
-
-def test_image_embedding_requires_a_model() -> None:
-    with pytest.raises(ValueError, match=r"image_embedding.*model"):
-        resolve_image_embedding_settings({})
-
-
-@pytest.mark.parametrize("value", ["", "  ", "${APP_GRAPH_UNSET_MODEL}"])
-def test_explicit_invalid_image_model_does_not_inherit(value: str) -> None:
-    with pytest.raises(ValueError, match=r"image_embedding.*model"):
-        resolve_image_embedding_settings(
-            {"embedding": {"model": "provider/text"}, "image_embedding": {"model": value}}
-        )
-
-
-@pytest.mark.parametrize("value", ["", "  ", "${APP_GRAPH_UNSET_MODEL}"])
-def test_invalid_cli_image_model_cannot_fall_back_to_configuration(value: str) -> None:
-    with pytest.raises(ValueError, match=r"image_embedding.*model"):
-        resolve_image_embedding_settings(
-            {"image_embedding": {"model": "provider/image"}}, model_override=value
-        )
 
 
 @pytest.mark.parametrize("re_explore", [False, True])

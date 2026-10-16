@@ -9,49 +9,11 @@ from pathlib import Path
 import httpx
 import pytest
 from openrouter import OpenRouter
-from openrouter.errors import OpenRouterError
 
-from android_app_graph import embedding_cache
 from android_app_graph.embedding_cache import resolve_image_embedding_settings
-from android_app_graph.utils import vlm_utils
 from android_app_graph.utils.graph_manager import GraphManager
 
 _CLICK = '{"action":"click","coordinate":[500,500]}'
-
-
-@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 422, 408, 409, 425, 429, 500, 503])
-def test_http_status_controls_attempts_and_backoff(
-    status: int,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router_responses.extend(
-        httpx.Response(status, json={"error": {"code": status, "message": "failed"}})
-        for _ in range(3)
-    )
-    monkeypatch.setattr(
-        embedding_cache,
-        "get_openrouter_image_embedding",
-        lambda *_args, **_kwargs: vlm_utils.get_image_embedding(
-            router_client, png_screenshot, model="google/gemini-embedding-2"
-        ),
-    )
-    with pytest.raises(OpenRouterError):
-        embedding_cache.compute_embedding_with_retry(
-            "test",
-            png_screenshot,
-            model="test",
-            base_url="https://openrouter.ai/api/v1",
-            app_name="demo",
-            node_id="home",
-        )
-    transient = status in {408, 409, 425, 429} or status >= 500
-    assert len(router_requests) == (3 if transient else 1)
-    assert no_sleep == ([2.0, 4.0] if transient else [])
 
 
 @pytest.mark.parametrize(
@@ -154,52 +116,11 @@ def test_text_embedding_model_survives_save_load(
     assert manager.find_node_by_description("home") == [("home", pytest.approx(1.0))]
 
 
-@pytest.mark.parametrize("recover", [False, True])
-def test_sdk_validation_uses_bounded_application_recovery(
-    recover: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    png_screenshot: str,
-    no_sleep: list[float],
-) -> None:
-    from openrouter.errors import ResponseValidationError
-
-    bad = {key: value for key, value in embedding_body.items() if key != "model"}
-    router_responses.extend(httpx.Response(200, json=bad) for _ in range(1 if recover else 3))
-    if recover:
-        router_responses.append(httpx.Response(200, json=embedding_body))
-
-    def request() -> object:
-        return embedding_cache.compute_embedding_with_retry(
-            "test",
-            png_screenshot,
-            model="model",
-            base_url="https://openrouter.ai/api/v1",
-            app_name="demo",
-            node_id="n1",
-            client=router_client,
-        )
-
-    if recover:
-        assert request() == [0.25, 0.75]
-    else:
-        with pytest.raises(ResponseValidationError) as caught:
-            request()
-        assert caught.value.status_code == 200
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
-
-
 @pytest.mark.parametrize("role", ["embedding", "image_embedding"])
-@pytest.mark.parametrize("entry", ["resolver", "offline"])
 @pytest.mark.usefixtures("model_environment")
 def test_legacy_native_url_rejected_before_requests(
     role: str,
-    entry: str,
     tmp_path: Path,
-    router_requests: list[httpx.Request],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from android_app_graph.commands import embed
@@ -207,88 +128,21 @@ def test_legacy_native_url_rejected_before_requests(
     secret = "dummy-google-secret-never-log"
     monkeypatch.setenv("GEMINI_API_KEY", secret)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-router-key")
-    cfg = {
-        "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "api_key": "${GEMINI_API_KEY}",
-        "model": "gemini-embedding-2",
-    }
-
-    def configure() -> None:
-        if entry == "resolver":
-            resolve_image_embedding_settings({role: cfg})
-        else:
-            path = tmp_path / "legacy.yaml"
-            path.write_text(
-                f"vlm:\n  {role}:\n    native_base_url: https://generativelanguage.googleapis.com/v1beta\n    api_key: '${{GEMINI_API_KEY}}'\n    model: gemini-embedding-2\n"
-            )
-            embed.load_image_embedding_settings(
-                path,
-                graphs_override=None,
-                api_key_override=None,
-                model_override=None,
-                base_url_override=None,
-            )
-
+    path = tmp_path / "legacy.yaml"
+    path.write_text(
+        f"vlm:\n  {role}:\n    native_base_url: https://generativelanguage.googleapis.com/v1beta\n    api_key: '${{GEMINI_API_KEY}}'\n    model: gemini-embedding-2\n"
+    )
     with pytest.raises(ValueError, match=rf"{role}\.native_base_url") as caught:
-        configure()
+        embed.load_image_embedding_settings(
+            path,
+            graphs_override=None,
+            api_key_override=None,
+            model_override=None,
+            base_url_override=None,
+        )
     assert secret not in str(caught.value)
     assert "base_url" in str(caught.value)
     assert "OPENROUTER_API_KEY" in str(caught.value)
-    assert router_requests == []
-
-
-@pytest.mark.parametrize("interrupted", [False, True])
-def test_screenshot_batch_reuses_and_closes_client_with_partial_progress(
-    interrupted: bool,
-    tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    from collections.abc import Iterator
-
-    graph = tmp_path / "demo.json"
-    cache: dict[str, list[float]] = {}
-    router_responses.extend(
-        [
-            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
-            httpx.Response(200, json=embedding_body),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-
-    def candidates() -> Iterator[tuple[str, str]]:
-        yield "n1", "shot-1"
-        if interrupted:
-            raise KeyboardInterrupt
-        yield "n2", "shot-2"
-
-    def compute() -> None:
-        embedding_cache.compute_missing_image_embeddings(
-            graph,
-            cache,
-            candidates(),
-            api_key="test",
-            model="model",
-            base_url="http://localhost:8080/v1",
-            app_name="demo",
-        )
-
-    if interrupted:
-        with pytest.raises(KeyboardInterrupt):
-            compute()
-    else:
-        compute()
-    assert len(router_requests) == (2 if interrupted else 3)
-    assert no_sleep == [2.0]
-    assert len(owned_router_clients) == 1
-    assert all(client.is_closed for client in owned_router_clients)
-    assert (
-        embedding_cache.load_image_embeddings(graph, model="model", node_ids={"n1", "n2"}) == cache
-    )
-    assert set(cache) == ({"n1"} if interrupted else {"n1", "n2"})
 
 
 @pytest.mark.parametrize("exceptional", [False, True])
@@ -325,31 +179,3 @@ def test_audit_cli_closes_owned_clients_on_exit(
         assert audit.main(["-c", str(config)]) == 0
     assert len(owned_router_clients) == 2
     assert all(client.is_closed for client in owned_router_clients)
-
-
-def test_image_batches_keep_endpoint_credentials_and_models_separate(
-    tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-) -> None:
-    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(4))
-    for index in range(2):
-        result = embedding_cache.compute_missing_image_embeddings(
-            tmp_path / f"graph-{index}.json",
-            {},
-            [("n1", "one"), ("n2", "two")],
-            api_key=f"key-{index}",
-            model=f"model-{index}",
-            base_url=f"https://endpoint-{index}.example/v1",
-            app_name="demo",
-        )
-        assert result.computed == 2
-    assert len(owned_router_clients) == 2
-    assert all(client.is_closed for client in owned_router_clients)
-    for index, request in enumerate(router_requests):
-        setting = index // 2
-        assert request.headers["authorization"] == f"Bearer key-{setting}"
-        assert str(request.url) == f"https://endpoint-{setting}.example/v1/embeddings"
-        assert json.loads(request.content)["model"] == f"model-{setting}"

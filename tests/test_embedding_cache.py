@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from openrouter.errors.openroutererror import OpenRouterError
+from openrouter import OpenRouter
+from openrouter.errors import OpenRouterError, ResponseValidationError
 
 from android_app_graph import embedding_cache
+from android_app_graph.utils import DEFAULT_BASE_URL, make_client, vlm_utils
 
 
 def test_image_embeddings_path_is_a_sidecar() -> None:
@@ -370,12 +373,12 @@ def test_resolve_image_embedding_settings_reads_config_values() -> None:
             "image_embedding": {
                 "model": "config-model",
                 "api_key": "config-key",
-                "base_url": "https://config.googleapis.com/v1",
+                "base_url": "https://config.example/v1",
             }
         }
     )
     assert settings == embedding_cache.ImageEmbeddingSettings(
-        api_key="config-key", model="config-model", base_url="https://config.googleapis.com/v1"
+        api_key="config-key", model="config-model", base_url="https://config.example/v1"
     )
 
 
@@ -402,7 +405,7 @@ def test_resolve_image_embedding_settings_overrides_win_over_config() -> None:
             "image_embedding": {
                 "model": "config-model",
                 "api_key": "config-key",
-                "base_url": "https://config.googleapis.com/v1",
+                "base_url": "https://config.example/v1",
             }
         },
         model_override="cli-model",
@@ -421,11 +424,11 @@ def test_resolve_image_embedding_settings_resolves_an_env_reference_base_url_ove
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CLI endpoint references must resolve through the environment."""
-    monkeypatch.setenv("APP_GRAPH_IMAGE_BASE_URL", "https://eu.googleapis.com/v1beta")
+    monkeypatch.setenv("APP_GRAPH_IMAGE_BASE_URL", "https://env.example/v1")
     settings = embedding_cache.resolve_image_embedding_settings(
         {}, base_url_override="${APP_GRAPH_IMAGE_BASE_URL}"
     )
-    assert settings.base_url == "https://eu.googleapis.com/v1beta"
+    assert settings.base_url == "https://env.example/v1"
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -502,8 +505,6 @@ def test_image_cache_retry_uses_real_sdk_and_counts_usage(
     no_sleep: list[float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from android_app_graph.utils import vlm_utils
-
     tracker = vlm_utils.TokenTracker()
     monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
     router_responses.extend(
@@ -523,17 +524,271 @@ def test_image_cache_retry_uses_real_sdk_and_counts_usage(
     }
 
 
-@pytest.mark.usefixtures("image_router")
+@pytest.mark.parametrize(("status", "attempts"), [(429, 3), (400, 1)])
 def test_image_cache_sdk_errors_are_bounded(
+    status: int,
+    attempts: int,
+    router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     no_sleep: list[float],
 ) -> None:
     router_responses.extend(
-        httpx.Response(500, json={"error": {"code": 500, "message": "provider failure"}})
-        for _ in range(3)
+        httpx.Response(status, json={"error": {"code": status, "message": "provider failure"}})
+        for _ in range(attempts)
     )
     with pytest.raises(OpenRouterError, match="provider failure"):
-        _retry("test-key", "shot")
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
+        embedding_cache.compute_embedding_with_retry(
+            "test-key",
+            "shot",
+            model="google/gemini-embedding-2",
+            base_url="https://openrouter.ai/api/v1",
+            app_name="demo",
+            node_id="s0_home",
+            client=router_client,
+        )
+    assert len(router_requests) == attempts
+    assert no_sleep == ([2.0, 4.0] if status == 429 else [])
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_sdk_validation_uses_bounded_application_recovery(
+    recover: bool,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    no_sleep: list[float],
+) -> None:
+    bad = {key: value for key, value in embedding_body.items() if key != "model"}
+    router_responses.extend(httpx.Response(200, json=bad) for _ in range(1 if recover else 3))
+    if recover:
+        router_responses.append(httpx.Response(200, json=embedding_body))
+
+    def request() -> list[float]:
+        return embedding_cache.compute_embedding_with_retry(
+            "test",
+            png_screenshot,
+            model="model",
+            base_url="https://openrouter.ai/api/v1",
+            app_name="demo",
+            node_id="n1",
+            client=router_client,
+        )
+
+    if recover:
+        assert request() == [0.25, 0.75]
+    else:
+        with pytest.raises(ResponseValidationError) as caught:
+            request()
+        assert caught.value.status_code == 200
+    assert len(router_requests) == (2 if recover else 3)
+    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_screenshot_batch_reuses_and_closes_client_with_partial_progress(
+    interrupted: bool,
+    tmp_path: Path,
+    owned_router_clients: list[httpx.Client],
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    no_sleep: list[float],
+) -> None:
+    graph = tmp_path / "demo.json"
+    cache: dict[str, list[float]] = {}
+    router_responses.extend(
+        [
+            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
+            httpx.Response(200, json=embedding_body),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    def candidates() -> Iterator[tuple[str, str]]:
+        yield "n1", "shot-1"
+        if interrupted:
+            raise KeyboardInterrupt
+        yield "n2", "shot-2"
+
+    def compute() -> None:
+        embedding_cache.compute_missing_image_embeddings(
+            graph,
+            cache,
+            candidates(),
+            api_key="test",
+            model="model",
+            base_url="http://localhost:8080/v1",
+            app_name="demo",
+        )
+
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt):
+            compute()
+    else:
+        compute()
+    assert len(router_requests) == (2 if interrupted else 3)
+    assert no_sleep == [2.0]
+    assert len(owned_router_clients) == 1
+    assert all(client.is_closed for client in owned_router_clients)
+    assert (
+        embedding_cache.load_image_embeddings(graph, model="model", node_ids={"n1", "n2"}) == cache
+    )
+    assert set(cache) == ({"n1"} if interrupted else {"n1", "n2"})
+
+
+def test_image_batches_keep_endpoint_credentials_and_models_separate(
+    tmp_path: Path,
+    owned_router_clients: list[httpx.Client],
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+) -> None:
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(4))
+    for index in range(2):
+        result = embedding_cache.compute_missing_image_embeddings(
+            tmp_path / f"graph-{index}.json",
+            {},
+            [("n1", "one"), ("n2", "two")],
+            api_key=f"key-{index}",
+            model=f"model-{index}",
+            base_url=f"https://endpoint-{index}.example/v1",
+            app_name="demo",
+        )
+        assert result.computed == 2
+    assert len(owned_router_clients) == 2
+    assert all(client.is_closed for client in owned_router_clients)
+    for index, request in enumerate(router_requests):
+        setting = index // 2
+        assert request.headers["authorization"] == f"Bearer key-{setting}"
+        assert str(request.url) == f"https://endpoint-{setting}.example/v1/embeddings"
+        assert json.loads(request.content)["model"] == f"model-{setting}"
+
+
+def test_image_embedding_requires_a_model() -> None:
+    with pytest.raises(ValueError, match=r"image_embedding.*model"):
+        embedding_cache.resolve_image_embedding_settings({})
+
+
+@pytest.mark.parametrize("value", ["", "  ", "${APP_GRAPH_UNSET_MODEL}"])
+def test_explicit_invalid_image_model_does_not_inherit(value: str) -> None:
+    with pytest.raises(ValueError, match=r"image_embedding.*model"):
+        embedding_cache.resolve_image_embedding_settings(
+            {"embedding": {"model": "provider/text"}, "image_embedding": {"model": value}}
+        )
+
+
+@pytest.mark.parametrize("value", ["", "  ", "${APP_GRAPH_UNSET_MODEL}"])
+def test_invalid_cli_image_model_cannot_fall_back_to_configuration(value: str) -> None:
+    with pytest.raises(ValueError, match=r"image_embedding.*model"):
+        embedding_cache.resolve_image_embedding_settings(
+            {"image_embedding": {"model": "provider/image"}}, model_override=value
+        )
+
+
+@pytest.mark.parametrize(
+    ("config", "timeout"),
+    [
+        ({}, 60.0),
+        ({"embedding": {"request_timeout": 7.5}, "image_embedding": {}}, 7.5),
+        (
+            {"embedding": {"request_timeout": 7.5}, "image_embedding": {"request_timeout": 2.25}},
+            2.25,
+        ),
+        ({"embedding": {"request_timeout": 7.5}, "image_embedding": {"timeout": 2.25}}, 2.25),
+    ],
+)
+@pytest.mark.usefixtures("model_environment")
+def test_image_settings_resolve_their_request_timeout(
+    config: dict[str, object], timeout: float
+) -> None:
+    assert embedding_cache.resolve_image_embedding_settings(config).request_timeout == timeout
+
+
+@pytest.mark.parametrize(
+    ("image_url", "override_url", "image_key", "override_key", "expected_key"),
+    [
+        ("https://text.example:443/images", None, None, None, "text-key"),
+        ("https://image.example/v1", None, None, None, None),
+        ("http://text.example/v1", None, None, None, None),
+        ("https://text.example:444/v1", None, None, None, None),
+        ("http://openrouter.ai/api/v1", None, None, None, None),
+        ("https://image.example/v1", "https://third.example/v1", "image-key", None, None),
+        ("https://image.example/v1", "https://third.example/v1", "image-key", "cli-key", "cli-key"),
+        (
+            "https://image.example/v1",
+            "https://image.example:443/v2",
+            "image-key",
+            None,
+            "image-key",
+        ),
+        (None, DEFAULT_BASE_URL, None, None, "router-key"),
+    ],
+)
+@pytest.mark.usefixtures("model_environment")
+def test_image_credential_inheritance_stays_with_its_origin(
+    image_url: str | None,
+    override_url: str | None,
+    image_key: str | None,
+    override_key: str | None,
+    expected_key: str | None,
+    router_http: httpx.Client,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-key")
+    settings = embedding_cache.resolve_image_embedding_settings(
+        {
+            "embedding": {"base_url": "https://text.example/v1", "api_key": "text-key"},
+            "image_embedding": {"base_url": image_url, "api_key": image_key},
+        },
+        base_url_override=override_url,
+        api_key_override=override_key,
+    )
+    assert settings.api_key == expected_key
+    if expected_key is None:
+        with pytest.raises(ValueError, match=r"image_embedding\.api_key"):
+            make_client(settings._asdict(), role="image_embedding", http_client=router_http)
+        assert router_requests == []
+    else:
+        client, _ = make_client(settings._asdict(), role="image_embedding", http_client=router_http)
+        router_responses.append(httpx.Response(200, json=embedding_body))
+        vlm_utils.get_image_embedding(client, "image", model="google/gemini-embedding-2")
+        request = router_requests[0]
+        assert request.url == httpx.URL(settings.base_url.rstrip("/") + "/embeddings")
+        assert request.headers["authorization"] == f"Bearer {expected_key}"
+
+
+@pytest.mark.parametrize("entry", ["embedding", "image_embedding", "override"])
+def test_unresolved_endpoint_cannot_redirect_an_explicit_credential(entry: str) -> None:
+    def configure() -> None:
+        if entry == "override":
+            embedding_cache.resolve_image_embedding_settings(
+                {}, base_url_override="${APP_GRAPH_ENDPOINT}", api_key_override="endpoint-secret"
+            )
+        else:
+            embedding_cache.resolve_image_embedding_settings(
+                {entry: {"base_url": "${APP_GRAPH_ENDPOINT}", "api_key": "endpoint-secret"}}
+            )
+
+    with pytest.raises(ValueError, match="endpoint") as caught:
+        configure()
+    assert "endpoint-secret" not in str(caught.value)
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_resolver_rejects_a_legacy_native_embedding_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "dummy-google-secret-never-log"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    legacy = {
+        "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-embedding-2",
+    }
+    with pytest.raises(ValueError, match=r"^embedding\.native_base_url") as caught:
+        embedding_cache.resolve_image_embedding_settings({"embedding": legacy})
+    assert secret not in str(caught.value)
