@@ -52,15 +52,15 @@ mutation = [
 [package.metadata]
 requires-dist = [
     { name = "aitk", git = "https://github.com/YuxiangChai/AITK?rev=fd06a28e2286cbc1ae699401c1a6f894ba926c44" },
-    { name = "dill" },
+    { name = "dill", specifier = ">=0.4.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10.8" },
-    { name = "networkx" },
-    { name = "openai" },
-    { name = "pillow" },
+    { name = "networkx", specifier = ">=3.7" },
+    { name = "openai", specifier = ">=3.19.2" },
+    { name = "pillow", specifier = ">=12.3.0" },
     { name = "pyvis", marker = "extra == 'viz'", specifier = ">=0.3.2" },
-    { name = "pyyaml" },
-    { name = "rich" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "rich", specifier = ">=15.0.0" },
 ]
 provides-extras = ["viz"]
 

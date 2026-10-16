@@ -11,12 +11,12 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.14"
 dependencies = [
-    "networkx",
-    "openai",
-    "pyyaml",
-    "pillow",
-    "rich",
-    "dill",
+    "networkx>=3.7",
+    "openai>=3.19.2",
+    "pyyaml>=6.0.3",
+    "pillow>=12.3.0",
+    "rich>=15.0.0",
+    "dill>=0.4.1",
     "aitk",
     "httpx>=0.28.1",
 ]
