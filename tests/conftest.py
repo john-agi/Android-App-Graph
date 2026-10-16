@@ -7,7 +7,7 @@ import io
 import os
 import socket
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, NoReturn
 
 import httpx
@@ -133,6 +133,29 @@ def chat_body() -> dict[str, object]:
         ],
         "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
     }
+
+
+@pytest.fixture
+def chat_response(chat_body: dict[str, object]) -> Callable[..., httpx.Response]:
+    """Build ``chat_body`` with one assistant message made of the given fields.
+
+    ``tool_arguments`` adds a native tool call carrying that JSON; ``content``
+    left out is omitted from the message rather than sent as null.
+    """
+
+    def build(*, tool_arguments: str | None = None, **message: object) -> httpx.Response:
+        if tool_arguments is not None:
+            message["tool_calls"] = [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "mobile_use", "arguments": tool_arguments},
+                }
+            ]
+        choice = {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}
+        return httpx.Response(200, json={**chat_body, "choices": [choice]})
+
+    return build
 
 
 @pytest.fixture

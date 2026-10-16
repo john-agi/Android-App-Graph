@@ -14,7 +14,7 @@ from openrouter import OpenRouter
 from openrouter.components.security import Security
 
 from android_app_graph.kobe import Kobe
-from android_app_graph.utils import make_client, resolve_env
+from android_app_graph.utils import client_scope, make_client, resolve_env
 
 
 def test_explicit_model_and_shared_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,6 +86,13 @@ def test_make_client_forwards_timeout_and_disables_sdk_retries() -> None:
     )
     assert client.sdk_configuration.timeout_ms == 12_000
     assert client.sdk_configuration.retry_config is None
+
+
+def test_client_scope_leaves_an_external_sdk_client_open(router_http: httpx.Client) -> None:
+    client = OpenRouter(api_key="test-key", client=router_http)
+    with client_scope(client) as scoped:
+        assert scoped is client
+    assert client.sdk_configuration.client is router_http
 
 
 def test_make_client_forwards_the_http_client() -> None:
