@@ -97,11 +97,14 @@ def test_android_world_steps_reopen_clients_and_preserve_task_memory(
 
     monkeypatch.setattr(runtime, "_step", runtime_step)
     assert isinstance(agent, _SteppingAgent)
-    for _ in range(2):
+    initial_count = len(owned_router_clients)
+    for step in range(1, 3):
         result = agent.step("Inspect the screen")
         assert isinstance(result, SimpleNamespace)
         assert result.done is False
         assert as_object_dict(result.data)["aitk_action"] == {"action": "wait", "time": 1}
+        # Only to_agent reopens all four role clients; a bare _step reopens just the one it uses.
+        assert len(owned_router_clients) == initial_count + 4 * step
         assert all(client.is_closed for client in owned_router_clients)
     assert len(runtime._memory.actions) == 2
     assert len(router_requests) == 2
