@@ -261,8 +261,6 @@ Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. All calls, including action
 prediction, propagate persistent SDK validation failures after their bounded
 retries. A broken endpoint response cannot become an action's fallback wait.
-The SDK is pinned to the tested version because the fingerprint compatibility
-hook uses its private hook interface; SDK upgrades require compatibility testing.
 Public endpoints honor environment proxy settings (including `NO_PROXY`);
 loopback endpoints such as `localhost`, `127.0.0.1` and `::1` connect directly
 for local forwarding.
