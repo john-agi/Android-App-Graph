@@ -91,6 +91,12 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - Only `uv add` and `uv remove` (`--dev` for tools, a `--group` for heavy
   optional tooling). Commit `pyproject.toml` and `uv.lock` together. If a hook
   fails because the lockfile is stale, run `uv lock` and stage it.
+- Every registry dependency in `dependencies`, an extra or a dependency group
+  declares its supported minimum version, `name>=X.Y`; a plain `uv add name`
+  writes the resolved version as that floor. `uv.lock` records the exact
+  versions that development and CI install. Any further restriction, such as
+  an upper bound, an exclusion or an exact pin, names its concrete
+  compatibility reason in a comment where it is declared.
 - `required-version` is bumped by hand in its own pull request, together with
   the `version:` of every setup-uv step under `.github/workflows/`; those
   checkout, setup-uv and Python steps are byte-for-byte copies of `ci.yml`.
