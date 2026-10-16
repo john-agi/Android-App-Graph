@@ -780,37 +780,6 @@ def test_chat_completion_content_makes_exactly_one_completion_call(
     assert len(router_requests) == 1
 
 
-def test_chat_completion_content_turns_a_missing_body_into_an_empty_string(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.append(chat_response(content=None))
-    content = aitk_translator._chat_completion_content(
-        router_client,
-        model="m",
-        messages=[{"role": "user", "content": "test"}],
-    )
-    assert content == ""
-
-
-def test_chat_completion_content_turns_an_empty_choices_list_into_empty_content(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
-) -> None:
-    """A filtered or refused completion can come back with zero choices; that must
-    be empty content the parse-retry handles, not an IndexError.
-    """
-    router_responses.append(httpx.Response(200, json={**chat_body, "choices": []}))
-    content = aitk_translator._chat_completion_content(
-        router_client,
-        model="m",
-        messages=[{"role": "user", "content": "test"}],
-    )
-    assert content == ""
-
-
 def test_endpoint_client_defaults() -> None:
     client, model = aitk_translator.make_client(
         {"model": "qwen/qwen3.8-flash", "api_key": "test-key"}, role="action"

@@ -117,6 +117,7 @@ def test_public_graph_and_navigation_recover_after_request_failure(
     with pytest.raises(OpenRouterError):
         kobe.graph.identify_state("com.demo.Home", png_screenshot)
     assert len(kobe.graph.graph) == 0
+    assert kobe.graph._last_identify_cache is None
     assert all(client.is_closed for client in owned_router_clients)
     for _ in range(2):
         router_responses.extend(

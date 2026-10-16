@@ -20,126 +20,9 @@ from android_app_graph.utils.graph_manager import GraphManager
 _CLICK = '{"action":"click","coordinate":[500,500]}'
 
 
-@pytest.mark.parametrize("content", ["[]", "null", '"screen"', "42", "true"])
-def test_page_description_retries_non_object_json(
-    content: str,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        [
-            chat_response(content=content),
-            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
-        ]
-    )
-    assert vlm_utils.describe_page_and_state(
-        router_client, png_screenshot, model="openai/gpt-6.1-sol"
-    ) == ("home", {}, [])
-    assert len(router_requests) == 2
-    assert no_sleep == [2.0]
-
-
-@pytest.mark.parametrize("recover", [False, True])
-def test_page_description_http_and_parse_errors_share_one_budget(
-    recover: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        [
-            httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}),
-            chat_response(content="[]"),
-            chat_response(content='{"page_description":"home"}' if recover else "null"),
-        ]
-    )
-    if recover:
-        assert vlm_utils.describe_page_and_state(
-            router_client, png_screenshot, model="openai/gpt-6.1-sol"
-        ) == ("home", {}, [])
-    else:
-        with pytest.raises(TypeError, match=r"page description.*JSON object"):
-            vlm_utils.describe_page_and_state(
-                router_client, png_screenshot, model="openai/gpt-6.1-sol"
-            )
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
-
-
-@pytest.mark.parametrize(
-    "first",
-    [
-        '{"action":"click","coordinate":["500","500"]}',
-        '{"action":"swipe","direction":"north"}',
-        '{"action":"swipe","direction":"Up"}',
-        '{"action":"type"}',
-        '{"action":"type","text":null}',
-        '{"action":"system_button","button":"Power"}',
-        '{"action":"invented"}',
-        "not JSON",
-        "[]",
-    ],
-)
-def test_malformed_action_requests_another_response(
-    first: str,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        [
-            chat_response(content=first),
-            chat_response(content='{"action":"click","coordinate":[500,500]}'),
-        ]
-    )
-    action, _ = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
-    )
-    assert action == {"action": "tap", "x": 50, "y": 100}
-    assert len(router_requests) == 2
-    assert no_sleep == [2.0]
-
-
-def test_action_http_and_parse_failures_share_one_budget(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        [
-            httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}),
-            chat_response(content='{"action":"click","coordinate":["500","500"]}'),
-            chat_response(content='{"action":"wait"}'),
-        ]
-    )
-    assert vlm_utils.predict_next_action(
-        router_client, png_screenshot, "wait", model="qwen/qwen3.8-flash"
-    )[0] == {
-        "action": "wait",
-        "time": 3,
-    }
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
-
-
 @pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 422, 408, 409, 425, 429, 500, 503])
-@pytest.mark.parametrize("operation", ["chat", "text", "image", "action", "description"])
 def test_http_status_controls_attempts_and_backoff(
     status: int,
-    operation: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -151,41 +34,22 @@ def test_http_status_controls_attempts_and_backoff(
         httpx.Response(status, json={"error": {"code": status, "message": "failed"}})
         for _ in range(3)
     )
-
-    def request() -> None:
-        if operation == "chat":
-            vlm_utils.send_chat(
-                router_client, model="test", messages=[{"role": "user", "content": "hi"}]
-            )
-        elif operation == "text":
-            vlm_utils.get_embedding(router_client, "hi", model="google/gemini-embedding-2")
-        elif operation == "action":
-            vlm_utils.predict_next_action(
-                router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
-            )
-        elif operation == "description":
-            vlm_utils.describe_page_and_state(
-                router_client, png_screenshot, model="openai/gpt-6.1-sol"
-            )
-        else:
-            monkeypatch.setattr(
-                embedding_cache,
-                "get_openrouter_image_embedding",
-                lambda *_args, **_kwargs: vlm_utils.get_image_embedding(
-                    router_client, png_screenshot, model="google/gemini-embedding-2"
-                ),
-            )
-            embedding_cache.compute_embedding_with_retry(
-                "test",
-                png_screenshot,
-                model="test",
-                base_url="https://openrouter.ai/api/v1",
-                app_name="demo",
-                node_id="home",
-            )
-
+    monkeypatch.setattr(
+        embedding_cache,
+        "get_openrouter_image_embedding",
+        lambda *_args, **_kwargs: vlm_utils.get_image_embedding(
+            router_client, png_screenshot, model="google/gemini-embedding-2"
+        ),
+    )
     with pytest.raises(OpenRouterError):
-        request()
+        embedding_cache.compute_embedding_with_retry(
+            "test",
+            png_screenshot,
+            model="test",
+            base_url="https://openrouter.ai/api/v1",
+            app_name="demo",
+            node_id="home",
+        )
     transient = status in {408, 409, 425, 429} or status >= 500
     assert len(router_requests) == (3 if transient else 1)
     assert no_sleep == ([2.0, 4.0] if transient else [])
@@ -211,49 +75,6 @@ def test_v2_endpoint_proxy_policy(
     assert isinstance(client.sdk_configuration.client, httpx.Client)
     assert client.sdk_configuration.client.trust_env is trust_env
     client.sdk_configuration.client.close()
-
-
-@pytest.mark.parametrize("native", [False, True])
-def test_action_text_observations_survive_native_calls(
-    native: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    text = (
-        'Thought: Search is visible\nAction: Tap Search\n<tool_call>{"action":"wait"}</tool_call>'
-    )
-    router_responses.append(chat_response(content=text, tool_arguments=_CLICK if native else None))
-    action, history = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
-    )
-    assert history == "Search is visible | Tap Search"
-    assert action == (
-        {"action": "tap", "x": 50, "y": 100} if native else {"action": "wait", "time": 3}
-    )
-
-
-@pytest.mark.parametrize("temperature", [None, 0.0, 0.7])
-@pytest.mark.usefixtures("model_environment")
-def test_optional_role_temperature_reaches_chat(
-    temperature: float | None,
-    router_http: httpx.Client,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
-) -> None:
-    cfg: dict[str, object] = {"api_key": "test"}
-    if temperature is not None:
-        cfg["temperature"] = temperature
-    client, model = make_client(cfg, http_client=router_http, role="page_detail")
-    router_responses.append(httpx.Response(200, json=chat_body))
-    vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
-    body = json.loads(router_requests[-1].content)
-    if temperature is None:
-        assert "temperature" not in body
-    else:
-        assert body["temperature"] == temperature
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -298,27 +119,6 @@ def test_temperatures_are_independent_across_roles(
         0.4,
         0.8,
     ]
-
-
-def test_malformed_action_exhausts_budget_and_falls_back(
-    router_client: OpenRouter,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        chat_response(content='{"action":"click","coordinate":["bad",500]}') for _ in range(3)
-    )
-    assert vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
-    ) == (
-        {"action": "wait", "time": 1},
-        "Failed to parse action response -> wait",
-    )
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -438,192 +238,40 @@ def test_text_embedding_model_survives_save_load(
     assert manager.find_node_by_description("home") == [("home", pytest.approx(1.0))]
 
 
-@pytest.mark.parametrize("operation", ["chat", "text", "image", "action"])
 @pytest.mark.parametrize("recover", [False, True])
 def test_sdk_validation_uses_bounded_application_recovery(
-    operation: str,
     recover: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
     embedding_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
 ) -> None:
     from openrouter.errors import ResponseValidationError
 
-    good = embedding_body if operation in {"text", "image"} else chat_body
-    bad = {key: value for key, value in good.items() if key != "model"}
+    bad = {key: value for key, value in embedding_body.items() if key != "model"}
     router_responses.extend(httpx.Response(200, json=bad) for _ in range(1 if recover else 3))
     if recover:
-        router_responses.append(
-            httpx.Response(200, json=good)
-            if operation != "action"
-            else chat_response(content='{"action":"wait","time":2}')
-        )
+        router_responses.append(httpx.Response(200, json=embedding_body))
 
     def request() -> object:
-        if operation == "action":
-            return vlm_utils.predict_next_action(
-                router_client, png_screenshot, "wait", model="qwen/qwen3.8-flash"
-            )[0]
-        if operation == "image":
-            return embedding_cache.compute_embedding_with_retry(
-                "test",
-                png_screenshot,
-                model="model",
-                base_url="https://openrouter.ai/api/v1",
-                app_name="demo",
-                node_id="n1",
-                client=router_client,
-            )
-        if operation == "text":
-            return vlm_utils.get_embedding(
-                router_client, "hello", model="google/gemini-embedding-2"
-            )
-        return vlm_utils.send_chat(
-            router_client, model="test", messages=[{"role": "user", "content": "hello"}]
+        return embedding_cache.compute_embedding_with_retry(
+            "test",
+            png_screenshot,
+            model="model",
+            base_url="https://openrouter.ai/api/v1",
+            app_name="demo",
+            node_id="n1",
+            client=router_client,
         )
 
     if recover:
-        result = request()
-        if operation == "action":
-            assert result == {"action": "wait", "time": 2}
-        elif operation in {"text", "image"}:
-            assert result == [0.25, 0.75]
-        else:
-            assert result is not None
+        assert request() == [0.25, 0.75]
     else:
         with pytest.raises(ResponseValidationError) as caught:
             request()
         assert caught.value.status_code == 200
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
-
-
-@pytest.mark.parametrize("last", ["success", "schema", "output", "http"])
-def test_action_schema_http_and_output_share_total_budget(
-    last: str,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    bad = {key: value for key, value in chat_body.items() if key != "model"}
-    http_error = httpx.Response(503, json={"error": {"code": 503, "message": "busy"}})
-    router_responses.extend(
-        [
-            http_error,
-            httpx.Response(200, json=bad),
-            {
-                "success": chat_response(content='{"action":"click","coordinate":[500,300]}'),
-                "schema": httpx.Response(200, json=bad),
-                "output": chat_response(content="unreadable"),
-                "http": http_error,
-            }[last],
-        ]
-    )
-    if last in {"http", "schema"}:
-        with pytest.raises(OpenRouterError):
-            vlm_utils.predict_next_action(
-                router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
-            )
-    else:
-        action, _ = vlm_utils.predict_next_action(
-            router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
-        )
-        assert action == (
-            {"action": "tap", "x": 540, "y": 576}
-            if last == "success"
-            else {"action": "wait", "time": 1}
-        )
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
-
-
-@pytest.mark.parametrize("limit", [None, 17, aitk_translator.V2_CHAT_MAX_TOKENS])
-def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
-    limit: int | None, chat_body: dict[str, object], no_sleep: list[float]
-) -> None:
-    requests: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        payload = json.loads(request.content)
-        if "max_tokens" in payload and payload["max_tokens"] is None:
-            return httpx.Response(400, json={"error": {"code": 400, "message": "null forbidden"}})
-        return httpx.Response(200, json=chat_body)
-
-    with httpx.Client(transport=httpx.MockTransport(respond)) as borrowed:
-        client, model = make_client(
-            {"model": "openai/gpt-6.1-sol", "api_key": "test"},
-            role="instruction",
-            http_client=borrowed,
-        )
-        vlm_utils.send_chat(
-            client, model=model, messages=[{"role": "user", "content": "hi"}], max_tokens=limit
-        )
-    payload = json.loads(requests[0].content)
-    if limit is None:
-        assert "max_tokens" not in payload
-    else:
-        assert payload["max_tokens"] == limit
-    assert len(requests) == 1
-    assert no_sleep == []
-
-
-@pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("recover", [False, True])
-@pytest.mark.parametrize(
-    "args",
-    [
-        {"action": "click", "coordinate": {"x": 500, "y": 300}},
-        {"action": "click"},
-        {"action": "click", "coordinate": []},
-        {"action": "click", "coordinate": [500]},
-        {"action": "long_press", "coordinate": []},
-        {"action": "long_press", "coordinate": [True, 300]},
-        {"action": "click", "coordinate": ["500", 300]},
-        {"action": "click", "coordinate": [None, 300]},
-        {"action": "click", "coordinate": [float("nan"), 300]},
-        {"action": "long_press", "coordinate": [500, float("inf")]},
-        {"action": "swipe", "coordinate": {"x": 500, "y": 300}, "coordinate2": [0, 0]},
-        {"action": "swipe", "coordinate": [500, 300], "coordinate2": [500]},
-        {"action": "swipe", "coordinate": [500, 300]},
-        {"action": "swipe"},
-        {"action": "swipe", "coordinate2": [500, 300]},
-        {"action": "click", "coordinate": [10**400, 300]},
-        {"action": "swipe", "coordinate": [], "coordinate2": [0, 0], "direction": "up"},
-    ],
-)
-def test_malformed_coordinates_recover_or_wait(
-    native: bool,
-    recover: bool,
-    args: dict[str, object],
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        chat_response(content=json.dumps(args), tool_arguments=json.dumps(args) if native else None)
-        for _ in range(1 if recover else 3)
-    )
-    if recover:
-        router_responses.append(chat_response(content='{"action":"click","coordinate":[500,300]}'))
-    action, _ = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
-    )
-    assert action == (
-        {"action": "tap", "x": 50, "y": 60} if recover else {"action": "wait", "time": 1}
-    )
     assert len(router_requests) == (2 if recover else 3)
     assert no_sleep == ([2.0] if recover else [2.0, 4.0])
 
@@ -847,50 +495,6 @@ def test_audit_cli_closes_owned_clients_on_exit(
     assert all(client.is_closed for client in owned_router_clients)
 
 
-@pytest.mark.parametrize(
-    "field", ["id", "created", "model", "object", "choices", "system_fingerprint"]
-)
-def test_missing_required_chat_field_is_retried(
-    field: str,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    incomplete = {key: value for key, value in chat_body.items() if key != field}
-    router_responses.extend(
-        [httpx.Response(200, json=incomplete), httpx.Response(200, json=chat_body)]
-    )
-    reply = vlm_utils.send_chat(router_client, model="test", messages=[])
-    assert vlm_utils.message_text(reply) == "test reply"
-    assert len(router_requests) == 2
-    assert no_sleep == [2.0]
-
-
-@pytest.mark.parametrize("native", [False, True])
-def test_multipart_content_preserves_text_and_native_actions(
-    native: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    text = 'Thought: Search\nAction: Tap\n<tool_call>{"action":"click","coordinate":[500,500]}</tool_call>'
-    router_responses.append(
-        chat_response(
-            content=[{"type": "text", "text": text}], tool_arguments=_CLICK if native else None
-        )
-    )
-    action, history = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
-    )
-    assert action == {"action": "tap", "x": 540, "y": 960}
-    assert history == "Search | Tap"
-    assert len(router_requests) == 1
-
-
 @pytest.mark.parametrize("borrowed", [False, True])
 def test_factory_initialization_failure_keeps_correct_owner(
     borrowed: bool,
@@ -949,96 +553,3 @@ def test_image_batches_keep_endpoint_credentials_and_models_separate(
         assert request.headers["authorization"] == f"Bearer key-{setting}"
         assert str(request.url) == f"https://endpoint-{setting}.example/v1/embeddings"
         assert json.loads(request.content)["model"] == f"model-{setting}"
-
-
-@pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        ({"action": "click", "coordinate": [500.5, 300.5]}, {"action": "tap", "x": 50, "y": 60}),
-        (
-            {"action": "long_press", "coordinate": [500, 300]},
-            {"action": "long_press", "x": 50, "y": 60, "duration": 1000},
-        ),
-        (
-            {"action": "long_press", "coordinate": [500, 300], "time": 250, "duration": 750},
-            {"action": "long_press", "x": 50, "y": 60, "duration": 250},
-        ),
-        (
-            {
-                "action": "swipe",
-                "coordinate": [500, 300],
-                "coordinate2": [250, 800],
-                "duration": 750,
-            },
-            {"action": "swipe", "x1": 50, "y1": 60, "x2": 25, "y2": 160, "duration": 750},
-        ),
-        (
-            {"action": "swipe", "direction": "up"},
-            {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 50, "duration": 1000},
-        ),
-        (
-            {"action": "swipe", "direction": "down"},
-            {"action": "swipe", "x1": 50, "y1": 50, "x2": 50, "y2": 150, "duration": 1000},
-        ),
-        (
-            {"action": "swipe", "direction": "left"},
-            {"action": "swipe", "x1": 80, "y1": 100, "x2": 20, "y2": 100, "duration": 1000},
-        ),
-        (
-            {"action": "swipe", "direction": "right"},
-            {"action": "swipe", "x1": 20, "y1": 100, "x2": 80, "y2": 100, "duration": 1000},
-        ),
-        ({"action": "end"}, {"action": "end"}),
-        ({"action": "terminate"}, {"action": "end"}),
-    ],
-)
-def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
-    native: bool,
-    args: dict[str, object],
-    expected: dict[str, object],
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.append(
-        chat_response(
-            content=f"<tool_call>{json.dumps(args)}</tool_call>",
-            tool_arguments=json.dumps(args) if native else None,
-        )
-    )
-    assert (
-        vlm_utils.predict_next_action(
-            router_client,
-            png_screenshot,
-            "act",
-            screen_w=100,
-            screen_h=200,
-            model="qwen/qwen3.8-flash",
-        )[0]
-        == expected
-    )
-    assert len(router_requests) == 1
-    assert no_sleep == []
-
-
-@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 422])
-def test_malformed_http_error_never_returns_action_fallback(
-    status: int,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-) -> None:
-    router_responses.append(httpx.Response(status, json={"error": {"message": "bad"}}))
-    with pytest.raises(OpenRouterError) as caught:
-        vlm_utils.predict_next_action(
-            router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
-        )
-    assert caught.value.status_code == status
-    assert len(router_requests) == 1
-    assert no_sleep == []

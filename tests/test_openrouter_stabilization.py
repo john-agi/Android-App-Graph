@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -12,44 +11,7 @@ import pytest
 
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.commands import embed
-from android_app_graph.kobe import Kobe
 from android_app_graph.utils import make_client, vlm_utils
-
-
-@pytest.fixture
-def kobe(
-    tmp_path: Path,
-    png_screenshot: str,
-    owned_router_clients: list[httpx.Client],
-    monkeypatch: pytest.MonkeyPatch,
-) -> Kobe:
-    class Device:
-        w: int = 100
-        h: int = 200
-
-        def __init__(self) -> None:
-            self.config: dict[str, object] = {}
-
-        def get_state(self) -> dict[str, object]:
-            return {"activity": "com.demo.Home", "screenshot": png_screenshot}
-
-        def exe_action(self, action: dict[str, object]) -> None:
-            raise AssertionError(f"No device action expected: {action}")
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    built = Kobe(
-        Device(),
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={
-            role: {"model": f"provider/{role}"}
-            for role in ("page_detail", "embedding", "instruction", "action")
-        },
-    )
-    assert all(client.is_closed for client in owned_router_clients)
-    return built
 
 
 @pytest.mark.parametrize("entry", ["runtime", "cli"])
@@ -215,49 +177,3 @@ def test_nested_scopes_keep_outer_connection_alive(
         assert client.sdk_configuration.client is connection
     assert len(owned_router_clients) == 1
     assert connection.is_closed
-
-
-@pytest.mark.parametrize("recover", [False, True])
-@pytest.mark.parametrize(
-    "malformed",
-    [
-        '{"page_description":',
-        "not JSON",
-        "{}",
-        '{"page_description":""}',
-        '{"page_description":"home","state":[]}',
-        '{"page_description":"home","elements":[null]}',
-    ],
-)
-def test_malformed_description_cannot_become_a_graph_node(
-    recover: bool,
-    malformed: str,
-    kobe: Kobe,
-    png_screenshot: str,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-    owned_router_clients: list[httpx.Client],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(chat_response(content=malformed) for _ in range(1 if recover else 3))
-    if recover:
-        router_responses.extend(
-            [
-                chat_response(content='{"page_description":"home"}'),
-                httpx.Response(200, json=embedding_body),
-            ]
-        )
-        node = kobe.graph.identify_state("com.demo.Home", png_screenshot)
-        assert kobe.graph.graph.nodes[node]["page_description"] == "home"
-        assert len(kobe.graph.graph) == 1
-        assert no_sleep == [2.0]
-    else:
-        with pytest.raises((ValueError, TypeError)):
-            kobe.graph.identify_state("com.demo.Home", png_screenshot)
-        assert len(kobe.graph.graph) == 0
-        assert kobe.graph._last_identify_cache is None
-        assert no_sleep == [2.0, 4.0]
-    assert len(router_requests) == 3
-    assert all(client.is_closed for client in owned_router_clients)

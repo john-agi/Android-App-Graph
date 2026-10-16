@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 
 import httpx
@@ -12,123 +11,6 @@ from openrouter import OpenRouter
 from android_app_graph.embedding_cache import resolve_image_embedding_settings
 from android_app_graph.utils import DEFAULT_BASE_URL, make_client, vlm_utils
 from android_app_graph.utils.graph_manager import GraphManager
-
-
-@pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("direction", ["up", "down", "left", "right"])
-@pytest.mark.parametrize(
-    "coordinates",
-    [
-        {"coordinate": None},
-        {"coordinate": None, "coordinate2": None},
-        {"coordinate": [500, 300]},
-        {"coordinate2": [500, 300]},
-        {"coordinate": [500, 300], "coordinate2": None},
-    ],
-)
-def test_directional_swipes_accept_optional_coordinates(
-    native: bool,
-    direction: str,
-    coordinates: dict[str, object],
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    arguments = json.dumps({"action": "swipe", "direction": direction, **coordinates})
-    router_responses.extend(
-        chat_response(content=None, tool_arguments=arguments)
-        if native
-        else chat_response(content=arguments)
-        for _ in range(3)
-    )
-    action, _ = vlm_utils.predict_next_action(
-        router_client,
-        png_screenshot,
-        "swipe",
-        screen_w=100,
-        screen_h=200,
-        model="qwen/qwen3.8-flash",
-    )
-    endpoints = {
-        "up": (50, 150, 50, 50),
-        "down": (50, 50, 50, 150),
-        "left": (80, 100, 20, 100),
-        "right": (20, 100, 80, 100),
-    }
-    x1, y1, x2, y2 = endpoints[direction]
-    assert action == {"action": "swipe", "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration": 1000}
-    assert len(router_requests) == 1
-    assert no_sleep == []
-
-
-@pytest.mark.parametrize("coordinate", [[], [500], [True, 500], [float("nan"), 300]])
-def test_direction_does_not_hide_invalid_partial_coordinates(coordinate: object) -> None:
-    with pytest.raises(ValueError, match="coordinates"):
-        vlm_utils._tool_call_to_aitk(
-            {"action": "swipe", "direction": "up", "coordinate": coordinate}
-        )
-
-
-@pytest.mark.parametrize("vector", [[], [float("nan")], [float("inf")], "base64"])
-@pytest.mark.parametrize("recover", [False, True])
-def test_text_vector_validation_uses_the_request_retry_budget(
-    vector: object,
-    recover: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tracker = vlm_utils.TokenTracker()
-    monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
-    bad = {
-        **embedding_body,
-        "data": [{"object": "embedding", "index": 0, "embedding": vector}],
-    }
-    router_responses.extend(
-        httpx.Response(200, text=json.dumps(bad), headers={"content-type": "application/json"})
-        for _ in range(1 if recover else 3)
-    )
-    if recover:
-        router_responses.append(httpx.Response(200, json=embedding_body))
-        assert vlm_utils.get_embedding(
-            router_client, "home", model="google/gemini-embedding-2"
-        ) == [0.25, 0.75]
-    else:
-        with pytest.raises(ValueError, match="embedding"):
-            vlm_utils.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
-    assert tracker.snapshot()["calls"] == int(recover)
-
-
-def test_text_http_schema_and_vector_failures_share_one_budget(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    router_responses.extend(
-        [
-            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
-            httpx.Response(
-                200, json={key: value for key, value in embedding_body.items() if key != "model"}
-            ),
-            httpx.Response(200, json={**embedding_body, "data": []}),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-    with pytest.raises(ValueError, match="one embedding"):
-        vlm_utils.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    assert len(router_requests) == 3
-    assert len(router_responses) == 1
-    assert no_sleep == [2.0, 4.0]
 
 
 @pytest.mark.parametrize("other_package", [False, True])
