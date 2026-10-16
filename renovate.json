@@ -7,6 +7,14 @@
   "forkProcessing": "enabled",
   "dependencyDashboard": true,
   "automerge": false,
+  "packageRules": [
+    {
+      "description": "Python minor upgrades require dependency compatibility review; see AGENTS.md.",
+      "matchManagers": ["pyenv"],
+      "matchPackageNames": ["python"],
+      "allowedVersions": "/^3\\.14(\\.[0-9]+)?$/"
+    }
+  ],
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["* 0-3 * * 1"]
