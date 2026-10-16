@@ -8,7 +8,9 @@ the callers cannot drift on the policy.
 
 from __future__ import annotations
 
+import httpx
 import pytest
+from openrouter.errors import OpenRouterError, ResponseValidationError
 
 from android_app_graph import retrying
 
@@ -83,32 +85,39 @@ def test_call_with_retry_logs_the_traceback_on_a_retried_failure(
     assert caplog.records[0].exc_info is not None
 
 
-@pytest.mark.parametrize("status", [200, 400, 401, 402, 403, 404, 422])
-def test_sdk_validation_retries_only_successful_or_transient_responses(
-    status: int, no_sleep: list[float]
+@pytest.mark.parametrize(
+    ("validation", "status", "retried"),
+    [
+        *((False, status, False) for status in (400, 401, 402, 403, 404, 422, 499, 600)),
+        *((False, status, True) for status in (408, 409, 425, 429, 500, 599)),
+        (True, 200, True),
+        (True, 299, True),
+        (True, 300, False),
+        (True, 400, False),
+        (True, 503, True),
+    ],
+)
+def test_sdk_errors_retry_only_transient_statuses_and_invalid_successes(
+    validation: bool, status: int, retried: bool, no_sleep: list[float]
 ) -> None:
-    import httpx
-    from openrouter.errors import ResponseValidationError
-
     attempts: list[int] = []
-    error = ResponseValidationError(
-        "invalid schema", httpx.Response(status), ValueError("missing field")
+    error = (
+        ResponseValidationError("invalid schema", httpx.Response(status), ValueError("missing"))
+        if validation
+        else OpenRouterError("provider error", httpx.Response(status))
     )
 
     def request() -> str:
         attempts.append(1)
         raise error
 
-    with pytest.raises(ResponseValidationError):
-        retrying.call_with_retry("schema", request)
-    assert len(attempts) == (3 if status == 200 else 1)
-    assert no_sleep == ([2.0, 4.0] if status == 200 else [])
+    with pytest.raises(OpenRouterError):
+        retrying.call_with_retry("sdk", request)
+    assert len(attempts) == (3 if retried else 1)
+    assert no_sleep == ([2.0, 4.0] if retried else [])
 
 
 def test_generic_sdk_error_with_success_status_is_not_retried(no_sleep: list[float]) -> None:
-    import httpx
-    from openrouter.errors import OpenRouterError
-
     attempts: list[int] = []
 
     def request() -> str:
