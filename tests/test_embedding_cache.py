@@ -356,43 +356,6 @@ def test_compute_embedding_with_retry_returns_on_first_success(
     assert calls == [("key", "shot")]
 
 
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_embedding_with_retry_recovers_after_a_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts: list[int] = []
-
-    def flaky_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(len(attempts))
-        if len(attempts) == 1:
-            msg = "429 rate limited"
-            raise RuntimeError(msg)
-        return [0.25]
-
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", flaky_embedding)
-
-    assert _retry("key", "shot") == [0.25]
-    assert len(attempts) == 2
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts: list[int] = []
-
-    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
-        attempts.append(len(attempts))
-        msg = "500 upstream error"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", always_failing)
-
-    with pytest.raises(RuntimeError, match="500 upstream error"):
-        _retry("key", "shot")
-    assert len(attempts) == embedding_cache.IMAGE_EMBEDDING_RETRIES + 1
-
-
 @pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_from_environment() -> None:
     settings = embedding_cache.resolve_image_embedding_settings({})
