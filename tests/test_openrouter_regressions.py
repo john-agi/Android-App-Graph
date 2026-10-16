@@ -63,7 +63,9 @@ def test_page_description_retries_non_object_json(
             action_response(chat_body, '{"page_description":"home","state":{},"elements":[]}'),
         ]
     )
-    assert vlm_utils.describe_page_and_state(router_client, png_screenshot) == ("home", {}, [])
+    assert vlm_utils.describe_page_and_state(
+        router_client, png_screenshot, model="openai/gpt-6.1-sol"
+    ) == ("home", {}, [])
     assert len(router_requests) == 2
     assert no_sleep == [2.0]
 
@@ -86,10 +88,14 @@ def test_page_description_http_and_parse_errors_share_one_budget(
         ]
     )
     if recover:
-        assert vlm_utils.describe_page_and_state(router_client, png_screenshot) == ("home", {}, [])
+        assert vlm_utils.describe_page_and_state(
+            router_client, png_screenshot, model="openai/gpt-6.1-sol"
+        ) == ("home", {}, [])
     else:
         with pytest.raises(TypeError, match=r"page description.*JSON object"):
-            vlm_utils.describe_page_and_state(router_client, png_screenshot)
+            vlm_utils.describe_page_and_state(
+                router_client, png_screenshot, model="openai/gpt-6.1-sol"
+            )
     assert len(router_requests) == 3
     assert no_sleep == [2.0, 4.0]
 
@@ -124,7 +130,7 @@ def test_malformed_action_requests_another_response(
         ]
     )
     action, _ = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200
+        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
     assert len(router_requests) == 2
@@ -146,7 +152,9 @@ def test_action_http_and_parse_failures_share_one_budget(
             action_response(chat_body, '{"action":"wait"}'),
         ]
     )
-    assert vlm_utils.predict_next_action(router_client, png_screenshot, "wait")[0] == {
+    assert vlm_utils.predict_next_action(
+        router_client, png_screenshot, "wait", model="qwen/qwen3.8-flash"
+    )[0] == {
         "action": "wait",
         "time": 3,
     }
@@ -177,17 +185,21 @@ def test_http_status_controls_attempts_and_backoff(
                 router_client, model="test", messages=[{"role": "user", "content": "hi"}]
             )
         elif operation == "text":
-            vlm_utils.get_embedding(router_client, "hi")
+            vlm_utils.get_embedding(router_client, "hi", model="google/gemini-embedding-2")
         elif operation == "action":
-            vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
+            vlm_utils.predict_next_action(
+                router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+            )
         elif operation == "description":
-            vlm_utils.describe_page_and_state(router_client, png_screenshot)
+            vlm_utils.describe_page_and_state(
+                router_client, png_screenshot, model="openai/gpt-6.1-sol"
+            )
         else:
             monkeypatch.setattr(
                 embedding_cache,
                 "get_openrouter_image_embedding",
                 lambda *_args, **_kwargs: vlm_utils.get_image_embedding(
-                    router_client, png_screenshot
+                    router_client, png_screenshot, model="google/gemini-embedding-2"
                 ),
             )
             embedding_cache.compute_embedding_with_retry(
@@ -220,7 +232,9 @@ def test_v2_endpoint_proxy_policy(
     endpoint: str, trust_env: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
-    client, _ = make_client({"api_key": "test", "base_url": endpoint}, role="action")
+    client, _ = make_client(
+        {"model": "qwen/qwen3.8-flash", "api_key": "test", "base_url": endpoint}, role="action"
+    )
     assert isinstance(client.sdk_configuration.client, httpx.Client)
     assert client.sdk_configuration.client.trust_env is trust_env
     client.sdk_configuration.client.close()
@@ -239,7 +253,7 @@ def test_action_text_observations_survive_native_calls(
     )
     router_responses.append(action_response(chat_body, text, native=native))
     action, history = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200
+        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
     assert history == "Search is visible | Tap Search"
     assert action == (
@@ -248,6 +262,7 @@ def test_action_text_observations_survive_native_calls(
 
 
 @pytest.mark.parametrize("temperature", [None, 0.0, 0.7])
+@pytest.mark.usefixtures("model_environment")
 def test_optional_role_temperature_reaches_chat(
     temperature: float | None,
     router_http: httpx.Client,
@@ -268,6 +283,7 @@ def test_optional_role_temperature_reaches_chat(
         assert body["temperature"] == temperature
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_temperatures_are_independent_across_roles(
     tmp_path: Path,
     router_http: httpx.Client,
@@ -277,10 +293,8 @@ def test_temperatures_are_independent_across_roles(
     png_screenshot: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def factory(
-        cfg: dict[str, object] | None, *, default_model: str, role: str
-    ) -> tuple[OpenRouter, str]:
-        return make_client(cfg, default_model=default_model, role=role, http_client=router_http)
+    def factory(cfg: dict[str, object] | None, *, role: str) -> tuple[OpenRouter, str]:
+        return make_client(cfg, role=role, http_client=router_http)
 
     monkeypatch.setattr(aitk_translator, "make_client", factory)
     translator = aitk_translator.UIKobeV2Translator(
@@ -323,7 +337,9 @@ def test_malformed_action_exhausts_budget_and_falls_back(
     router_responses.extend(
         action_response(chat_body, '{"action":"click","coordinate":["bad",500]}') for _ in range(3)
     )
-    assert vlm_utils.predict_next_action(router_client, png_screenshot, "tap") == (
+    assert vlm_utils.predict_next_action(
+        router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+    ) == (
         {"action": "wait", "time": 1},
         "Failed to parse action response -> wait",
     )
@@ -331,6 +347,7 @@ def test_malformed_action_exhausts_budget_and_falls_back(
     assert no_sleep == [2.0, 4.0]
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_instruction_credentials_error_names_role(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"instruction.*OPENROUTER_API_KEY"):
         aitk_translator.UIKobeV2Translator(
@@ -352,8 +369,7 @@ def test_instruction_credentials_error_names_role(tmp_path: Path) -> None:
 def test_native_google_embedding_config_rejected_before_requests(endpoint: str) -> None:
     with pytest.raises(ValueError, match=r"embedding.*OpenRouter.*OPENROUTER_API_KEY"):
         make_client(
-            {"api_key": "test", "base_url": endpoint},
-            default_model="google/gemini-embedding-2",
+            {"model": "google/gemini-embedding-2", "api_key": "test", "base_url": endpoint},
             role="embedding",
         )
     with pytest.raises(ValueError, match=r"image_embedding.*OpenRouter"):
@@ -397,7 +413,12 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
             ),
             encoding="utf-8",
         )
-    manager = GraphManager(page_detail_client=router_client, embedding_client=router_client)
+    manager = GraphManager(
+        page_detail_client=router_client,
+        embedding_client=router_client,
+        page_detail_model="openai/gpt-6.1-sol",
+        embedding_model="google/gemini-embedding-2",
+    )
     manager.load_graph(path)
     router_responses.extend(
         [
@@ -426,7 +447,9 @@ def test_text_embedding_model_survives_save_load(
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
 ) -> None:
-    manager = GraphManager(embedding_client=router_client)
+    manager = GraphManager(
+        embedding_client=router_client, embedding_model="google/gemini-embedding-2"
+    )
     manager.graph.add_node(
         "home",
         description_embedding=[0.25, 0.75],
@@ -468,7 +491,9 @@ def test_sdk_validation_uses_bounded_application_recovery(
 
     def request() -> object:
         if operation == "action":
-            return vlm_utils.predict_next_action(router_client, png_screenshot, "wait")[0]
+            return vlm_utils.predict_next_action(
+                router_client, png_screenshot, "wait", model="qwen/qwen3.8-flash"
+            )[0]
         if operation == "image":
             return embedding_cache.compute_embedding_with_retry(
                 "test",
@@ -480,7 +505,9 @@ def test_sdk_validation_uses_bounded_application_recovery(
                 client=router_client,
             )
         if operation == "text":
-            return vlm_utils.get_embedding(router_client, "hello")
+            return vlm_utils.get_embedding(
+                router_client, "hello", model="google/gemini-embedding-2"
+            )
         return vlm_utils.send_chat(
             router_client, model="test", messages=[{"role": "user", "content": "hello"}]
         )
@@ -527,9 +554,13 @@ def test_action_schema_http_and_output_share_total_budget(
     )
     if last in {"http", "schema"}:
         with pytest.raises(OpenRouterError):
-            vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
+            vlm_utils.predict_next_action(
+                router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+            )
     else:
-        action, _ = vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
+        action, _ = vlm_utils.predict_next_action(
+            router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+        )
         assert action == (
             {"action": "tap", "x": 540, "y": 576}
             if last == "success"
@@ -556,7 +587,9 @@ def test_chat_fingerprint_compatibility_is_scoped(
     else:
         body["system_fingerprint"] = fingerprint
     client, model = make_client(
-        {"api_key": "test", "base_url": endpoint}, role="page_detail", http_client=router_http
+        {"model": "openai/gpt-6.1-sol", "api_key": "test", "base_url": endpoint},
+        role="page_detail",
+        http_client=router_http,
     )
     router_responses.append(httpx.Response(200, json=body))
     result = vlm_utils.send_chat(client, model=model, messages=[{"role": "user", "content": "hi"}])
@@ -580,7 +613,11 @@ def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
         return httpx.Response(200, json=chat_body)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as borrowed:
-        client, model = make_client({"api_key": "test"}, role="instruction", http_client=borrowed)
+        client, model = make_client(
+            {"model": "openai/gpt-6.1-sol", "api_key": "test"},
+            role="instruction",
+            http_client=borrowed,
+        )
         vlm_utils.send_chat(
             client, model=model, messages=[{"role": "user", "content": "hi"}], max_tokens=limit
         )
@@ -639,7 +676,7 @@ def test_malformed_coordinates_recover_or_wait(
             action_response(chat_body, '{"action":"click","coordinate":[500,300]}')
         )
     action, _ = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200
+        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
     assert action == (
         {"action": "tap", "x": 50, "y": 60} if recover else {"action": "wait", "time": 1}
@@ -650,6 +687,7 @@ def test_malformed_coordinates_recover_or_wait(
 
 @pytest.mark.parametrize("role", ["embedding", "image_embedding"])
 @pytest.mark.parametrize("entry", ["resolver", "factory", "offline", "runtime"])
+@pytest.mark.usefixtures("model_environment")
 def test_legacy_native_url_rejected_before_requests(
     role: str,
     entry: str,
@@ -699,7 +737,7 @@ def test_legacy_native_url_rejected_before_requests(
 
 @pytest.mark.parametrize("exceptional", [False, True])
 def test_owned_http_client_closed_on_sdk_scope_exit(exceptional: bool) -> None:
-    client, _ = make_client({"api_key": "test"}, role="action")
+    client, _ = make_client({"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action")
     owned = client.sdk_configuration.client
     assert isinstance(owned, httpx.Client)
     try:
@@ -716,7 +754,11 @@ def test_borrowed_client_and_hooks_survive_sdk_scope(
 ) -> None:
     events: list[str] = []
     router_http.event_hooks["response"].append(lambda _response: events.append("response"))
-    client, model = make_client({"api_key": "test"}, role="page_detail", http_client=router_http)
+    client, model = make_client(
+        {"model": "openai/gpt-6.1-sol", "api_key": "test"},
+        role="page_detail",
+        http_client=router_http,
+    )
     body = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
     router_responses.append(httpx.Response(200, json=body))
     with client:
@@ -780,6 +822,7 @@ def test_screenshot_batch_reuses_and_closes_client_with_partial_progress(
 
 
 @pytest.mark.parametrize("exceptional", [False, True])
+@pytest.mark.usefixtures("model_environment")
 def test_v2_invoked_callback_closes_clients_and_reuses_image_client(
     exceptional: bool,
     tmp_path: Path,
@@ -814,6 +857,7 @@ def test_v2_invoked_callback_closes_clients_and_reuses_image_client(
     assert len(owned_router_clients) == initial_count + 8
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_v2_partial_initialization_closes_created_clients(
     tmp_path: Path, owned_router_clients: list[httpx.Client]
 ) -> None:
@@ -826,6 +870,7 @@ def test_v2_partial_initialization_closes_created_clients(
 
 
 @pytest.mark.parametrize("exceptional", [False, True])
+@pytest.mark.usefixtures("model_environment")
 def test_audit_cli_closes_owned_clients_on_exit(
     exceptional: bool,
     tmp_path: Path,
@@ -861,6 +906,7 @@ def test_audit_cli_closes_owned_clients_on_exit(
 
 
 @pytest.mark.parametrize("exceptional", [False, True])
+@pytest.mark.usefixtures("model_environment")
 def test_exploration_lifecycle_closes_owned_clients(
     exceptional: bool,
     tmp_path: Path,
@@ -944,7 +990,9 @@ def test_omitted_fingerprint_preserves_multipart_and_native_actions(
         {"type": "text", "text": body["choices"][0]["message"]["content"]}
     ]
     router_responses.append(httpx.Response(200, json=body))
-    action, history = vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
+    action, history = vlm_utils.predict_next_action(
+        router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+    )
     assert action == {"action": "tap", "x": 540, "y": 960}
     assert history == "Search | Tap"
     assert len(router_requests) == 1
@@ -965,7 +1013,9 @@ def test_factory_initialization_failure_keeps_correct_owner(
 
     monkeypatch.setattr(utils, "ConfiguredOpenRouter", fail_sdk)
     with pytest.raises(RuntimeError, match="SDK construction failed"):
-        make_client({"api_key": "test"}, role="action", http_client=supplied)
+        make_client(
+            {"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action", http_client=supplied
+        )
     assert len(owned_router_clients) == 1
     assert owned_router_clients[0].is_closed is not borrowed
     if supplied is not None:
@@ -977,7 +1027,7 @@ def test_factory_initialization_failure_keeps_correct_owner(
 )
 def test_missing_key_names_explicit_configuration_role(role: str) -> None:
     with pytest.raises(ValueError, match=rf"{role}\.api_key.*OPENROUTER_API_KEY"):
-        make_client({}, role=role, default_model="google/gemini-embedding-2")
+        make_client({"model": "openai/gpt-6.1-sol"}, role=role)
 
 
 def test_image_batches_keep_endpoint_credentials_and_models_separate(
@@ -1069,7 +1119,12 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
     router_responses.append(httpx.Response(200, json=body))
     assert (
         vlm_utils.predict_next_action(
-            router_client, png_screenshot, "act", screen_w=100, screen_h=200
+            router_client,
+            png_screenshot,
+            "act",
+            screen_w=100,
+            screen_h=200,
+            model="qwen/qwen3.8-flash",
         )[0]
         == expected
     )
@@ -1088,7 +1143,9 @@ def test_malformed_http_error_never_returns_action_fallback(
 ) -> None:
     router_responses.append(httpx.Response(status, json={"error": {"message": "bad"}}))
     with pytest.raises(OpenRouterError) as caught:
-        vlm_utils.predict_next_action(router_client, png_screenshot, "tap")
+        vlm_utils.predict_next_action(
+            router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+        )
     assert caught.value.status_code == status
     assert len(router_requests) == 1
     assert no_sleep == []

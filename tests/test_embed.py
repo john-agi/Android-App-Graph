@@ -60,6 +60,7 @@ def test_embed_main_rejects_missing_config(capsys: pytest.CaptureFixture[str]) -
     assert "config file not found" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_embed_main_rejects_missing_graph_root(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -71,6 +72,7 @@ def test_embed_main_rejects_missing_graph_root(
     assert "graph root does not exist" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text(f"experiment:\n  graph_dir: {tmp_path}\n", encoding="utf-8")
@@ -107,7 +109,8 @@ def test_embed_main_reports_invalid_embedding_config(
     assert router_requests == []
 
 
-def test_embed_settings_from_config(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("model_environment")
+def test_embed_settings_from_environment(tmp_path: Path) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("experiment:\n  graph_dir: my_graphs\n", encoding="utf-8")
     graph_dir, api_key, model, base_url, timeout = embed.load_image_embedding_settings(
@@ -165,6 +168,7 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_embed_settings_read_the_api_key_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -809,6 +813,7 @@ def test_offline_sdk_recomputes_native_cache_using_shared_openrouter_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "google/gemini-embedding-2")
     graph_path = _write_graph_tree(tmp_path)
     sidecar = image_embeddings_path(graph_path)
     sidecar.write_text(

@@ -56,7 +56,12 @@ def test_directional_swipes_accept_optional_coordinates(
     }
     router_responses.extend(httpx.Response(200, json=body) for _ in range(3))
     action, _ = vlm_utils.predict_next_action(
-        router_client, png_screenshot, "swipe", screen_w=100, screen_h=200
+        router_client,
+        png_screenshot,
+        "swipe",
+        screen_w=100,
+        screen_h=200,
+        model="qwen/qwen3.8-flash",
     )
     endpoints = {
         "up": (50, 150, 50, 50),
@@ -102,10 +107,12 @@ def test_text_vector_validation_uses_the_request_retry_budget(
     )
     if recover:
         router_responses.append(httpx.Response(200, json=embedding_body))
-        assert vlm_utils.get_embedding(router_client, "home") == [0.25, 0.75]
+        assert vlm_utils.get_embedding(
+            router_client, "home", model="google/gemini-embedding-2"
+        ) == [0.25, 0.75]
     else:
         with pytest.raises(ValueError, match="embedding"):
-            vlm_utils.get_embedding(router_client, "home")
+            vlm_utils.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert len(router_requests) == (2 if recover else 3)
     assert no_sleep == ([2.0] if recover else [2.0, 4.0])
     assert tracker.snapshot()["calls"] == int(recover)
@@ -129,7 +136,7 @@ def test_text_http_schema_and_vector_failures_share_one_budget(
         ]
     )
     with pytest.raises(ValueError, match="one embedding"):
-        vlm_utils.get_embedding(router_client, "home")
+        vlm_utils.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert len(router_requests) == 3
     assert len(router_responses) == 1
     assert no_sleep == [2.0, 4.0]
@@ -145,7 +152,12 @@ def test_graph_preflight_allows_empty_vectors_and_unrelated_packages(
     embedding_body: dict[str, object],
     png_screenshot: str,
 ) -> None:
-    manager = GraphManager(page_detail_client=router_client, embedding_client=router_client)
+    manager = GraphManager(
+        page_detail_client=router_client,
+        embedding_client=router_client,
+        page_detail_model="openai/gpt-6.1-sol",
+        embedding_model="google/gemini-embedding-2",
+    )
     manager.graph.add_node(
         "old",
         activity="com.other.Home" if other_package else "com.demo.Home",
@@ -194,6 +206,7 @@ def test_graph_preflight_allows_empty_vectors_and_unrelated_packages(
         (None, DEFAULT_BASE_URL, None, None, "router-key"),
     ],
 )
+@pytest.mark.usefixtures("model_environment")
 def test_image_credential_inheritance_stays_with_its_origin(
     image_url: str | None,
     override_url: str | None,
@@ -223,7 +236,7 @@ def test_image_credential_inheritance_stays_with_its_origin(
     else:
         client, _ = make_client(settings._asdict(), role="image_embedding", http_client=router_http)
         router_responses.append(httpx.Response(200, json=embedding_body))
-        vlm_utils.get_image_embedding(client, "image")
+        vlm_utils.get_image_embedding(client, "image", model="google/gemini-embedding-2")
         request = router_requests[0]
         assert request.url == httpx.URL(settings.base_url.rstrip("/") + "/embeddings")
         assert request.headers["authorization"] == f"Bearer {expected_key}"
@@ -241,6 +254,7 @@ def test_image_credential_inheritance_stays_with_its_origin(
         "https://openrouter.ai:0/api/v1",
     ],
 )
+@pytest.mark.usefixtures("model_environment")
 def test_shared_router_key_never_falls_back_to_a_different_origin(
     role: str,
     endpoint: str,
@@ -248,7 +262,7 @@ def test_shared_router_key_never_falls_back_to_a_different_origin(
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "router-secret")
     with pytest.raises(ValueError, match=rf"{role}\.api_key") as caught:
-        make_client({"base_url": endpoint}, role=role)
+        make_client({"model": "openai/gpt-6.1-sol", "base_url": endpoint}, role=role)
     assert "router-secret" not in str(caught.value)
     assert (
         resolve_image_embedding_settings({"image_embedding": {"base_url": endpoint}}).api_key
@@ -274,7 +288,9 @@ def test_owned_clients_preserve_redirects_and_strip_foreign_credentials_after_re
     router_requests: list[httpx.Request],
     embedding_body: dict[str, object],
 ) -> None:
-    client, _ = make_client({"api_key": "test-key"}, role="embedding")
+    client, _ = make_client(
+        {"model": "google/gemini-embedding-2", "api_key": "test-key"}, role="embedding"
+    )
     for _ in range(2):
         router_responses.extend(
             [
@@ -283,7 +299,10 @@ def test_owned_clients_preserve_redirects_and_strip_foreign_credentials_after_re
             ]
         )
         with client:
-            assert vlm_utils.get_embedding(client, "home") == [0.25, 0.75]
+            assert vlm_utils.get_embedding(client, "home", model="google/gemini-embedding-2") == [
+                0.25,
+                0.75,
+            ]
         first, redirected = router_requests[-2:]
         assert first.method == redirected.method == "POST"
         assert first.content == redirected.content
@@ -297,11 +316,15 @@ def test_owned_clients_preserve_redirects_and_strip_foreign_credentials_after_re
 @pytest.mark.parametrize("endpoint", ["relative/path", "ftp://other.example/v1", "https:///v1"])
 def test_invalid_endpoint_fails_before_client_creation(endpoint: str) -> None:
     with pytest.raises(ValueError, match="absolute HTTP or HTTPS"):
-        make_client({"base_url": endpoint, "api_key": "test"}, role="action")
+        make_client(
+            {"model": "qwen/qwen3.8-flash", "base_url": endpoint, "api_key": "test"}, role="action"
+        )
 
 
 def test_borrowed_client_retains_redirect_policy_and_ownership(router_http: httpx.Client) -> None:
-    client, _ = make_client({"api_key": "test"}, role="action", http_client=router_http)
+    client, _ = make_client(
+        {"model": "qwen/qwen3.8-flash", "api_key": "test"}, role="action", http_client=router_http
+    )
     for _ in range(2):
         with client:
             assert client.sdk_configuration.client is router_http

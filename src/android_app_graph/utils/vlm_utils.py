@@ -23,10 +23,6 @@ from PIL import Image
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
 from android_app_graph.retrying import DEFAULT_RETRIES, call_with_retry
 from android_app_graph.utils import (
-    DEFAULT_ACTION_MODEL,
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_INSTRUCTION_MODEL,
-    DEFAULT_PAGE_DETAIL_MODEL,
     ConfiguredOpenRouter,
     client_scope,
     make_client,
@@ -650,7 +646,8 @@ def describe_page_and_state(
     screenshot_b64: str,
     existing_nodes: list[str] | None = None,
     existing_keys: list[str] | None = None,
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    model: str,
 ) -> tuple[str, dict[str, object], list[dict[str, str]]]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
@@ -760,7 +757,8 @@ def verify_same_node(
     screenshot_new_b64: str,
     screenshot_existing_b64: str,
     existing_description: str,
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    model: str,
 ) -> dict[str, Any]:
     """Compare two screenshots to decide if they are the same screen.
 
@@ -812,7 +810,8 @@ def normalize_edge(
     client: OpenRouter,
     instructions: list[str],
     target_observations: list[str] | None = None,
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    model: str,
 ) -> dict[str, Any]:
     """Normalize edge instructions into a reusable template.
 
@@ -973,7 +972,8 @@ def audit_merge_nodes(
     client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    model: str,
 ) -> dict[str, Any]:
     """Ask a model only for duplicate-node merge candidates."""
     prompt = NODE_MERGE_AUDIT_PROMPT.format(
@@ -1026,7 +1026,8 @@ def select_exploration_target(
     client: OpenRouter,
     app_name: str,
     candidates: list[dict[str, Any]],
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    model: str,
 ) -> str | None:
     """Select a node for periodic live exploration coverage balancing."""
     if not candidates:
@@ -1081,7 +1082,8 @@ def audit_graph(
     client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    model: str,
 ) -> dict[str, Any]:
     """Ask a model to review the graph structure for anomalies.
 
@@ -1130,9 +1132,7 @@ def _embedding_result(
     return vector, response.usage
 
 
-def get_embedding(
-    client: OpenRouter, text: str, model: str = DEFAULT_EMBEDDING_MODEL
-) -> list[float]:
+def get_embedding(client: OpenRouter, text: str, model: str) -> list[float]:
     """Get a text embedding through the official OpenRouter SDK."""
 
     def request_embedding() -> tuple[list[float], CreateEmbeddingsUsage | None]:
@@ -1147,9 +1147,7 @@ def get_embedding(
     return vector
 
 
-def get_image_embedding(
-    client: OpenRouter, screenshot_b64: str, model: str = DEFAULT_EMBEDDING_MODEL
-) -> list[float]:
+def get_image_embedding(client: OpenRouter, screenshot_b64: str, model: str) -> list[float]:
     """Embed a screenshot using OpenRouter's documented multimodal content array.
 
     The shared image-cache loop owns retries for both runtime and offline use.
@@ -1196,7 +1194,6 @@ def image_embedding_client(
             "base_url": base_url,
             "request_timeout": request_timeout,
         },
-        default_model=DEFAULT_EMBEDDING_MODEL,
         role="image_embedding",
     )
     with created:
@@ -1358,7 +1355,8 @@ def plan_next_action(
     app_name: str = "",
     unexplored_elements: list[dict[str, Any]] | None = None,
     input_status: str = "unknown from screenshot",
-    model: str = DEFAULT_INSTRUCTION_MODEL,
+    *,
+    model: str,
 ) -> str:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
@@ -1518,7 +1516,8 @@ def predict_next_action(
     screen_w: int = 1080,
     screen_h: int = 1920,
     action_history: list[str] | None = None,
-    model: str = DEFAULT_ACTION_MODEL,
+    *,
+    model: str,
     overall_task: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Call the action agent VLM for one step.

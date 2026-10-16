@@ -31,11 +31,8 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
-from android_app_graph.utils import make_client
+from android_app_graph.utils import make_client, resolve_model_roles
 from android_app_graph.utils.vlm_utils import (
-    DEFAULT_ACTION_MODEL,
-    DEFAULT_INSTRUCTION_MODEL,
-    DEFAULT_PAGE_DETAIL_MODEL,
     build_image_message,
     describe_page_and_state,
     message_text,
@@ -598,7 +595,12 @@ class UIKobeV2Translator(BaseTranslator):
         # Accepted because AITK forwards every translator_args key and its controller.yaml
         # sets max_pixels; this translator sends screenshots unresized.
         self.max_pixels = max_pixels
-        vlm_config = vlm_config or {}
+        vlm_config = dict(vlm_config or {})
+        vlm_config.update(
+            resolve_model_roles(
+                vlm_config, roles=("page_detail", "instruction", "action", "image_embedding")
+            )
+        )
 
         image_embedding_settings = resolve_image_embedding_settings(vlm_config)
         self.image_embedding_model = image_embedding_settings.model
@@ -607,18 +609,16 @@ class UIKobeV2Translator(BaseTranslator):
 
         with ExitStack() as clients:
             self.model_client, self.model_name = make_client(
-                vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
+                vlm_config.get("action"), role="action"
             )
             clients.enter_context(self.model_client)
             self.desc_client, self.desc_model = make_client(
                 vlm_config.get("page_detail"),
-                default_model=DEFAULT_PAGE_DETAIL_MODEL,
                 role="page_detail",
             )
             clients.enter_context(self.desc_client)
             self.instruction_client, self.instruction_model = make_client(
                 vlm_config.get("instruction"),
-                default_model=DEFAULT_INSTRUCTION_MODEL,
                 role="instruction",
             )
             clients.enter_context(self.instruction_client)
@@ -626,7 +626,6 @@ class UIKobeV2Translator(BaseTranslator):
             if self.image_embedding_api_key:
                 self.image_embedding_client, _ = make_client(
                     image_embedding_settings._asdict(),
-                    default_model=self.image_embedding_model,
                     role="image_embedding",
                 )
                 clients.enter_context(self.image_embedding_client)

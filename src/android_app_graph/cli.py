@@ -9,6 +9,7 @@ import yaml
 
 from android_app_graph.device import AvdManager
 from android_app_graph.kobe import Kobe
+from android_app_graph.utils import resolve_model_roles
 from android_app_graph.utils.logging import setup_logging
 
 
@@ -116,6 +117,18 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    with args.config.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    vlm_config = config.get("vlm", {})
+    try:
+        vlm_config.update(
+            resolve_model_roles(
+                vlm_config, roles=("page_detail", "embedding", "instruction", "action")
+            )
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     try:
         from aitk.utils.adb_controller import ADBController
         from aitk.utils.avd_manager import AVDManager
@@ -125,9 +138,6 @@ def main() -> None:
             "app-graph requires the 'aitk' dependency. Install it first, then rerun the command.\n",
         )
 
-    with args.config.open("r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-
     setup_logging(level=logging.INFO)
     logger = logging.getLogger("android_app_graph.explorer")
 
@@ -136,7 +146,6 @@ def main() -> None:
     controller = ADBController(config, logger)
 
     exp_config = config.get("experiment", {})
-    vlm_config = config.get("vlm", {})
     graph_dir = exp_config.get("graph_dir", "graphs")
 
     max_steps = args.max_steps or exp_config.get("max_steps", 20)

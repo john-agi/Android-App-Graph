@@ -184,26 +184,37 @@ source .env
 set +a
 ```
 
-`.env` is ignored by git. The four model environment variables are optional
-overrides; leave them unset to use the approved starting defaults:
+`.env` is ignored by git. Keep all four model selections from
+[`.env.example`](.env.example), or replace them with exact OpenRouter model IDs.
+The application has no built-in model defaults. Each operation requires explicit,
+nonempty model settings and reports missing model settings before device setup or
+API requests. You may also supply these environment variables directly in your
+shell, CI or container; a physical `.env` file is not required or loaded automatically.
 
-| Optional environment variable | Default model |
+| Environment variable | Role |
 |---|---|
-| `APP_GRAPH_PAGE_DETAIL_MODEL` | `openai/gpt-6.1-sol` |
-| `APP_GRAPH_EMBEDDING_MODEL` | `google/gemini-embedding-2` |
-| `APP_GRAPH_INSTRUCTION_MODEL` | `openai/gpt-6.1-sol` |
-| `APP_GRAPH_ACTION_MODEL` | `qwen/qwen3.8-flash` |
+| `APP_GRAPH_PAGE_DETAIL_MODEL` | Screen descriptions and graph auditing |
+| `APP_GRAPH_EMBEDDING_MODEL` | Text and screenshot embeddings |
+| `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning |
+| `APP_GRAPH_ACTION_MODEL` | Action prediction |
 
-These defaults were approved from OpenRouter's catalog on 2026-10-12 based
-on documented capabilities; Android-task improvements have not been measured.
+The template's model selections were approved from OpenRouter's catalog on
+2026-10-12 based on documented capabilities; Android-task improvements have not
+been measured.
 Check a replacement model's supported input modalities and parameters in the
 [chat catalog](https://openrouter.ai/api/v1/models) or
 [embedding catalog](https://openrouter.ai/api/v1/embeddings/models).
 
-The sample YAML keeps `${APP_GRAPH_*_MODEL}` references so the factory can
-resolve an override or fall back to the role's default when it is unset. To
-compare models, add the corresponding variable with an exact OpenRouter model
-ID to `.env`, export it again and restart the command.
+The sample YAML uses `${APP_GRAPH_*_MODEL}` references. An omitted `model` field
+reads the corresponding environment variable; an explicit model ID in YAML or
+the embedding command's `--model` argument takes precedence. An empty value or
+unresolved reference is an error, including an explicit image-model override.
+To compare models, edit `.env`, export it again and restart the command.
+
+Exploration and the v2 runtime require all four roles. A basic audit requires
+page-detail and embedding models; `--re-explore` also requires instruction and
+action models. `app-graph-embed` requires only an embedding model. Help and plotting
+existing graphs need no model configuration or credentials.
 
 Each role's base URL defaults to `https://openrouter.ai/api/v1`. For advanced
 configurations, each role still accepts explicit `api_key` and `base_url` YAML
@@ -271,7 +282,7 @@ The instruction planner now has its own `instruction` role in v2 as well as
 exploration. If a legacy configuration supplied only an action credential or
 used the action model for planning, add an `instruction` block with its own
 `model`, `api_key` and compatible `base_url`, or export `OPENROUTER_API_KEY`
-and use the approved instruction default. To retain a supported custom model
+and `APP_GRAPH_INSTRUCTION_MODEL`. To retain a supported custom model
 for planning, explicitly copy that model and endpoint into `instruction`.
 Missing-credential errors identify the affected role; action credentials are
 not implicitly reused for instruction requests.

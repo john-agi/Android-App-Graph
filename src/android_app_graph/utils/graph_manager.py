@@ -37,9 +37,8 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.payloads import as_float_list, as_int_list, as_str, as_str_dict
+from android_app_graph.utils import resolve_model
 from android_app_graph.utils.vlm_utils import (
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_PAGE_DETAIL_MODEL,
     audit_graph,
     audit_merge_nodes,
     describe_page_and_state,
@@ -122,21 +121,37 @@ class GraphManager:
     def __init__(
         self,
         page_detail_client: OpenRouter | None = None,
-        page_detail_model: str = DEFAULT_PAGE_DETAIL_MODEL,
+        page_detail_model: str | None = None,
         embedding_client: OpenRouter | None = None,
-        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        embedding_model: str | None = None,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     ) -> None:
         self.graph = nx.DiGraph()
         self.page_detail_client = page_detail_client
-        self.page_detail_model = page_detail_model
+        self._page_detail_model = (
+            resolve_model(page_detail_model, role="page_detail")
+            if page_detail_client is not None
+            else page_detail_model
+        )
         self.embedding_client = embedding_client
-        self.embedding_model = embedding_model
+        self._embedding_model = (
+            resolve_model(embedding_model, role="embedding")
+            if embedding_client is not None
+            else embedding_model
+        )
         self.similarity_threshold = similarity_threshold
         self._next_id = 0
         self._dirty_screenshots: set[str] = set()
         self._last_identify_cache: _IdentifyCacheEntry | None = None
         self.total_steps_completed = 0
+
+    @property
+    def page_detail_model(self) -> str:
+        return resolve_model(self._page_detail_model, role="page_detail")
+
+    @property
+    def embedding_model(self) -> str:
+        return resolve_model(self._embedding_model, role="embedding")
 
     def _require_page_detail_client(self) -> OpenRouter:
         """Return the page-detail client, or raise when none was configured."""

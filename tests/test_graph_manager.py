@@ -61,6 +61,8 @@ def make_manager(similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> 
         page_detail_client=FAKE_CLIENT,
         embedding_client=FAKE_CLIENT,
         similarity_threshold=similarity_threshold,
+        page_detail_model="openai/gpt-6.1-sol",
+        embedding_model="google/gemini-embedding-2",
     )
 
 
@@ -226,7 +228,7 @@ def test_identify_state_without_a_page_detail_client_raises() -> None:
 
 def test_identify_state_without_an_embedding_client_raises(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = GraphManager(page_detail_client=FAKE_CLIENT)
+    gm = GraphManager(page_detail_client=FAKE_CLIENT, page_detail_model="openai/gpt-6.1-sol")
     with pytest.raises(RuntimeError, match="embedding_client"):
         gm.identify_state(HOME, SHOT_A)
 
@@ -1067,7 +1069,7 @@ def test_normalize_all_edges_normalizes_a_long_single_instruction(
 def test_normalize_all_edges_without_a_client_does_nothing(
     normalizer: FakeNormalizer,
 ) -> None:
-    gm = GraphManager()
+    gm = GraphManager(embedding_model="test/embedding")
     _search_graph(gm)
 
     gm.normalize_all_edges()
@@ -1089,7 +1091,7 @@ def test_normalize_node_edges_counts_templatized_edges(normalizer: FakeNormalize
 def test_normalize_node_edges_without_a_client_returns_zero(
     normalizer: FakeNormalizer,
 ) -> None:
-    gm = GraphManager()
+    gm = GraphManager(embedding_model="test/embedding")
     _search_graph(gm)
 
     assert gm.normalize_node_edges("s0_home") == 0
@@ -2184,7 +2186,7 @@ def test_save_then_load_round_trips(
 def test_readding_an_identical_edge_is_idempotent(
     action: dict[str, Any], repeats: int, instruction: str
 ) -> None:
-    gm = GraphManager()
+    gm = GraphManager(embedding_model="test/embedding")
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
 

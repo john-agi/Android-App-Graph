@@ -10,13 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
-from android_app_graph.utils import make_client
+from android_app_graph.utils import make_client, resolve_model_roles
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
-    DEFAULT_ACTION_MODEL,
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_INSTRUCTION_MODEL,
-    DEFAULT_PAGE_DETAIL_MODEL,
     plan_next_action,
     predict_next_action,
     select_exploration_target,
@@ -79,27 +75,30 @@ class Kobe:
         self.coverage_checkpoint_steps = coverage_checkpoint_steps
         self.coverage_checkpoint_top_k = coverage_checkpoint_top_k
 
-        vlm_config = vlm_config or {}
+        vlm_config = dict(vlm_config or {})
+        vlm_config.update(
+            resolve_model_roles(
+                vlm_config, roles=("page_detail", "embedding", "instruction", "action")
+            )
+        )
 
         with ExitStack() as clients:
             self.page_detail_client, self.page_detail_model = make_client(
                 vlm_config.get("page_detail"),
-                default_model=DEFAULT_PAGE_DETAIL_MODEL,
                 role="page_detail",
             )
             clients.enter_context(self.page_detail_client)
             self.embedding_client, self.embedding_model = make_client(
-                vlm_config.get("embedding"), default_model=DEFAULT_EMBEDDING_MODEL, role="embedding"
+                vlm_config.get("embedding"), role="embedding"
             )
             clients.enter_context(self.embedding_client)
             self.instruction_client, self.instruction_model = make_client(
                 vlm_config.get("instruction"),
-                default_model=DEFAULT_INSTRUCTION_MODEL,
                 role="instruction",
             )
             clients.enter_context(self.instruction_client)
             self.action_client, self.action_model = make_client(
-                vlm_config.get("action"), default_model=DEFAULT_ACTION_MODEL, role="action"
+                vlm_config.get("action"), role="action"
             )
 
             clients.enter_context(self.action_client)

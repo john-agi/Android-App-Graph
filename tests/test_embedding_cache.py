@@ -393,7 +393,8 @@ def test_compute_embedding_with_retry_reraises_after_the_last_attempt(
     assert len(attempts) == embedding_cache.IMAGE_EMBEDDING_RETRIES + 1
 
 
-def test_resolve_image_embedding_settings_defaults() -> None:
+@pytest.mark.usefixtures("model_environment")
+def test_resolve_image_embedding_settings_from_environment() -> None:
     settings = embedding_cache.resolve_image_embedding_settings({})
     assert settings.model == "google/gemini-embedding-2"
     assert settings.api_key is None
@@ -415,6 +416,7 @@ def test_resolve_image_embedding_settings_reads_config_values() -> None:
     )
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_preserves_endpoint_override() -> None:
 
     settings = embedding_cache.resolve_image_embedding_settings(
@@ -423,6 +425,7 @@ def test_resolve_image_embedding_settings_preserves_endpoint_override() -> None:
     assert settings.base_url == "http://localhost:9000/v1"
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_keeps_a_base_url_override() -> None:
     settings = embedding_cache.resolve_image_embedding_settings(
         {"image_embedding": {"base_url": "https://eu.googleapis.com/v1beta"}}
@@ -430,6 +433,7 @@ def test_resolve_image_embedding_settings_keeps_a_base_url_override() -> None:
     assert settings.base_url == "https://eu.googleapis.com/v1beta"
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_reads_the_api_key_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -458,6 +462,7 @@ def test_resolve_image_embedding_settings_overrides_win_over_config() -> None:
     )
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_resolves_an_env_reference_base_url_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -469,6 +474,7 @@ def test_resolve_image_embedding_settings_resolves_an_env_reference_base_url_ove
     assert settings.base_url == "https://eu.googleapis.com/v1beta"
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_resolve_image_embedding_settings_resolves_optional_env_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

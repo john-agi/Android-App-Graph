@@ -829,7 +829,7 @@ def test_chat_completion_content_turns_an_empty_choices_list_into_empty_content(
 
 def test_endpoint_client_defaults() -> None:
     client, model = aitk_translator.make_client(
-        {"api_key": "test-key"}, role="action", default_model="qwen/qwen3.8-flash"
+        {"model": "qwen/qwen3.8-flash", "api_key": "test-key"}, role="action"
     )
     assert model == "qwen/qwen3.8-flash"
     assert client.sdk_configuration.retry_config is None
@@ -852,7 +852,9 @@ def test_endpoint_client_reads_the_config() -> None:
 
 
 def test_endpoint_client_prefers_the_timeout_alias() -> None:
-    client, _ = aitk_translator.make_client({"api_key": "test-key", "timeout": 5}, role="action")
+    client, _ = aitk_translator.make_client(
+        {"model": "qwen/qwen3.8-flash", "api_key": "test-key", "timeout": 5}, role="action"
+    )
     assert client.sdk_configuration.timeout_ms == 5_000
 
 
@@ -2225,7 +2227,8 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
     }
 
 
-def test_v2_approved_defaults_share_openrouter_credentials(
+@pytest.mark.usefixtures("model_environment")
+def test_v2_environment_models_share_openrouter_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2240,6 +2243,7 @@ def test_v2_approved_defaults_share_openrouter_credentials(
 
 
 @pytest.mark.usefixtures("image_router")
+@pytest.mark.usefixtures("model_environment")
 def test_v2_sdk_migrates_native_cache_and_embeds_runtime_screenshots(
     tmp_path: Path,
     router_requests: list[httpx.Request],

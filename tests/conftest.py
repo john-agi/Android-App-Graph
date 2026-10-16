@@ -55,6 +55,18 @@ def _no_network() -> Iterator[None]:
 
 
 @pytest.fixture
+def model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit model choices for tests of behavior other than missing configuration."""
+    for role, model in (
+        ("PAGE_DETAIL", "openai/gpt-6.1-sol"),
+        ("EMBEDDING", "google/gemini-embedding-2"),
+        ("INSTRUCTION", "openai/gpt-6.1-sol"),
+        ("ACTION", "qwen/qwen3.8-flash"),
+    ):
+        monkeypatch.setenv(f"APP_GRAPH_{role}_MODEL", model)
+
+
+@pytest.fixture
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record retry back-off delays instead of waiting for them.
 
@@ -93,7 +105,9 @@ def router_http(
 @pytest.fixture
 def router_client(router_http: httpx.Client) -> Iterator[OpenRouter]:
     client, _ = make_client(
-        {"api_key": "test-router-key"}, http_client=router_http, role="page_detail"
+        {"model": "openai/gpt-6.1-sol", "api_key": "test-router-key"},
+        http_client=router_http,
+        role="page_detail",
     )
     with client:
         yield client
@@ -140,10 +154,8 @@ def png_screenshot() -> str:
 
 @pytest.fixture
 def image_router(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> None:
-    def factory(
-        cfg: Mapping[str, object] | None, *, default_model: str, role: str
-    ) -> tuple[OpenRouter, str]:
-        return make_client(cfg, default_model=default_model, role=role, http_client=router_http)
+    def factory(cfg: Mapping[str, object] | None, *, role: str) -> tuple[OpenRouter, str]:
+        return make_client(cfg, role=role, http_client=router_http)
 
     monkeypatch.setattr(vlm_utils, "make_client", factory)
     monkeypatch.setattr(aitk_translator, "make_client", factory)

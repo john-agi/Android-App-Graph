@@ -61,6 +61,7 @@ path = "android_app_graph.cli"
 depends_on = [
     "android_app_graph.device",
     "android_app_graph.kobe",
+    "android_app_graph.utils",
     "android_app_graph.utils.logging",
 ]
 
@@ -83,6 +84,7 @@ depends_on = [
     "android_app_graph.android_packages",
     "android_app_graph.graph_files",
     "android_app_graph.payloads",
+    "android_app_graph.utils",
     "android_app_graph.utils.vlm_utils",
 ]
 

@@ -217,23 +217,36 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     result: object
     match operation:
         case "page":
-            result = vlm.describe_page_and_state(router_client, png_screenshot)
+            result = vlm.describe_page_and_state(
+                router_client, png_screenshot, model="openai/gpt-6.1-sol"
+            )
         case "verify":
-            result = vlm.verify_same_node(router_client, png_screenshot, png_screenshot, "home")
+            result = vlm.verify_same_node(
+                router_client, png_screenshot, png_screenshot, "home", model="openai/gpt-6.1-sol"
+            )
         case "normalize":
-            result = vlm.normalize_edge(router_client, ["search milk"])
+            result = vlm.normalize_edge(router_client, ["search milk"], model="openai/gpt-6.1-sol")
         case "merge":
-            result = vlm.audit_merge_nodes(router_client, "home")
+            result = vlm.audit_merge_nodes(router_client, "home", model="openai/gpt-6.1-sol")
         case "audit":
-            result = vlm.audit_graph(router_client, "home")
+            result = vlm.audit_graph(router_client, "home", model="openai/gpt-6.1-sol")
         case "target":
-            result = vlm.select_exploration_target(router_client, "demo", [{"node_id": "home"}])
+            result = vlm.select_exploration_target(
+                router_client, "demo", [{"node_id": "home"}], model="openai/gpt-6.1-sol"
+            )
         case "planner":
             result = vlm.plan_next_action(
-                router_client, png_screenshot, "home", [], app_name="demo"
+                router_client,
+                png_screenshot,
+                "home",
+                [],
+                app_name="demo",
+                model="openai/gpt-6.1-sol",
             )
         case _:
-            result = vlm.predict_next_action(router_client, png_screenshot, "wait")
+            result = vlm.predict_next_action(
+                router_client, png_screenshot, "wait", model="qwen/qwen3.8-flash"
+            )
     assert result == expected
     body = json.loads(router_requests[0].content)
     assert body["model"] == model
@@ -280,7 +293,7 @@ def test_native_tool_calls_survive_sdk_parsing(
     chat_body["choices"] = [{"index": 0, "finish_reason": "tool_calls", "message": message}]
     router_responses.append(httpx.Response(200, json=chat_body))
     action, _ = vlm.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200
+        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
 
@@ -317,9 +330,9 @@ def test_text_and_image_embeddings_use_the_documented_sdk_format(
 ) -> None:
     router_responses.append(httpx.Response(200, json=embedding_body))
     vector = (
-        vlm.get_image_embedding(router_client, "shot")
+        vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
         if image
-        else vlm.get_embedding(router_client, "home")
+        else vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     )
     assert vector == [0.25, 0.75]
     body = json.loads(router_requests[0].content)
@@ -361,7 +374,7 @@ def test_sdk_embedding_shapes_are_rejected_explicitly(
         )
     )
     with pytest.raises(ValueError, match="embedding"):
-        vlm.get_image_embedding(router_client, "shot")
+        vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
 
 
 def test_non_json_embedding_response_is_rejected(
@@ -372,7 +385,7 @@ def test_non_json_embedding_response_is_rejected(
         httpx.Response(200, text="data: unexpected", headers={"content-type": "text/event-stream"})
     )
     with pytest.raises(TypeError, match="JSON embedding response"):
-        vlm.get_image_embedding(router_client, "shot")
+        vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
 
 
 @pytest.mark.parametrize("operation", ["chat", "embedding"])
@@ -397,7 +410,7 @@ def test_sdk_errors_exhaust_bounded_application_retries(
             )
     else:
         with pytest.raises(OpenRouterError, match="upstream failed"):
-            vlm.get_embedding(router_client, "home")
+            vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert len(router_requests) == 3
     assert no_sleep == [2.0, 4.0]
     assert tracked_usage.snapshot()["calls"] == 0
@@ -421,9 +434,9 @@ def test_sdk_retry_recovers_and_counts_only_completed_responses(
         ]
     )
     if operation == "chat":
-        vlm.audit_graph(router_client, "home")
+        vlm.audit_graph(router_client, "home", model="openai/gpt-6.1-sol")
     else:
-        vlm.get_embedding(router_client, "home")
+        vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert len(router_requests) == 2
     assert no_sleep == [2.0]
     assert tracked_usage.snapshot()["calls"] == 1
@@ -461,11 +474,21 @@ def test_unreadable_or_refused_sdk_response_keeps_parse_fallbacks(
         httpx.Response(200, json=chat_body) for _ in range(3 if operation == "action" else 1)
     )
     if operation == "audit":
-        assert vlm.audit_graph(router_client, "home") == {"issues": [], "summary": "parse error"}
+        assert vlm.audit_graph(router_client, "home", model="openai/gpt-6.1-sol") == {
+            "issues": [],
+            "summary": "parse error",
+        }
     elif operation == "planner":
-        assert vlm.plan_next_action(router_client, png_screenshot, "home", []) == ""
+        assert (
+            vlm.plan_next_action(
+                router_client, png_screenshot, "home", [], model="openai/gpt-6.1-sol"
+            )
+            == ""
+        )
     else:
-        assert vlm.predict_next_action(router_client, png_screenshot, "tap") == (
+        assert vlm.predict_next_action(
+            router_client, png_screenshot, "tap", model="qwen/qwen3.8-flash"
+        ) == (
             {"action": "wait", "time": 1},
             "Failed to parse action response -> wait",
         )

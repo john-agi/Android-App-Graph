@@ -22,13 +22,12 @@ from android_app_graph.retrying import call_with_retry
 from android_app_graph.utils import (
     resolve_endpoint_api_key,
     resolve_endpoint_base_url,
-    resolve_env,
+    resolve_model,
     resolve_request_timeout,
     validate_embedding_config,
     validate_embedding_endpoint,
 )
 from android_app_graph.utils.vlm_utils import (
-    DEFAULT_EMBEDDING_MODEL,
     get_openrouter_image_embedding,
     image_embedding_client,
 )
@@ -58,12 +57,6 @@ def resolve_image_embedding_settings(
     embedding_cfg = as_object_dict(vlm_config.get("embedding"))
     validate_embedding_config(image_embedding_cfg, role="image_embedding")
     validate_embedding_config(embedding_cfg, role="embedding")
-    model = (
-        resolve_env(model_override)
-        or resolve_env(image_embedding_cfg.get("model"))
-        or resolve_env(embedding_cfg.get("model"))
-        or DEFAULT_EMBEDDING_MODEL
-    )
     embedding_base_url = resolve_endpoint_base_url(
         embedding_cfg.get("base_url"), api_key=embedding_cfg.get("api_key")
     )
@@ -81,6 +74,12 @@ def resolve_image_embedding_settings(
         (base_url, api_key_override),
         (image_base_url, image_embedding_cfg.get("api_key")),
         (embedding_base_url, embedding_cfg.get("api_key")),
+    )
+    model = resolve_model(
+        model_override
+        if model_override is not None
+        else image_embedding_cfg.get("model", embedding_cfg.get("model")),
+        role="image_embedding",
     )
     timeout = image_embedding_cfg.get(
         "request_timeout",

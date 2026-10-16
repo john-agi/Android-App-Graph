@@ -22,6 +22,7 @@ class _SteppingAgent(Protocol):
     def step(self, _goal: str) -> object: ...
 
 
+@pytest.mark.usefixtures("model_environment")
 def test_android_world_steps_reopen_clients_and_preserve_task_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
