@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any
 from openrouter import OpenRouter
 from openrouter.components.chatcontenttext import ChatContentText
 from openrouter.components.chatresult import ChatResult
-from openrouter.components.chatusage import ChatUsage, ChatUsageCompletionTokensDetails
+from openrouter.components.chatusage import (
+    ChatUsage,
+    ChatUsageCompletionTokensDetails,
+    ChatUsagePromptTokensDetails,
+)
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 from PIL import Image
@@ -108,11 +112,36 @@ def score_by_cosine[K](
     return scored
 
 
+_USAGE_COUNTERS = (
+    "calls",
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "cost",
+)
+
+
+def _cached_prompt_tokens(usage: ChatUsage | CreateEmbeddingsUsage) -> int:
+    details = usage.prompt_tokens_details if isinstance(usage, ChatUsage) else None
+    if isinstance(details, ChatUsagePromptTokensDetails) and isinstance(details.cached_tokens, int):
+        return details.cached_tokens
+    return 0
+
+
+def _reasoning_tokens(usage: ChatUsage | CreateEmbeddingsUsage | None) -> int | None:
+    details = usage.completion_tokens_details if isinstance(usage, ChatUsage) else None
+    if not isinstance(details, ChatUsageCompletionTokensDetails):
+        return None
+    return details.reasoning_tokens if isinstance(details.reasoning_tokens, int) else None
+
+
 class TokenTracker:
-    """Accumulates token usage across all API calls, broken down by call type."""
+    """Accumulates token usage and cost across all API calls, broken down by call type."""
 
     def __init__(self) -> None:
-        self._usage: dict[str, dict[str, int]] = {}
+        self._usage: dict[str, dict[str, float]] = {}
 
     def record(
         self,
@@ -120,92 +149,75 @@ class TokenTracker:
         model: str,
         usage: ChatUsage | CreateEmbeddingsUsage | None,
     ) -> None:
-        """Record token usage from an API response.
+        """Record the usage OpenRouter reported for one completed request.
 
         Args:
-            call_type: e.g. "page_description", "page_detail", "embedding",
-                       "instruction", "action"
+            call_type: e.g. "page_describe_and_state", "embedding", "instruction", "action"
             model: The model name used.
-            usage: The response.usage object (has prompt_tokens, completion_tokens, total_tokens).
+            usage: The response's usage; cached prompt tokens and reasoning tokens
+                count only when the provider reports them, and cost is in USD.
         """
         if usage is None:
             return
-        key = f"{call_type}:{model}"
-        if key not in self._usage:
-            self._usage[key] = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "calls": 0,
-            }
-        self._usage[key]["prompt_tokens"] += usage.prompt_tokens
-        self._usage[key]["completion_tokens"] += (
+        totals = self._usage.setdefault(f"{call_type}:{model}", dict.fromkeys(_USAGE_COUNTERS, 0))
+        totals["calls"] += 1
+        totals["prompt_tokens"] += usage.prompt_tokens
+        totals["cached_prompt_tokens"] += _cached_prompt_tokens(usage)
+        totals["completion_tokens"] += (
             usage.completion_tokens if isinstance(usage, ChatUsage) else 0
         )
-        self._usage[key]["total_tokens"] += usage.total_tokens
-        self._usage[key]["calls"] += 1
+        totals["reasoning_tokens"] += _reasoning_tokens(usage) or 0
+        totals["total_tokens"] += usage.total_tokens
+        totals["cost"] += usage.cost if isinstance(usage.cost, float) else 0.0
 
-    def snapshot(self) -> dict[str, int]:
+    def snapshot(self) -> dict[str, float]:
         """Return current totals as a flat dict."""
-        total = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "calls": 0,
-        }
-        for u in self._usage.values():
-            for k in total:
-                total[k] += u[k]
+        total = dict.fromkeys(_USAGE_COUNTERS, 0.0)
+        for totals in self._usage.values():
+            for counter in _USAGE_COUNTERS:
+                total[counter] += totals[counter]
         return total
 
     def snapshot_by_type(self) -> dict[str, int]:
         """Return total_tokens per call_type (aggregated across models).
 
-        E.g. {"page_description": 500, "page_detail": 1200, "embedding": 20, ...}
+        E.g. {"page_describe_and_state": 1200, "embedding": 20, ...}
         """
         by_type: dict[str, int] = {}
-        for key, u in self._usage.items():
+        for key, totals in self._usage.items():
             call_type = key.split(":")[0]
-            by_type[call_type] = by_type.get(call_type, 0) + u["total_tokens"]
+            by_type[call_type] = by_type.get(call_type, 0) + int(totals["total_tokens"])
         return by_type
 
-    def summary(self) -> dict[str, dict[str, int]]:
+    def summary(self) -> dict[str, dict[str, float]]:
         """Return accumulated usage by call_type:model."""
         return dict(self._usage)
 
     def print_summary(self) -> None:
-        """Log a formatted summary table of all token usage."""
+        """Log a formatted summary table of all token usage and cost."""
         if not self._usage:
             logger.info("No API calls recorded.")
             return
 
-        total_prompt = 0
-        total_completion = 0
-        total_all = 0
-        total_calls = 0
-
-        lines = ["", "=" * 80, "TOKEN USAGE SUMMARY", "=" * 80]
-        lines.append(
-            f"{'Call Type':<40} {'Calls':>6} {'Prompt':>10} {'Completion':>10} {'Total':>10}"
-        )
-        lines.append("-" * 80)
-
-        for key, u in sorted(self._usage.items()):
-            lines.append(
-                f"{key:<40} {u['calls']:>6} {u['prompt_tokens']:>10} "
-                f"{u['completion_tokens']:>10} {u['total_tokens']:>10}"
+        def row(label: str, totals: dict[str, float]) -> str:
+            return (
+                f"{label:<40} {totals['calls']:>6.0f} {totals['prompt_tokens']:>10.0f} "
+                f"{totals['cached_prompt_tokens']:>8.0f} {totals['completion_tokens']:>10.0f} "
+                f"{totals['reasoning_tokens']:>9.0f} {totals['total_tokens']:>10.0f} "
+                f"{totals['cost']:>12.6f}"
             )
-            total_prompt += u["prompt_tokens"]
-            total_completion += u["completion_tokens"]
-            total_all += u["total_tokens"]
-            total_calls += u["calls"]
 
-        lines.append("-" * 80)
+        width = 112
+        lines = ["", "=" * width, "TOKEN USAGE SUMMARY", "=" * width]
         lines.append(
-            f"{'TOTAL':<40} {total_calls:>6} {total_prompt:>10} "
-            f"{total_completion:>10} {total_all:>10}"
+            f"{'Call Type':<40} {'Calls':>6} {'Prompt':>10} {'Cached':>8} {'Completion':>10} "
+            f"{'Reasoning':>9} {'Total':>10} {'Cost (USD)':>12}"
         )
-        lines.append("=" * 80)
+        lines.append("-" * width)
+        lines.extend(row(key, totals) for key, totals in sorted(self._usage.items()))
+        lines.append("-" * width)
+        lines.append(row("TOTAL", self.snapshot()))
+        lines.append("=" * width)
 
         logger.info("\n".join(lines))
 
@@ -717,13 +729,6 @@ class GenerationFailedError(UnusableOutputError):
 
 class TruncatedReplyError(Exception):
     """The reply hit its token limit (``finish_reason: "length"``); asking again cannot help."""
-
-
-def _reasoning_tokens(usage: ChatUsage | None) -> int | None:
-    details = usage.completion_tokens_details if usage is not None else None
-    if not isinstance(details, ChatUsageCompletionTokensDetails):
-        return None
-    return details.reasoning_tokens if isinstance(details.reasoning_tokens, int) else None
 
 
 def _send_chat_once(
@@ -1463,17 +1468,19 @@ def audit_graph(
         return {"issues": [], "summary": "parse error"}
 
 
-def _embedding_result(
-    response: CreateEmbeddingsResponse,
-) -> tuple[list[float], CreateEmbeddingsUsage | None]:
+def _embedding_vector(
+    response: CreateEmbeddingsResponse, *, call_type: str, model: str
+) -> list[float]:
+    """Record a completed response's usage, then return its one finite vector."""
     if not isinstance(response, CreateEmbeddingsResponseBody):
         raise TypeError("Expected an OpenRouter JSON embedding response")
+    token_tracker.record(call_type, model, response.usage)
     if len(response.data) != 1:
         raise ValueError("Expected one embedding vector from OpenRouter")
     vector = as_float_list(response.data[0].embedding)
     if not vector:
         raise UnusableOutputError("OpenRouter returned an empty, non-finite or non-float embedding")
-    return vector, response.usage
+    return vector
 
 
 def get_embedding(
@@ -1485,18 +1492,16 @@ def get_embedding(
 ) -> list[float]:
     """Get a text embedding through the official OpenRouter SDK."""
 
-    def request_embedding() -> tuple[list[float], CreateEmbeddingsUsage | None]:
+    def request_embedding() -> list[float]:
         response = client.embeddings.generate(
             model=model,
             input=text,
             encoding_format="float",
             timeout_ms=int(request_timeout * 1000),
         )
-        return _embedding_result(response)
+        return _embedding_vector(response, call_type="embedding", model=model)
 
-    vector, usage = call_with_retry("[API] text embedding", request_embedding)
-    token_tracker.record("embedding", model, usage)
-    return vector
+    return call_with_retry("[API] text embedding", request_embedding)
 
 
 def get_image_embedding(
@@ -1525,9 +1530,7 @@ def get_image_embedding(
         encoding_format="float",
         timeout_ms=int(request_timeout * 1000),
     )
-    vector, usage = _embedding_result(response)
-    token_tracker.record("image_embedding", model, usage)
-    return vector
+    return _embedding_vector(response, call_type="image_embedding", model=model)
 
 
 def _parse_xml_parameters(block: str) -> dict[str, object] | None:

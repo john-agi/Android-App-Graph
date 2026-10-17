@@ -768,6 +768,7 @@ def test_chat_completion_content_records_its_usage_as_v2_chat(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
+    chat_usage_totals: dict[str, float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracker = vlm_utils.TokenTracker()
@@ -778,9 +779,7 @@ def test_chat_completion_content_records_its_usage_as_v2_chat(
         settings=ModelSettings("m"),
         messages=[{"role": "user", "content": "test"}],
     )
-    assert tracker.summary() == {
-        "v2_chat:m": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10, "calls": 1}
-    }
+    assert tracker.summary() == {"v2_chat:m": chat_usage_totals}
 
 
 def test_chat_completion_content_makes_exactly_one_completion_call(

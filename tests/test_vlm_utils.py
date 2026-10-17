@@ -20,8 +20,10 @@ from hypothesis import strategies as st
 from openrouter import OpenRouter
 from openrouter.chat import Chat
 from openrouter.components.chatresult import ChatResult
+from openrouter.components.chatusage import ChatUsage
 from openrouter.embeddings import Embeddings
 from openrouter.errors import OpenRouterError, ResponseValidationError
+from openrouter.operations.createembeddings import CreateEmbeddingsUsage
 from openrouter.types import UNSET
 
 from android_app_graph.payloads import as_list, as_object_dict, as_str, as_str_dict
@@ -165,6 +167,52 @@ def tracked_usage(monkeypatch: pytest.MonkeyPatch) -> vlm.TokenTracker:
     return tracker
 
 
+def test_token_tracker_sums_cost_cached_and_reasoning_tokens_and_logs_them(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tracker = vlm.TokenTracker()
+    with caplog.at_level("INFO"):
+        tracker.print_summary()
+    assert "No API calls recorded." in caplog.text
+    chat = ChatUsage.model_validate(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "total_tokens": 140,
+            "cost": 0.0125,
+            "prompt_tokens_details": {"cached_tokens": 64},
+            "completion_tokens_details": {"reasoning_tokens": 30},
+        }
+    )
+    bare = ChatUsage.model_validate({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})
+    embedding = CreateEmbeddingsUsage.model_validate(
+        {"prompt_tokens": 5, "total_tokens": 5, "cost": 0.0005}
+    )
+    tracker.record("action", "qwen/qwen3.8-flash", chat)
+    tracker.record("action", "qwen/qwen3.8-flash", bare)
+    tracker.record("embedding", "google/gemini-embedding-2", embedding)
+    tracker.record("embedding", "google/gemini-embedding-2", None)
+    assert tracker.summary()["action:qwen/qwen3.8-flash"] == {
+        "calls": 2,
+        "prompt_tokens": 101,
+        "cached_prompt_tokens": 64,
+        "completion_tokens": 42,
+        "reasoning_tokens": 30,
+        "total_tokens": 143,
+        "cost": 0.0125,
+    }
+    assert tracker.snapshot()["cost"] == pytest.approx(0.013)
+    assert tracker.snapshot_by_type() == {"action": 143, "embedding": 5}
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        tracker.print_summary()
+    assert "Cached" in caplog.text
+    assert "Reasoning" in caplog.text
+    assert "Cost (USD)" in caplog.text
+    (total,) = [line for line in caplog.text.splitlines() if line.startswith("TOTAL")]
+    assert total.split()[1:] == ["3", "106", "64", "42", "30", "148", "0.013000"]
+
+
 _STRUCTURED: dict[str, tuple[str, bool]] = {
     "page": ("page_description", False),
     "verify": ("node_verification", True),
@@ -239,6 +287,7 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     png_screenshot: str,
     tracked_usage: vlm.TokenTracker,
     chat_response: Callable[..., httpx.Response],
+    chat_usage_totals: dict[str, float],
 ) -> None:
     router_responses.append(chat_response(content=content))
     result: object
@@ -293,12 +342,7 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
         assert "response_format" not in body
         assert "plugins" not in body
     assert "provider" not in body
-    assert tracked_usage.summary()[f"{call_type}:{model}"] == {
-        "prompt_tokens": 7,
-        "completion_tokens": 3,
-        "total_tokens": 10,
-        "calls": 1,
-    }
+    assert tracked_usage.summary()[f"{call_type}:{model}"] == chat_usage_totals
 
 
 @pytest.mark.parametrize("content", ["", "calling action"])
@@ -601,6 +645,7 @@ def test_text_and_image_embeddings_use_the_documented_sdk_format(
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
+    embedding_usage_totals: dict[str, float],
     tracked_usage: vlm.TokenTracker,
 ) -> None:
     router_responses.append(httpx.Response(200, json=embedding_body))
@@ -618,12 +663,7 @@ def test_text_and_image_embeddings_use_the_documented_sdk_format(
         if image
         else "home"
     )
-    assert tracked_usage.snapshot() == {
-        "prompt_tokens": 5,
-        "completion_tokens": 0,
-        "total_tokens": 5,
-        "calls": 1,
-    }
+    assert tracked_usage.snapshot() == embedding_usage_totals
     assert tracked_usage.snapshot_by_type() == {"image_embedding" if image else "embedding": 5}
 
 
@@ -968,7 +1008,7 @@ def test_an_empty_or_non_finite_vector_is_re_asked_once(
         with pytest.raises(UnusableOutputError, match="embedding"):
             vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert len(router_requests) == 2
-    assert tracked_usage.snapshot()["calls"] == int(recover)
+    assert tracked_usage.snapshot()["calls"] == 2
 
 
 def test_a_wrong_vector_count_is_not_re_asked(

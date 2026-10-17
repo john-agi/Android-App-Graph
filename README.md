@@ -289,6 +289,14 @@ include every field the SDK requires, including `system_fingerprint`, which may 
 `null` but not omitted. A broken endpoint response cannot become an action's
 fallback wait.
 
+Exploration and `app-graph-audit` log a usage summary when they finish, per call
+type and model: calls, prompt tokens and the cached share of them, completion
+tokens and the reasoning share of them, total tokens, and cost in USD, as reported
+by OpenRouter's [usage accounting](https://openrouter.ai/docs/guides/administration/usage-accounting).
+Every completed reply counts, including one that was asked again or cut off,
+since OpenRouter bills it; embedding replies report cost but no cached or
+reasoning tokens.
+
 Each command opens one OpenRouter client for the whole run, shares it across every
 role and closes it when the run ends; each request carries its own role's model,
 temperature and timeout. The v2 runtime creates its client when AITK constructs the

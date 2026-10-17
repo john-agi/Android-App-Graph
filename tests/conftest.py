@@ -143,7 +143,14 @@ def chat_body() -> dict[str, object]:
                 },
             }
         ],
-        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+            "cost": 0.00042,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
     }
 
 
@@ -177,12 +184,40 @@ def chat_response(chat_body: dict[str, object]) -> Callable[..., httpx.Response]
 
 
 @pytest.fixture
+def chat_usage_totals() -> dict[str, float]:
+    """What one ``chat_body`` reply adds to a TokenTracker."""
+    return {
+        "calls": 1,
+        "prompt_tokens": 7,
+        "cached_prompt_tokens": 2,
+        "completion_tokens": 3,
+        "reasoning_tokens": 1,
+        "total_tokens": 10,
+        "cost": 0.00042,
+    }
+
+
+@pytest.fixture
+def embedding_usage_totals() -> dict[str, float]:
+    """What one ``embedding_body`` reply adds to a TokenTracker."""
+    return {
+        "calls": 1,
+        "prompt_tokens": 5,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 5,
+        "cost": 0.00001,
+    }
+
+
+@pytest.fixture
 def embedding_body() -> dict[str, object]:
     return {
         "object": "list",
         "model": "google/gemini-embedding-2",
         "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
-        "usage": {"prompt_tokens": 5, "total_tokens": 5},
+        "usage": {"prompt_tokens": 5, "total_tokens": 5, "cost": 0.00001},
     }
 
 

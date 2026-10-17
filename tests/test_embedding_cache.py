@@ -419,6 +419,7 @@ def test_image_cache_relies_on_the_sdk_to_retry_a_503_and_counts_usage(
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
+    embedding_usage_totals: dict[str, float],
     no_sleep: list[float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -433,12 +434,7 @@ def test_image_cache_relies_on_the_sdk_to_retry_a_503_and_counts_usage(
     assert _retry(router_client, "shot") == [0.25, 0.75]
     assert len(router_requests) == 2
     assert len(no_sleep) == 1
-    assert tracker.snapshot() == {
-        "prompt_tokens": 5,
-        "completion_tokens": 0,
-        "total_tokens": 5,
-        "calls": 1,
-    }
+    assert tracker.snapshot() == embedding_usage_totals
 
 
 @pytest.mark.parametrize("status", [429, 400])
