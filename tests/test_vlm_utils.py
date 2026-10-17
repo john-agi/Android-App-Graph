@@ -162,8 +162,11 @@ def tracked_usage(monkeypatch: pytest.MonkeyPatch) -> vlm.TokenTracker:
             "page",
             "page_describe_and_state",
             "openai/gpt-6.1-sol",
-            '{"page_description":"home","state":{"tab":"all"},"elements":[]}',
-            ("home", {"tab": "all"}, []),
+            (
+                '{"page_description":"home","state":{"tab":"all"},'
+                '"elements":[{"description":"Search","position":"top"}]}'
+            ),
+            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}]),
         ),
         ("verify", "node_verify", "openai/gpt-6.1-sol", '{"same":true}', {"same": True}),
         (
@@ -284,6 +287,18 @@ def test_native_tool_calls_survive_sdk_parsing(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
+
+
+def test_send_chat_rejects_a_streamed_response(
+    router_client: OpenRouter, router_responses: list[httpx.Response]
+) -> None:
+    router_responses.append(
+        httpx.Response(200, text="data: [DONE]\n\n", headers={"content-type": "text/event-stream"})
+    )
+    with pytest.raises(TypeError, match="non-streaming"):
+        vlm.send_chat(
+            router_client, model="provider/other", messages=[{"role": "user", "content": "hi"}]
+        )
 
 
 @pytest.mark.parametrize(
@@ -682,6 +697,7 @@ def test_page_description_http_and_parse_errors_share_one_budget(
         ("{}", ValueError, "non-empty page_description"),
         ('{"page_description":""}', ValueError, "non-empty page_description"),
         ('{"page_description":"home","state":[]}', TypeError, "page state"),
+        ('{"page_description":"home","elements":{}}', TypeError, "page elements"),
         ('{"page_description":"home","elements":[null]}', TypeError, "element description"),
     ],
 )
@@ -828,12 +844,52 @@ def test_direction_does_not_hide_invalid_partial_coordinates(coordinate: object)
         vlm._tool_call_to_aitk({"action": "swipe", "direction": "up", "coordinate": coordinate})
 
 
-@pytest.mark.parametrize("content", ["not JSON", "[]"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"content": ""},
+        {"content": "not JSON"},
+        {"content": "[]"},
+        {"content": '{"name":"mobile_use","arguments":[]}'},
+        {"content": "", "tool_arguments": "not JSON"},
+        {"content": "", "tool_arguments": "[]"},
+    ],
+)
 def test_agent_reply_without_an_arguments_object_is_unusable(
-    content: str, chat_response: Callable[..., httpx.Response]
+    message: dict[str, str], chat_response: Callable[..., httpx.Response]
 ) -> None:
-    reply = ChatResult.model_validate(chat_response(content=content).json())
+    reply = ChatResult.model_validate(chat_response(**message).json())
     assert vlm._parse_agent_response(reply) == (None, "", "")
+
+
+def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    reply = ChatResult.model_validate(
+        chat_response(content='{"name":"mobile_use","arguments":{"action":"wait"}}').json()
+    )
+    assert vlm._parse_agent_response(reply) == ({"action": "wait"}, "", "")
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"action": "type", "text": "milk"}, {"action": "type", "text": "milk"}),
+        ({"action": "system_button", "button": "Back"}, {"action": "back"}),
+        ({"action": "system_button", "button": "Home"}, {"action": "home"}),
+        ({"action": "system_button", "button": "Enter"}, {"action": "enter"}),
+        ({"action": "answer", "text": "9 EUR"}, {"action": "end"}),
+        ({"action": "error"}, {"action": "end"}),
+        (
+            {"name": "mobile_use", "arguments": {"action": "click", "coordinate": [500, 500]}},
+            {"action": "tap", "x": 540, "y": 960},
+        ),
+    ],
+)
+def test_tool_arguments_convert_to_aitk_actions(
+    args: dict[str, object], expected: dict[str, object]
+) -> None:
+    assert vlm._tool_call_to_aitk(args) == expected
 
 
 @pytest.mark.parametrize("recover", [False, True])

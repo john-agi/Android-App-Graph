@@ -764,6 +764,25 @@ def test_chat_completion_content_returns_the_reply_content(
     assert content == "first"
 
 
+def test_chat_completion_content_records_its_usage_as_v2_chat(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = vlm_utils.TokenTracker()
+    monkeypatch.setattr(aitk_translator, "token_tracker", tracker)
+    router_responses.append(chat_response(content="first"))
+    aitk_translator._chat_completion_content(
+        router_client,
+        model="m",
+        messages=[{"role": "user", "content": "test"}],
+    )
+    assert tracker.summary() == {
+        "v2_chat:m": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10, "calls": 1}
+    }
+
+
 def test_chat_completion_content_makes_exactly_one_completion_call(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
@@ -839,6 +858,7 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator._package_to_app == {"com.demo.app": "demo"}
     assert translator.model_name == "action-model"
     assert translator.desc_model == "detail-model"
+    assert translator.instruction_model == "instruction-model"
     assert translator.image_embedding_model == "img-model"
     assert translator.image_embedding_api_key == "image-key"
     # image_embedding.base_url resolution itself is embedding_cache's
@@ -2286,6 +2306,21 @@ def test_v2_partial_initialization_closes_created_clients(
             vlm_config={role: {"api_key": "test"} for role in roles[:created]},
         )
     assert len(owned_router_clients) == created
+    assert all(client.is_closed for client in owned_router_clients)
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_v2_construction_closes_its_clients_when_graph_loading_fails(
+    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(_self: aitk_translator.UIKobeV2Translator) -> None:
+        raise _Interrupted
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setattr(aitk_translator.UIKobeV2Translator, "_load_all_graphs", interrupted)
+    with pytest.raises(_Interrupted):
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert len(owned_router_clients) == 4
     assert all(client.is_closed for client in owned_router_clients)
 
 

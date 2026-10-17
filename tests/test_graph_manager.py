@@ -167,6 +167,19 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     return fake
 
 
+def test_a_client_without_a_model_is_rejected_at_construction() -> None:
+    with pytest.raises(ValueError, match=r"page_detail\.model is required"):
+        GraphManager(page_detail_client=FAKE_CLIENT)
+    with pytest.raises(ValueError, match=r"embedding\.model is required"):
+        GraphManager(embedding_client=FAKE_CLIENT)
+
+
+def test_a_manager_without_a_model_rejects_reading_it() -> None:
+    gm = GraphManager()
+    with pytest.raises(ValueError, match=r"embedding\.model is required"):
+        _ = gm.embedding_model
+
+
 def test_network_guard_blocks_outbound_connections() -> None:
     with pytest.raises(RuntimeError, match="network access is disabled"):
         socket.create_connection(("127.0.0.1", 9), timeout=0.1)
@@ -465,6 +478,17 @@ def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm) -> Non
 def test_rename_node_returns_a_missing_id_unchanged() -> None:
     gm = make_manager()
     assert gm.rename_node("s9_missing", "Anything") == "s9_missing"
+
+
+def test_rename_node_tags_the_recomputed_embedding_with_the_current_model(vlm: FakeVlm) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", description_embedding_model="provider/old")
+
+    new_id = gm.rename_node("s0_home", "Settings page")
+
+    assert vlm.kinds() == ["embed"]
+    assert gm.graph.nodes[new_id]["description_embedding"] == EMBEDDINGS["Settings page"]
+    assert gm.graph.nodes[new_id]["description_embedding_model"] == gm.embedding_model
 
 
 def test_rename_node_keeps_the_numeric_prefix_and_relabels_edges(vlm: FakeVlm) -> None:
@@ -2100,6 +2124,7 @@ node_attrs = st.fixed_dictionaries(
         "description_embedding": st.lists(
             st.floats(allow_nan=False, allow_infinity=False), max_size=4
         ),
+        "description_embedding_model": st.none() | st.text(min_size=1, max_size=30),
         "last_normalized_visit_milestone": st.integers(min_value=0, max_value=10),
         "visit_count": st.integers(min_value=0, max_value=100),
     }
@@ -2133,6 +2158,10 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "last_detail_snapshot": d.get("last_detail_snapshot", {}),
             "interactable_elements": d.get("interactable_elements", []),
             "description_embedding": d.get("description_embedding") or [],
+            # A tag is stored with its vector; "" and None both mean untagged.
+            "description_embedding_model": (d.get("description_embedding_model") or None)
+            if d.get("description_embedding")
+            else None,
             "last_normalized_visit_milestone": d.get("last_normalized_visit_milestone", 0),
             "visit_count": d.get("visit_count", 0),
         }

@@ -13,7 +13,13 @@ from openrouter import OpenRouter
 from openrouter.components.security import Security
 
 from android_app_graph import utils
-from android_app_graph.utils import client_scope, make_client, resolve_env, vlm_utils
+from android_app_graph.utils import (
+    ConfiguredOpenRouter,
+    client_scope,
+    make_client,
+    resolve_env,
+    vlm_utils,
+)
 
 
 def test_none_passes_through() -> None:
@@ -193,6 +199,25 @@ def test_invalid_timeout_is_a_configuration_error(timeout: str) -> None:
         )
 
 
+@pytest.mark.parametrize("temperature", [float("nan"), -0.1, 2.1])
+def test_make_client_rejects_a_temperature_outside_zero_to_two(temperature: float) -> None:
+    with pytest.raises(ValueError, match=r"action\.temperature must be a finite number"):
+        make_client(
+            {"model": "qwen/qwen3.8-flash", "api_key": "test", "temperature": temperature},
+            role="action",
+        )
+
+
+@pytest.mark.parametrize("temperature", [0, 2])
+def test_make_client_accepts_the_temperature_bounds(temperature: int) -> None:
+    client, _ = make_client(
+        {"model": "qwen/qwen3.8-flash", "api_key": "test", "temperature": temperature},
+        role="action",
+    )
+    assert isinstance(client, ConfiguredOpenRouter)
+    assert client.temperature == temperature
+
+
 @pytest.mark.parametrize(
     ("role", "value", "variable"),
     [
@@ -293,6 +318,18 @@ def test_shared_router_key_never_falls_back_to_a_different_origin(
     with pytest.raises(ValueError, match=r"action\.api_key") as caught:
         make_client({"model": "openai/gpt-6.1-sol", "base_url": endpoint}, role="action")
     assert "router-secret" not in str(caught.value)
+
+
+def test_unresolved_endpoint_without_an_explicit_key_falls_back_to_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-key")
+    client, _ = make_client(
+        {"model": "openai/gpt-6.1-sol", "base_url": "${APP_GRAPH_ENDPOINT}"}, role="action"
+    )
+    assert client.sdk_configuration.server_url == "https://openrouter.ai/api/v1"
+    assert isinstance(client.sdk_configuration.security, Security)
+    assert client.sdk_configuration.security.api_key == "router-key"
 
 
 def test_unresolved_endpoint_cannot_redirect_an_explicit_credential() -> None:

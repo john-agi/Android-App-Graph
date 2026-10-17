@@ -229,6 +229,27 @@ def test_embed_settings_read_the_api_key_from_the_environment(
     assert api_key == "from-env"
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_precompute_shares_one_client_across_graphs(
+    tmp_path: Path,
+    owned_router_clients: list[httpx.Client],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    _write_graph_tree(tmp_path, app="demo")
+    _write_graph_tree(tmp_path, app="other")
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
+    summary = embed.precompute_graph_image_embeddings(
+        tmp_path,
+        api_key="test",
+        model="google/gemini-embedding-2",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    assert (summary["graphs"], summary["computed"]) == (2, 2)
+    assert len(owned_router_clients) == 1
+    assert owned_router_clients[0].is_closed
+
+
 def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
     graph_path.write_text("[1, 2, 3]", encoding="utf-8")

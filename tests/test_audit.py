@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import httpx
@@ -456,4 +458,24 @@ def test_audit_cli_closes_owned_clients_on_exit(
     else:
         assert audit.main(["-c", str(config)]) == 0
     assert len(owned_router_clients) == 2
+    assert all(client.is_closed for client in owned_router_clients)
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_re_explore_session_closes_its_instruction_and_action_clients(
+    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adb_module = ModuleType("aitk.utils.adb_controller")
+    monkeypatch.setattr(
+        adb_module,
+        "ADBController",
+        lambda _config, _logger: FakeController("com.demo"),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\n", encoding="utf-8")
+    assert audit.main(["--config", str(config), "--re-explore"]) == 0
+    assert len(owned_router_clients) == 4
     assert all(client.is_closed for client in owned_router_clients)
