@@ -39,7 +39,6 @@ from android_app_graph.utils import (
 from android_app_graph.utils.vlm_utils import (
     TruncatedReplyError,
     build_image_message,
-    describe_page_and_state,
     message_text,
     predict_next_action,
     score_by_cosine,
@@ -64,7 +63,7 @@ V2_PARSE_RETRY_HINT = (
     "requested above and nothing else."
 )
 
-RUNTIME_ROLES = ("page_detail", "action", "image_embedding")
+RUNTIME_ROLES = ("action", "image_embedding")
 
 _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
@@ -609,7 +608,6 @@ class UIKobeV2Translator(BaseTranslator):
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
         settings = resolve_model_settings(vlm_config, roles=RUNTIME_ROLES)
-        self.page_detail = settings["page_detail"]
         self.action = settings["action"]
         self.image_embedding = resolve_image_embedding_settings(vlm_config)
         # AITK has no translator teardown, so the client lives as long as the
@@ -793,20 +791,21 @@ class UIKobeV2Translator(BaseTranslator):
         )
         return None
 
-    def _identify_node(self, activity: str, screenshot: str) -> tuple[str | None, str]:
-        """Match current screen to a graph node.
+    def _identify_node(self, activity: str, screenshot: str) -> str | None:
+        """Match the current screen to a graph node, or return ``None`` when none matches.
 
-        1. Get page description via VLM.
-        2. Compute embedding similarity against all nodes (same package).
-        3. Take top-K candidates.
-        4. Ask the model to pick the best match (multiple-choice).
+        1. Embed the screenshot and score it against the same-package nodes'
+           cached screenshot embeddings.
+        2. Ask the model to pick one of the top-K candidates, each shown with its
+           description and similarity, or to reject them all.
 
-        Returns (node_id, page_description).
+        No page description is generated: the paper's runtime identifies nodes by
+        screenshot, and upstream UI-KOBE's describe call here never fed a decision.
         """
         G = self._current_graph
         if G is None:
             logger.warning("[IDENTIFY] No current graph is loaded")
-            return None, ""
+            return None
 
         current_pkg = package_from_activity(activity)
         graph_packages = sorted(_extract_packages_from_graph(G))
@@ -818,39 +817,12 @@ class UIKobeV2Translator(BaseTranslator):
             graph_packages,
         )
 
-        same_pkg_descriptions: list[str] = []
-        same_pkg_keys: list[str] = []
-        same_pkg_node_count = 0
-        for _, data in G.nodes(data=True):
-            if package_from_activity(data.get("activity", "")) == current_pkg:
-                same_pkg_node_count += 1
-                desc = data.get("page_description", "")
-                if desc and desc not in same_pkg_descriptions:
-                    same_pkg_descriptions.append(desc)
-                for k in data.get("state_schema", {}):
-                    if k not in same_pkg_keys:
-                        same_pkg_keys.append(k)
-
-        logger.info(
-            "[IDENTIFY] same-package graph nodes=%d known_descriptions=%d known_state_keys=%d",
-            same_pkg_node_count,
-            len(same_pkg_descriptions),
-            len(same_pkg_keys),
+        same_pkg_node_count = sum(
+            1
+            for _, data in G.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
         )
-
-        started = time.perf_counter()
-        page_desc, _detail_snapshot, _elements = describe_page_and_state(
-            self.client,
-            screenshot,
-            existing_nodes=same_pkg_descriptions or None,
-            existing_keys=same_pkg_keys or None,
-            settings=self.page_detail,
-        )
-        logger.info(
-            '[IDENTIFY] screen_description="%s" describe_time=%.1fs',
-            page_desc,
-            time.perf_counter() - started,
-        )
+        logger.info("[IDENTIFY] same-package graph nodes=%d", same_pkg_node_count)
 
         try:
             started = time.perf_counter()
@@ -900,7 +872,7 @@ class UIKobeV2Translator(BaseTranslator):
                     "usable image embedding (missing, or cached at a stale dimension)",
                     same_pkg_node_count,
                 )
-            return None, page_desc
+            return None
 
         # Take top 4 for multiple-choice. Image similarity is retrieval only;
         # the model must always make the final node-identification decision.
@@ -926,12 +898,12 @@ class UIKobeV2Translator(BaseTranslator):
                 "[IDENTIFY] model rejected candidates; not using image similarity as final identity. best_sim=%.3f",
                 candidates[0][1],
             )
-            return None, page_desc
+            return None
 
         idx = letters.index(answer)
         chosen_node = top_k[idx][0]
         logger.info("[IDENTIFY] identified node=%s", chosen_node)
-        return chosen_node, page_desc
+        return chosen_node
 
     def _record_info(self, task: str, screenshot: str) -> None:
         """Check if the current screen has task-relevant info to remember."""
@@ -1301,8 +1273,8 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[LOOP] Step %d", self._step_count)
         logger.info(_SEP_THICK)
 
-        node_id, page_desc = self._identify_node(activity, screenshot)
-        logger.info('[IDENTIFY] Node: %s — "%s"', node_id, page_desc)
+        node_id = self._identify_node(activity, screenshot)
+        logger.info("[IDENTIFY] Node: %s", node_id)
 
         self._record_info(task, screenshot)
         logger.info("[RECORD] Memory: %s", self._memory.format())

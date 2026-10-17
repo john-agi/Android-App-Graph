@@ -808,7 +808,6 @@ def _openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 _VLM_CONFIG: dict[str, Any] = {
     "action": {"model": "action-model"},
-    "page_detail": {"model": "detail-model"},
     "image_embedding": {"model": "img-model"},
 }
 
@@ -861,8 +860,8 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert set(translator._graphs) == {"demo"}
     assert translator._package_to_app == {"com.demo.app": "demo"}
     assert translator.action.model == "action-model"
-    assert translator.page_detail.model == "detail-model"
     assert translator.image_embedding.model == "img-model"
+    assert not hasattr(translator, "page_detail")
 
 
 @pytest.mark.usefixtures("translator")
@@ -1605,12 +1604,7 @@ def test_compute_runtime_image_embedding_with_retry_propagates_a_persistent_fail
 def identifiable(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> aitk_translator.UIKobeV2Translator:
-    """A translator whose page description and image embeddings come from fakes."""
-    monkeypatch.setattr(
-        aitk_translator,
-        "describe_page_and_state",
-        lambda *_args, **_kwargs: ("a home screen", {}, []),
-    )
+    """A translator whose image embeddings come from a fake."""
     monkeypatch.setattr(
         embedding_cache,
         "get_image_embedding",
@@ -1625,17 +1619,28 @@ def identifiable(
 
 
 def test_identify_node_without_a_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator._identify_node("com.demo.app/.HomeActivity", "shot") == (None, "")
+    assert translator._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
 
 def test_identify_node_picks_the_model_choice(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(identifiable, "A")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-        "home",
-        "a home screen",
-    )
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == "home"
+
+
+def test_identify_node_only_asks_the_action_model_to_pick_a_candidate(
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
+) -> None:
+    """The paper's runtime retrieves candidates by screenshot embedding and lets the
+    runtime model pick one; it never describes the screen with the page-detail model."""
+    completions = use_model(identifiable, "A")
+
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == "home"
+
+    assert len(completions.calls) == 1
+    assert completions.calls[0]["model"] == "action-model"
+    assert completions.prompt_text().startswith("You are looking at a mobile app screen.")
 
 
 def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
@@ -1661,7 +1666,7 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
     use_model(identifiable, "A")
 
     with caplog.at_level("WARNING"):
-        node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+        node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
     stale_warnings = [
@@ -1676,17 +1681,14 @@ def test_identify_node_respects_a_rejection(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(identifiable, "none")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-        None,
-        "a home screen",
-    )
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
 
 def test_identify_node_retries_an_unparseable_pick(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(identifiable, "hmm", "B")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
     assert node_id == "results"
     assert len(completions.calls) == 2
 
@@ -1696,7 +1698,7 @@ def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
 ) -> None:
     """A "BC"-shaped reply must not be silently mapped to a candidate by substring luck."""
     completions = use_model(identifiable, "BC", "B")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
     assert node_id == "results"
     assert len(completions.calls) == 2
 
@@ -1712,7 +1714,7 @@ def test_identify_node_retry_appends_the_parse_hint_and_recovers(
     rather than guess, so the second attempt (still "A") is what recovers it.
     """
     completions = use_model(identifiable, "A login screen is the best match", "A")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
     assert len(completions.calls) == 2
@@ -1726,7 +1728,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(identifiable, "A")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
     assert len(completions.calls) == 1
@@ -1737,7 +1739,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
 def test_identify_node_without_candidates_in_the_current_package(
     identifiable: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    assert identifiable._identify_node("org.other.thing/.Main", "shot") == (None, "a home screen")
+    assert identifiable._identify_node("org.other.thing/.Main", "shot") is None
 
 
 def test_identify_node_without_cached_embeddings(
@@ -1746,10 +1748,7 @@ def test_identify_node_without_cached_embeddings(
     G = identifiable._graphs["demo"]
     for node in G.nodes:
         del G.nodes[node]["image_embedding"]
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-        None,
-        "a home screen",
-    )
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
 
 def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
@@ -1782,9 +1781,6 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
             }
         ],
     )
-    monkeypatch.setattr(
-        aitk_translator, "describe_page_and_state", lambda *_a, **_kw: ("home screen", {}, [])
-    )
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
     G = translator._graphs["demo"]
@@ -1796,9 +1792,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     assert [opt["type"] for opt in options] == ["done", "free"]
 
     use_model(translator, "A")
-    node_id, page_desc = translator._identify_node("", "shot")
-    assert node_id == "home"
-    assert page_desc == "home screen"
+    assert translator._identify_node("", "shot") == "home"
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -2147,10 +2141,7 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
         G.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
 
     with caplog.at_level("WARNING"):
-        assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-            None,
-            "a home screen",
-        )
+        assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
     expected = (
         f"[IDENTIFY] no candidates: none of the {len(same_pkg)} same-package node(s) has a "
@@ -2224,7 +2215,7 @@ def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_scre
 
 
 @pytest.mark.usefixtures("opened_clients", "model_environment")
-def test_v2_roles_send_their_own_models_and_temperatures(
+def test_v2_chat_requests_send_the_action_model_and_temperature(
     tmp_path: Path,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -2232,24 +2223,13 @@ def test_v2_roles_send_their_own_models_and_temperatures(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     translator = aitk_translator.UIKobeV2Translator(
-        graph_dir=str(tmp_path),
-        vlm_config={
-            "action": {"temperature": 0.0},
-            "page_detail": {"temperature": 0.4},
-        },
+        graph_dir=str(tmp_path), vlm_config={"action": {"temperature": 0.3}}
     )
     router_responses.extend(
-        [
-            chat_response(content='{"action":"wait"}'),
-            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
-            chat_response(content="Tap Search"),
-        ]
+        [chat_response(content='{"action":"wait"}'), chat_response(content="Tap Search")]
     )
     vlm_utils.predict_next_action(
         translator.client, png_screenshot, "wait", settings=translator.action
-    )
-    vlm_utils.describe_page_and_state(
-        translator.client, png_screenshot, settings=translator.page_detail
     )
     assert (
         translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
@@ -2257,15 +2237,14 @@ def test_v2_roles_send_their_own_models_and_temperatures(
     )
     bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
     assert [(body["model"], body["temperature"]) for body in bodies] == [
-        ("qwen/qwen3.8-flash", 0.0),
-        ("openai/gpt-6.1-sol", 0.4),
-        ("qwen/qwen3.8-flash", 0.0),
+        ("qwen/qwen3.8-flash", 0.3),
+        ("qwen/qwen3.8-flash", 0.3),
     ]
-    assert bodies[2]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
+    assert bodies[1]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
 
 
 @pytest.mark.usefixtures("opened_clients")
-def test_v2_decisions_use_the_action_model_and_never_read_instruction(
+def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     router_requests: list[httpx.Request],
@@ -2273,14 +2252,13 @@ def test_v2_decisions_use_the_action_model_and_never_read_instruction(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    monkeypatch.setenv("APP_GRAPH_PAGE_DETAIL_MODEL", "openai/gpt-6.1-sol")
     monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "google/gemini-embedding-2")
     monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "qwen/qwen3.8-flash")
     translator = aitk_translator.UIKobeV2Translator(
         graph_dir=str(tmp_path),
         vlm_config={
             "action": {},
-            "page_detail": {},
+            "page_detail": {"model": "${APP_GRAPH_PAGE_DETAIL_MODEL}", "temperature": "hot"},
             "instruction": {"model": "${APP_GRAPH_INSTRUCTION_MODEL}", "temperature": "hot"},
         },
     )
@@ -2289,6 +2267,7 @@ def test_v2_decisions_use_the_action_model_and_never_read_instruction(
     translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
     bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
     assert [body["model"] for body in bodies] == ["qwen/qwen3.8-flash"] * 2
+    assert not hasattr(translator, "page_detail")
     assert not hasattr(translator, "instruction")
 
 
@@ -2297,8 +2276,9 @@ def test_runtime_reports_missing_models_before_creating_clients(
 ) -> None:
     with pytest.raises(ValueError, match="Invalid vlm configuration") as caught:
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    for role in ("PAGE_DETAIL", "EMBEDDING", "ACTION"):
+    for role in ("EMBEDDING", "ACTION"):
         assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
+    assert "PAGE_DETAIL" not in str(caught.value)
     assert "INSTRUCTION" not in str(caught.value)
     assert opened_clients == []
 
@@ -2308,7 +2288,7 @@ def test_runtime_keeps_caller_environment_references(
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     config: dict[str, object] = {}
-    for role in ("page_detail", "embedding", "action"):
+    for role in ("embedding", "action"):
         variable = f"APP_GRAPH_{role.upper()}_MODEL"
         monkeypatch.setenv(variable, f"provider/{role}")
         config[role] = {"model": f"${{{variable}}}"}

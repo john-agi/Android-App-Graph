@@ -221,8 +221,8 @@ the embedding command's `--model` argument takes precedence. An empty value or
 unresolved reference is an error, including an explicit image-model override.
 To compare models, edit `.env`, export it again and restart the command.
 
-Exploration requires all four roles. The v2 runtime requires page-detail, action
-and embedding models; it never reads an `instruction` block. A basic audit requires
+Exploration requires all four roles. The v2 runtime requires action and embedding
+models; it never reads a `page_detail` or `instruction` block. A basic audit requires
 page-detail and embedding models; `--re-explore` also requires instruction and
 action models. `app-graph-embed` requires only an embedding model. Help and plotting
 existing graphs need no model configuration or credentials.
@@ -477,11 +477,13 @@ execution complete using the configured roles.
 
 After opening the app, each turn matches the screen to a graph node, records
 task-relevant observations, chooses a neighboring or free-form instruction, and
-executes one action. As in upstream UI-KOBE, one small model runs the turn: node
+executes one action. As in the UI-KOBE paper, one small model runs the turn: node
 identification, recording, the decision, free-form planning, the final answer and
-action execution all use the `action` model, while `page_detail` describes the
-screen and the embedding model retrieves candidate nodes. The roles it requires
-are listed under [Configure API Credentials](#configure-api-credentials).
+action execution all use the `action` model, and the embedding model retrieves
+candidate nodes by screenshot. No page description is generated at runtime:
+upstream UI-KOBE asked `page_detail` for one each turn but never used it, and the
+paper identifies nodes from screenshots alone. The roles it requires are listed
+under [Configure API Credentials](#configure-api-credentials).
 
 AITK loads a translator by module name: `register_translator()` in
 `aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
@@ -544,8 +546,6 @@ translator itself stays in the installed package. Verified against AITK commit
      max_pixels: 784000
      vlm_config:
        similarity_threshold: 0.84
-       page_detail:
-         model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
        embedding:
          model: ${APP_GRAPH_EMBEDDING_MODEL}
        action:
