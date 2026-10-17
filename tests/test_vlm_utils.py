@@ -24,7 +24,7 @@ from openrouter.embeddings import Embeddings
 from openrouter.errors import OpenRouterError, ResponseValidationError
 from openrouter.types import UNSET
 
-from android_app_graph.payloads import as_str, as_str_dict
+from android_app_graph.payloads import as_list, as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UnusableOutputError
 from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils import vlm_utils as vlm
@@ -165,6 +165,16 @@ def tracked_usage(monkeypatch: pytest.MonkeyPatch) -> vlm.TokenTracker:
     return tracker
 
 
+_STRUCTURED: dict[str, tuple[str, bool]] = {
+    "page": ("page_description", False),
+    "verify": ("node_verification", True),
+    "normalize": ("edge_template", False),
+    "merge": ("node_merge_audit", True),
+    "audit": ("graph_audit", True),
+    "target": ("exploration_target", True),
+}
+
+
 @pytest.mark.parametrize(
     ("operation", "call_type", "model", "content", "expected"),
     [
@@ -272,8 +282,17 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
         images = [part for part in parts if part["type"] == "image_url"]
         assert len(images) == (2 if operation == "verify" else 1)
         assert images[0]["image_url"]["url"] == f"data:image/png;base64,{png_screenshot}"
-    if operation not in {"planner", "action"}:
-        assert body["response_format"] == {"type": "json_object"}
+    if operation in _STRUCTURED:
+        name, strict = _STRUCTURED[operation]
+        json_schema = body["response_format"]["json_schema"]
+        assert body["response_format"]["type"] == "json_schema"
+        assert (json_schema["name"], json_schema["strict"]) == (name, strict)
+        assert json_schema["schema"]["type"] == "object"
+        assert body["plugins"] == [{"id": "response-healing"}]
+    else:
+        assert "response_format" not in body
+        assert "plugins" not in body
+    assert "provider" not in body
     assert tracked_usage.summary()[f"{call_type}:{model}"] == {
         "prompt_tokens": 7,
         "completion_tokens": 3,
@@ -396,6 +415,146 @@ def test_xml_parameter_tool_calls_become_device_actions(
     assert action == {"action": "tap", "x": 752, "y": 340}
     assert history == "The search icon is at the top. | Tap the search icon."
     assert len(router_requests) == 1
+
+
+def _strict_violations(schema: object, path: str = "$") -> list[str]:
+    """Where a schema breaks strict mode: every object closed, every property required."""
+    if isinstance(schema, list):
+        return [
+            violation
+            for index, item in enumerate(schema)
+            for violation in _strict_violations(item, f"{path}[{index}]")
+        ]
+    node = as_object_dict(schema)
+    violations: list[str] = []
+    if node.get("type") == "object":
+        properties = as_object_dict(node.get("properties"))
+        if node.get("additionalProperties") is not False:
+            violations.append(f"{path} is open")
+        if sorted(map(str, as_list(node.get("required")))) != sorted(properties):
+            violations.append(f"{path} leaves a property optional")
+        violations.extend(
+            f"{path}.{key} has no description"
+            for key, value in properties.items()
+            if "description" not in as_object_dict(value)
+        )
+    for key, value in node.items():
+        violations.extend(_strict_violations(value, f"{path}.{key}"))
+    return violations
+
+
+def _sent_schemas(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> dict[str, dict[str, Any]]:
+    router_responses.extend(
+        chat_response(content=content)
+        for content in (
+            '{"page_description":"home","state":{},"elements":[]}',
+            '{"same":true}',
+            "{}",
+            "{}",
+            "{}",
+            "{}",
+        )
+    )
+    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+    vlm.verify_same_node(
+        router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+    )
+    vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
+    vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
+    vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
+    vlm.select_exploration_target(
+        router_client, "demo", [{"node_id": "b"}, {"node_id": "a"}], settings=PAGE_DETAIL
+    )
+    schemas = [
+        json.loads(request.content)["response_format"]["json_schema"] for request in router_requests
+    ]
+    return {schema["name"]: schema for schema in schemas}
+
+
+def test_strict_schemas_close_every_object_and_describe_every_property(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    schemas = _sent_schemas(
+        router_client, router_requests, router_responses, png_screenshot, chat_response
+    )
+    strict = {name: schema for name, schema in schemas.items() if schema["strict"]}
+    assert sorted(strict) == [
+        "exploration_target",
+        "graph_audit",
+        "node_merge_audit",
+        "node_verification",
+    ]
+    for name, schema in strict.items():
+        assert _strict_violations(schema["schema"]) == [], name
+    assert schemas["exploration_target"]["schema"]["properties"]["node_id"]["enum"] == ["a", "b"]
+    assert schemas["node_verification"]["schema"]["properties"]["new_description"]["type"] == [
+        "string",
+        "null",
+    ]
+
+
+def test_free_form_objects_keep_their_format_in_non_strict_schemas(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    schemas = _sent_schemas(
+        router_client, router_requests, router_responses, png_screenshot, chat_response
+    )
+    state = schemas["page_description"]["schema"]["properties"]["state"]
+    assert state["additionalProperties"] == {"type": ["string", "number", "boolean", "null"]}
+    examples = schemas["edge_template"]["schema"]["properties"]["examples"]
+    assert examples["items"]["properties"]["params"]["additionalProperties"] == {"type": "string"}
+    assert not schemas["page_description"]["strict"]
+    assert not schemas["edge_template"]["strict"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "reply", "expected"),
+    [
+        ("target", '{"node_id":"elsewhere","reason":"invented"}', None),
+        (
+            "merge",
+            '{"issues":[{"type":"retry_edge","node_a":"a","node_b":"b"}],"summary":"s"}',
+            {"issues": [], "summary": "s"},
+        ),
+        ("description", '{"page_description":"home","state":[],"elements":[]}', "raises"),
+    ],
+)
+def test_parsers_still_reject_replies_that_violate_the_schema(
+    operation: str,
+    reply: str,
+    expected: object,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.extend(chat_response(content=reply) for _ in range(2))
+    if operation == "target":
+        assert (
+            vlm.select_exploration_target(
+                router_client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
+            )
+            == expected
+        )
+    elif operation == "merge":
+        assert vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL) == expected
+    else:
+        with pytest.raises(UnusableOutputError, match="Malformed page description"):
+            vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
 
 
 def test_send_chat_rejects_a_streamed_response(

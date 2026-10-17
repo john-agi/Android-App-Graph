@@ -271,6 +271,17 @@ tokens. A reply stopped by the provider's content filter (`finish_reason:
 "content_filter"`) is logged with the call's name and otherwise handled like any
 other empty or partial reply.
 
+The page-detail calls that return JSON (screen descriptions, node verification,
+edge normalization, both audits and the coverage checkpoint's target choice) ask
+for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
+a JSON schema with a description of every property, plus OpenRouter's
+[response-healing](https://openrouter.ai/docs/guides/features/plugins/response-healing)
+plugin. The schemas are strict except for screen descriptions and edge templates,
+whose `state` and `params` objects have free-form keys that strict mode cannot
+express. OpenRouter routes a `response_format` only to providers that support it,
+and not every provider enforces strict schemas, so every reply is still validated
+as before. The action model and the v2 runtime's decisions keep their text formats.
+
 V2 planning caps each completion at 3000 `max_tokens` and permits one
 format-correction retry with a prompt reminder; a failed generation is asked again
 within each completion, and a truncated one ends the retry. Chat responses must

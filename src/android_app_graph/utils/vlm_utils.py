@@ -26,7 +26,10 @@ from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 if TYPE_CHECKING:
     from openrouter.components.chatcontentimage import ChatContentImageTypedDict
     from openrouter.components.chatmessages import ChatMessagesTypedDict
-    from openrouter.components.chatrequest import ResponseFormatTypedDict
+    from openrouter.components.chatrequest import (
+        ChatRequestPluginTypedDict,
+        ResponseFormatTypedDict,
+    )
     from openrouter.operations.createembeddings import (
         CreateEmbeddingsResponse,
         CreateEmbeddingsUsage,
@@ -401,6 +404,121 @@ if needed, but it MUST explicitly name what menu is shown (e.g. "results page wi
 "existing_description": "more specific description for the first screenshot", \
 "new_description": "more specific description for the second screenshot"}}"""
 
+_SEVERITY: dict[str, Any] = {
+    "type": "string",
+    "enum": ["high", "medium", "low"],
+    "description": "How likely and how harmful the issue is.",
+}
+
+_EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "instruction_template": {
+            "type": "string",
+            "description": "The instruction with each user-provided value replaced by a "
+            "{placeholder}, or the instruction unchanged when there is none.",
+        },
+        "observation_template": {
+            "type": "string",
+            "description": "The observation normalized the same way, or an empty string.",
+        },
+        "is_template": {
+            "type": "boolean",
+            "description": "Whether any placeholder was inserted.",
+        },
+        "param_names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The placeholder names; empty when is_template is false.",
+        },
+        "examples": {
+            "type": "array",
+            "description": "Each original instruction with the value each placeholder took.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "description": "An original instruction."},
+                    "params": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Placeholder name to the value it took.",
+                    },
+                },
+                "required": ["instruction", "params"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [
+        "instruction_template",
+        "observation_template",
+        "is_template",
+        "param_names",
+        "examples",
+    ],
+    "additionalProperties": False,
+}
+
+_PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "page_description": {
+            "type": "string",
+            "description": "The screen type in under 10 words, with no user-specific content.",
+        },
+        "state": {
+            "type": "object",
+            "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
+            "description": "Flat dynamic state: snake_case keys mapped to the current value, "
+            "or null when it cannot be read.",
+        },
+        "elements": {
+            "type": "array",
+            "description": "Interactable elements, roughly top to bottom and left to right.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "A short label, under 8 words, using the screen's text.",
+                    },
+                    "position": {
+                        "type": "string",
+                        "description": "The general screen region, never pixel coordinates.",
+                    },
+                },
+                "required": ["description", "position"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["page_description", "state", "elements"],
+    "additionalProperties": False,
+}
+
+_NODE_VERIFICATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "same": {
+            "type": "boolean",
+            "description": "Whether the two screenshots show the same screen.",
+        },
+        "reason": {"type": "string", "description": "A brief explanation."},
+        "existing_description": {
+            "type": ["string", "null"],
+            "description": "When the screens differ, a more specific description of the first "
+            "screenshot; null when they are the same.",
+        },
+        "new_description": {
+            "type": ["string", "null"],
+            "description": "When the screens differ, a more specific description of the second "
+            "screenshot; null when they are the same.",
+        },
+    },
+    "required": ["same", "reason", "existing_description", "new_description"],
+    "additionalProperties": False,
+}
+
 NEXT_ACTION_PLAN_PROMPT = """\
 You are an exploration planner for a mobile app. Your goal is to systematically explore \
 the app to discover as many DISTINCT screens and functionalities as possible.
@@ -583,6 +701,16 @@ Look at the screenshot and execute the SINGLE next action to complete the task a
 Focus on the task instruction. The overall goal is only for context when the instruction is ambiguous."""
 
 
+def _structured_output(
+    name: str, schema: dict[str, Any], *, strict: bool = True
+) -> ResponseFormatTypedDict:
+    """Ask for JSON matching ``schema``; parsers still validate, since not every provider does."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": strict, "schema_": schema},
+    }
+
+
 class GenerationFailedError(UnusableOutputError):
     """The provider reported ``finish_reason: "error"``: generation failed partway."""
 
@@ -605,6 +733,7 @@ def _send_chat_once(
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
+    plugins: list[ChatRequestPluginTypedDict] | None = None,
     max_tokens: int | None = None,
 ) -> ChatResult:
     """Send one completion, record its usage and check how it finished."""
@@ -612,6 +741,7 @@ def _send_chat_once(
         model=settings.model,
         messages=messages,
         response_format=response_format,
+        plugins=plugins,
         max_tokens=max_tokens if max_tokens is not None else UNSET,
         temperature=settings.temperature if settings.temperature is not None else UNSET,
         stream=False,
@@ -646,6 +776,7 @@ def send_chat(
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
+    plugins: list[ChatRequestPluginTypedDict] | None = None,
     max_tokens: int | None = None,
 ) -> ChatResult:
     """Send a non-streaming completion, asking once more if its generation failed.
@@ -661,6 +792,7 @@ def send_chat(
             settings=settings,
             messages=messages,
             response_format=response_format,
+            plugins=plugins,
             max_tokens=max_tokens,
         ),
     )
@@ -787,7 +919,12 @@ def describe_page_and_state(
             call_type="page_describe_and_state",
             settings=settings,
             messages=messages,
-            response_format={"type": "json_object"},
+            # Not strict: "state" has free-form keys, which strict mode cannot express
+            # because it needs every key listed and additionalProperties false.
+            response_format=_structured_output(
+                "page_description", _PAGE_DESCRIPTION_SCHEMA, strict=False
+            ),
+            plugins=[{"id": "response-healing"}],
         )
         try:
             return _parse_page_description(message_text(resp))
@@ -845,7 +982,8 @@ def verify_same_node(
                     ],
                 }
             ],
-            response_format={"type": "json_object"},
+            response_format=_structured_output("node_verification", _NODE_VERIFICATION_SCHEMA),
+            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"same": False, "reason": "reply truncated"}
@@ -909,7 +1047,11 @@ def normalize_edge(
                     "content": f"{NORMALIZE_EDGE_PROMPT}\n\n{input_text}",
                 }
             ],
-            response_format={"type": "json_object"},
+            # Not strict: each example's "params" maps free-form placeholder names.
+            response_format=_structured_output(
+                "edge_template", _EDGE_TEMPLATE_SCHEMA, strict=False
+            ),
+            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return unchanged
@@ -1026,6 +1168,120 @@ Return ONLY a JSON object:
 }}"""
 
 
+_MERGE_NODES_ISSUE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": ["merge_nodes"], "description": "The issue type."},
+        "severity": _SEVERITY,
+        "description": {
+            "type": "string",
+            "description": "Why these two nodes may be the same screen.",
+        },
+        "node_a": {"type": "string", "description": "The first node_id."},
+        "node_b": {"type": "string", "description": "The second node_id."},
+    },
+    "required": ["type", "severity", "description", "node_a", "node_b"],
+    "additionalProperties": False,
+}
+
+_NODE_MERGE_AUDIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": _MERGE_NODES_ISSUE,
+            "description": "Likely duplicate screen templates to verify for merging.",
+        },
+        "summary": {"type": "string", "description": "A short summary."},
+    },
+    "required": ["issues", "summary"],
+    "additionalProperties": False,
+}
+
+_GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "description": "Every merge_nodes, retry_edge and explore_node issue found.",
+            "items": {
+                "anyOf": [
+                    _MERGE_NODES_ISSUE,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["retry_edge"],
+                                "description": "The issue type.",
+                            },
+                            "severity": _SEVERITY,
+                            "description": {
+                                "type": "string",
+                                "description": "Why this edge looks wrong.",
+                            },
+                            "source_node": {
+                                "type": "string",
+                                "description": "The node_id where the edge starts.",
+                            },
+                            "target_node": {
+                                "type": "string",
+                                "description": "The node_id the edge currently goes to.",
+                            },
+                            "instruction": {
+                                "type": "string",
+                                "description": "The edge instruction that looks mismatched.",
+                            },
+                        },
+                        "required": [
+                            "type",
+                            "severity",
+                            "description",
+                            "source_node",
+                            "target_node",
+                            "instruction",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["explore_node"],
+                                "description": "The issue type.",
+                            },
+                            "severity": _SEVERITY,
+                            "description": {
+                                "type": "string",
+                                "description": "What is likely missing from this node.",
+                            },
+                            "node": {
+                                "type": "string",
+                                "description": "The node_id that needs more exploration.",
+                            },
+                            "expected_pages": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Pages that should be reachable from this node.",
+                            },
+                        },
+                        "required": ["type", "severity", "description", "node", "expected_pages"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+        },
+        "summary": {
+            "type": "string",
+            "description": "A one-paragraph overall assessment of graph quality.",
+        },
+    },
+    "required": ["issues", "summary"],
+    "additionalProperties": False,
+}
+
+
 def audit_merge_nodes(
     client: OpenRouter,
     graph_summary: str,
@@ -1044,7 +1300,8 @@ def audit_merge_nodes(
             call_type="node_merge_audit",
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
+            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"issues": [], "summary": "reply truncated"}
@@ -1081,6 +1338,22 @@ Return ONLY a JSON object:
   "node_id": "candidate node_id",
   "reason": "short reason"
 }}"""
+
+
+def _exploration_target_schema(node_ids: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "node_id": {
+                "type": "string",
+                "enum": node_ids,
+                "description": "The candidate node_id most urgent to continue exploring from.",
+            },
+            "reason": {"type": "string", "description": "A short reason."},
+        },
+        "required": ["node_id", "reason"],
+        "additionalProperties": False,
+    }
 
 
 def select_exploration_target(
@@ -1120,7 +1393,10 @@ def select_exploration_target(
             call_type="exploration_target",
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=_structured_output(
+                "exploration_target", _exploration_target_schema(sorted(valid_ids))
+            ),
+            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return None
@@ -1167,7 +1443,8 @@ def audit_graph(
             call_type="graph_audit",
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
+            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"issues": [], "summary": "reply truncated"}
