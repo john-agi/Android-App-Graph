@@ -253,11 +253,11 @@ reset or failed reads and writes) and timeouts with exponential backoff (0.5 s,
 then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between tries) for up
 to one hour, waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
 header asks instead. It does not retry 429 or other 4xx responses, which fail at
-once, nor a server that closes the connection without sending a response. The application never retries what
-the SDK has given up on. A request that timed out can be sent again within that
-hour, and OpenRouter bills a non-streaming request in full even after the client
-disconnects, so a timeout shorter than the model needs can pay for the same
-request several times.
+once, nor a server that closes the connection without sending a response. The
+application never retries what the SDK has given up on. A request that timed out
+can be sent again within that hour, and OpenRouter bills a non-streaming request
+in full even after the client disconnects, so a timeout shorter than the model
+needs can pay for the same request several times.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
@@ -351,9 +351,9 @@ renamed descriptions carry their model metadata through save/load.
 
 ### Action responses
 
-The action model receives the `mobile_use` function in the prompt's text format
-and states its screen resolution as 999x999 whatever the device or screenshot
-size; the screenshot itself is still downscaled to at most one million pixels.
+The action prompt declares the `mobile_use` function in its text format and gives
+the screen resolution as 999x999 whatever the device or screenshot size; the
+screenshot itself is still downscaled to at most one million pixels.
 On ScreenSpot-v2 mobile (501 screenshots, temperature 0), `qwen/qwen3.8-flash`
 hit the target in 94.2% of taps with that screen line, against 91.0% when the
 prompt stated the resized screenshot size.
@@ -363,7 +363,9 @@ or the arguments alone) or the `<function=mobile_use>` form with one
 `<parameter=name>` block per argument. Each parameter value is parsed as JSON
 when it is valid JSON, such as `[752, 170]` or `2`, and kept as a string
 otherwise. A reply cut off before `</tool_call>` keeps every argument it
-completed. Textual and native tool calls use the same action conversion. Click and long-press
+completed.
+
+Textual and native tool calls use the same action conversion. Click and long-press
 coordinates must contain two finite numbers on the model's 0–1000 scale, which
 are scaled to device pixels. A swipe uses two complete coordinate pairs when
 provided; otherwise `up`, `down`, `left` or `right` works with omitted, null or

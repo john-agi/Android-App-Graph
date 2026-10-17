@@ -784,10 +784,12 @@ def send_chat(
     plugins: list[ChatRequestPluginTypedDict] | None = None,
     max_tokens: int | None = None,
 ) -> ChatResult:
-    """Send a non-streaming completion, asking once more if its generation failed.
+    """Send a non-streaming completion, asking once more for unusable output.
 
-    ``call_type`` names the call in usage records and logs. A truncated reply
-    raises ``TruncatedReplyError`` for the caller's final fallback.
+    Unusable output is a failed generation (``finish_reason: "error"``) or a 2xx
+    reply the SDK cannot validate. ``call_type`` names the call in usage records
+    and logs. A truncated reply raises ``TruncatedReplyError`` for the caller's
+    final fallback.
     """
     return call_with_retry(
         f"[API] {call_type}",
