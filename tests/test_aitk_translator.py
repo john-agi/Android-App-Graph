@@ -803,7 +803,6 @@ def test_chat_completion_content_makes_exactly_one_completion_call(
 
 _VLM_CONFIG: dict[str, Any] = {
     "action": {"api_key": "test-key", "model": "action-model"},
-    "instruction": {"api_key": "test-key", "model": "instruction-model"},
     "page_detail": {"api_key": "test-key", "model": "detail-model"},
     "image_embedding": {"api_key": "image-key", "model": "img-model"},
 }
@@ -858,7 +857,6 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator._package_to_app == {"com.demo.app": "demo"}
     assert translator.model_name == "action-model"
     assert translator.desc_model == "detail-model"
-    assert translator.instruction_model == "instruction-model"
     assert translator.image_embedding_model == "img-model"
     assert translator.image_embedding_api_key == "image-key"
     # image_embedding.base_url resolution itself is embedding_cache's
@@ -1299,10 +1297,8 @@ def use_model(
     def answer(
         translator: aitk_translator.UIKobeV2Translator, *replies: str | None
     ) -> _RecordedCompletions:
-        client, _ = make_client(
-            _VLM_CONFIG["instruction"], role="instruction", http_client=router_http
-        )
-        monkeypatch.setattr(translator, "instruction_client", client)
+        client, _ = make_client(_VLM_CONFIG["action"], role="action", http_client=router_http)
+        monkeypatch.setattr(translator, "model_client", client)
         router_responses.extend(chat_response(content=reply) for reply in replies)
         return _RecordedCompletions(router_requests)
 
@@ -2236,7 +2232,6 @@ def test_v2_roles_send_their_own_models_and_temperatures(
         vlm_config={
             "action": {"api_key": "test", "temperature": 0.0},
             "page_detail": {"api_key": "test", "temperature": 0.4},
-            "instruction": {"api_key": "test", "temperature": 0.8, "model": "provider/planner"},
         },
     )
     router_responses.extend(
@@ -2260,9 +2255,37 @@ def test_v2_roles_send_their_own_models_and_temperatures(
     assert [(body["model"], body["temperature"]) for body in bodies] == [
         ("qwen/qwen3.8-flash", 0.0),
         ("openai/gpt-6.1-sol", 0.4),
-        ("provider/planner", 0.8),
+        ("qwen/qwen3.8-flash", 0.0),
     ]
     assert bodies[2]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
+
+
+@pytest.mark.usefixtures("image_router")
+def test_v2_decisions_use_the_action_model_and_never_read_instruction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    monkeypatch.setenv("APP_GRAPH_PAGE_DETAIL_MODEL", "openai/gpt-6.1-sol")
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "google/gemini-embedding-2")
+    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "qwen/qwen3.8-flash")
+    translator = aitk_translator.UIKobeV2Translator(
+        graph_dir=str(tmp_path),
+        vlm_config={
+            "action": {"api_key": "test"},
+            "page_detail": {"api_key": "test"},
+            "instruction": {"model": "${APP_GRAPH_INSTRUCTION_MODEL}", "temperature": "hot"},
+        },
+    )
+    router_responses.extend([chat_response(content="nothing"), chat_response(content="Tap Search")])
+    translator._record_info("find shoes", png_screenshot)
+    translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
+    bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
+    assert [body["model"] for body in bodies] == ["qwen/qwen3.8-flash"] * 2
+    assert not hasattr(translator, "instruction_client")
 
 
 def test_runtime_reports_missing_models_before_creating_clients(
@@ -2270,8 +2293,9 @@ def test_runtime_reports_missing_models_before_creating_clients(
 ) -> None:
     with pytest.raises(ValueError, match="Invalid model configuration") as caught:
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    for role in ("PAGE_DETAIL", "EMBEDDING", "INSTRUCTION", "ACTION"):
+    for role in ("PAGE_DETAIL", "EMBEDDING", "ACTION"):
         assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
+    assert "INSTRUCTION" not in str(caught.value)
     assert owned_router_clients == []
 
 
@@ -2280,7 +2304,7 @@ def test_runtime_keeps_caller_environment_references(
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     config: dict[str, object] = {}
-    for role in ("page_detail", "embedding", "instruction", "action"):
+    for role in ("page_detail", "embedding", "action"):
         variable = f"APP_GRAPH_{role.upper()}_MODEL"
         monkeypatch.setenv(variable, f"provider/{role}")
         config[role] = {"model": f"${{{variable}}}"}
@@ -2293,12 +2317,12 @@ def test_runtime_keeps_caller_environment_references(
     assert "image_embedding" not in config
 
 
-@pytest.mark.parametrize("missing", ["page_detail", "instruction"])
 @pytest.mark.usefixtures("model_environment")
 def test_v2_partial_initialization_closes_created_clients(
-    missing: str, tmp_path: Path, owned_router_clients: list[httpx.Client]
+    tmp_path: Path, owned_router_clients: list[httpx.Client]
 ) -> None:
-    roles = ("action", "page_detail", "instruction")
+    roles = ("action", "page_detail")
+    missing = "page_detail"
     created = roles.index(missing)
     with pytest.raises(ValueError, match=rf"{missing}\.api_key.*OPENROUTER_API_KEY"):
         aitk_translator.UIKobeV2Translator(
@@ -2320,7 +2344,7 @@ def test_v2_construction_closes_its_clients_when_graph_loading_fails(
     monkeypatch.setattr(aitk_translator.UIKobeV2Translator, "_load_all_graphs", interrupted)
     with pytest.raises(_Interrupted):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert len(owned_router_clients) == 4
+    assert len(owned_router_clients) == 3
     assert all(client.is_closed for client in owned_router_clients)
 
 
@@ -2400,7 +2424,7 @@ def test_v2_invoked_callback_closes_clients_and_reuses_image_client(
         else:
             assert built.to_agent("task", {}, {}) == "ok"
         assert all(client.is_closed for client in owned_router_clients)
-    assert len(owned_router_clients) == initial_count + 8
+    assert len(owned_router_clients) == initial_count + 6
 
 
 @pytest.mark.parametrize("schema_failure", [False, True])

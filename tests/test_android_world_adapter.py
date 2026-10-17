@@ -88,8 +88,8 @@ def test_android_world_steps_reopen_clients_and_preserve_task_memory(
         assert state["package"] == "com.demo"
         assert history["actions"] == ["acted"] * len(runtime._memory.actions)
         response = vlm_utils.send_chat(
-            runtime.instruction_client,
-            model=runtime.instruction_model,
+            runtime.model_client,
+            model=runtime.model_name,
             messages=[{"role": "user", "content": "inspect"}],
         )
         runtime._memory.add_action(vlm_utils.message_text(response))
@@ -103,8 +103,8 @@ def test_android_world_steps_reopen_clients_and_preserve_task_memory(
         assert isinstance(result, SimpleNamespace)
         assert result.done is False
         assert as_object_dict(result.data)["aitk_action"] == {"action": "wait", "time": 1}
-        # Only to_agent reopens all four role clients; a bare _step reopens just the one it uses.
-        assert len(owned_router_clients) == initial_count + 4 * step
+        # Only to_agent reopens all three role clients; a bare _step reopens just the one it uses.
+        assert len(owned_router_clients) == initial_count + 3 * step
         assert all(client.is_closed for client in owned_router_clients)
     assert len(runtime._memory.actions) == 2
     assert len(router_requests) == 2

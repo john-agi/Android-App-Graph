@@ -196,7 +196,7 @@ shell, CI or container; a physical `.env` file is not required or loaded automat
 | `APP_GRAPH_PAGE_DETAIL_MODEL` | Screen descriptions and graph auditing |
 | `APP_GRAPH_EMBEDDING_MODEL` | Text and screenshot embeddings |
 | `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning |
-| `APP_GRAPH_ACTION_MODEL` | Action prediction |
+| `APP_GRAPH_ACTION_MODEL` | Action prediction and v2 runtime decisions |
 
 The template's model selections were approved from OpenRouter's catalog on
 2026-10-12 based on documented capabilities; Android-task improvements have not
@@ -211,7 +211,8 @@ the embedding command's `--model` argument takes precedence. An empty value or
 unresolved reference is an error, including an explicit image-model override.
 To compare models, edit `.env`, export it again and restart the command.
 
-Exploration and the v2 runtime require all four roles. A basic audit requires
+Exploration requires all four roles. The v2 runtime requires page-detail, action
+and embedding models; it never reads an `instruction` block. A basic audit requires
 page-detail and embedding models; `--re-explore` also requires instruction and
 action models. `app-graph-embed` requires only an embedding model. Help and plotting
 existing graphs need no model configuration or credentials.
@@ -275,15 +276,6 @@ including graph identification and navigation, open and close their own request
 scope when no outer scope is active.
 
 ### Upgrading provider configuration
-
-The instruction planner now has its own `instruction` role in v2 as well as
-exploration. If a legacy configuration supplied only an action credential or
-used the action model for planning, add an `instruction` block with its own
-`model`, `api_key` and compatible `base_url`, or export `OPENROUTER_API_KEY`
-and `APP_GRAPH_INSTRUCTION_MODEL`. To retain a supported custom model
-for planning, explicitly copy that model and endpoint into `instruction`.
-Missing-credential errors identify the affected role; action credentials are
-not implicitly reused for instruction requests.
 
 The v2 runtime and `app-graph-embed` both use OpenRouter's
 [multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
@@ -437,8 +429,11 @@ execution complete using the configured roles.
 
 After opening the app, each turn matches the screen to a graph node, records
 task-relevant observations, chooses a neighboring or free-form instruction, and
-executes one action. Planning and action execution use separate configured roles;
-see [Upgrading provider configuration](#upgrading-provider-configuration).
+executes one action. As in upstream UI-KOBE, one small model runs the turn: node
+identification, recording, the decision, free-form planning, the final answer and
+action execution all use the `action` model, while `page_detail` describes the
+screen and the embedding model retrieves candidate nodes. The roles it requires
+are listed under [Configure API Credentials](#configure-api-credentials).
 
 AITK loads a translator by module name: `register_translator()` in
 `aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
@@ -505,8 +500,6 @@ translator itself stays in the installed package. Verified against AITK commit
          model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
        embedding:
          model: ${APP_GRAPH_EMBEDDING_MODEL}
-       instruction:
-         model: ${APP_GRAPH_INSTRUCTION_MODEL}
        action:
          model: ${APP_GRAPH_ACTION_MODEL}
    ```

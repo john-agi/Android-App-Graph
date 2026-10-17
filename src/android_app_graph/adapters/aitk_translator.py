@@ -597,9 +597,7 @@ class UIKobeV2Translator(BaseTranslator):
         self.max_pixels = max_pixels
         vlm_config = dict(vlm_config or {})
         vlm_config.update(
-            resolve_model_roles(
-                vlm_config, roles=("page_detail", "instruction", "action", "image_embedding")
-            )
+            resolve_model_roles(vlm_config, roles=("page_detail", "action", "image_embedding"))
         )
 
         image_embedding_settings = resolve_image_embedding_settings(vlm_config)
@@ -617,11 +615,6 @@ class UIKobeV2Translator(BaseTranslator):
                 role="page_detail",
             )
             clients.enter_context(self.desc_client)
-            self.instruction_client, self.instruction_model = make_client(
-                vlm_config.get("instruction"),
-                role="instruction",
-            )
-            clients.enter_context(self.instruction_client)
             self.image_embedding_client: OpenRouter | None = None
             if self.image_embedding_api_key:
                 self.image_embedding_client, _ = make_client(
@@ -804,8 +797,8 @@ class UIKobeV2Translator(BaseTranslator):
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
             raw = _chat_completion_content(
-                self.instruction_client,
-                model=self.instruction_model,
+                self.model_client,
+                model=self.model_name,
                 messages=[{"role": "user", "content": content}],
                 max_tokens=V2_CHAT_MAX_TOKENS,
             )
@@ -1422,7 +1415,7 @@ class UIKobeV2Translator(BaseTranslator):
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
         # AITK exposes callbacks, not translator teardown; each turn owns its connections.
         with ExitStack() as clients:
-            for client in (self.model_client, self.desc_client, self.instruction_client):
+            for client in (self.model_client, self.desc_client):
                 clients.enter_context(client)
             if self.image_embedding_client is not None:
                 clients.enter_context(self.image_embedding_client)
