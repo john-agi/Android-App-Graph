@@ -1198,7 +1198,7 @@ class GraphManager:
             emb = attrs.get("description_embedding")
             if emb:
                 embeddings[node_id] = {
-                    "model": attrs.get("description_embedding_model"),
+                    "model": attrs.get("description_embedding_model") or None,
                     "embedding": emb,
                 }
 

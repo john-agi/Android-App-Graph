@@ -2213,6 +2213,9 @@ def test_save_then_load_round_trips(
     again = tmp_path_factory.mktemp("roundtrip") / "graph.json"
     loaded.save_graph(again)
     assert again.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+    assert again.with_suffix(".emb.json").read_text(encoding="utf-8") == path.with_suffix(
+        ".emb.json"
+    ).read_text(encoding="utf-8")
 
 
 @given(
