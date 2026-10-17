@@ -317,7 +317,19 @@ renamed descriptions carry their model metadata through save/load.
 
 ### Action responses
 
-Textual and native tool calls use the same action conversion. Click and long-press
+The action model receives the `mobile_use` function in the prompt's text format
+and states its screen resolution as 999x999 whatever the device or screenshot
+size; the screenshot itself is still downscaled to at most one million pixels.
+On ScreenSpot-v2 mobile (501 screenshots, temperature 0), `qwen/qwen3.8-flash`
+hit the target in 94.2% of taps with that screen line, against 91.0% when the
+prompt stated the resized screenshot size.
+
+A `<tool_call>` block may hold a JSON object (`{"name": ..., "arguments": {...}}`
+or the arguments alone) or the `<function=mobile_use>` form with one
+`<parameter=name>` block per argument. Each parameter value is parsed as JSON
+when it is valid JSON, such as `[752, 170]` or `2`, and kept as a string
+otherwise. A reply cut off before `</tool_call>` keeps every argument it
+completed. Textual and native tool calls use the same action conversion. Click and long-press
 coordinates must contain two finite numbers on the model's 0–1000 scale, which
 are scaled to device pixels. A swipe uses two complete coordinate pairs when
 provided; otherwise `up`, `down`, `left` or `right` works with omitted, null or

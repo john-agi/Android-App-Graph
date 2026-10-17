@@ -20,6 +20,7 @@ from openrouter import OpenRouter
 from openrouter.components.chatresult import ChatResult
 from openrouter.errors import OpenRouterError, ResponseValidationError
 
+from android_app_graph.payloads import as_str, as_str_dict
 from android_app_graph.utils import make_client
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
@@ -287,6 +288,107 @@ def test_native_tool_calls_survive_sdk_parsing(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, model="qwen/qwen3.8-flash"
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
+
+
+def _sent_system_prompt(request: httpx.Request) -> str:
+    system = as_str_dict(json.loads(request.content)["messages"][0])
+    assert system["role"] == "system"
+    return as_str(system["content"], "")
+
+
+def test_action_prompt_declares_a_parseable_mobile_use_function(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='<tool_call>{"action":"wait"}</tool_call>'))
+    vlm.predict_next_action(router_client, png_screenshot, "wait", model="qwen/qwen3.8-flash")
+    prompt = _sent_system_prompt(router_requests[0])
+    tools = prompt.split("<tools>\n", 1)[1].split("\n</tools>", 1)[0]
+    assert json.loads(tools)["function"]["name"] == "mobile_use"
+
+
+def test_action_prompt_states_the_benchmarked_screen_line_whatever_the_screenshot(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='<tool_call>{"action":"wait"}</tool_call>'))
+    vlm.predict_next_action(
+        router_client,
+        png_screenshot,
+        "wait",
+        screen_w=1080,
+        screen_h=2400,
+        model="qwen/qwen3.8-flash",
+    )
+    prompt = _sent_system_prompt(router_requests[0])
+    assert "The screen's resolution is 999x999." in prompt
+    assert "32x32" not in prompt
+    assert "1080" not in prompt
+
+
+_XML_CLICK = """\
+Thought: The search icon is at the top.
+Action: Tap the search icon.
+<tool_call>
+<function=mobile_use>
+<parameter=action>
+click
+</parameter>
+<parameter=coordinate>
+[752, 170]
+</parameter>
+</tool_call>"""
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_xml_parameter_tool_calls_are_read(truncated: bool) -> None:
+    raw = _XML_CLICK.removesuffix("</tool_call>") if truncated else _XML_CLICK
+    assert vlm._parse_tool_call(raw) == {"action": "click", "coordinate": [752, 170]}
+
+
+def test_xml_parameter_values_that_are_not_json_stay_strings() -> None:
+    raw = (
+        "<tool_call>\n<function=mobile_use>\n<parameter=action>\ntype\n</parameter>\n"
+        "<parameter=text>\nstewed beef\n</parameter>\n<parameter=time>\n2\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    assert vlm._parse_tool_call(raw) == {"action": "type", "text": "stewed beef", "time": 2}
+
+
+def test_a_truncated_xml_parameter_is_dropped() -> None:
+    raw = "<tool_call>\n<function=mobile_use>\n<parameter=action>\nclick\n</parameter>\n"
+    raw += "<parameter=coordinate>\n[752,"
+    assert vlm._parse_tool_call(raw) == {"action": "click"}
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_xml_parameter_tool_calls_become_device_actions(
+    truncated: bool,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    content = _XML_CLICK.removesuffix("</tool_call>") if truncated else _XML_CLICK
+    router_responses.append(chat_response(content=content))
+    action, history = vlm.predict_next_action(
+        router_client,
+        png_screenshot,
+        "tap",
+        screen_w=1000,
+        screen_h=2000,
+        model="qwen/qwen3.8-flash",
+    )
+    assert action == {"action": "tap", "x": 752, "y": 340}
+    assert history == "The search icon is at the top. | Tap the search icon."
+    assert len(router_requests) == 1
 
 
 def test_send_chat_rejects_a_streamed_response(

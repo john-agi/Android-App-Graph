@@ -546,7 +546,7 @@ You may call one or more functions to assist with the user query.
 
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
-{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is {screen_w}x{screen_h}.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application background menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}
+{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is 999x999.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application background menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}}}
 </tools>
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
@@ -1213,8 +1213,26 @@ def get_openrouter_image_embedding(
         return get_image_embedding(scoped, screenshot_b64, model=model)
 
 
+def _parse_xml_parameters(block: str) -> dict[str, object] | None:
+    """Read ``<function=...>`` with one ``<parameter=name>value</parameter>`` per argument.
+
+    A parameter cut off before its closing tag is dropped, so a truncated reply
+    keeps only the arguments it completed.
+    """
+    if "<function=" not in block:
+        return None
+    arguments: dict[str, object] = {}
+    for name, value in re.findall(r"<parameter=([^>\s]+)>(.*?)</parameter>", block, re.DOTALL):
+        text = value.strip()
+        try:
+            arguments[name] = json.loads(text)
+        except json.JSONDecodeError:
+            arguments[name] = text
+    return arguments
+
+
 def _parse_tool_call(raw: str) -> dict[str, Any] | None:
-    """Extract the JSON arguments from a <tool_call>...</tool_call> block."""
+    """Extract the arguments from a <tool_call>...</tool_call> block, JSON or XML parameters."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
     inner = m.group(1).strip() if m else ""
 
@@ -1223,6 +1241,9 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
         if start == -1:
             return None
         remainder = raw[start + len("<tool_call>") :].lstrip()
+        xml_arguments = _parse_xml_parameters(remainder)
+        if xml_arguments is not None:
+            return xml_arguments
         decoder = json.JSONDecoder()
         try:
             parsed, _end = decoder.raw_decode(remainder)
@@ -1232,6 +1253,9 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
             return parsed["arguments"]
         return parsed
 
+    xml_arguments = _parse_xml_parameters(inner)
+    if xml_arguments is not None:
+        return xml_arguments
     inner = strip_json_fences(inner)
     try:
         parsed = json.loads(inner)
@@ -1537,12 +1561,9 @@ def predict_next_action(
         - aitk_action: action dict in AITK format (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
-    screenshot_b64, resized_w, resized_h, _scale_back = _resize_screenshot(screenshot_b64)
+    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
-    system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format(
-        screen_w=resized_w,
-        screen_h=resized_h,
-    )
+    system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format()
 
     if action_history:
         history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(action_history))
