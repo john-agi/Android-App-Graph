@@ -152,6 +152,33 @@ def test_exploration_wait_recovery_respects_step_limit(
     kobe.explore(max_steps=2)
     assert kobe.graph.total_steps_completed == 2
     assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 2
-    assert len(router_requests) == (8 if malformed else 6)
+    step = ["provider/instruction", *["provider/action"] * (2 if malformed else 1)]
+    assert [json.loads(request.content)["model"] for request in router_requests] == [
+        "provider/page_detail",
+        "provider/embedding",
+        *step,
+        *step,
+    ]
     assert len(kobe.graph.graph.edges) == 0
     assert no_sleep == [1, 1]
+
+
+def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kobe.graph.graph.add_edge("s0_home", "s1_settings")
+    router_responses.extend(
+        [
+            chat_response(content='{"issues":[],"summary":"no duplicates"}'),
+            chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
+        ]
+    )
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
+    assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_settings"
+    assert [json.loads(request.content)["model"] for request in router_requests] == [
+        "provider/page_detail"
+    ] * 2

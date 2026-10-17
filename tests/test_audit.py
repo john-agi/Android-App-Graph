@@ -328,6 +328,18 @@ def test_re_explore_issues_retries_explores_and_skips(
     graph, graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
     controller = FakeController("com.demo")
+    models: list[tuple[str, str]] = []
+
+    def plan(*, settings: ModelSettings, **_kwargs: object) -> str:
+        models.append(("plan", settings.model))
+        return "tap the first button"
+
+    def act(*, settings: ModelSettings, **_kwargs: object) -> tuple[dict[str, str], str]:
+        models.append(("act", settings.model))
+        return {"action": "end"}, ""
+
+    monkeypatch.setattr(audit, "plan_next_action", plan)
+    monkeypatch.setattr(audit, "predict_next_action", act)
 
     out_path = tmp_path / "demo" / "demo_audited.json"
     results = audit.re_explore_issues(
@@ -349,6 +361,7 @@ def test_re_explore_issues_retries_explores_and_skips(
 
     assert [r["status"] for r in results] == ["retried", "explored", "skipped"]
     assert results[2]["reason"] == "source not found"
+    assert models == [("plan", "instruction-model"), ("act", "action-model")] * 2
     # "end" is rewritten to a back press, and every action is recorded with save_flag.
     assert {action["action"] for action, _save_flag in controller.actions} <= {"tap", "back"}
     assert all(save_flag for _action, save_flag in controller.actions)
