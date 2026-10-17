@@ -176,6 +176,13 @@ and screenshot embeddings, and a missing or empty key is an error:
 OPENROUTER_API_KEY=your-key
 ```
 
+Two optional variables, commented out in `.env.example`, attribute your requests to
+your app in OpenRouter's rankings and analytics
+([app attribution](https://openrouter.ai/docs/app-attribution)):
+`OPENROUTER_HTTP_REFERER` (your app's URL) and `OPENROUTER_X_OPEN_ROUTER_TITLE`
+(its name). The OpenRouter SDK reads them from the environment and sends them as
+the `HTTP-Referer` and `X-OpenRouter-Title` headers.
+
 Export `.env` into the environment before running commands:
 
 ```bash
@@ -223,12 +230,13 @@ existing graphs need no model configuration or credentials.
 Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
 `temperature` in its YAML block: a finite number from 0 to 2, inclusive, or an
 `${ENV_VAR}` reference.
-It is omitted by default, including for Sol. Only set it when the selected
-model and provider support it; check the model's supported parameters and
+It is omitted by default. Only set it when the selected model and provider
+support it; check the model's supported parameters and
 [OpenRouter's parameter guidance](https://openrouter.ai/docs/api_reference/parameters).
-For example, `action: {temperature: 0.0}` configures only action requests;
-planning and page analysis retain their own settings. Zero temperature does
-not guarantee deterministic output.
+The sample `configs/explore.yaml` sets `temperature: 0.0` on `action` only:
+`qwen/qwen3.8-flash` supports it and upstream UI-KOBE used it, while Sol, the
+sample's page-detail and instruction model, rejects temperature, so those blocks
+leave it out. Zero temperature does not guarantee deterministic output.
 
 ### Requests and recovery
 

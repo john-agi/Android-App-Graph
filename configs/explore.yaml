@@ -32,3 +32,4 @@ vlm:
 
   action:
     model: ${APP_GRAPH_ACTION_MODEL}
+    temperature: 0.0
