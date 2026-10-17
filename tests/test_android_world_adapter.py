@@ -99,6 +99,8 @@ def test_android_world_steps_share_one_client_and_preserve_task_memory(
         return json.dumps({"message": "acted", "aitk_action": {"action": "wait", "time": 1}})
 
     monkeypatch.setattr(runtime, "_step", runtime_step)
+    # Only to_agent clears what an earlier task left; an adapter calling _step would keep it.
+    runtime._memory.add_action("earlier task")
     assert isinstance(agent, _SteppingAgent)
     for _ in range(2):
         result = agent.step("Inspect the screen")
