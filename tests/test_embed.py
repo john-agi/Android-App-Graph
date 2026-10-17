@@ -370,7 +370,7 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
     )
 
     def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
-        msg = "503 unavailable"
+        msg = "embedding failed"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", always_failing)
@@ -410,7 +410,7 @@ def test_precompute_recompute_discards_through_a_symlinked_sidecar(
     sidecar.symlink_to(target)
 
     def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
-        msg = "503 unavailable"
+        msg = "embedding failed"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", always_failing)
@@ -493,7 +493,7 @@ def test_precompute_keeps_going_when_a_node_fails(
     graph_path = _write_graph_tree(tmp_path)
 
     def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
-        msg = "503 unavailable"
+        msg = "embedding failed"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", always_failing)

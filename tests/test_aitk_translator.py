@@ -984,7 +984,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
         _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
     ) -> list[float]:
         if screenshot_b64 == b64_by_node["n2"]:
-            msg = "500 upstream error"
+            msg = "embedding failed"
             raise RuntimeError(msg)
         return [1.0, 0.0]
 
@@ -1568,18 +1568,23 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_compute_runtime_image_embedding_with_retry_propagates_a_persistent_failure(
+def test_runtime_image_embedding_propagates_an_error_without_asking_again(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """The retry loop itself is owned by tests/test_embedding_cache.py; this is the
-    integration point: a persistent failure must still propagate to the caller."""
+    """Only unusable output is asked again (tests/test_retrying.py); any other
+    error reaches the caller from the first attempt."""
+    calls: list[str] = []
 
-    def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
-        raise RuntimeError("rate limited")
+    def _fails(
+        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+    ) -> list[float]:
+        calls.append(screenshot_b64)
+        raise RuntimeError("embedding failed")
 
-    monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
-    with pytest.raises(RuntimeError, match="rate limited"):
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _fails)
+    with pytest.raises(RuntimeError, match="embedding failed"):
         translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
+    assert calls == ["shot"]
 
 
 @pytest.fixture

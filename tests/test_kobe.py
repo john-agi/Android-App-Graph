@@ -90,13 +90,10 @@ def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
     assert router_client.sdk_configuration.client is router_http
 
 
-def test_public_graph_and_navigation_recover_after_request_failure(
+def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_response: Callable[..., httpx.Response],
-    embedding_body: dict[str, object],
     no_sleep: list[float],
 ) -> None:
     router_responses.append(httpx.Response(401, json={"error": {"message": "bad key"}}))
@@ -104,6 +101,17 @@ def test_public_graph_and_navigation_recover_after_request_failure(
         kobe.graph.identify_state("com.demo.Home", png_screenshot)
     assert len(kobe.graph.graph) == 0
     assert kobe.graph._last_identify_cache is None
+    assert no_sleep == []
+
+
+def test_navigating_to_the_start_node_identifies_the_screen_again(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
     for _ in range(2):
         router_responses.extend(
             [
@@ -112,11 +120,11 @@ def test_public_graph_and_navigation_recover_after_request_failure(
             ]
         )
     node = kobe.graph.identify_state("com.demo.Home", png_screenshot)
+    # The cache would skip the model, and a reference screenshot would add a verify request.
     kobe.graph._last_identify_cache = None
     kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
     assert kobe.navigate_to_node(node) == node
-    assert len(router_requests) == 5
-    assert no_sleep == []
+    assert len(router_requests) == 4
 
 
 @pytest.mark.parametrize("malformed", [False, True])
