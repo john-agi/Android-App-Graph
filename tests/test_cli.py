@@ -8,8 +8,11 @@ import logging
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import NoReturn
 
+import httpx
 import pytest
+from openrouter import OpenRouter
 
 from android_app_graph import cli
 from android_app_graph.cli import build_parser, main
@@ -41,17 +44,23 @@ def test_parser_overrides() -> None:
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_main_passes_resolved_models_to_exploration(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_main_opens_one_client_for_every_app_and_closes_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    opened_clients: list[OpenRouter],
+    router_http: httpx.Client,
 ) -> None:
     roles = ("page_detail", "embedding", "instruction", "action")
-    expected_models = {role: {"model": f"provider/{role}"} for role in roles}
+    vlm = {role: {"model": f"${{APP_GRAPH_{role.upper()}_MODEL}}"} for role in roles}
     config = tmp_path / "explore.yaml"
     config.write_text(
         json.dumps(
             {
-                "vlm": {role: {"model": f"${{APP_GRAPH_{role.upper()}_MODEL}}"} for role in roles},
-                "apps": [{"name": "demo", "package_name": "com.demo"}],
+                "vlm": vlm,
+                "apps": [
+                    {"name": "demo", "package_name": "com.demo"},
+                    {"name": "other", "package_name": "com.other"},
+                ],
                 "experiment": {"graph_dir": str(tmp_path / "graphs")},
             }
         ),
@@ -59,7 +68,9 @@ def test_main_passes_resolved_models_to_exploration(
     )
     for role in roles:
         monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     events: list[str] = []
+    clients: list[OpenRouter] = []
 
     class Device:
         def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
@@ -79,13 +90,16 @@ def test_main_passes_resolved_models_to_exploration(
             vlm_config: dict[str, object],
             graph_dir: str,
             max_steps: int,
+            client: OpenRouter,
             **_kwargs: object,
         ) -> None:
             assert isinstance(controller, Device)
-            assert (app_name, package_name) == ("demo", "com.demo")
-            assert vlm_config == expected_models
+            assert package_name == f"com.{app_name}"
+            assert vlm_config == vlm
             assert graph_dir == str(tmp_path / "graphs")
             assert max_steps == 3
+            assert client.sdk_configuration.client is router_http
+            clients.append(client)
 
         def explore(self, *, resume_from: str) -> None:
             assert resume_from == "auto"
@@ -95,7 +109,7 @@ def test_main_passes_resolved_models_to_exploration(
             events.append("save")
 
     def check_avd(_manager: object, config: dict[str, object], _logger: logging.Logger) -> None:
-        assert config["vlm"] == expected_models
+        assert config["vlm"] == vlm
         events.append("avd")
 
     adb_module = ModuleType("aitk.utils.adb_controller")
@@ -111,7 +125,9 @@ def test_main_passes_resolved_models_to_exploration(
         sys, "argv", ["app-graph", "-c", str(config), "--max-steps", "3", "--resume-from", "auto"]
     )
     main()
-    assert events == ["avd", "device", "terminate", "launch", "explore", "save"]
+    assert events == ["avd", "device", *["terminate", "launch", "explore", "save"] * 2]
+    assert opened_clients == clients[:1] == clients[1:]
+    assert opened_clients[0].sdk_configuration.client is None
 
 
 def test_explorer_reports_all_missing_models_before_importing_device_tools(
@@ -140,3 +156,54 @@ def test_explorer_reports_all_missing_models_before_importing_device_tools(
     for role in ("PAGE_DETAIL", "EMBEDDING", "INSTRUCTION", "ACTION"):
         assert f"APP_GRAPH_{role}_MODEL" in error
     assert "Traceback" not in error
+
+
+@pytest.mark.parametrize(
+    ("role_settings", "key", "message"),
+    [
+        ({"action": {"temperature": "warm"}}, "test", "action.temperature must be"),
+        ({"embedding": {"timeout": "nan"}}, "test", "embedding.request_timeout must be"),
+        ({"action": {"api_key": "${OPENROUTER_API_KEY}"}}, "test", "action.api_key was removed"),
+        ({}, None, "OPENROUTER_API_KEY is required"),
+    ],
+)
+@pytest.mark.usefixtures("model_environment")
+def test_explorer_rejects_invalid_settings_before_any_device_work(
+    role_settings: dict[str, object],
+    key: str | None,
+    message: str,
+    tmp_path: Path,
+    opened_clients: list[OpenRouter],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def touched(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("settings must be validated before any device work")
+
+    if key is not None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", key)
+    monkeypatch.setattr(cli, "check_avd", touched)
+    monkeypatch.setattr(cli, "launch_app", touched)
+    monkeypatch.setattr(cli, "Kobe", touched)
+    for name, attribute in (
+        ("aitk.utils.adb_controller", "ADBController"),
+        ("aitk.utils.avd_manager", "AVDManager"),
+    ):
+        module = ModuleType(name)
+        monkeypatch.setattr(module, attribute, touched, raising=False)
+        monkeypatch.setitem(sys.modules, name, module)
+    config = tmp_path / "explore.yaml"
+    config.write_text(
+        json.dumps({"vlm": role_settings, "apps": [{"name": "demo", "package_name": "com.demo"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "argv", ["app-graph", "--config", str(config)])
+    with pytest.raises(SystemExit) as caught:
+        main()
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "Traceback" not in error
+    (line,) = [line for line in error.splitlines() if line.startswith("app-graph: error:")]
+    assert message in line
+    assert error.rstrip().endswith(line)
+    assert opened_clients == []

@@ -1,4 +1,4 @@
-"""Tests for android_app_graph.kobe: client lifecycle, model setup and exploration recovery."""
+"""Tests for android_app_graph.kobe: the shared client, model setup and exploration recovery."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 
 from android_app_graph.kobe import Kobe
@@ -36,14 +37,7 @@ class _Device:
 
 
 @pytest.fixture
-def kobe(
-    tmp_path: Path,
-    png_screenshot: str,
-    owned_router_clients: list[httpx.Client],
-    monkeypatch: pytest.MonkeyPatch,
-) -> Kobe:
-    del owned_router_clients  # requested so the clients Kobe opens use the mock transport
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
     return Kobe(
         _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
         "demo",
@@ -51,14 +45,13 @@ def kobe(
         logging.getLogger("test"),
         graph_dir=tmp_path,
         vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
     )
 
 
 def test_exploration_resolves_all_role_models_before_device_access(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, router_client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
     for role in _ROLES:
         monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
     agent = Kobe(
@@ -67,40 +60,40 @@ def test_exploration_resolves_all_role_models_before_device_access(
         "com.demo.app",
         logging.getLogger("test"),
         graph_dir=tmp_path,
+        vlm_config={"action": {"temperature": 0.0, "timeout": 9}},
+        client=router_client,
     )
-    assert agent.page_detail_model == "provider/page_detail"
-    assert agent.embedding_model == "provider/embedding"
-    assert agent.instruction_model == "provider/instruction"
-    assert agent.action_model == "provider/action"
-    assert agent.graph.embedding_model == agent.embedding_model
-    assert agent.graph.page_detail_model == agent.page_detail_model
+    assert agent.page_detail.model == "provider/page_detail"
+    assert agent.instruction.model == "provider/instruction"
+    assert (agent.action.model, agent.action.temperature) == ("provider/action", 0.0)
+    assert agent.action.request_timeout == 9.0
+    assert agent.graph.embedding_model == "provider/embedding"
+    assert agent.graph.page_detail == agent.page_detail
+    assert agent.client is agent.graph.client is router_client
 
 
 @pytest.mark.parametrize("exceptional", [False, True])
 @pytest.mark.usefixtures("model_environment")
-def test_exploration_lifecycle_closes_owned_clients(
+def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
     exceptional: bool,
     tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
-    monkeypatch: pytest.MonkeyPatch,
+    router_client: OpenRouter,
+    router_http: httpx.Client,
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     built = Kobe(
         _Device(RuntimeError("device failed")),
         "demo",
         "com.demo",
         logging.getLogger("test"),
         graph_dir=tmp_path,
+        client=router_client,
     )
-    assert len(owned_router_clients) == 4
-    assert all(client.is_closed for client in owned_router_clients)
     if exceptional:
         with pytest.raises(RuntimeError, match="device failed"):
             built.explore(max_steps=1)
     else:
         built.explore(max_steps=0)
-    assert len(owned_router_clients) == 8
-    assert all(client.is_closed for client in owned_router_clients)
+    assert router_client.sdk_configuration.client is router_http
 
 
 def test_public_graph_and_navigation_recover_after_request_failure(
@@ -108,7 +101,6 @@ def test_public_graph_and_navigation_recover_after_request_failure(
     png_screenshot: str,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    owned_router_clients: list[httpx.Client],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     no_sleep: list[float],
@@ -118,7 +110,6 @@ def test_public_graph_and_navigation_recover_after_request_failure(
         kobe.graph.identify_state("com.demo.Home", png_screenshot)
     assert len(kobe.graph.graph) == 0
     assert kobe.graph._last_identify_cache is None
-    assert all(client.is_closed for client in owned_router_clients)
     for _ in range(2):
         router_responses.extend(
             [
@@ -132,7 +123,6 @@ def test_public_graph_and_navigation_recover_after_request_failure(
     assert kobe.navigate_to_node(node) == node
     assert len(router_requests) == 5
     assert no_sleep == []
-    assert all(client.is_closed for client in owned_router_clients)
 
 
 @pytest.mark.parametrize("malformed", [False, True])
@@ -141,7 +131,6 @@ def test_exploration_wait_recovery_respects_step_limit(
     kobe: Kobe,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
-    owned_router_clients: list[httpx.Client],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     no_sleep: list[float],
@@ -166,4 +155,3 @@ def test_exploration_wait_recovery_respects_step_limit(
     assert len(router_requests) == (10 if malformed else 6)
     assert len(kobe.graph.graph.edges) == 0
     assert no_sleep == ([2.0, 4.0, 1, 2.0, 4.0, 1] if malformed else [1, 1])
-    assert all(client.is_closed for client in owned_router_clients)

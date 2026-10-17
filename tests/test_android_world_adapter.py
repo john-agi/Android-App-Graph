@@ -1,4 +1,4 @@
-"""Exercise the copy-in adapter with a stub host and the real runtime HTTP lifecycle."""
+"""Exercise the copy-in adapter with a stub host and the real runtime client."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 import pytest
+from openrouter import OpenRouter
 
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.payloads import as_object_dict
@@ -23,10 +24,11 @@ class _SteppingAgent(Protocol):
 
 
 @pytest.mark.usefixtures("model_environment")
-def test_android_world_steps_reopen_clients_and_preserve_task_memory(
+def test_android_world_steps_share_one_client_and_preserve_task_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    owned_router_clients: list[httpx.Client],
+    opened_clients: list[OpenRouter],
+    router_http: httpx.Client,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     chat_body: dict[str, object],
@@ -88,8 +90,8 @@ def test_android_world_steps_reopen_clients_and_preserve_task_memory(
         assert state["package"] == "com.demo"
         assert history["actions"] == ["acted"] * len(runtime._memory.actions)
         response = vlm_utils.send_chat(
-            runtime.model_client,
-            model=runtime.model_name,
+            runtime.client,
+            settings=runtime.action,
             messages=[{"role": "user", "content": "inspect"}],
         )
         runtime._memory.add_action(vlm_utils.message_text(response))
@@ -97,15 +99,13 @@ def test_android_world_steps_reopen_clients_and_preserve_task_memory(
 
     monkeypatch.setattr(runtime, "_step", runtime_step)
     assert isinstance(agent, _SteppingAgent)
-    initial_count = len(owned_router_clients)
-    for step in range(1, 3):
+    for _ in range(2):
         result = agent.step("Inspect the screen")
         assert isinstance(result, SimpleNamespace)
         assert result.done is False
         assert as_object_dict(result.data)["aitk_action"] == {"action": "wait", "time": 1}
-        # Only to_agent reopens all three role clients; a bare _step reopens just the one it uses.
-        assert len(owned_router_clients) == initial_count + 3 * step
-        assert all(client.is_closed for client in owned_router_clients)
+        assert runtime.client.sdk_configuration.client is router_http
+    assert opened_clients == [runtime.client]
     assert len(runtime._memory.actions) == 2
     assert len(router_requests) == 2
     assert no_sleep == []

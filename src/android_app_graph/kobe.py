@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from openrouter import OpenRouter
+
 from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
-from android_app_graph.utils import make_client, resolve_model_roles
+from android_app_graph.utils import resolve_model_settings
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
@@ -18,6 +19,8 @@ from android_app_graph.utils.vlm_utils import (
     select_exploration_target,
     token_tracker,
 )
+
+EXPLORATION_ROLES = ("page_detail", "embedding", "instruction", "action")
 
 
 def _compute_schema_delta(
@@ -60,6 +63,8 @@ class Kobe:
         max_steps: int = 20,
         coverage_checkpoint_steps: int = 50,
         coverage_checkpoint_top_k: int = 15,
+        *,
+        client: OpenRouter,
     ) -> None:
         self.controller = controller
         self.app_name = app_name
@@ -75,52 +80,28 @@ class Kobe:
         self.coverage_checkpoint_steps = coverage_checkpoint_steps
         self.coverage_checkpoint_top_k = coverage_checkpoint_top_k
 
-        vlm_config = dict(vlm_config or {})
-        vlm_config.update(
-            resolve_model_roles(
-                vlm_config, roles=("page_detail", "embedding", "instruction", "action")
-            )
+        vlm_config = vlm_config or {}
+        settings = resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
+        self.client = client
+        self.page_detail = settings["page_detail"]
+        self.instruction = settings["instruction"]
+        self.action = settings["action"]
+
+        self.graph = GraphManager(
+            client=client,
+            page_detail=self.page_detail,
+            embedding=settings["embedding"],
+            similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
         )
 
-        with ExitStack() as clients:
-            self.page_detail_client, self.page_detail_model = make_client(
-                vlm_config.get("page_detail"),
-                role="page_detail",
-            )
-            clients.enter_context(self.page_detail_client)
-            self.embedding_client, self.embedding_model = make_client(
-                vlm_config.get("embedding"), role="embedding"
-            )
-            clients.enter_context(self.embedding_client)
-            self.instruction_client, self.instruction_model = make_client(
-                vlm_config.get("instruction"),
-                role="instruction",
-            )
-            clients.enter_context(self.instruction_client)
-            self.action_client, self.action_model = make_client(
-                vlm_config.get("action"), role="action"
-            )
+        base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
+        self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
 
-            clients.enter_context(self.action_client)
-
-            similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
-
-            self.graph = GraphManager(
-                page_detail_client=self.page_detail_client,
-                page_detail_model=self.page_detail_model,
-                embedding_client=self.embedding_client,
-                embedding_model=self.embedding_model,
-                similarity_threshold=similarity_threshold,
-            )
-
-            base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
-            self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
-
-            if self.graph_path.exists():
-                self.graph.load_graph(self.graph_path)
-                self.logger.info("Graph loaded from %s", self.graph_path)
-            else:
-                self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
+        if self.graph_path.exists():
+            self.graph.load_graph(self.graph_path)
+            self.logger.info("Graph loaded from %s", self.graph_path)
+        else:
+            self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
 
     def _maybe_continue_from_coverage_checkpoint(
         self,
@@ -166,10 +147,10 @@ class Kobe:
             return None
 
         selected = select_exploration_target(
-            self.page_detail_client,
+            self.client,
             app_name=self.app_name,
             candidates=candidates,
-            model=self.page_detail_model,
+            settings=self.page_detail,
         )
         if not selected:
             selected = candidates[0]["node_id"]
@@ -325,17 +306,6 @@ class Kobe:
 
         The graph is auto-saved after every step so crashes lose at most one step.
         """
-        with ExitStack() as clients:
-            for client in (
-                self.page_detail_client,
-                self.embedding_client,
-                self.instruction_client,
-                self.action_client,
-            ):
-                clients.enter_context(client)
-            self._explore(max_steps=max_steps, resume_from=resume_from)
-
-    def _explore(self, max_steps: int | None, resume_from: str | None) -> None:
         max_steps = max_steps if max_steps is not None else self.max_steps
         start_step = self.graph.total_steps_completed
 
@@ -405,26 +375,26 @@ class Kobe:
 
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)
                 instruction = plan_next_action(
-                    client=self.instruction_client,
+                    client=self.client,
                     screenshot_b64=screenshot,
                     page_description=node_data["page_description"],
                     explored_edges=explored_edges,
                     app_name=self.app_name,
                     unexplored_elements=unexplored_elements,
                     input_status=input_status,
-                    model=self.instruction_model,
+                    settings=self.instruction,
                 )
 
                 left_app = False
 
                 action, _history_entry = predict_next_action(
-                    client=self.action_client,
+                    client=self.client,
                     screenshot_b64=screenshot,
                     instruction=instruction + keyboard_hint,
                     screen_w=self.controller.w,
                     screen_h=self.controller.h,
                     action_history=[],
-                    model=self.action_model,
+                    settings=self.action,
                 )
 
                 if action.get("action") == "end":

@@ -187,9 +187,12 @@ set +a
 `.env` is ignored by git. Keep all four model selections from
 [`.env.example`](.env.example), or replace them with exact OpenRouter model IDs.
 The application has no built-in model defaults. Each operation requires explicit,
-nonempty model settings and reports missing model settings before device setup or
-API requests. You may also supply these environment variables directly in your
-shell, CI or container; a physical `.env` file is not required or loaded automatically.
+nonempty model settings. It validates every setting it uses (models, temperatures,
+timeouts, removed keys and `OPENROUTER_API_KEY`) before any device setup or API
+request: `app-graph`, `app-graph-audit` and `app-graph-embed` report every problem
+in a one-line usage error, and the v2 runtime raises from its constructor. You may
+also supply these environment variables directly in your shell, CI or container; a
+physical `.env` file is not required or loaded automatically.
 
 | Environment variable | Role |
 |---|---|
@@ -253,12 +256,12 @@ Chat responses must include every field the SDK requires, including
 prediction, propagate persistent SDK validation failures after their bounded
 retries. A broken endpoint response cannot become an action's fallback wait.
 
-AITK connections are scoped
-to each `to_agent` callback because its translator interface has no teardown
-callback; retries and screenshot batches reuse connections within that scope.
-Nested operations keep their caller's connection open. Standalone public calls,
-including graph identification and navigation, open and close their own request
-scope when no outer scope is active.
+Each command opens one OpenRouter client for the whole run, shares it across every
+role and closes it when the run ends; each request carries its own role's model,
+temperature and timeout. The v2 runtime creates its client when AITK constructs the
+translator and keeps it for the translator's lifetime, because AITK's translator
+interface has no teardown callback; the SDK closes it when the translator is garbage
+collected or the process exits.
 
 ### Upgrading provider configuration
 

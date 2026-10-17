@@ -332,27 +332,31 @@ def test_load_image_embeddings_treats_an_unreadable_file_as_no_cache(
     assert "demo.image_emb.json" in caplog.text
 
 
-def _retry(screenshot_b64: str) -> list[float]:
+IMAGE_SETTINGS = embedding_cache.ImageEmbeddingSettings("google/gemini-embedding-2")
+
+
+def _retry(client: OpenRouter, screenshot_b64: str) -> list[float]:
     return embedding_cache.compute_embedding_with_retry(
-        screenshot_b64, model="google/gemini-embedding-2", app_name="demo", node_id="s0_home"
+        client, screenshot_b64, settings=IMAGE_SETTINGS, app_name="demo", node_id="s0_home"
     )
 
 
 @pytest.mark.usefixtures("no_sleep")
 def test_compute_embedding_with_retry_returns_on_first_success(
-    monkeypatch: pytest.MonkeyPatch,
+    router_client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    calls: list[str] = []
+    calls: list[tuple[OpenRouter, str, str]] = []
 
-    def fake_embedding(screenshot_b64: str, **_kwargs: Any) -> list[float]:
-        calls.append(screenshot_b64)
+    def fake_embedding(
+        client: OpenRouter, screenshot_b64: str, model: str, **_kwargs: Any
+    ) -> list[float]:
+        calls.append((client, screenshot_b64, model))
         return [1.0, 2.0]
 
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", fake_embedding)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", fake_embedding)
 
-    assert _retry("shot") == [1.0, 2.0]
-    assert calls == ["shot"]
+    assert _retry(router_client, "shot") == [1.0, 2.0]
+    assert calls == [(router_client, "shot", "google/gemini-embedding-2")]
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -410,15 +414,14 @@ def test_image_settings_inherit_the_embedding_model_until_they_set_their_own() -
     ) == embedding_cache.ImageEmbeddingSettings("provider/image-model")
 
 
-@pytest.mark.usefixtures("image_router")
 def test_image_cache_retry_uses_real_sdk_and_counts_usage(
+    router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
     no_sleep: list[float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     tracker = vlm_utils.TokenTracker()
     monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
     router_responses.extend(
@@ -427,7 +430,7 @@ def test_image_cache_retry_uses_real_sdk_and_counts_usage(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    assert _retry("shot") == [0.25, 0.75]
+    assert _retry(router_client, "shot") == [0.25, 0.75]
     assert len(router_requests) == 2
     assert no_sleep == [2.0]
     assert tracker.snapshot() == {
@@ -452,13 +455,7 @@ def test_image_cache_sdk_errors_are_bounded(
         for _ in range(attempts)
     )
     with pytest.raises(OpenRouterError, match="provider failure"):
-        embedding_cache.compute_embedding_with_retry(
-            "shot",
-            model="google/gemini-embedding-2",
-            app_name="demo",
-            node_id="s0_home",
-            client=router_client,
-        )
+        _retry(router_client, "shot")
     assert len(router_requests) == attempts
     assert no_sleep == ([2.0, 4.0] if status == 429 else [])
 
@@ -479,13 +476,7 @@ def test_sdk_validation_uses_bounded_application_recovery(
         router_responses.append(httpx.Response(200, json=embedding_body))
 
     def request() -> list[float]:
-        return embedding_cache.compute_embedding_with_retry(
-            png_screenshot,
-            model="model",
-            app_name="demo",
-            node_id="n1",
-            client=router_client,
-        )
+        return _retry(router_client, png_screenshot)
 
     if recover:
         assert request() == [0.25, 0.75]
@@ -498,17 +489,16 @@ def test_sdk_validation_uses_bounded_application_recovery(
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_screenshot_batch_reuses_and_closes_client_with_partial_progress(
+def test_screenshot_batch_uses_the_callers_client_and_keeps_partial_progress(
     interrupted: bool,
     tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
+    router_client: OpenRouter,
+    router_http: httpx.Client,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
     no_sleep: list[float],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     graph = tmp_path / "demo.json"
     cache: dict[str, list[float]] = {}
     router_responses.extend(
@@ -530,7 +520,8 @@ def test_screenshot_batch_reuses_and_closes_client_with_partial_progress(
             graph,
             cache,
             candidates(),
-            model="model",
+            client=router_client,
+            settings=embedding_cache.ImageEmbeddingSettings("model"),
             app_name="demo",
         )
 
@@ -541,37 +532,34 @@ def test_screenshot_batch_reuses_and_closes_client_with_partial_progress(
         compute()
     assert len(router_requests) == (2 if interrupted else 3)
     assert no_sleep == [2.0]
-    assert len(owned_router_clients) == 1
-    assert all(client.is_closed for client in owned_router_clients)
+    assert router_client.sdk_configuration.client is router_http
     assert (
         embedding_cache.load_image_embeddings(graph, model="model", node_ids={"n1", "n2"}) == cache
     )
     assert set(cache) == ({"n1"} if interrupted else {"n1", "n2"})
 
 
-def test_image_batches_keep_their_models_separate(
+def test_image_batches_send_their_own_model_and_timeout(
     tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
+    router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(4))
     for index in range(2):
         result = embedding_cache.compute_missing_image_embeddings(
             tmp_path / f"graph-{index}.json",
             {},
             [("n1", "one"), ("n2", "two")],
-            model=f"model-{index}",
+            client=router_client,
+            settings=embedding_cache.ImageEmbeddingSettings(f"model-{index}", index + 1.5),
             app_name="demo",
         )
         assert result.computed == 2
-    assert len(owned_router_clients) == 2
-    assert all(client.is_closed for client in owned_router_clients)
     for index, request in enumerate(router_requests):
-        assert request.headers["authorization"] == "Bearer test-key"
+        assert request.headers["authorization"] == "Bearer test-router-key"
+        assert request.extensions["timeout"]["read"] == index // 2 + 1.5
         assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
         assert json.loads(request.content)["model"] == f"model-{index // 2}"
 
@@ -625,6 +613,8 @@ def test_resolver_rejects_removed_endpoint_and_credential_keys(
     secret = "dummy-google-secret-never-log"
     monkeypatch.setenv("GEMINI_API_KEY", secret)
     legacy = {key: "${GEMINI_API_KEY}", "model": "gemini-embedding-2"}
-    with pytest.raises(ValueError, match=rf"^{role}\.{key} was removed") as caught:
+    with pytest.raises(
+        ValueError, match=rf"^Invalid vlm configuration: {role}\.{key} was removed"
+    ) as caught:
         embedding_cache.resolve_image_embedding_settings({role: legacy})
     assert secret not in str(caught.value)

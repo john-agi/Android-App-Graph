@@ -23,6 +23,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
 
+from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
@@ -48,6 +49,8 @@ EMBEDDINGS: dict[str, list[float]] = {
 UNKNOWN_EMBEDDING = [0.5, 0.5, 0.5]
 
 FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
+PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
+EMBEDDING = ModelSettings("google/gemini-embedding-2", request_timeout=4.0)
 
 
 def b64(data: bytes) -> str:
@@ -59,13 +62,12 @@ SHOT_B = b64(b"screenshot-b")
 
 
 def make_manager(similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> GraphManager:
-    """A manager whose two clients are sentinels; every caller of them is patched."""
+    """A manager whose client is a sentinel; every caller of it is patched."""
     return GraphManager(
-        page_detail_client=FAKE_CLIENT,
-        embedding_client=FAKE_CLIENT,
+        client=FAKE_CLIENT,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
         similarity_threshold=similarity_threshold,
-        page_detail_model="openai/gpt-6.1-sol",
-        embedding_model="google/gemini-embedding-2",
     )
 
 
@@ -110,9 +112,9 @@ class FakeVlm:
         screenshot_b64: str,
         existing_nodes: list[str] | None = None,
         existing_keys: list[str] | None = None,
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
-        call = {"client": client, "screenshot": screenshot_b64, "model": model}
+        call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
         call.update(existing_nodes=existing_nodes, existing_keys=existing_keys)
         self.calls.append(("describe", call))
         return self.descriptions.pop(0)
@@ -123,15 +125,18 @@ class FakeVlm:
         screenshot_new_b64: str,
         screenshot_existing_b64: str,
         existing_description: str,
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
         call = {"client": client, "new": screenshot_new_b64, "existing": screenshot_existing_b64}
-        call.update(existing_description=existing_description, model=model)
+        call.update(existing_description=existing_description, settings=settings)
         self.calls.append(("verify", call))
         return self.verdicts.pop(0)
 
-    def get_embedding(self, client: OpenRouter | None, text: str, model: str = "") -> list[float]:
-        self.calls.append(("embed", {"client": client, "text": text, "model": model}))
+    def get_embedding(
+        self, client: OpenRouter | None, text: str, model: str = "", request_timeout: float = 0.0
+    ) -> list[float]:
+        call = {"client": client, "text": text, "model": model, "timeout": request_timeout}
+        self.calls.append(("embed", call))
         return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)
 
     def kinds(self) -> list[str]:
@@ -150,10 +155,10 @@ class FakeAudit:
         client: OpenRouter | None,
         graph_summary: str,
         app_name: str = "",
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
         call = {"client": client, "graph_summary": graph_summary}
-        call.update(app_name=app_name, model=model)
+        call.update(app_name=app_name, settings=settings)
         self.calls.append(call)
         return self.result
 
@@ -167,16 +172,9 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     return fake
 
 
-def test_a_client_without_a_model_is_rejected_at_construction() -> None:
-    with pytest.raises(ValueError, match=r"page_detail\.model is required"):
-        GraphManager(page_detail_client=FAKE_CLIENT)
-    with pytest.raises(ValueError, match=r"embedding\.model is required"):
-        GraphManager(embedding_client=FAKE_CLIENT)
-
-
-def test_a_manager_without_a_model_rejects_reading_it() -> None:
-    gm = GraphManager()
-    with pytest.raises(ValueError, match=r"embedding\.model is required"):
+def test_a_manager_without_embedding_settings_rejects_reading_its_model() -> None:
+    gm = GraphManager(client=FAKE_CLIENT)
+    with pytest.raises(RuntimeError, match="needs embedding settings"):
         _ = gm.embedding_model
 
 
@@ -230,22 +228,23 @@ def test_merge_elements_defaults_a_missing_position_to_an_empty_string() -> None
 def test_construction_defaults() -> None:
     gm = GraphManager()
     assert gm.graph.number_of_nodes() == 0
-    assert gm.page_detail_client is None
-    assert gm.embedding_client is None
+    assert gm.client is None
+    assert gm.page_detail is None
+    assert gm.embedding is None
     assert gm.similarity_threshold == DEFAULT_SIMILARITY_THRESHOLD
     assert gm.total_steps_completed == 0
 
 
-def test_identify_state_without_a_page_detail_client_raises() -> None:
-    gm = GraphManager()
-    with pytest.raises(RuntimeError, match="page_detail_client"):
+def test_identify_state_without_page_detail_settings_raises() -> None:
+    gm = GraphManager(embedding=EMBEDDING)
+    with pytest.raises(RuntimeError, match="needs a client and page_detail settings"):
         gm.identify_state(HOME, SHOT_A)
 
 
-def test_identify_state_without_an_embedding_client_raises(vlm: FakeVlm) -> None:
+def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = GraphManager(page_detail_client=FAKE_CLIENT, page_detail_model="openai/gpt-6.1-sol")
-    with pytest.raises(RuntimeError, match="embedding_client"):
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL)
+    with pytest.raises(RuntimeError, match="needs a client and embedding settings"):
         gm.identify_state(HOME, SHOT_A)
 
 
@@ -275,9 +274,12 @@ def test_identify_state_passes_the_configured_models_and_clients(vlm: FakeVlm) -
 
     gm.identify_state(HOME, SHOT_A)
 
-    assert vlm.calls[0][1]["model"] == gm.page_detail_model
+    assert vlm.calls[0][1]["settings"] == PAGE_DETAIL
     assert vlm.calls[0][1]["client"] is FAKE_CLIENT
-    assert vlm.calls[1][1]["model"] == gm.embedding_model
+    assert (vlm.calls[1][1]["model"], vlm.calls[1][1]["timeout"]) == (
+        EMBEDDING.model,
+        EMBEDDING.request_timeout,
+    )
 
 
 def test_identify_state_cache_hit_skips_the_vlm(vlm: FakeVlm) -> None:
@@ -955,10 +957,10 @@ class FakeNormalizer:
         _client: OpenRouter | None,
         instructions: list[str],
         target_observations: list[str] | None = None,
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
         call = {"instructions": list(instructions)}
-        call.update(target_observations=target_observations, model=model)
+        call.update(target_observations=target_observations, settings=settings)
         self.calls.append(call)
         return self.result
 
@@ -999,7 +1001,7 @@ def test_normalize_all_edges_templatizes_and_then_skips(normalizer: FakeNormaliz
     assert len(normalizer.calls) == 1
     assert normalizer.calls[0]["instructions"] == ['search for "shoes"', 'search for "hats"']
     assert normalizer.calls[0]["target_observations"] is None
-    assert normalizer.calls[0]["model"] == gm.page_detail_model
+    assert normalizer.calls[0]["settings"] == PAGE_DETAIL
 
     gm.normalize_all_edges()  # the existing template already covers every instruction
 
@@ -1097,7 +1099,7 @@ def test_normalize_all_edges_normalizes_a_long_single_instruction(
 def test_normalize_all_edges_without_a_client_does_nothing(
     normalizer: FakeNormalizer,
 ) -> None:
-    gm = GraphManager(embedding_model="test/embedding")
+    gm = GraphManager(embedding=ModelSettings("test/embedding"))
     _search_graph(gm)
 
     gm.normalize_all_edges()
@@ -1119,7 +1121,7 @@ def test_normalize_node_edges_counts_templatized_edges(normalizer: FakeNormalize
 def test_normalize_node_edges_without_a_client_returns_zero(
     normalizer: FakeNormalizer,
 ) -> None:
-    gm = GraphManager(embedding_model="test/embedding")
+    gm = GraphManager(embedding=ModelSettings("test/embedding"))
     _search_graph(gm)
 
     assert gm.normalize_node_edges("s0_home") == 0
@@ -1979,7 +1981,7 @@ def test_run_audit_returns_the_audit_result(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result["summary"] == "two issues"
     assert fake.calls[0]["app_name"] == "Example"
-    assert fake.calls[0]["model"] == gm.page_detail_model
+    assert fake.calls[0]["settings"] == PAGE_DETAIL
     assert fake.calls[0]["graph_summary"].startswith("## Nodes (1)")
 
 
@@ -2224,7 +2226,7 @@ def test_save_then_load_round_trips(
 def test_readding_an_identical_edge_is_idempotent(
     action: dict[str, Any], repeats: int, instruction: str
 ) -> None:
-    gm = GraphManager(embedding_model="test/embedding")
+    gm = GraphManager(embedding=ModelSettings("test/embedding"))
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
 
@@ -2250,8 +2252,10 @@ operations = st.lists(
 )
 
 
-def fake_get_embedding(_client: OpenRouter | None, text: str, **_kwargs: Any) -> list[float]:
-    """Module-level fake for property tests; `model=` arrives through **_kwargs."""
+def fake_get_embedding(
+    _client: OpenRouter | None, text: str, *_args: Any, **_kwargs: Any
+) -> list[float]:
+    """Module-level fake for property tests; the model and timeout arrive through the rest."""
     return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)
 
 
@@ -2299,10 +2303,9 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     manager = GraphManager(
-        page_detail_client=router_client,
-        embedding_client=router_client,
-        page_detail_model="openai/gpt-6.1-sol",
-        embedding_model="google/gemini-embedding-2",
+        client=router_client,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
     )
     manager.graph.add_node(
         "old",
@@ -2350,10 +2353,9 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
         )
         path.with_suffix(".emb.json").write_text(json.dumps({"home": entry}), encoding="utf-8")
     manager = GraphManager(
-        page_detail_client=router_client,
-        embedding_client=router_client,
-        page_detail_model="openai/gpt-6.1-sol",
-        embedding_model="google/gemini-embedding-2",
+        client=router_client,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
     )
     manager.load_graph(path)
     router_responses.extend(

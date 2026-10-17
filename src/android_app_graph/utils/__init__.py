@@ -5,9 +5,8 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
-from typing import Self, override
+from collections.abc import Callable, Mapping
+from typing import NamedTuple
 
 import httpx
 from openrouter import OpenRouter
@@ -17,42 +16,25 @@ from android_app_graph.payloads import as_object_dict
 ROLES = ("page_detail", "embedding", "image_embedding", "instruction", "action")
 # Earlier releases and AITK controller.yaml files copied from upstream UI-KOBE set these.
 REMOVED_KEYS = ("api_key", "base_url", "native_base_url")
+DEFAULT_REQUEST_TIMEOUT = 60.0
 
 
-class ConfiguredOpenRouter(OpenRouter):
-    """Keep role settings and explicitly own the SDK-created HTTP client."""
+class ModelSettings(NamedTuple):
+    """One role's per-request settings, resolved before any device or network work."""
 
+    model: str
     temperature: float | None = None
-    owns_http_client: bool = False
-    _scope_depth: int = 0
-
-    @override
-    def __enter__(self) -> Self:
-        client = self.sdk_configuration.client
-        if self.owns_http_client and isinstance(client, httpx.Client) and client.is_closed:
-            self.sdk_configuration.client = httpx.Client(follow_redirects=True)
-        self._scope_depth += 1
-        return self
-
-    @override
-    def __exit__(self, *_args: object, **_kwargs: object) -> None:
-        self._scope_depth -= 1
-        if (
-            self._scope_depth == 0
-            and self.owns_http_client
-            and self.sdk_configuration.client is not None
-        ):
-            self.sdk_configuration.client.close()
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
 
 
-@contextmanager
-def client_scope(client: OpenRouter) -> Iterator[OpenRouter]:
-    """Reuse an active application scope; leave externally supplied SDK clients alone."""
-    if isinstance(client, ConfiguredOpenRouter):
-        with client:
-            yield client
-    else:
-        yield client
+def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> OpenRouter:
+    """Create the run's one OpenRouter client, shared by every role.
+
+    Only tests pass ``http_client``; otherwise the SDK creates and owns the HTTP
+    client. Retries stay with the application: the SDK's hour-long retry window
+    must not multiply its bounded attempts.
+    """
+    return OpenRouter(api_key=api_key, client=http_client, retry_config=None)
 
 
 def removed_key_errors(vlm_config: Mapping[str, object]) -> list[str]:
@@ -101,32 +83,13 @@ def resolve_model(value: object, *, role: str) -> str:
     return model.strip()
 
 
-def resolve_model_roles(
-    vlm_config: Mapping[str, object], *, roles: tuple[str, ...]
-) -> dict[str, dict[str, object]]:
-    """Resolve the operation's models together before constructing clients or devices."""
-    resolved: dict[str, dict[str, object]] = {}
-    errors = removed_key_errors(vlm_config)
-    for role in roles:
-        cfg = as_object_dict(vlm_config.get(role)).copy()
-        value = cfg.get("model")
-        if role == "image_embedding" and "model" not in cfg:
-            value = as_object_dict(vlm_config.get("embedding")).get("model")
-        try:
-            cfg["model"] = resolve_model(value, role=role)
-        except ValueError as exc:
-            errors.append(str(exc))
-        resolved[role] = cfg
-    if errors:
-        raise ValueError("Invalid vlm configuration:\n" + "\n".join(errors))
-    return resolved
-
-
 def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
     """Validate seconds before opening connections or sending requests."""
     message = f"{role}.request_timeout must be a positive finite number of seconds"
     try:
-        value = float(resolve_env(cfg.get("request_timeout", cfg.get("timeout"))) or "60")
+        value = float(
+            resolve_env(cfg.get("request_timeout", cfg.get("timeout"))) or DEFAULT_REQUEST_TIMEOUT
+        )
     except ValueError as exc:
         raise ValueError(message) from exc
     if not math.isfinite(value) or value <= 0:
@@ -135,7 +98,7 @@ def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
 
 
 def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None:
-    """Validate an optional sampling temperature before creating the client."""
+    """Validate an optional sampling temperature before any request."""
     message = f"{role}.temperature must be a finite number between 0 and 2"
     value = resolve_env(cfg.get("temperature"))
     if value is None:
@@ -149,32 +112,53 @@ def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None
     return temperature
 
 
-def make_client(
-    cfg: Mapping[str, object] | None,
-    *,
-    role: str,
-    http_client: httpx.Client | None = None,
-    timeout: float | None = None,
-) -> tuple[OpenRouter, str]:
-    """Create the official SDK client with per-role overrides and the shared key.
+def _role_config(vlm_config: Mapping[str, object], role: str) -> dict[str, object]:
+    """Return a role's block; image embeddings inherit the embedding model and timeout."""
+    cfg = as_object_dict(vlm_config.get(role))
+    if role != "image_embedding":
+        return cfg
+    embedding = as_object_dict(vlm_config.get("embedding"))
+    inherited = dict(cfg)
+    if "model" not in cfg:
+        inherited["model"] = embedding.get("model")
+    if "request_timeout" not in cfg and "timeout" not in cfg:
+        inherited["request_timeout"] = embedding.get("request_timeout", embedding.get("timeout"))
+    return inherited
 
-    Timeouts are configured in seconds here and milliseconds in the SDK.
-    The application owns bounded retries; the SDK's hour-long retry window
-    must not multiply those attempts. Only tests pass ``http_client``; otherwise
-    the SDK creates its own.
-    """
-    cfg = cfg or {}
-    model = resolve_model(cfg.get("model"), role=role)
-    request_timeout = resolve_request_timeout(
-        {"request_timeout": timeout} if timeout is not None else cfg, role=role
-    )
-    temperature = resolve_temperature(cfg, role=role)
-    client = ConfiguredOpenRouter(
-        api_key=resolve_api_key(),
-        client=http_client,
-        timeout_ms=int(request_timeout * 1000),
-        retry_config=None,
-    )
-    client.owns_http_client = http_client is None
-    client.temperature = temperature
-    return client, model
+
+def _checked[T](resolve: Callable[[], T], errors: list[str]) -> T | None:
+    try:
+        return resolve()
+    except ValueError as exc:
+        errors.append(str(exc))
+        return None
+
+
+def _role_settings(
+    vlm_config: Mapping[str, object], role: str, errors: list[str]
+) -> ModelSettings | None:
+    """Resolve one role, recording every invalid field rather than only the first."""
+    cfg = _role_config(vlm_config, role)
+    model = _checked(lambda: resolve_model(cfg.get("model"), role=role), errors)
+    temperature = _checked(lambda: resolve_temperature(cfg, role=role), errors)
+    timeout = _checked(lambda: resolve_request_timeout(cfg, role=role), errors)
+    if model is None or timeout is None:
+        return None
+    return ModelSettings(model, temperature, timeout)
+
+
+def resolve_model_settings(
+    vlm_config: Mapping[str, object], *, roles: tuple[str, ...]
+) -> dict[str, ModelSettings]:
+    """Validate an operation's settings, and removed keys in every role block, all at once."""
+    errors = removed_key_errors(vlm_config)
+    settings: dict[str, ModelSettings] = {}
+    for role in roles:
+        resolved = _role_settings(vlm_config, role, errors)
+        if resolved is not None:
+            settings[role] = resolved
+    if errors:
+        raise ValueError(
+            "Invalid vlm configuration: " + "; ".join(error.rstrip(".") for error in errors)
+        )
+    return settings

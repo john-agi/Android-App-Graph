@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from openrouter import OpenRouter
 
 from android_app_graph.embedding_cache import (
+    ImageEmbeddingSettings,
     compute_missing_image_embeddings,
     iter_screenshot_candidates,
     load_image_embeddings,
@@ -27,9 +29,8 @@ from android_app_graph.graph_files import (
     reference_screenshot_path,
     require_graph_shape,
 )
-from android_app_graph.utils import resolve_api_key
+from android_app_graph.utils import open_client, resolve_api_key
 from android_app_graph.utils.logging import setup_logging
-from android_app_graph.utils.vlm_utils import image_embedding_client
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,10 @@ def _pending_candidates(
 def precompute_graph_image_embeddings(
     graph_dir: Path,
     *,
-    model: str,
+    client: OpenRouter,
+    settings: ImageEmbeddingSettings,
     app_name: str | None = None,
     recompute: bool = False,
-    request_timeout: float = 60.0,
 ) -> dict[str, int]:
     summary: dict[str, int] = {
         "graphs": 0,
@@ -70,54 +71,53 @@ def precompute_graph_image_embeddings(
         "skipped_failed": 0,
     }
 
-    with image_embedding_client(model=model, request_timeout=request_timeout) as client:
-        for current_app_name, graph_path in iter_graph_files(graph_dir, app_name):
-            summary["graphs"] += 1
-            logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
-            graph_data = load_graph_json(graph_path)
-            node_ids = {node["id"] for node in graph_data["nodes"]}
+    for current_app_name, graph_path in iter_graph_files(graph_dir, app_name):
+        summary["graphs"] += 1
+        logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
+        graph_data = load_graph_json(graph_path)
+        node_ids = {node["id"] for node in graph_data["nodes"]}
 
-            embeddings: dict[str, list[float]]
-            if recompute:
-                try:
-                    # Preserve symlink targets and invalidate stale data even if every call fails.
-                    save_image_embeddings(graph_path, {}, model=model)
-                except OSError:
-                    # Avoid mixing fresh vectors with a cache we could not invalidate.
-                    logger.exception(
-                        "Failed to discard image embedding cache for graph %s at %s",
-                        current_app_name,
-                        graph_path,
-                    )
-                    continue
-                embeddings = {}
-            else:
-                embeddings = load_image_embeddings(graph_path, model=model, node_ids=node_ids)
+        embeddings: dict[str, list[float]]
+        if recompute:
+            try:
+                # Preserve symlink targets and invalidate stale data even if every call fails.
+                save_image_embeddings(graph_path, {}, model=settings.model)
+            except OSError:
+                # Avoid mixing fresh vectors with a cache we could not invalidate.
+                logger.exception(
+                    "Failed to discard image embedding cache for graph %s at %s",
+                    current_app_name,
+                    graph_path,
+                )
+                continue
+            embeddings = {}
+        else:
+            embeddings = load_image_embeddings(graph_path, model=settings.model, node_ids=node_ids)
 
-            # Defer encoding to keep memory bounded and avoid reading cached screenshots.
-            pending: list[tuple[str, Path]] = []
-            for node in graph_data["nodes"]:
-                node_id = node["id"]
-                screenshot_path = reference_screenshot_path(graph_path, node_id)
-                if screenshot_path is None:
-                    summary["skipped_missing_screenshot"] += 1
-                    continue
-                summary["reference_screenshots"] += 1
-                if node_id in embeddings:
-                    summary["already_cached"] += 1
-                    continue
-                pending.append((node_id, screenshot_path))
+        # Defer encoding to keep memory bounded and avoid reading cached screenshots.
+        pending: list[tuple[str, Path]] = []
+        for node in graph_data["nodes"]:
+            node_id = node["id"]
+            screenshot_path = reference_screenshot_path(graph_path, node_id)
+            if screenshot_path is None:
+                summary["skipped_missing_screenshot"] += 1
+                continue
+            summary["reference_screenshots"] += 1
+            if node_id in embeddings:
+                summary["already_cached"] += 1
+                continue
+            pending.append((node_id, screenshot_path))
 
-            run = compute_missing_image_embeddings(
-                graph_path,
-                embeddings,
-                _pending_candidates(pending, app_name=current_app_name, summary=summary),
-                model=model,
-                app_name=current_app_name,
-                client=client,
-            )
-            summary["computed"] += run.computed
-            summary["skipped_failed"] += run.failed
+        run = compute_missing_image_embeddings(
+            graph_path,
+            embeddings,
+            _pending_candidates(pending, app_name=current_app_name, summary=summary),
+            client=client,
+            settings=settings,
+            app_name=current_app_name,
+        )
+        summary["computed"] += run.computed
+        summary["skipped_failed"] += run.failed
 
     return summary
 
@@ -127,7 +127,7 @@ def load_image_embedding_settings(
     *,
     graphs_override: Path | None,
     model_override: str | None,
-) -> tuple[Path, str, float]:
+) -> tuple[Path, ImageEmbeddingSettings]:
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
@@ -138,8 +138,7 @@ def load_image_embedding_settings(
     )
 
     vlm_config = translator_args.get("vlm_config") or config.get("vlm") or {}
-    settings = resolve_image_embedding_settings(vlm_config, model_override=model_override)
-    return graph_dir, settings.model, settings.request_timeout
+    return graph_dir, resolve_image_embedding_settings(vlm_config, model_override=model_override)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"config file not found: {args.config}")
 
     try:
-        graph_dir, model, request_timeout = load_image_embedding_settings(
+        graph_dir, settings = load_image_embedding_settings(
             args.config.expanduser(),
             graphs_override=args.graphs.expanduser() if args.graphs else None,
             model_override=args.model,
@@ -197,19 +196,20 @@ def main(argv: list[str] | None = None) -> int:
     if not graph_dir.exists():
         parser.error(f"graph root does not exist: {graph_dir}")
     try:
-        resolve_api_key()
+        api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
 
     setup_logging(level=logging.INFO)
 
-    summary = precompute_graph_image_embeddings(
-        graph_dir,
-        model=model,
-        app_name=args.app,
-        recompute=args.recompute,
-        request_timeout=request_timeout,
-    )
+    with open_client(api_key) as client:
+        summary = precompute_graph_image_embeddings(
+            graph_dir,
+            client=client,
+            settings=settings,
+            app_name=args.app,
+            recompute=args.recompute,
+        )
     logger.info(
         "Done: graphs=%d reference_screenshots=%d already_cached=%d computed=%d "
         "skipped_missing_screenshot=%d skipped_failed=%d",

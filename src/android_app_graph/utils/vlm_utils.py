@@ -8,8 +8,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from openrouter import OpenRouter
@@ -22,11 +21,7 @@ from PIL import Image
 
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
 from android_app_graph.retrying import DEFAULT_RETRIES, call_with_retry
-from android_app_graph.utils import (
-    ConfiguredOpenRouter,
-    client_scope,
-    make_client,
-)
+from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
 if TYPE_CHECKING:
     from openrouter.components.chatcontentimage import ChatContentImageTypedDict
@@ -591,29 +586,27 @@ Focus on the task instruction. The overall goal is only for context when the ins
 def send_chat(
     client: OpenRouter,
     *,
-    model: str,
+    settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
     max_tokens: int | None = None,
     retries: int = DEFAULT_RETRIES,
 ) -> ChatResult:
     """Send a typed, non-streaming completion with bounded application retries."""
-    with client_scope(client):
-        response: object = call_with_retry(
-            "[API] chat completion",
-            lambda: client.chat.send(
-                model=model,
-                messages=messages,
-                response_format=response_format,
-                max_tokens=max_tokens if max_tokens is not None else UNSET,
-                temperature=client.temperature
-                if isinstance(client, ConfiguredOpenRouter) and client.temperature is not None
-                else UNSET,
-                stream=False,
-                retries=None,
-            ),
-            retries=retries,
-        )
+    response: object = call_with_retry(
+        "[API] chat completion",
+        lambda: client.chat.send(
+            model=settings.model,
+            messages=messages,
+            response_format=response_format,
+            max_tokens=max_tokens if max_tokens is not None else UNSET,
+            temperature=settings.temperature if settings.temperature is not None else UNSET,
+            stream=False,
+            retries=None,
+            timeout_ms=int(settings.request_timeout * 1000),
+        ),
+        retries=retries,
+    )
     if not isinstance(response, ChatResult):
         raise TypeError("Expected a non-streaming OpenRouter chat response")
     return response
@@ -647,7 +640,7 @@ def describe_page_and_state(
     existing_nodes: list[str] | None = None,
     existing_keys: list[str] | None = None,
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> tuple[str, dict[str, object], list[dict[str, str]]]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
@@ -713,12 +706,12 @@ def describe_page_and_state(
     def request_description() -> tuple[str, dict[str, object], list[dict[str, str]]]:
         resp = send_chat(
             client,
-            model=model,
+            settings=settings,
             messages=messages,
             response_format={"type": "json_object"},
             retries=0,
         )
-        token_tracker.record("page_describe_and_state", model, resp.usage)
+        token_tracker.record("page_describe_and_state", settings.model, resp.usage)
         raw = strip_json_fences(message_text(resp))
         result = json.loads(raw)
         if not isinstance(result, dict):
@@ -742,10 +735,9 @@ def describe_page_and_state(
             elements.append({"description": label, "position": position})
         return description, as_object_dict(state), elements
 
-    with client_scope(client):
-        page_description, state, elements = call_with_retry(
-            "[API] page describe and state", request_description
-        )
+    page_description, state, elements = call_with_retry(
+        "[API] page describe and state", request_description
+    )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
@@ -758,7 +750,7 @@ def verify_same_node(
     screenshot_existing_b64: str,
     existing_description: str,
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Compare two screenshots to decide if they are the same screen.
 
@@ -779,7 +771,7 @@ def verify_same_node(
     prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
     resp = send_chat(
         client,
-        model=model,
+        settings=settings,
         messages=[
             {
                 "role": "user",
@@ -794,7 +786,7 @@ def verify_same_node(
         ],
         response_format={"type": "json_object"},
     )
-    token_tracker.record("node_verify", model, resp.usage)
+    token_tracker.record("node_verify", settings.model, resp.usage)
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
@@ -811,7 +803,7 @@ def normalize_edge(
     instructions: list[str],
     target_observations: list[str] | None = None,
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Normalize edge instructions into a reusable template.
 
@@ -839,7 +831,7 @@ def normalize_edge(
 
     resp = send_chat(
         client,
-        model=model,
+        settings=settings,
         messages=[
             {
                 "role": "user",
@@ -848,7 +840,7 @@ def normalize_edge(
         ],
         response_format={"type": "json_object"},
     )
-    token_tracker.record("normalize_edge", model, resp.usage)
+    token_tracker.record("normalize_edge", settings.model, resp.usage)
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
@@ -973,7 +965,7 @@ def audit_merge_nodes(
     graph_summary: str,
     app_name: str = "",
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Ask a model only for duplicate-node merge candidates."""
     prompt = NODE_MERGE_AUDIT_PROMPT.format(
@@ -982,11 +974,11 @@ def audit_merge_nodes(
     )
     resp = send_chat(
         client,
-        model=model,
+        settings=settings,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
-    token_tracker.record("node_merge_audit", model, resp.usage)
+    token_tracker.record("node_merge_audit", settings.model, resp.usage)
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
@@ -1027,7 +1019,7 @@ def select_exploration_target(
     app_name: str,
     candidates: list[dict[str, Any]],
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> str | None:
     """Select a node for periodic live exploration coverage balancing."""
     if not candidates:
@@ -1055,11 +1047,11 @@ def select_exploration_target(
     )
     resp = send_chat(
         client,
-        model=model,
+        settings=settings,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
-    token_tracker.record("exploration_target", model, resp.usage)
+    token_tracker.record("exploration_target", settings.model, resp.usage)
 
     raw = strip_json_fences(message_text(resp))
     try:
@@ -1083,7 +1075,7 @@ def audit_graph(
     graph_summary: str,
     app_name: str = "",
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Ask a model to review the graph structure for anomalies.
 
@@ -1099,11 +1091,11 @@ def audit_graph(
     )
     resp = send_chat(
         client,
-        model=model,
+        settings=settings,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
-    token_tracker.record("graph_audit", model, resp.usage)
+    token_tracker.record("graph_audit", settings.model, resp.usage)
     finish_reason = resp.choices[0].finish_reason if resp.choices else ""
     raw_original = message_text(resp)
     raw = strip_json_fences(raw_original)
@@ -1132,75 +1124,60 @@ def _embedding_result(
     return vector, response.usage
 
 
-def get_embedding(client: OpenRouter, text: str, model: str) -> list[float]:
+def get_embedding(
+    client: OpenRouter,
+    text: str,
+    model: str,
+    *,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> list[float]:
     """Get a text embedding through the official OpenRouter SDK."""
 
     def request_embedding() -> tuple[list[float], CreateEmbeddingsUsage | None]:
         response = client.embeddings.generate(
-            model=model, input=text, encoding_format="float", retries=None
+            model=model,
+            input=text,
+            encoding_format="float",
+            retries=None,
+            timeout_ms=int(request_timeout * 1000),
         )
         return _embedding_result(response)
 
-    with client_scope(client):
-        vector, usage = call_with_retry("[API] text embedding", request_embedding)
+    vector, usage = call_with_retry("[API] text embedding", request_embedding)
     token_tracker.record("embedding", model, usage)
     return vector
 
 
-def get_image_embedding(client: OpenRouter, screenshot_b64: str, model: str) -> list[float]:
+def get_image_embedding(
+    client: OpenRouter,
+    screenshot_b64: str,
+    model: str,
+    *,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> list[float]:
     """Embed a screenshot using OpenRouter's documented multimodal content array.
 
     The shared image-cache loop owns retries for both runtime and offline use.
     """
-    with client_scope(client):
-        response = client.embeddings.generate(
-            model=model,
-            input=[
-                {
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
-                        }
-                    ]
-                }
-            ],
-            encoding_format="float",
-            retries=None,
-        )
+    response = client.embeddings.generate(
+        model=model,
+        input=[
+            {
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                    }
+                ]
+            }
+        ],
+        encoding_format="float",
+        retries=None,
+        timeout_ms=int(request_timeout * 1000),
+    )
     vector, usage = _embedding_result(response)
     token_tracker.record("image_embedding", model, usage)
     return vector
-
-
-@contextmanager
-def image_embedding_client(
-    *,
-    model: str,
-    client: OpenRouter | None = None,
-    request_timeout: float = 60.0,
-) -> Iterator[OpenRouter]:
-    """Own a standalone/batch connection, or borrow a client from an active scope."""
-    if client is not None:
-        with client_scope(client):
-            yield client
-        return
-    created, _ = make_client(
-        {"model": model, "request_timeout": request_timeout}, role="image_embedding"
-    )
-    with created:
-        yield created
-
-
-def get_openrouter_image_embedding(
-    screenshot_b64: str,
-    *,
-    model: str,
-    client: OpenRouter | None = None,
-) -> list[float]:
-    """Share SDK setup between runtime retrieval and offline precomputation."""
-    with image_embedding_client(model=model, client=client) as scoped:
-        return get_image_embedding(scoped, screenshot_b64, model=model)
 
 
 def _parse_xml_parameters(block: str) -> dict[str, object] | None:
@@ -1370,7 +1347,7 @@ def plan_next_action(
     unexplored_elements: list[dict[str, Any]] | None = None,
     input_status: str = "unknown from screenshot",
     *,
-    model: str,
+    settings: ModelSettings,
 ) -> str:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
@@ -1436,13 +1413,9 @@ def plan_next_action(
             ],
         }
     ]
-    resp = send_chat(
-        client,
-        model=model,
-        messages=messages,
-    )
+    resp = send_chat(client, settings=settings, messages=messages)
 
-    token_tracker.record("instruction", model, resp.usage)
+    token_tracker.record("instruction", settings.model, resp.usage)
     raw = message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
@@ -1531,7 +1504,7 @@ def predict_next_action(
     screen_h: int = 1920,
     action_history: list[str] | None = None,
     *,
-    model: str,
+    settings: ModelSettings,
     overall_task: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Call the action agent VLM for one step.
@@ -1585,8 +1558,8 @@ def predict_next_action(
 
     def request_action() -> tuple[dict[str, object], str]:
         # Disable inner retries so transport and malformed output cannot multiply attempts.
-        resp = send_chat(client, model=model, messages=messages, retries=0)
-        token_tracker.record("action", model, resp.usage)
+        resp = send_chat(client, settings=settings, messages=messages, retries=0)
+        token_tracker.record("action", settings.model, resp.usage)
         try:
             tool_args, thought, action_desc = _parse_agent_response(resp)
             if tool_args is None:
@@ -1601,8 +1574,7 @@ def predict_next_action(
         return as_object_dict(action), history_entry
 
     try:
-        with client_scope(client):
-            return call_with_retry("[API] action response", request_action)
+        return call_with_retry("[API] action response", request_action)
     except _MalformedActionOutput:
         logger.warning(
             "Action agent parse attempts exhausted, falling back to 'wait'", exc_info=True

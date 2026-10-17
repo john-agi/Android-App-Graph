@@ -22,7 +22,7 @@ from openrouter.errors import ResponseValidationError
 from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.payloads import as_list, as_str, as_str_dict
-from android_app_graph.utils import make_client, vlm_utils
+from android_app_graph.utils import ModelSettings, open_client, vlm_utils
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -758,7 +758,7 @@ def test_chat_completion_content_returns_the_reply_content(
     router_responses.extend([chat_response(content="first"), chat_response(content="second")])
     content = aitk_translator._chat_completion_content(
         router_client,
-        model="m",
+        settings=ModelSettings("m"),
         messages=[{"role": "user", "content": "test"}],
     )
     assert content == "first"
@@ -775,7 +775,7 @@ def test_chat_completion_content_records_its_usage_as_v2_chat(
     router_responses.append(chat_response(content="first"))
     aitk_translator._chat_completion_content(
         router_client,
-        model="m",
+        settings=ModelSettings("m"),
         messages=[{"role": "user", "content": "test"}],
     )
     assert tracker.summary() == {
@@ -795,7 +795,7 @@ def test_chat_completion_content_makes_exactly_one_completion_call(
     router_responses.extend([chat_response(content="first"), chat_response(content="second")])
     aitk_translator._chat_completion_content(
         router_client,
-        model="m",
+        settings=ModelSettings("m"),
         messages=[{"role": "user", "content": "test"}],
     )
     assert len(router_requests) == 1
@@ -861,9 +861,9 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert isinstance(translator, aitk_translator.UIKobeV2Translator)
     assert set(translator._graphs) == {"demo"}
     assert translator._package_to_app == {"com.demo.app": "demo"}
-    assert translator.model_name == "action-model"
-    assert translator.desc_model == "detail-model"
-    assert translator.image_embedding_model == "img-model"
+    assert translator.action.model == "action-model"
+    assert translator.page_detail.model == "detail-model"
+    assert translator.image_embedding.model == "img-model"
 
 
 @pytest.mark.usefixtures("translator")
@@ -963,7 +963,7 @@ def test_load_all_graphs_streams_screenshot_reads_lazily(
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", fake_embedding)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", fake_embedding)
 
     aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -1000,13 +1000,15 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _flaky(screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _flaky(
+        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+    ) -> list[float]:
         if screenshot_b64 == b64_by_node["n2"]:
             msg = "500 upstream error"
             raise RuntimeError(msg)
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _flaky)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _flaky)
 
     save_calls: list[dict[str, list[float]]] = []
     original_save = embedding_cache.save_image_embeddings
@@ -1055,12 +1057,14 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _interrupted_at_n3(screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _interrupted_at_n3(
+        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+    ) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _interrupted_at_n3)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _interrupted_at_n3)
 
     with pytest.raises(_Interrupted):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
@@ -1086,9 +1090,7 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(b"shot-n1")
 
-    monkeypatch.setattr(
-        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
-    )
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
 
     def _raise_permission_error(
         _graph_file: Path, _embeddings: dict[str, list[float]], **_kwargs: object
@@ -1298,8 +1300,7 @@ def use_model(
     def answer(
         translator: aitk_translator.UIKobeV2Translator, *replies: str | None
     ) -> _RecordedCompletions:
-        client, _ = make_client(_VLM_CONFIG["action"], role="action", http_client=router_http)
-        monkeypatch.setattr(translator, "model_client", client)
+        monkeypatch.setattr(translator, "client", open_client("test-key", http_client=router_http))
         router_responses.extend(chat_response(content=reply) for reply in replies)
         return _RecordedCompletions(router_requests)
 
@@ -1554,7 +1555,7 @@ def test_compute_runtime_image_embedding_with_retry_propagates_a_persistent_fail
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("rate limited")
 
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="rate limited"):
         translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
 
@@ -1571,7 +1572,7 @@ def identifiable(
     )
     monkeypatch.setattr(
         embedding_cache,
-        "get_openrouter_image_embedding",
+        "get_image_embedding",
         lambda *_args, **_kwargs: [1.0, 0.0],
     )
     G = translator._graphs["demo"]
@@ -1743,9 +1744,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     monkeypatch.setattr(
         aitk_translator, "describe_page_and_state", lambda *_a, **_kw: ("home screen", {}, [])
     )
-    monkeypatch.setattr(
-        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
-    )
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
     G = translator._graphs["demo"]
     G.nodes["home"]["image_embedding"] = [1.0, 0.0]
@@ -1768,7 +1767,7 @@ def test_identify_node_propagates_an_embedding_failure(
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("embedding down")
 
-    monkeypatch.setattr(embedding_cache, "get_openrouter_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
@@ -2136,9 +2135,7 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(b"shot-n1")
 
-    monkeypatch.setattr(
-        embedding_cache, "get_openrouter_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
-    )
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -2149,8 +2146,7 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
     }
 
 
-@pytest.mark.usefixtures("image_router")
-@pytest.mark.usefixtures("model_environment")
+@pytest.mark.usefixtures("opened_clients", "model_environment")
 def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_screenshots(
     tmp_path: Path,
     router_requests: list[httpx.Request],
@@ -2186,7 +2182,7 @@ def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_scre
     )
 
 
-@pytest.mark.usefixtures("image_router", "model_environment")
+@pytest.mark.usefixtures("opened_clients", "model_environment")
 def test_v2_roles_send_their_own_models_and_temperatures(
     tmp_path: Path,
     router_requests: list[httpx.Request],
@@ -2209,10 +2205,10 @@ def test_v2_roles_send_their_own_models_and_temperatures(
         ]
     )
     vlm_utils.predict_next_action(
-        translator.model_client, png_screenshot, "wait", model=translator.model_name
+        translator.client, png_screenshot, "wait", settings=translator.action
     )
     vlm_utils.describe_page_and_state(
-        translator.desc_client, png_screenshot, model=translator.desc_model
+        translator.client, png_screenshot, settings=translator.page_detail
     )
     assert (
         translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
@@ -2227,7 +2223,7 @@ def test_v2_roles_send_their_own_models_and_temperatures(
     assert bodies[2]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
 
 
-@pytest.mark.usefixtures("image_router")
+@pytest.mark.usefixtures("opened_clients")
 def test_v2_decisions_use_the_action_model_and_never_read_instruction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2252,18 +2248,18 @@ def test_v2_decisions_use_the_action_model_and_never_read_instruction(
     translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
     bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
     assert [body["model"] for body in bodies] == ["qwen/qwen3.8-flash"] * 2
-    assert not hasattr(translator, "instruction_client")
+    assert not hasattr(translator, "instruction")
 
 
 def test_runtime_reports_missing_models_before_creating_clients(
-    tmp_path: Path, owned_router_clients: list[httpx.Client]
+    tmp_path: Path, opened_clients: list[OpenRouter]
 ) -> None:
     with pytest.raises(ValueError, match="Invalid vlm configuration") as caught:
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
     for role in ("PAGE_DETAIL", "EMBEDDING", "ACTION"):
         assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
     assert "INSTRUCTION" not in str(caught.value)
-    assert owned_router_clients == []
+    assert opened_clients == []
 
 
 def test_runtime_keeps_caller_environment_references(
@@ -2278,40 +2274,25 @@ def test_runtime_keeps_caller_environment_references(
     first = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
     monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/new-action")
     second = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
-    assert first.model_name == "provider/action"
-    assert second.model_name == "provider/new-action"
+    assert first.action.model == "provider/action"
+    assert second.action.model == "provider/new-action"
     assert config["action"] == {"model": "${APP_GRAPH_ACTION_MODEL}"}
     assert "image_embedding" not in config
 
 
 @pytest.mark.usefixtures("model_environment")
 def test_v2_runtime_without_an_openrouter_key_creates_no_client(
-    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, opened_clients: list[OpenRouter], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY")
     with pytest.raises(ValueError, match="OPENROUTER_API_KEY is required"):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert owned_router_clients == []
-
-
-@pytest.mark.usefixtures("model_environment")
-def test_v2_construction_closes_its_clients_when_graph_loading_fails(
-    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def interrupted(_self: aitk_translator.UIKobeV2Translator) -> None:
-        raise _Interrupted
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    monkeypatch.setattr(aitk_translator.UIKobeV2Translator, "_load_all_graphs", interrupted)
-    with pytest.raises(_Interrupted):
-        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert len(owned_router_clients) == 3
-    assert all(client.is_closed for client in owned_router_clients)
+    assert opened_clients == []
 
 
 @pytest.mark.usefixtures("model_environment")
 def test_v2_runtime_rejects_upstream_endpoint_and_credential_keys(
-    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, opened_clients: list[OpenRouter], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     secret = "dummy-google-secret-never-log"
     monkeypatch.setenv("GEMINI_API_KEY", secret)
@@ -2333,10 +2314,10 @@ def test_v2_runtime_rejects_upstream_endpoint_and_credential_keys(
     ):
         assert f"{name} was removed" in str(caught.value)
     assert secret not in str(caught.value)
-    assert owned_router_clients == []
+    assert opened_clients == []
 
 
-@pytest.mark.usefixtures("model_environment", "owned_router_clients")
+@pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_v2_runtime_image_requests_use_the_image_timeout(
     tmp_path: Path,
     router_responses: list[httpx.Response],
@@ -2361,18 +2342,18 @@ def test_v2_runtime_image_requests_use_the_image_timeout(
 
 @pytest.mark.parametrize("exceptional", [False, True])
 @pytest.mark.usefixtures("model_environment")
-def test_v2_invoked_callback_closes_clients_and_reuses_image_client(
+def test_v2_turns_share_the_one_client_the_translator_opened(
     exceptional: bool,
     tmp_path: Path,
-    owned_router_clients: list[httpx.Client],
+    opened_clients: list[OpenRouter],
+    router_http: httpx.Client,
+    router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert all(client.is_closed for client in owned_router_clients)
-    initial_count = len(owned_router_clients)
+    assert opened_clients == [built.client]
     router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(4))
 
     def step(_task: str, _state: dict[str, object], _history: dict[str, object]) -> str:
@@ -2391,12 +2372,13 @@ def test_v2_invoked_callback_closes_clients_and_reuses_image_client(
                 built.to_agent("task", {}, {})
         else:
             assert built.to_agent("task", {}, {}) == "ok"
-        assert all(client.is_closed for client in owned_router_clients)
-    assert len(owned_router_clients) == initial_count + 6
+        assert built.client.sdk_configuration.client is router_http
+    assert opened_clients == [built.client]
+    assert len(router_requests) == 4
 
 
 @pytest.mark.parametrize("schema_failure", [False, True])
-@pytest.mark.usefixtures("model_environment", "owned_router_clients")
+@pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     schema_failure: bool,
     tmp_path: Path,

@@ -7,7 +7,6 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
@@ -31,7 +30,12 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
-from android_app_graph.utils import make_client, resolve_model_roles
+from android_app_graph.utils import (
+    ModelSettings,
+    open_client,
+    resolve_api_key,
+    resolve_model_settings,
+)
 from android_app_graph.utils.vlm_utils import (
     build_image_message,
     describe_page_and_state,
@@ -59,6 +63,8 @@ V2_PARSE_RETRY_HINT = (
     "Your previous reply could not be parsed. Reply in exactly the format "
     "requested above and nothing else."
 )
+
+RUNTIME_ROLES = ("page_detail", "action", "image_embedding")
 
 _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
@@ -527,13 +533,13 @@ def _parse_decide_output(raw: str) -> dict[str, Any] | None:
 def _chat_completion_content(
     client: OpenRouter,
     *,
-    model: str,
+    settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     max_tokens: int | None = None,
 ) -> str:
     """Run a typed completion, account for usage and return assistant text."""
-    resp = send_chat(client, model=model, messages=messages, max_tokens=max_tokens)
-    token_tracker.record("v2_chat", model, resp.usage)
+    resp = send_chat(client, settings=settings, messages=messages, max_tokens=max_tokens)
+    token_tracker.record("v2_chat", settings.model, resp.usage)
     return message_text(resp)
 
 
@@ -595,31 +601,17 @@ class UIKobeV2Translator(BaseTranslator):
         # Accepted because AITK forwards every translator_args key and its controller.yaml
         # sets max_pixels; this translator sends screenshots unresized.
         self.max_pixels = max_pixels
-        vlm_config = dict(vlm_config or {})
-        vlm_config.update(
-            resolve_model_roles(vlm_config, roles=("page_detail", "action", "image_embedding"))
-        )
-
-        image_embedding_settings = resolve_image_embedding_settings(vlm_config)
-        self.image_embedding_model = image_embedding_settings.model
-
-        with ExitStack() as clients:
-            self.model_client, self.model_name = make_client(
-                vlm_config.get("action"), role="action"
-            )
-            clients.enter_context(self.model_client)
-            self.desc_client, self.desc_model = make_client(
-                vlm_config.get("page_detail"),
-                role="page_detail",
-            )
-            clients.enter_context(self.desc_client)
-            self.image_embedding_client, _ = make_client(
-                image_embedding_settings._asdict(), role="image_embedding"
-            )
-            clients.enter_context(self.image_embedding_client)
-            self._graphs: dict[str, nx.DiGraph] = {}
-            self._package_to_app: dict[str, str] = {}
-            self._load_all_graphs()
+        vlm_config = vlm_config or {}
+        settings = resolve_model_settings(vlm_config, roles=RUNTIME_ROLES)
+        self.page_detail = settings["page_detail"]
+        self.action = settings["action"]
+        self.image_embedding = resolve_image_embedding_settings(vlm_config)
+        # AITK has no translator teardown, so the client lives as long as the
+        # translator; the SDK closes it when the translator is collected or at exit.
+        self.client = open_client(resolve_api_key())
+        self._graphs: dict[str, nx.DiGraph] = {}
+        self._package_to_app: dict[str, str] = {}
+        self._load_all_graphs()
 
         # A device property: only to_device updates it, and a task reset must not.
         self._screen_w = 1080
@@ -641,11 +633,11 @@ class UIKobeV2Translator(BaseTranslator):
     ) -> list[float]:
         """Use OpenRouter image embeddings for runtime node retrieval, with retry."""
         return compute_embedding_with_retry(
+            self.client,
             screenshot_b64,
-            model=self.image_embedding_model,
+            settings=self.image_embedding,
             app_name=app_name,
             node_id=node_id,
-            client=self.image_embedding_client,
         )
 
     def _compute_missing_image_embeddings(
@@ -679,9 +671,9 @@ class UIKobeV2Translator(BaseTranslator):
             graph_file,
             embeddings,
             candidates,
-            model=self.image_embedding_model,
+            client=self.client,
+            settings=self.image_embedding,
             app_name=app_name,
-            client=self.image_embedding_client,
         )
         for node_id, _screenshot_path in pending:
             if node_id in embeddings:
@@ -697,7 +689,7 @@ class UIKobeV2Translator(BaseTranslator):
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
                 G = _load_graph_from_json(graph_file)
                 embeddings = load_image_embeddings(
-                    graph_file, model=self.image_embedding_model, node_ids=set(G.nodes)
+                    graph_file, model=self.image_embedding.model, node_ids=set(G.nodes)
                 )
                 for node_id, emb in embeddings.items():
                     G.nodes[node_id]["image_embedding"] = emb
@@ -773,8 +765,8 @@ class UIKobeV2Translator(BaseTranslator):
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
             raw = _chat_completion_content(
-                self.model_client,
-                model=self.model_name,
+                self.client,
+                settings=self.action,
                 messages=[{"role": "user", "content": content}],
                 max_tokens=V2_CHAT_MAX_TOKENS,
             )
@@ -835,11 +827,11 @@ class UIKobeV2Translator(BaseTranslator):
 
         started = time.perf_counter()
         page_desc, _detail_snapshot, _elements = describe_page_and_state(
-            self.desc_client,
+            self.client,
             screenshot,
             existing_nodes=same_pkg_descriptions or None,
             existing_keys=same_pkg_keys or None,
-            model=self.desc_model,
+            settings=self.page_detail,
         )
         logger.info(
             '[IDENTIFY] screen_description="%s" describe_time=%.1fs',
@@ -1244,13 +1236,13 @@ class UIKobeV2Translator(BaseTranslator):
         keyboard_hint = device.soft_keyboard_hint()
 
         aitk_action, history_entry = predict_next_action(
-            self.model_client,
+            self.client,
             screenshot,
             task + keyboard_hint,
             screen_w=self._screen_w,
             screen_h=self._screen_h,
             action_history=action_history,
-            model=self.model_name,
+            settings=self.action,
             overall_task=overall_task,
         )
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
@@ -1389,13 +1381,9 @@ class UIKobeV2Translator(BaseTranslator):
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
-        # AITK exposes callbacks, not translator teardown; each turn owns its connections.
-        with ExitStack() as clients:
-            for client in (self.model_client, self.desc_client, self.image_embedding_client):
-                clients.enter_context(client)
-            if not history.get("actions", []):
-                self._reset_task_state()
-            return self._step(task, state, history)
+        if not history.get("actions", []):
+            self._reset_task_state()
+        return self._step(task, state, history)
 
     @override
     def to_device(self, action: str, width: int, height: int) -> dict[str, Any]:
