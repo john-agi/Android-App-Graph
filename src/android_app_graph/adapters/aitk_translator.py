@@ -602,8 +602,6 @@ class UIKobeV2Translator(BaseTranslator):
 
         image_embedding_settings = resolve_image_embedding_settings(vlm_config)
         self.image_embedding_model = image_embedding_settings.model
-        self.image_embedding_api_key = image_embedding_settings.api_key
-        self.image_embedding_base_url = image_embedding_settings.base_url
 
         with ExitStack() as clients:
             self.model_client, self.model_name = make_client(
@@ -615,13 +613,10 @@ class UIKobeV2Translator(BaseTranslator):
                 role="page_detail",
             )
             clients.enter_context(self.desc_client)
-            self.image_embedding_client: OpenRouter | None = None
-            if self.image_embedding_api_key:
-                self.image_embedding_client, _ = make_client(
-                    image_embedding_settings._asdict(),
-                    role="image_embedding",
-                )
-                clients.enter_context(self.image_embedding_client)
+            self.image_embedding_client, _ = make_client(
+                image_embedding_settings._asdict(), role="image_embedding"
+            )
+            clients.enter_context(self.image_embedding_client)
             self._graphs: dict[str, nx.DiGraph] = {}
             self._package_to_app: dict[str, str] = {}
             self._load_all_graphs()
@@ -645,16 +640,9 @@ class UIKobeV2Translator(BaseTranslator):
         node_id: str,
     ) -> list[float]:
         """Use OpenRouter image embeddings for runtime node retrieval, with retry."""
-        if not self.image_embedding_api_key:
-            raise RuntimeError(
-                "OpenRouter image embedding requires image_embedding.api_key for the selected "
-                "endpoint. OPENROUTER_API_KEY is inherited only by HTTPS OpenRouter."
-            )
         return compute_embedding_with_retry(
-            self.image_embedding_api_key,
             screenshot_b64,
             model=self.image_embedding_model,
-            base_url=self.image_embedding_base_url,
             app_name=app_name,
             node_id=node_id,
             client=self.image_embedding_client,
@@ -675,10 +663,6 @@ class UIKobeV2Translator(BaseTranslator):
         vector to it in place and persists it (once, not per node -- see its own
         docstring), and only those newly computed vectors are copied back onto
         ``G`` here -- the caller's entries are on ``G`` already.
-
-        A missing ``image_embedding.api_key`` is checked once here, before the
-        retry loop starts, rather than inside it: raising per node would log a
-        full traceback for every candidate instead of one clear error for the graph.
         """
         pending = [
             (node_id, data["reference_screenshot_path"])
@@ -686,12 +670,6 @@ class UIKobeV2Translator(BaseTranslator):
             if data.get("reference_screenshot_path") and not data.get("image_embedding")
         ]
         if not pending:
-            return
-        if not self.image_embedding_api_key:
-            logger.error(
-                "OpenRouter image embedding requires image_embedding.api_key for the selected "
-                "endpoint. OPENROUTER_API_KEY is inherited only by HTTPS OpenRouter."
-            )
             return
         # Encoded lazily, one screenshot at a time, the same as offline
         # precomputation: at most one base64 payload resident, never every
@@ -701,9 +679,7 @@ class UIKobeV2Translator(BaseTranslator):
             graph_file,
             embeddings,
             candidates,
-            api_key=self.image_embedding_api_key,
             model=self.image_embedding_model,
-            base_url=self.image_embedding_base_url,
             app_name=app_name,
             client=self.image_embedding_client,
         )
@@ -1415,10 +1391,8 @@ class UIKobeV2Translator(BaseTranslator):
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
         # AITK exposes callbacks, not translator teardown; each turn owns its connections.
         with ExitStack() as clients:
-            for client in (self.model_client, self.desc_client):
+            for client in (self.model_client, self.desc_client, self.image_embedding_client):
                 clients.enter_context(client)
-            if self.image_embedding_client is not None:
-                clients.enter_context(self.image_embedding_client)
             if not history.get("actions", []):
                 self._reset_task_state()
             return self._step(task, state, history)

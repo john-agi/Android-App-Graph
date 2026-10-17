@@ -801,10 +801,16 @@ def test_chat_completion_content_makes_exactly_one_completion_call(
     assert len(router_requests) == 1
 
 
+@pytest.fixture(autouse=True)
+def _openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every translator reads OPENROUTER_API_KEY; a test of its absence deletes it."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+
 _VLM_CONFIG: dict[str, Any] = {
-    "action": {"api_key": "test-key", "model": "action-model"},
-    "page_detail": {"api_key": "test-key", "model": "detail-model"},
-    "image_embedding": {"api_key": "image-key", "model": "img-model"},
+    "action": {"model": "action-model"},
+    "page_detail": {"model": "detail-model"},
+    "image_embedding": {"model": "img-model"},
 }
 
 _DEMO_NODES: list[dict[str, Any]] = [
@@ -858,11 +864,6 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert translator.model_name == "action-model"
     assert translator.desc_model == "detail-model"
     assert translator.image_embedding_model == "img-model"
-    assert translator.image_embedding_api_key == "image-key"
-    # image_embedding.base_url resolution itself is embedding_cache's
-    # resolve_image_embedding_settings; this only checks the translator wires
-    # its result through.
-    assert translator.image_embedding_base_url == "https://openrouter.ai/api/v1"
 
 
 @pytest.mark.usefixtures("translator")
@@ -999,7 +1000,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _flaky(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _flaky(screenshot_b64: str, **_kwargs: Any) -> list[float]:
         if screenshot_b64 == b64_by_node["n2"]:
             msg = "500 upstream error"
             raise RuntimeError(msg)
@@ -1054,7 +1055,7 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _interrupted_at_n3(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _interrupted_at_n3(screenshot_b64: str, **_kwargs: Any) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
         return [1.0, 0.0]
@@ -1541,40 +1542,6 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     completions = use_model(translator, '{"choice": "A"}')
     translator._decide(translator._graphs["demo"], "buy shoes", "results", "screenshot")
     assert "State parameters" not in completions.prompt_text()
-
-
-def test_load_all_graphs_requires_an_api_key_once_per_graph_not_per_node(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A missing ``image_embedding.api_key`` must not raise inside the per-node
-    retry loop -- that would log a full traceback once per candidate node. It
-    is checked once per graph, before the loop starts, and only when the graph
-    actually has a candidate to compute.
-    """
-    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}])
-    screenshots = path.parent / "demo_screenshots"
-    screenshots.mkdir()
-    (screenshots / "n1.png").write_bytes(b"shot-n1")
-    (screenshots / "n2.png").write_bytes(b"shot-n2")
-    config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
-
-    with caplog.at_level("ERROR"):
-        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
-
-    assert set(built._graphs) == {"demo"}
-    key_errors = [m for m in caplog.messages if "OpenRouter image embedding requires" in m]
-    assert len(key_errors) == 1
-    assert not any("Runtime image embedding failed for graph" in m for m in caplog.messages)
-
-
-def test_compute_runtime_image_embedding_with_retry_requires_a_key(graph_dir: Path) -> None:
-    """This is the one remaining caller of the shared api-key check: the runtime
-    query embedding computed once per ``_identify_node`` call, not the per-node
-    cache-fill loop (that check is once-per-graph -- see the test above)."""
-    config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
-    built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
-    with pytest.raises(RuntimeError, match="OpenRouter image embedding requires"):
-        built._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -2230,8 +2197,8 @@ def test_v2_roles_send_their_own_models_and_temperatures(
     translator = aitk_translator.UIKobeV2Translator(
         graph_dir=str(tmp_path),
         vlm_config={
-            "action": {"api_key": "test", "temperature": 0.0},
-            "page_detail": {"api_key": "test", "temperature": 0.4},
+            "action": {"temperature": 0.0},
+            "page_detail": {"temperature": 0.4},
         },
     )
     router_responses.extend(
@@ -2275,8 +2242,8 @@ def test_v2_decisions_use_the_action_model_and_never_read_instruction(
     translator = aitk_translator.UIKobeV2Translator(
         graph_dir=str(tmp_path),
         vlm_config={
-            "action": {"api_key": "test"},
-            "page_detail": {"api_key": "test"},
+            "action": {},
+            "page_detail": {},
             "instruction": {"model": "${APP_GRAPH_INSTRUCTION_MODEL}", "temperature": "hot"},
         },
     )
@@ -2291,7 +2258,7 @@ def test_v2_decisions_use_the_action_model_and_never_read_instruction(
 def test_runtime_reports_missing_models_before_creating_clients(
     tmp_path: Path, owned_router_clients: list[httpx.Client]
 ) -> None:
-    with pytest.raises(ValueError, match="Invalid model configuration") as caught:
+    with pytest.raises(ValueError, match="Invalid vlm configuration") as caught:
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
     for role in ("PAGE_DETAIL", "EMBEDDING", "ACTION"):
         assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
@@ -2318,19 +2285,13 @@ def test_runtime_keeps_caller_environment_references(
 
 
 @pytest.mark.usefixtures("model_environment")
-def test_v2_partial_initialization_closes_created_clients(
-    tmp_path: Path, owned_router_clients: list[httpx.Client]
+def test_v2_runtime_without_an_openrouter_key_creates_no_client(
+    tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    roles = ("action", "page_detail")
-    missing = "page_detail"
-    created = roles.index(missing)
-    with pytest.raises(ValueError, match=rf"{missing}\.api_key.*OPENROUTER_API_KEY"):
-        aitk_translator.UIKobeV2Translator(
-            graph_dir=str(tmp_path),
-            vlm_config={role: {"api_key": "test"} for role in roles[:created]},
-        )
-    assert len(owned_router_clients) == created
-    assert all(client.is_closed for client in owned_router_clients)
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY is required"):
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert owned_router_clients == []
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -2349,21 +2310,28 @@ def test_v2_construction_closes_its_clients_when_graph_loading_fails(
 
 
 @pytest.mark.usefixtures("model_environment")
-def test_v2_runtime_rejects_a_legacy_native_embedding_url(
+def test_v2_runtime_rejects_upstream_endpoint_and_credential_keys(
     tmp_path: Path, owned_router_clients: list[httpx.Client], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     secret = "dummy-google-secret-never-log"
     monkeypatch.setenv("GEMINI_API_KEY", secret)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router-key")
-    legacy = {
-        "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "api_key": "${GEMINI_API_KEY}",
-        "model": "gemini-embedding-2",
+    upstream = {
+        "action": {"api_key": "${GEMINI_API_KEY}", "base_url": "https://provider.example/v1"},
+        "image_embedding": {
+            "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "model": "gemini-embedding-2",
+        },
+        "instruction": {"api_key": "${GEMINI_API_KEY}"},
     }
-    with pytest.raises(ValueError, match=r"image_embedding\.native_base_url") as caught:
-        aitk_translator.UIKobeV2Translator(
-            graph_dir=str(tmp_path), vlm_config={"image_embedding": legacy}
-        )
+    with pytest.raises(ValueError, match="was removed") as caught:
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=upstream)
+    for name in (
+        "action.api_key",
+        "action.base_url",
+        "image_embedding.native_base_url",
+        "instruction.api_key",
+    ):
+        assert f"{name} was removed" in str(caught.value)
     assert secret not in str(caught.value)
     assert owned_router_clients == []
 

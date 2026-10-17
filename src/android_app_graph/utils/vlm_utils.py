@@ -1175,10 +1175,8 @@ def get_image_embedding(client: OpenRouter, screenshot_b64: str, model: str) -> 
 
 @contextmanager
 def image_embedding_client(
-    api_key: str,
     *,
     model: str,
-    base_url: str,
     client: OpenRouter | None = None,
     request_timeout: float = 60.0,
 ) -> Iterator[OpenRouter]:
@@ -1188,28 +1186,20 @@ def image_embedding_client(
             yield client
         return
     created, _ = make_client(
-        {
-            "api_key": api_key,
-            "model": model,
-            "base_url": base_url,
-            "request_timeout": request_timeout,
-        },
-        role="image_embedding",
+        {"model": model, "request_timeout": request_timeout}, role="image_embedding"
     )
     with created:
         yield created
 
 
 def get_openrouter_image_embedding(
-    api_key: str,
     screenshot_b64: str,
     *,
     model: str,
-    base_url: str,
     client: OpenRouter | None = None,
 ) -> list[float]:
     """Share SDK setup between runtime retrieval and offline precomputation."""
-    with image_embedding_client(api_key, model=model, base_url=base_url, client=client) as scoped:
+    with image_embedding_client(model=model, client=client) as scoped:
         return get_image_embedding(scoped, screenshot_b64, model=model)
 
 

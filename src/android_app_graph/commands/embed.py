@@ -27,6 +27,7 @@ from android_app_graph.graph_files import (
     reference_screenshot_path,
     require_graph_shape,
 )
+from android_app_graph.utils import resolve_api_key
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import image_embedding_client
 
@@ -55,9 +56,7 @@ def _pending_candidates(
 def precompute_graph_image_embeddings(
     graph_dir: Path,
     *,
-    api_key: str,
     model: str,
-    base_url: str,
     app_name: str | None = None,
     recompute: bool = False,
     request_timeout: float = 60.0,
@@ -71,9 +70,7 @@ def precompute_graph_image_embeddings(
         "skipped_failed": 0,
     }
 
-    with image_embedding_client(
-        api_key, model=model, base_url=base_url, request_timeout=request_timeout
-    ) as client:
+    with image_embedding_client(model=model, request_timeout=request_timeout) as client:
         for current_app_name, graph_path in iter_graph_files(graph_dir, app_name):
             summary["graphs"] += 1
             logger.info("[GRAPH] %s: selected %s", current_app_name, graph_path.name)
@@ -115,9 +112,7 @@ def precompute_graph_image_embeddings(
                 graph_path,
                 embeddings,
                 _pending_candidates(pending, app_name=current_app_name, summary=summary),
-                api_key=api_key,
                 model=model,
-                base_url=base_url,
                 app_name=current_app_name,
                 client=client,
             )
@@ -131,10 +126,8 @@ def load_image_embedding_settings(
     config_path: Path,
     *,
     graphs_override: Path | None,
-    api_key_override: str | None,
     model_override: str | None,
-    base_url_override: str | None,
-) -> tuple[Path, str | None, str, str, float]:
+) -> tuple[Path, str, float]:
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
@@ -145,13 +138,8 @@ def load_image_embedding_settings(
     )
 
     vlm_config = translator_args.get("vlm_config") or config.get("vlm") or {}
-    settings = resolve_image_embedding_settings(
-        vlm_config,
-        model_override=model_override,
-        api_key_override=api_key_override,
-        base_url_override=base_url_override,
-    )
-    return graph_dir, settings.api_key, settings.model, settings.base_url, settings.request_timeout
+    settings = resolve_image_embedding_settings(vlm_config, model_override=model_override)
+    return graph_dir, settings.model, settings.request_timeout
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -180,18 +168,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", type=str, default=None, help="Override image embedding model.")
     parser.add_argument(
-        "--base-url",
-        type=str,
-        default=None,
-        help="Override OpenRouter API base URL.",
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
-        help="API key or env reference. Defaults to OPENROUTER_API_KEY.",
-    )
-    parser.add_argument(
         "--recompute",
         action="store_true",
         help="Discard the existing embedding sidecar and rebuild every vector, "
@@ -210,32 +186,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"config file not found: {args.config}")
 
     try:
-        graph_dir, api_key, model, base_url, request_timeout = load_image_embedding_settings(
+        graph_dir, model, request_timeout = load_image_embedding_settings(
             args.config.expanduser(),
             graphs_override=args.graphs.expanduser() if args.graphs else None,
-            api_key_override=args.api_key,
             model_override=args.model,
-            base_url_override=args.base_url,
         )
     except ValueError as exc:
         parser.error(str(exc))
     graph_dir = graph_dir.expanduser()
     if not graph_dir.exists():
         parser.error(f"graph root does not exist: {graph_dir}")
-
-    if not api_key:
-        parser.error(
-            "missing API key: pass --api-key for the selected endpoint or configure "
-            "image_embedding.api_key. OPENROUTER_API_KEY is inherited only by HTTPS OpenRouter."
-        )
+    try:
+        resolve_api_key()
+    except ValueError as exc:
+        parser.error(str(exc))
 
     setup_logging(level=logging.INFO)
 
     summary = precompute_graph_image_embeddings(
         graph_dir,
-        api_key=api_key,
         model=model,
-        base_url=base_url,
         app_name=args.app,
         recompute=args.recompute,
         request_timeout=request_timeout,

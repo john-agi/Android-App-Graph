@@ -22,6 +22,11 @@ class _Interrupted(BaseException):
     """Stand-in for KeyboardInterrupt/SystemExit that stays clear of pytest's own."""
 
 
+@pytest.fixture
+def openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+
 def _write_graph_tree(tmp_path: Path, *, app: str = "demo", audited: bool = False) -> Path:
     """Create ``<tmp_path>/<app>/`` with one graph file and one node screenshot."""
     app_dir = tmp_path / app
@@ -43,9 +48,17 @@ def test_embed_parser_defaults() -> None:
     assert args.graphs is None
     assert args.app is None
     assert args.model is None
-    assert args.base_url is None
-    assert args.api_key is None
     assert args.recompute is False
+
+
+@pytest.mark.parametrize("option", ["--api-key", "--base-url"])
+def test_embed_parser_rejects_the_removed_endpoint_options(
+    option: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        embed.build_parser().parse_args([option, "value"])
+    assert excinfo.value.code == 2
+    assert option in capsys.readouterr().err
 
 
 def test_embed_parser_accepts_recompute() -> None:
@@ -79,21 +92,18 @@ def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFi
     with pytest.raises(SystemExit) as excinfo:
         embed.main(["-c", str(config)])
     assert excinfo.value.code == 2
-    assert "missing API key" in capsys.readouterr().err
+    assert "OPENROUTER_API_KEY is required" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     ("settings", "message"),
     [
         (
-            {
-                "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
-                "api_key": "${GEMINI_API_KEY}",
-            },
-            "image_embedding.native_base_url",
+            {"native_base_url": "https://generativelanguage.googleapis.com/v1beta"},
+            "image_embedding.native_base_url was removed",
         ),
-        ({"base_url": "https://generativelanguage.googleapis.com/v1beta"}, "native Google"),
-        ({"base_url": "invalid"}, "absolute HTTP or HTTPS"),
+        ({"base_url": "https://openrouter.ai/api/v1"}, "image_embedding.base_url was removed"),
+        ({"api_key": "${GEMINI_API_KEY}"}, "image_embedding.api_key was removed"),
         (
             {"model": "provider/image", "timeout": "nan"},
             "image_embedding.request_timeout must be a positive finite number",
@@ -157,18 +167,9 @@ def test_embed_main_sends_the_image_timeout_with_each_request(
 def test_embed_settings_from_environment(tmp_path: Path) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("experiment:\n  graph_dir: my_graphs\n", encoding="utf-8")
-    graph_dir, api_key, model, base_url, timeout = embed.load_image_embedding_settings(
-        config,
-        graphs_override=None,
-        api_key_override=None,
-        model_override=None,
-        base_url_override=None,
-    )
-    assert graph_dir == Path("my_graphs")
-    assert api_key is None
-    assert model == "google/gemini-embedding-2"
-    assert base_url == "https://openrouter.ai/api/v1"
-    assert timeout == 60.0
+    assert embed.load_image_embedding_settings(
+        config, graphs_override=None, model_override=None
+    ) == (Path("my_graphs"), "google/gemini-embedding-2", 60.0)
 
 
 def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> None:
@@ -178,58 +179,18 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
         "  graph_dir: from_translator\n"
         "  vlm_config:\n"
         "    image_embedding:\n"
-        "      model: config-model\n"
-        "      base_url: https://config.example/v1\n"
-        "      api_key: config-key\n",
+        "      model: config-model\n",
         encoding="utf-8",
     )
-    graph_dir, api_key, model, base_url, timeout = embed.load_image_embedding_settings(
-        config,
-        graphs_override=None,
-        api_key_override=None,
-        model_override=None,
-        base_url_override=None,
-    )
-    assert graph_dir == Path("from_translator")
-    assert api_key == "config-key"
-    assert model == "config-model"
-    assert base_url == "https://config.example/v1"
-    assert timeout == 60.0
-
-    overridden = embed.load_image_embedding_settings(
-        config,
-        graphs_override=Path("cli_graphs"),
-        api_key_override="cli-key",
-        model_override="cli-model",
-        base_url_override="https://cli.example.com/v1",
-    )
-    assert overridden == (
-        Path("cli_graphs"),
-        "cli-key",
-        "cli-model",
-        "https://cli.example.com/v1",
-        60.0,
-    )
+    assert embed.load_image_embedding_settings(
+        config, graphs_override=None, model_override=None
+    ) == (Path("from_translator"), "config-model", 60.0)
+    assert embed.load_image_embedding_settings(
+        config, graphs_override=Path("cli_graphs"), model_override="cli-model"
+    ) == (Path("cli_graphs"), "cli-model", 60.0)
 
 
-@pytest.mark.usefixtures("model_environment")
-def test_embed_settings_read_the_api_key_from_the_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
-    config = tmp_path / "explore.yaml"
-    config.write_text("{}\n", encoding="utf-8")
-    _graph_dir, api_key, _model, _base_url, _timeout = embed.load_image_embedding_settings(
-        config,
-        graphs_override=None,
-        api_key_override=None,
-        model_override=None,
-        base_url_override=None,
-    )
-    assert api_key == "from-env"
-
-
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_shares_one_client_across_graphs(
     tmp_path: Path,
     owned_router_clients: list[httpx.Client],
@@ -239,12 +200,7 @@ def test_precompute_shares_one_client_across_graphs(
     _write_graph_tree(tmp_path, app="demo")
     _write_graph_tree(tmp_path, app="other")
     router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
-    summary = embed.precompute_graph_image_embeddings(
-        tmp_path,
-        api_key="test",
-        model="google/gemini-embedding-2",
-        base_url="https://openrouter.ai/api/v1",
-    )
+    summary = embed.precompute_graph_image_embeddings(tmp_path, model="google/gemini-embedding-2")
     assert (summary["graphs"], summary["computed"]) == (2, 2)
     assert len(owned_router_clients) == 1
     assert owned_router_clients[0].is_closed
@@ -288,15 +244,13 @@ def _precompute(
 ) -> dict[str, int]:
     return embed.precompute_graph_image_embeddings(
         tmp_path,
-        api_key="key",
         model="google/gemini-embedding-2",
-        base_url="https://openrouter.ai/api/v1",
         app_name=app_name,
         recompute=recompute,
     )
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_finds_screenshots_under_the_audited_stem_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,7 +275,7 @@ def test_precompute_finds_screenshots_under_the_audited_stem_directory(
     assert summary["computed"] == 1
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_finds_every_node_in_a_partially_audited_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -356,7 +310,7 @@ def test_precompute_finds_every_node_in_a_partially_audited_graph(
     assert summary["computed"] == 3
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_computes_caches_and_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -381,7 +335,7 @@ def test_precompute_computes_caches_and_skips(
     assert _precompute(tmp_path)["already_cached"] == 1
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -416,7 +370,7 @@ def test_precompute_writes_back_a_sidecar_without_a_node_that_left_the_graph(
     assert "gone" not in saved["embeddings"]
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -441,7 +395,7 @@ def test_precompute_recompute_ignores_the_cache_and_rewrites_it(
     ) == {"s0_home": [0.9, 0.8]}
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -478,7 +432,7 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
     )
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_recompute_discards_through_a_symlinked_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -519,7 +473,7 @@ def test_precompute_recompute_discards_through_a_symlinked_sidecar(
     reason="root passes os.access/write for every directory regardless of mode, so a "
     "chmod 0o500 app directory denies nothing to run as root here",
 )
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_recompute_skips_a_graph_whose_sidecar_cannot_be_discarded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -549,6 +503,7 @@ def test_precompute_recompute_skips_a_graph_whose_sidecar_cannot_be_discarded(
     ) == {"s0_home": [0.5, 0.5]}
 
 
+@pytest.mark.usefixtures("openrouter_key")
 def test_precompute_recompute_logs_and_skips_a_graph_whose_discard_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -576,7 +531,7 @@ def test_precompute_recompute_logs_and_skips_a_graph_whose_discard_write_fails(
     assert str(first_path) in caplog.text
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_keeps_going_when_a_node_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -599,7 +554,7 @@ def test_precompute_keeps_going_when_a_node_fails(
     )
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -647,7 +602,7 @@ def test_precompute_skips_a_screenshot_that_disappears_before_encoding(
     }
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -671,7 +626,7 @@ def test_precompute_recomputes_a_node_whose_cached_entry_was_malformed(
     ) == {"s0_home": [0.3, 0.4]}
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -695,7 +650,7 @@ def test_precompute_recomputes_a_node_whose_cached_entry_overflowed_a_float(
     ) == {"s0_home": [0.3, 0.4]}
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -735,7 +690,7 @@ def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     assert save_calls[0] == {"n1": [0.1, 0.2], "n2": [0.1, 0.2], "n3": [0.1, 0.2]}
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_streams_screenshot_reads_lazily(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -778,7 +733,7 @@ def test_precompute_streams_screenshot_reads_lazily(
     assert reads_at_call == [1, 2, 3]
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_never_reads_an_already_cached_screenshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -811,7 +766,7 @@ def test_precompute_never_reads_an_already_cached_screenshot(
     assert reads == 0
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "openrouter_key")
 def test_precompute_persists_progress_before_an_interrupt_propagates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -837,7 +792,7 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _interrupted_at_n3(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _interrupted_at_n3(screenshot_b64: str, **_kwargs: Any) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
         return [1.0, 0.0]
@@ -855,6 +810,7 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
     }
 
 
+@pytest.mark.usefixtures("openrouter_key")
 def test_precompute_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
     """A hand-edited graph file fails through the shared shape check with the
     path in the message, not with a bare TypeError out of the node loop.

@@ -104,11 +104,12 @@ def router_http(
 
 
 @pytest.fixture
-def router_client(router_http: httpx.Client) -> Iterator[OpenRouter]:
+def router_client(
+    router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[OpenRouter]:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router-key")
     client, _ = make_client(
-        {"model": "openai/gpt-6.1-sol", "api_key": "test-router-key"},
-        http_client=router_http,
-        role="page_detail",
+        {"model": "openai/gpt-6.1-sol"}, http_client=router_http, role="page_detail"
     )
     with client:
         yield client

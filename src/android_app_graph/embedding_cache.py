@@ -19,14 +19,7 @@ from openrouter import OpenRouter
 from android_app_graph.graph_files import encode_screenshot_b64, write_json_atomically
 from android_app_graph.payloads import as_float_list, as_object_dict, as_str_dict
 from android_app_graph.retrying import call_with_retry
-from android_app_graph.utils import (
-    resolve_endpoint_api_key,
-    resolve_endpoint_base_url,
-    resolve_model,
-    resolve_request_timeout,
-    validate_embedding_config,
-    validate_embedding_endpoint,
-)
+from android_app_graph.utils import removed_key_errors, resolve_model, resolve_request_timeout
 from android_app_graph.utils.vlm_utils import (
     get_openrouter_image_embedding,
     image_embedding_client,
@@ -39,42 +32,19 @@ IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
 
 
 class ImageEmbeddingSettings(NamedTuple):
-    api_key: str | None
     model: str
-    base_url: str
     request_timeout: float = 60.0
 
 
 def resolve_image_embedding_settings(
-    vlm_config: Mapping[str, object],
-    *,
-    model_override: str | None = None,
-    api_key_override: str | None = None,
-    base_url_override: str | None = None,
+    vlm_config: Mapping[str, object], *, model_override: str | None = None
 ) -> ImageEmbeddingSettings:
-    """Resolve image settings while keeping inherited keys with their URL origin."""
+    """Resolve screenshot-embedding settings; omitted ones inherit the ``embedding`` role."""
+    errors = removed_key_errors(vlm_config)
+    if errors:
+        raise ValueError("\n".join(errors))
     image_embedding_cfg = as_object_dict(vlm_config.get("image_embedding"))
     embedding_cfg = as_object_dict(vlm_config.get("embedding"))
-    validate_embedding_config(image_embedding_cfg, role="image_embedding")
-    validate_embedding_config(embedding_cfg, role="embedding")
-    embedding_base_url = resolve_endpoint_base_url(
-        embedding_cfg.get("base_url"), api_key=embedding_cfg.get("api_key")
-    )
-    image_base_url = resolve_endpoint_base_url(
-        image_embedding_cfg.get("base_url"),
-        default=embedding_base_url,
-        api_key=image_embedding_cfg.get("api_key"),
-    )
-    base_url = resolve_endpoint_base_url(
-        base_url_override, default=image_base_url, api_key=api_key_override
-    )
-    validate_embedding_endpoint(base_url, role="image_embedding")
-    api_key = resolve_endpoint_api_key(
-        base_url,
-        (base_url, api_key_override),
-        (image_base_url, image_embedding_cfg.get("api_key")),
-        (embedding_base_url, embedding_cfg.get("api_key")),
-    )
     model = resolve_model(
         model_override
         if model_override is not None
@@ -88,9 +58,7 @@ def resolve_image_embedding_settings(
         ),
     )
     return ImageEmbeddingSettings(
-        api_key=api_key,
         model=model,
-        base_url=base_url,
         request_timeout=resolve_request_timeout(
             {"request_timeout": timeout}, role="image_embedding"
         ),
@@ -216,26 +184,18 @@ def save_image_embeddings(
 
 
 def compute_embedding_with_retry(
-    api_key: str,
     screenshot_b64: str,
     *,
     model: str,
-    base_url: str,
     app_name: str,
     node_id: str,
     client: OpenRouter | None = None,
 ) -> list[float]:
     """Get an OpenRouter image embedding, retrying on failure with backoff."""
-    with image_embedding_client(api_key, model=model, base_url=base_url, client=client) as scoped:
+    with image_embedding_client(model=model, client=client) as scoped:
         return call_with_retry(
             f"[GRAPH] {app_name}/{node_id}: image embedding",
-            lambda: get_openrouter_image_embedding(
-                api_key,
-                screenshot_b64,
-                model=model,
-                base_url=base_url,
-                client=scoped,
-            ),
+            lambda: get_openrouter_image_embedding(screenshot_b64, model=model, client=scoped),
             retries=IMAGE_EMBEDDING_RETRIES,
             base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
         )
@@ -289,9 +249,7 @@ def compute_missing_image_embeddings(
     embeddings: dict[str, list[float]],
     candidates: Iterable[tuple[str, str]],
     *,
-    api_key: str,
     model: str,
-    base_url: str,
     app_name: str,
     client: OpenRouter | None = None,
 ) -> ImageEmbeddingRun:
@@ -314,16 +272,14 @@ def compute_missing_image_embeddings(
     """
     computed = 0
     failed = 0
-    with image_embedding_client(api_key, model=model, base_url=base_url, client=client) as scoped:
+    with image_embedding_client(model=model, client=client) as scoped:
         try:
             for node_id, screenshot_b64 in candidates:
                 try:
                     started = time.perf_counter()
                     embeddings[node_id] = compute_embedding_with_retry(
-                        api_key,
                         screenshot_b64,
                         model=model,
-                        base_url=base_url,
                         app_name=app_name,
                         node_id=node_id,
                         client=scoped,

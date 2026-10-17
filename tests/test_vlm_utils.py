@@ -616,8 +616,12 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
 
 @pytest.mark.parametrize("limit", [None, 17])
 def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
-    limit: int | None, chat_body: dict[str, object], no_sleep: list[float]
+    limit: int | None,
+    chat_body: dict[str, object],
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -629,9 +633,7 @@ def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as borrowed:
         client, model = make_client(
-            {"model": "openai/gpt-6.1-sol", "api_key": "test"},
-            role="instruction",
-            http_client=borrowed,
+            {"model": "openai/gpt-6.1-sol"}, role="instruction", http_client=borrowed
         )
         vlm.send_chat(
             client, model=model, messages=[{"role": "user", "content": "hi"}], max_tokens=limit

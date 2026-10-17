@@ -168,9 +168,9 @@ cp .env.example .env
 ```
 
 The official [OpenRouter Python SDK](https://openrouter.ai/docs/client-sdks/python/overview)
-is installed by `uv sync --locked`. The only required credential setting in
-`.env` is `OPENROUTER_API_KEY`; one key covers chat, text embeddings and
-screenshot embeddings:
+is installed by `uv sync --locked`. OpenRouter is the only endpoint and
+`OPENROUTER_API_KEY` is the only credential: one key covers chat, text embeddings
+and screenshot embeddings, and a missing or empty key is an error:
 
 ```bash
 OPENROUTER_API_KEY=your-key
@@ -217,16 +217,6 @@ page-detail and embedding models; `--re-explore` also requires instruction and
 action models. `app-graph-embed` requires only an embedding model. Help and plotting
 existing graphs need no model configuration or credentials.
 
-Each role's base URL defaults to `https://openrouter.ai/api/v1`. For advanced
-configurations, each role still accepts explicit `api_key` and `base_url` YAML
-values, including `${ENV_VAR}` references. A role's `api_key` takes precedence
-over `OPENROUTER_API_KEY`. The shared key is inherited only for
-`https://openrouter.ai` on its default HTTPS port. Custom endpoints require an
-explicit role key; use `api_key: ${OPENROUTER_API_KEY}` only if that endpoint is
-intended to receive your OpenRouter credential.
-An unset or empty endpoint variable paired with an explicit key is rejected
-before requests; it cannot silently redirect that key to the default endpoint.
-
 Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
 `temperature` in its YAML block: a finite number from 0 to 2, inclusive, or an
 `${ENV_VAR}` reference.
@@ -262,13 +252,8 @@ Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. All calls, including action
 prediction, propagate persistent SDK validation failures after their bounded
 retries. A broken endpoint response cannot become an action's fallback wait.
-Public endpoints honor environment proxy settings (including `NO_PROXY`);
-loopback endpoints such as `localhost`, `127.0.0.1` and `::1` connect directly
-for local forwarding.
 
-Application-created clients follow redirects and retain HTTPX's removal of
-authorization on redirects to another origin. Caller-supplied HTTP clients
-retain their own redirect and ownership policies. AITK connections are scoped
+AITK connections are scoped
 to each `to_agent` callback because its translator interface has no teardown
 callback; retries and screenshot batches reuse connections within that scope.
 Nested operations keep their caller's connection open. Standalone public calls,
@@ -277,22 +262,19 @@ scope when no outer scope is active.
 
 ### Upgrading provider configuration
 
+Custom endpoints and per-role credentials were removed. A `page_detail`,
+`embedding`, `image_embedding`, `instruction` or `action` block that still sets
+`api_key`, `base_url` or `native_base_url` is rejected, with an error naming each
+key, by every command and by the v2 runtime, even in a block the operation does
+not use. AITK `controller.yaml` files copied from upstream UI-KOBE still set
+these keys: delete them and export `OPENROUTER_API_KEY` instead. The
+`app-graph-embed` options `--api-key` and `--base-url` were removed too.
+
 The v2 runtime and `app-graph-embed` both use OpenRouter's
 [multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
-`vlm.image_embedding` inherits the `embedding` role when omitted; use its
-`model`, `base_url` and `api_key` fields to override screenshots separately.
-Keys are inherited only across URLs with the same scheme, hostname and effective
-port. Changing the image endpoint to a different origin requires its own
-`image_embedding.api_key`. Likewise, an `app-graph-embed --base-url` override to a
-different origin requires `--api-key` (or a configured key for that origin).
-Image embeddings require an image-capable embedding model. Remove legacy
-`native_base_url` and Google API-key settings from existing configurations.
-The `embedding.native_base_url` and `image_embedding.native_base_url` fields
-are rejected explicitly before credentials are sent.
-Native Google Gemini and Vertex embedding URLs do not accept OpenRouter's
-request format and are rejected before requests are sent. Replace them with
-the [OpenRouter configuration above](#configure-api-credentials).
-OpenRouter-compatible custom endpoint overrides remain supported.
+`vlm.image_embedding` inherits the `embedding` model and timeout when omitted;
+set its `model` or `request_timeout` to override screenshots separately.
+Image embeddings require an image-capable embedding model.
 
 ### Embedding caches
 
