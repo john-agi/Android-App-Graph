@@ -37,6 +37,7 @@ from android_app_graph.utils import (
     resolve_model_settings,
 )
 from android_app_graph.utils.vlm_utils import (
+    TruncatedReplyError,
     build_image_message,
     describe_page_and_state,
     message_text,
@@ -44,7 +45,6 @@ from android_app_graph.utils.vlm_utils import (
     score_by_cosine,
     send_chat,
     strip_json_fences,
-    token_tracker,
 )
 
 if TYPE_CHECKING:
@@ -538,9 +538,15 @@ def _chat_completion_content(
     max_tokens: int | None = None,
 ) -> str:
     """Run a typed completion, account for usage and return assistant text."""
-    resp = send_chat(client, settings=settings, messages=messages, max_tokens=max_tokens)
-    token_tracker.record("v2_chat", settings.model, resp.usage)
-    return message_text(resp)
+    return message_text(
+        send_chat(
+            client,
+            call_type="v2_chat",
+            settings=settings,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+    )
 
 
 class Memory:
@@ -754,7 +760,8 @@ class UIKobeV2Translator(BaseTranslator):
         (including a falsy one such as ``{}`` or ``""``) is accepted as success.
         Pass ``screenshot`` to ground the question in a screenshot; ``None`` sends
         the prompt as plain text. Every attempt after the first appends a strict-format reminder
-        (``V2_PARSE_RETRY_HINT``) to help the model repair an unreadable reply.
+        (``V2_PARSE_RETRY_HINT``) to help the model repair an unreadable reply. A reply cut
+        off at its token limit returns ``None`` at once: asking again would be cut off too.
         """
         result: T | None = None
         raw = ""
@@ -764,12 +771,18 @@ class UIKobeV2Translator(BaseTranslator):
             if screenshot is not None:
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
-            raw = _chat_completion_content(
-                self.client,
-                settings=self.action,
-                messages=[{"role": "user", "content": content}],
-                max_tokens=V2_CHAT_MAX_TOKENS,
-            )
+            try:
+                raw = _chat_completion_content(
+                    self.client,
+                    settings=self.action,
+                    messages=[{"role": "user", "content": content}],
+                    # max_tokens, not max_completion_tokens: the action model,
+                    # qwen/qwen3.8-flash, lists only max_tokens.
+                    max_tokens=V2_CHAT_MAX_TOKENS,
+                )
+            except TruncatedReplyError:
+                logger.warning("%s reply hit its token limit; not asking again", tag)
+                return None
             result = parse(raw)
             if result is not None:
                 return result

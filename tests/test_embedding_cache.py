@@ -414,7 +414,7 @@ def test_image_settings_inherit_the_embedding_model_until_they_set_their_own() -
     ) == embedding_cache.ImageEmbeddingSettings("provider/image-model")
 
 
-def test_image_cache_retry_uses_real_sdk_and_counts_usage(
+def test_image_cache_relies_on_the_sdk_to_retry_a_503_and_counts_usage(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -426,13 +426,13 @@ def test_image_cache_retry_uses_real_sdk_and_counts_usage(
     monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
     router_responses.extend(
         [
-            httpx.Response(429, json={"error": {"code": 429, "message": "rate limited"}}),
+            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
             httpx.Response(200, json=embedding_body),
         ]
     )
     assert _retry(router_client, "shot") == [0.25, 0.75]
     assert len(router_requests) == 2
-    assert no_sleep == [2.0]
+    assert len(no_sleep) == 1
     assert tracker.snapshot() == {
         "prompt_tokens": 5,
         "completion_tokens": 0,
@@ -441,27 +441,25 @@ def test_image_cache_retry_uses_real_sdk_and_counts_usage(
     }
 
 
-@pytest.mark.parametrize(("status", "attempts"), [(429, 3), (400, 1)])
-def test_image_cache_sdk_errors_are_bounded(
+@pytest.mark.parametrize("status", [429, 400])
+def test_image_cache_never_retries_a_429_or_other_4xx(
     status: int,
-    attempts: int,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     no_sleep: list[float],
 ) -> None:
-    router_responses.extend(
+    router_responses.append(
         httpx.Response(status, json={"error": {"code": status, "message": "provider failure"}})
-        for _ in range(attempts)
     )
     with pytest.raises(OpenRouterError, match="provider failure"):
         _retry(router_client, "shot")
-    assert len(router_requests) == attempts
-    assert no_sleep == ([2.0, 4.0] if status == 429 else [])
+    assert len(router_requests) == 1
+    assert no_sleep == []
 
 
 @pytest.mark.parametrize("recover", [False, True])
-def test_sdk_validation_uses_bounded_application_recovery(
+def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
     recover: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -471,9 +469,8 @@ def test_sdk_validation_uses_bounded_application_recovery(
     no_sleep: list[float],
 ) -> None:
     bad = {key: value for key, value in embedding_body.items() if key != "model"}
-    router_responses.extend(httpx.Response(200, json=bad) for _ in range(1 if recover else 3))
-    if recover:
-        router_responses.append(httpx.Response(200, json=embedding_body))
+    router_responses.append(httpx.Response(200, json=bad))
+    router_responses.append(httpx.Response(200, json=embedding_body if recover else bad))
 
     def request() -> list[float]:
         return _retry(router_client, png_screenshot)
@@ -484,8 +481,8 @@ def test_sdk_validation_uses_bounded_application_recovery(
         with pytest.raises(ResponseValidationError) as caught:
             request()
         assert caught.value.status_code == 200
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
+    assert len(router_requests) == 2
+    assert no_sleep == []
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
@@ -531,7 +528,7 @@ def test_screenshot_batch_uses_the_callers_client_and_keeps_partial_progress(
     else:
         compute()
     assert len(router_requests) == (2 if interrupted else 3)
-    assert no_sleep == [2.0]
+    assert len(no_sleep) == 1
     assert router_client.sdk_configuration.client is router_http
     assert (
         embedding_cache.load_image_embeddings(graph, model="model", node_ids={"n1", "n2"}) == cache

@@ -24,9 +24,6 @@ from android_app_graph.utils.vlm_utils import get_image_embedding
 
 logger = logging.getLogger(__name__)
 
-IMAGE_EMBEDDING_RETRIES = 2
-IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS = 2.0
-
 
 class ImageEmbeddingSettings(NamedTuple):
     model: str
@@ -173,7 +170,7 @@ def compute_embedding_with_retry(
     app_name: str,
     node_id: str,
 ) -> list[float]:
-    """Get an OpenRouter image embedding, retrying on failure with backoff."""
+    """Get an OpenRouter image embedding, asking once more for an unusable vector."""
     return call_with_retry(
         f"[GRAPH] {app_name}/{node_id}: image embedding",
         lambda: get_image_embedding(
@@ -182,8 +179,6 @@ def compute_embedding_with_retry(
             settings.model,
             request_timeout=settings.request_timeout,
         ),
-        retries=IMAGE_EMBEDDING_RETRIES,
-        base_delay=IMAGE_EMBEDDING_RETRY_BASE_DELAY_SECONDS,
     )
 
 

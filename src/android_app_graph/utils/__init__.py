@@ -17,6 +17,7 @@ ROLES = ("page_detail", "embedding", "image_embedding", "instruction", "action")
 # Earlier releases and AITK controller.yaml files copied from upstream UI-KOBE set these.
 REMOVED_KEYS = ("api_key", "base_url", "native_base_url")
 DEFAULT_REQUEST_TIMEOUT = 60.0
+DEFAULT_AUDIT_TIMEOUT = 300.0
 
 
 class ModelSettings(NamedTuple):
@@ -31,10 +32,10 @@ def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> Ope
     """Create the run's one OpenRouter client, shared by every role.
 
     Only tests pass ``http_client``; otherwise the SDK creates and owns the HTTP
-    client. Retries stay with the application: the SDK's hour-long retry window
-    must not multiply its bounded attempts.
+    client. The SDK's default retry policy is kept as is:
+    README.md#requests-and-recovery.
     """
-    return OpenRouter(api_key=api_key, client=http_client, retry_config=None)
+    return OpenRouter(api_key=api_key, client=http_client)
 
 
 def removed_key_errors(vlm_config: Mapping[str, object]) -> list[str]:
@@ -83,18 +84,33 @@ def resolve_model(value: object, *, role: str) -> str:
     return model.strip()
 
 
-def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
-    """Validate seconds before opening connections or sending requests."""
-    message = f"{role}.request_timeout must be a positive finite number of seconds"
+def _seconds(value: object, *, setting: str, default: float) -> float:
+    message = f"{setting} must be a positive finite number of seconds"
     try:
-        value = float(
-            resolve_env(cfg.get("request_timeout", cfg.get("timeout"))) or DEFAULT_REQUEST_TIMEOUT
-        )
+        seconds = float(resolve_env(value) or default)
     except ValueError as exc:
         raise ValueError(message) from exc
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError(message)
-    return value
+    return seconds
+
+
+def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
+    """Validate seconds before opening connections or sending requests."""
+    return _seconds(
+        cfg.get("request_timeout", cfg.get("timeout")),
+        setting=f"{role}.request_timeout",
+        default=DEFAULT_REQUEST_TIMEOUT,
+    )
+
+
+def resolve_audit_timeout(vlm_config: Mapping[str, object]) -> float:
+    """Validate the page_detail timeout for whole-graph audits, whose prompts are long."""
+    return _seconds(
+        as_object_dict(vlm_config.get("page_detail")).get("audit_request_timeout"),
+        setting="page_detail.audit_request_timeout",
+        default=DEFAULT_AUDIT_TIMEOUT,
+    )
 
 
 def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None:
@@ -157,6 +173,8 @@ def resolve_model_settings(
         resolved = _role_settings(vlm_config, role, errors)
         if resolved is not None:
             settings[role] = resolved
+    if "page_detail" in roles:
+        _checked(lambda: resolve_audit_timeout(vlm_config), errors)
     if errors:
         raise ValueError(
             "Invalid vlm configuration: " + "; ".join(error.rstrip(".") for error in errors)

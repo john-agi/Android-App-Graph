@@ -37,7 +37,7 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.payloads import as_float_list, as_int_list, as_str, as_str_dict
-from android_app_graph.utils import ModelSettings
+from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
@@ -124,12 +124,14 @@ class GraphManager:
         page_detail: ModelSettings | None = None,
         embedding: ModelSettings | None = None,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        audit_timeout: float = DEFAULT_AUDIT_TIMEOUT,
     ) -> None:
         self.graph = nx.DiGraph()
         self.client = client
         self.page_detail = page_detail
         self.embedding = embedding
         self.similarity_threshold = similarity_threshold
+        self.audit_timeout = audit_timeout
         self._next_id = 0
         self._dirty_screenshots: set[str] = set()
         self._last_identify_cache: _IdentifyCacheEntry | None = None
@@ -1422,7 +1424,12 @@ class GraphManager:
         graph_text = self.format_for_audit()
         logger.info("Running graph audit (%d chars)...", len(graph_text))
 
-        result = audit_graph(client, graph_text, app_name=app_name, settings=settings)
+        result = audit_graph(
+            client,
+            graph_text,
+            app_name=app_name,
+            settings=settings._replace(request_timeout=self.audit_timeout),
+        )
 
         logger.info("Audit summary: %s", result.get("summary", ""))
         for issue in result.get("issues", []):
@@ -1478,7 +1485,12 @@ class GraphManager:
 
         graph_text = self.format_for_audit()
         logger.info("Running node merge audit (%d chars)...", len(graph_text))
-        audit_result = audit_merge_nodes(client, graph_text, app_name=app_name, settings=settings)
+        audit_result = audit_merge_nodes(
+            client,
+            graph_text,
+            app_name=app_name,
+            settings=settings._replace(request_timeout=self.audit_timeout),
+        )
         issues = audit_result.get("issues", [])
         results = []
 

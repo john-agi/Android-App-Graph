@@ -71,12 +71,12 @@ def model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Record retry back-off delays instead of waiting for them.
+    """Record sleeps instead of waiting for them.
 
-    The retry-with-backoff policy (android_app_graph.retrying, used by
-    utils.vlm_utils and embedding_cache) does ``import time`` and calls
-    ``time.sleep(...)``, so patching the shared stdlib module here covers every
-    caller of it without a per-caller fixture.
+    The OpenRouter SDK's retry back-off and the explorer's settling pauses call
+    ``time.sleep`` on the shared stdlib module, so patching it here covers them
+    all. A test must never let the SDK keep failing: its default policy retries
+    5XX responses and timeouts for up to an hour.
     """
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
@@ -155,7 +155,9 @@ def chat_response(chat_body: dict[str, object]) -> Callable[..., httpx.Response]
     left out is omitted from the message rather than sent as null.
     """
 
-    def build(*, tool_arguments: str | None = None, **message: object) -> httpx.Response:
+    def build(
+        *, tool_arguments: str | None = None, finish_reason: str = "stop", **message: object
+    ) -> httpx.Response:
         if tool_arguments is not None:
             message["tool_calls"] = [
                 {
@@ -164,7 +166,11 @@ def chat_response(chat_body: dict[str, object]) -> Callable[..., httpx.Response]
                     "function": {"name": "mobile_use", "arguments": tool_arguments},
                 }
             ]
-        choice = {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}
+        choice = {
+            "index": 0,
+            "finish_reason": finish_reason,
+            "message": {"role": "assistant", **message},
+        }
         return httpx.Response(200, json={**chat_body, "choices": [choice]})
 
     return build

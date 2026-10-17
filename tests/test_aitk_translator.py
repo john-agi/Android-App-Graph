@@ -771,7 +771,7 @@ def test_chat_completion_content_records_its_usage_as_v2_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracker = vlm_utils.TokenTracker()
-    monkeypatch.setattr(aitk_translator, "token_tracker", tracker)
+    monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
     router_responses.append(chat_response(content="first"))
     aitk_translator._chat_completion_content(
         router_client,
@@ -1447,6 +1447,48 @@ def test_plan_free_action_falls_back_when_the_planner_is_generic(
     use_model(translator, "Take the best action", "Take the best action")
     instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
     assert instruction == "Wait briefly for the current screen to finish loading."
+
+
+def test_a_truncated_v2_reply_is_not_asked_again_and_takes_the_fallback(
+    use_model: _UseModel,
+    translator: aitk_translator.UIKobeV2Translator,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    use_model(translator)
+    router_responses.append(chat_response(content="Tap the", finish_reason="length"))
+    instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+    assert instruction == "Wait briefly for the current screen to finish loading."
+    assert len(router_requests) == 1
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_a_failed_v2_generation_is_asked_again_once_then_raises(
+    recover: bool,
+    use_model: _UseModel,
+    translator: aitk_translator.UIKobeV2Translator,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    use_model(translator)
+    router_responses.append(chat_response(content="", finish_reason="error"))
+    router_responses.append(
+        chat_response(content="Tap the cart icon")
+        if recover
+        else chat_response(content="", finish_reason="error")
+    )
+
+    def plan() -> str:
+        return translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+
+    if recover:
+        assert plan() == "Tap the cart icon"
+    else:
+        with pytest.raises(vlm_utils.GenerationFailedError):
+            plan()
+    assert len(router_requests) == 2
 
 
 def test_decide_returns_the_chosen_option(
@@ -2410,7 +2452,7 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
                 )
                 if schema_failure
                 else chat_response(content='{"action":"system_button","button":"Power"}')
-                for _ in range(3)
+                for _ in range(2)
             )
         else:
             router_responses.append(
@@ -2427,5 +2469,5 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
                 if turn == 0
                 else {"action": "tap", "x": 540, "y": 960}
             )
-    assert len(router_requests) == 8
-    assert no_sleep == [2.0, 4.0]
+    assert len(router_requests) == 7
+    assert no_sleep == []

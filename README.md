@@ -233,28 +233,50 @@ not guarantee deterministic output.
 ### Requests and recovery
 
 All model roles accept a positive, finite `request_timeout` (or `timeout`) in
-seconds. Image embeddings inherit the text embedding timeout unless overridden,
-in both runtime retrieval and `app-graph-embed`. Requests default to 60 seconds
-and retry at most twice, after 2 and 4 seconds, for
-transient HTTP failures, rate limits, transport timeouts and SDK validation
-failures on successful HTTP responses. Text embedding vector validation shares
-that same attempt budget, including empty and non-finite vectors. Permanent HTTP
-errors such as 400, 401 and 402 fail immediately. Page-description replies with
-invalid JSON, an empty or missing description, or malformed state/elements are
-retried within that same attempt budget; exhausted attempts raise before the
-graph is updated. Action-output parsing and
-conversion can request a corrected response within the same three-attempt
-budget, then fall back to a one-second wait if output remains malformed.
-Exploration counts waits toward `max_steps`, including recovery waits, so
-repeated malformed actions cannot keep the run alive indefinitely.
-SDK retries are disabled to avoid multiplying attempts; legacy SDK
-`max_retries` settings are superseded by this application retry budget.
-V2 planning caps each completion at 3000 tokens and permits one format-correction
-retry with a prompt reminder; each completion has its own request retry budget.
-Chat responses must include every field the SDK requires, including
-`system_fingerprint`, which may be `null` but not omitted. All calls, including action
-prediction, propagate persistent SDK validation failures after their bounded
-retries. A broken endpoint response cannot become an action's fallback wait.
+seconds, sent with each request; the default is 60 seconds. Image embeddings
+inherit the text embedding timeout unless overridden, in both runtime retrieval
+and `app-graph-embed`. The graph audit and node-merge audit send the whole graph in
+one prompt, so they use `page_detail.audit_request_timeout` instead, default 300
+seconds.
+
+The OpenRouter SDK retries transport failures with its default policy, which the
+application keeps as is. It retries 5XX responses, dropped connections (refused,
+reset or failed reads and writes) and timeouts with exponential backoff (0.5 s,
+then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between tries) for up
+to one hour, waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
+header asks instead. It does not retry 429 or other 4xx responses, which fail at
+once, nor a server that closes the connection without sending a response. The application never retries what
+the SDK has given up on. A request that timed out can be sent again within that
+hour, and OpenRouter bills a non-streaming request in full even after the client
+disconnects, so a timeout shorter than the model needs can pay for the same
+request several times.
+
+The application asks a model once more, and only once, for output it cannot use:
+a malformed page description, an action reply that cannot be parsed or converted,
+an SDK validation failure on a 2xx response, an empty or non-finite embedding
+vector, or a reply whose generation failed partway (`finish_reason: "error"`). If
+the second attempt is unusable too, an action falls back to a one-second wait and
+everything else raises; a failed generation never becomes a parse fallback.
+Exploration counts waits toward `max_steps`, including recovery waits, so repeated
+malformed actions cannot keep the run alive indefinitely.
+
+A reply cut off by its token limit (`finish_reason: "length"`) is never asked
+again, since the same request would be cut off again. The log names the call and
+any reasoning tokens, and the caller applies its final fallback at once: an
+action waits, node verification treats the screens as different, edge
+normalization keeps the instruction, the audits report no issues, the coverage
+checkpoint uses its top candidate, the v2 runtime's own fallback applies, and a
+page description or an exploration plan raises. Token limits include any reasoning
+tokens. A reply stopped by the provider's content filter (`finish_reason:
+"content_filter"`) is logged with the call's name and otherwise handled like any
+other empty or partial reply.
+
+V2 planning caps each completion at 3000 `max_tokens` and permits one
+format-correction retry with a prompt reminder; a failed generation is asked again
+within each completion, and a truncated one ends the retry. Chat responses must
+include every field the SDK requires, including `system_fingerprint`, which may be
+`null` but not omitted. A broken endpoint response cannot become an action's
+fallback wait.
 
 Each command opens one OpenRouter client for the whole run, shares it across every
 role and closes it when the run ends; each request carries its own role's model,

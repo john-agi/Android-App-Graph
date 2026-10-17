@@ -91,6 +91,7 @@ def test_android_world_steps_share_one_client_and_preserve_task_memory(
         assert history["actions"] == ["acted"] * len(runtime._memory.actions)
         response = vlm_utils.send_chat(
             runtime.client,
+            call_type="v2_chat",
             settings=runtime.action,
             messages=[{"role": "user", "content": "inspect"}],
         )

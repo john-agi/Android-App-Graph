@@ -11,16 +11,21 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
+from openrouter.chat import Chat
 from openrouter.components.chatresult import ChatResult
+from openrouter.embeddings import Embeddings
 from openrouter.errors import OpenRouterError, ResponseValidationError
+from openrouter.types import UNSET
 
 from android_app_graph.payloads import as_str, as_str_dict
+from android_app_graph.retrying import UnusableOutputError
 from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
@@ -400,7 +405,12 @@ def test_send_chat_rejects_a_streamed_response(
         httpx.Response(200, text="data: [DONE]\n\n", headers={"content-type": "text/event-stream"})
     )
     with pytest.raises(TypeError, match="non-streaming"):
-        vlm.send_chat(router_client, settings=OTHER, messages=[{"role": "user", "content": "hi"}])
+        vlm.send_chat(
+            router_client,
+            call_type="chat",
+            settings=OTHER,
+            messages=[{"role": "user", "content": "hi"}],
+        )
 
 
 @pytest.mark.parametrize(
@@ -417,7 +427,10 @@ def test_sdk_assistant_content_variants(
         chat_response() if content == "omitted" else chat_response(content=content)
     )
     response = vlm.send_chat(
-        router_client, settings=OTHER, messages=[{"role": "user", "content": "hi"}]
+        router_client,
+        call_type="chat",
+        settings=OTHER,
+        messages=[{"role": "user", "content": "hi"}],
     )
     assert vlm.message_text(response) == ("hello \nworld" if isinstance(content, list) else "")
 
@@ -491,12 +504,42 @@ def test_non_json_embedding_response_is_rejected(
         vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
 
 
+def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
+    match operation:
+        case "chat":
+            reply = vlm.send_chat(
+                client,
+                call_type="chat",
+                settings=OTHER,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+            return vlm.message_text(reply)
+        case "text":
+            return vlm.get_embedding(client, "home", model="google/gemini-embedding-2")
+        case "action":
+            return vlm.predict_next_action(client, png_screenshot, "tap", settings=ACTION)[0]
+        case _:
+            return vlm.describe_page_and_state(client, png_screenshot, settings=PAGE_DETAIL)[0]
+
+
+_GOOD_REPLIES: dict[str, str] = {
+    "chat": "test reply",
+    "action": '{"action":"click","coordinate":[500,500]}',
+    "description": '{"page_description":"home"}',
+}
+_RESULTS: dict[str, object] = {
+    "chat": "test reply",
+    "text": [0.25, 0.75],
+    "action": {"action": "tap", "x": 540, "y": 960},
+    "description": "home",
+}
+
+
 @pytest.mark.parametrize("operation", ["chat", "text", "action", "description"])
-@pytest.mark.parametrize(("status", "attempts"), [(429, 3), (400, 1)])
-def test_sdk_errors_exhaust_bounded_application_retries(
+@pytest.mark.parametrize("status", [429, 400])
+def test_a_429_or_other_4xx_is_retried_by_neither_the_sdk_nor_the_app(
     operation: str,
     status: int,
-    attempts: int,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -504,77 +547,131 @@ def test_sdk_errors_exhaust_bounded_application_retries(
     no_sleep: list[float],
     tracked_usage: vlm.TokenTracker,
 ) -> None:
-    router_responses.extend(
+    router_responses.append(
         httpx.Response(status, json={"error": {"code": status, "message": "upstream failed"}})
-        for _ in range(attempts)
     )
-
-    def request() -> None:
-        match operation:
-            case "chat":
-                vlm.send_chat(
-                    router_client,
-                    settings=OTHER,
-                    messages=[{"role": "user", "content": "hi"}],
-                )
-            case "text":
-                vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-            case "action":
-                vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
-            case _:
-                vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-
     with pytest.raises(OpenRouterError, match="upstream failed"):
-        request()
-    assert len(router_requests) == attempts
-    assert no_sleep == ([2.0, 4.0] if status == 429 else [])
+        _request(operation, router_client, png_screenshot)
+    assert len(router_requests) == 1
+    assert no_sleep == []
     assert tracked_usage.snapshot()["calls"] == 0
 
 
-@pytest.mark.parametrize("operation", ["chat", "embedding"])
-def test_sdk_retry_recovers_and_counts_only_completed_responses(
+@pytest.mark.parametrize("operation", ["chat", "text", "action", "description"])
+@pytest.mark.parametrize("then", [200, 400])
+def test_the_sdk_retries_a_503_and_the_app_does_not_retry_again(
     operation: str,
+    then: int,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
-    chat_body: dict[str, object],
-    embedding_body: dict[str, object],
+    png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
     tracked_usage: vlm.TokenTracker,
 ) -> None:
+    good = (
+        httpx.Response(200, json=embedding_body)
+        if operation == "text"
+        else chat_response(content=_GOOD_REPLIES[operation])
+    )
     router_responses.extend(
         [
-            httpx.Response(429, json={"error": {"code": 429, "message": "rate limited"}}),
-            httpx.Response(200, json=chat_body if operation == "chat" else embedding_body),
+            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
+            good
+            if then == 200
+            else httpx.Response(400, json={"error": {"code": 400, "message": "bad request"}}),
         ]
     )
-    if operation == "chat":
-        vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
+    if then == 200:
+        assert _request(operation, router_client, png_screenshot) == _RESULTS[operation]
     else:
-        vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
+        with pytest.raises(OpenRouterError, match="bad request"):
+            _request(operation, router_client, png_screenshot)
     assert len(router_requests) == 2
-    assert no_sleep == [2.0]
-    assert tracked_usage.snapshot()["calls"] == 1
+    assert len(no_sleep) == 1
+    assert 0.5 <= no_sleep[0] <= 1.5
+    assert tracked_usage.snapshot()["calls"] == int(then == 200)
 
 
-def test_transport_timeouts_have_a_bounded_retry_budget(no_sleep: list[float]) -> None:
+@pytest.mark.parametrize("failure", ["timeout", "dropped"])
+def test_the_sdk_retries_a_timeout_or_a_dropped_connection_once_it_recovers(
+    failure: str, chat_body: dict[str, object], no_sleep: list[float]
+) -> None:
     attempts: list[httpx.Request] = []
 
-    def timeout(request: httpx.Request) -> httpx.Response:
+    def flaky(request: httpx.Request) -> httpx.Response:
         attempts.append(request)
-        raise httpx.ReadTimeout("provider timed out", request=request)
+        if len(attempts) == 1 and failure == "timeout":
+            raise httpx.ReadTimeout("provider timed out", request=request)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200, json=chat_body)
 
-    with (
-        httpx.Client(transport=httpx.MockTransport(timeout)) as http_client,
-        pytest.raises(httpx.ReadTimeout, match="provider timed out"),
-    ):
-        vlm.send_chat(
+    with httpx.Client(transport=httpx.MockTransport(flaky)) as http_client:
+        reply = vlm.send_chat(
             open_client("test-key", http_client=http_client),
+            call_type="chat",
             settings=OTHER,
             messages=[{"role": "user", "content": "hi"}],
         )
-    assert len(attempts) == 3
-    assert no_sleep == [2.0, 4.0]
+    assert vlm.message_text(reply) == "test reply"
+    assert len(attempts) == 2
+    assert len(no_sleep) == 1
+
+
+def test_no_request_overrides_the_sdk_retry_policy(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert router_client.sdk_configuration.retry_config is UNSET
+    sent: list[dict[str, object]] = []
+    chat_send = Chat.send
+    generate = Embeddings.generate
+
+    def spy_send(self: Chat, **kwargs: Any) -> object:
+        sent.append(kwargs)
+        return chat_send(self, **kwargs)
+
+    def spy_generate(self: Embeddings, **kwargs: Any) -> object:
+        sent.append(kwargs)
+        return generate(self, **kwargs)
+
+    monkeypatch.setattr(Chat, "send", spy_send)
+    monkeypatch.setattr(Embeddings, "generate", spy_generate)
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            chat_response(content='{"same":true}'),
+            chat_response(content="{}"),
+            chat_response(content="{}"),
+            chat_response(content="{}"),
+            chat_response(content="{}"),
+            chat_response(content="Tap Search"),
+            chat_response(content='{"action":"wait"}'),
+            httpx.Response(200, json=embedding_body),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+    vlm.verify_same_node(
+        router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+    )
+    vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
+    vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
+    vlm.select_exploration_target(router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL)
+    vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
+    vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
+    vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
+    vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
+    vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
+    assert len(sent) == 10
+    assert all("retries" not in kwargs and "timeout_ms" in kwargs for kwargs in sent)
 
 
 @pytest.mark.parametrize("operation", ["audit", "planner", "action"])
@@ -582,14 +679,14 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
     operation: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
     chat_body: dict[str, object],
     png_screenshot: str,
-    no_sleep: list[float],
 ) -> None:
     chat_body["choices"] = []
     chat_body.pop("usage")
     router_responses.extend(
-        httpx.Response(200, json=chat_body) for _ in range(3 if operation == "action" else 1)
+        httpx.Response(200, json=chat_body) for _ in range(2 if operation == "action" else 1)
     )
     if operation == "audit":
         assert vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL) == {
@@ -606,7 +703,8 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
             {"action": "wait", "time": 1},
             "Failed to parse action response -> wait",
         )
-        assert no_sleep == [2.0, 4.0]
+    assert router_responses == []
+    assert len(router_requests) == (2 if operation == "action" else 1)
 
 
 @pytest.mark.parametrize("limit", [None, 17])
@@ -627,6 +725,7 @@ def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
     with httpx.Client(transport=httpx.MockTransport(respond)) as borrowed:
         vlm.send_chat(
             open_client("test", http_client=borrowed),
+            call_type="chat",
             settings=PAGE_DETAIL,
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=limit,
@@ -640,26 +739,9 @@ def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
     assert no_sleep == []
 
 
-def test_missing_required_chat_field_is_retried(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    incomplete = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
-    router_responses.extend(
-        [httpx.Response(200, json=incomplete), httpx.Response(200, json=chat_body)]
-    )
-    reply = vlm.send_chat(router_client, settings=ModelSettings("test"), messages=[])
-    assert vlm.message_text(reply) == "test reply"
-    assert len(router_requests) == 2
-    assert no_sleep == [2.0]
-
-
 @pytest.mark.parametrize("operation", ["chat", "text", "action"])
 @pytest.mark.parametrize("recover", [False, True])
-def test_sdk_validation_uses_bounded_application_recovery(
+def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
     operation: str,
     recover: bool,
     router_client: OpenRouter,
@@ -673,70 +755,76 @@ def test_sdk_validation_uses_bounded_application_recovery(
 ) -> None:
     good = embedding_body if operation == "text" else chat_body
     bad = {key: value for key, value in good.items() if key != "model"}
-    router_responses.extend(httpx.Response(200, json=bad) for _ in range(1 if recover else 3))
+    router_responses.append(httpx.Response(200, json=bad))
+    router_responses.append(
+        httpx.Response(200, json=bad)
+        if not recover
+        else chat_response(content=_GOOD_REPLIES[operation])
+        if operation == "action"
+        else httpx.Response(200, json=good)
+    )
     if recover:
-        router_responses.append(
-            chat_response(content='{"action":"wait","time":2}')
-            if operation == "action"
-            else httpx.Response(200, json=good)
-        )
-
-    def request() -> object:
-        if operation == "action":
-            return vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)[
-                0
-            ]
-        if operation == "text":
-            return vlm.get_embedding(router_client, "hello", model="google/gemini-embedding-2")
-        reply = vlm.send_chat(
-            router_client,
-            settings=ModelSettings("test"),
-            messages=[{"role": "user", "content": "hello"}],
-        )
-        return vlm.message_text(reply)
-
-    if recover:
-        expected: dict[str, object] = {
-            "action": {"action": "wait", "time": 2},
-            "text": [0.25, 0.75],
-            "chat": "test reply",
-        }
-        assert request() == expected[operation]
+        assert _request(operation, router_client, png_screenshot) == _RESULTS[operation]
     else:
         with pytest.raises(ResponseValidationError) as caught:
-            request()
+            _request(operation, router_client, png_screenshot)
         assert caught.value.status_code == 200
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
+    assert len(router_requests) == 2
+    assert no_sleep == []
+
+
+def test_a_reply_missing_a_required_chat_field_is_re_asked_once(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_body: dict[str, object],
+) -> None:
+    incomplete = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
+    router_responses.extend(
+        [httpx.Response(200, json=incomplete), httpx.Response(200, json=chat_body)]
+    )
+    reply = vlm.send_chat(router_client, call_type="chat", settings=OTHER, messages=[])
+    assert vlm.message_text(reply) == "test reply"
+    assert len(router_requests) == 2
 
 
 @pytest.mark.parametrize("recover", [False, True])
-def test_text_vector_validation_uses_the_request_retry_budget(
+def test_an_empty_or_non_finite_vector_is_re_asked_once(
     recover: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     embedding_body: dict[str, object],
-    no_sleep: list[float],
     tracked_usage: vlm.TokenTracker,
 ) -> None:
     bad = {**embedding_body, "data": [{"object": "embedding", "index": 0, "embedding": []}]}
-    router_responses.extend(httpx.Response(200, json=bad) for _ in range(1 if recover else 3))
+    router_responses.append(httpx.Response(200, json=bad))
+    router_responses.append(httpx.Response(200, json=embedding_body if recover else bad))
     if recover:
-        router_responses.append(httpx.Response(200, json=embedding_body))
         assert vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2") == [
             0.25,
             0.75,
         ]
     else:
-        with pytest.raises(ValueError, match="embedding"):
+        with pytest.raises(UnusableOutputError, match="embedding"):
             vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
+    assert len(router_requests) == 2
     assert tracked_usage.snapshot()["calls"] == int(recover)
 
 
-def test_text_http_schema_and_vector_failures_share_one_budget(
+def test_a_wrong_vector_count_is_not_re_asked(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+) -> None:
+    router_responses.append(httpx.Response(200, json={**embedding_body, "data": []}))
+    with pytest.raises(ValueError, match="one embedding"):
+        vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
+    assert len(router_requests) == 1
+
+
+def test_sdk_retries_and_the_unusable_output_re_ask_are_separate_budgets(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -749,45 +837,15 @@ def test_text_http_schema_and_vector_failures_share_one_budget(
             httpx.Response(
                 200, json={key: value for key, value in embedding_body.items() if key != "model"}
             ),
-            httpx.Response(200, json={**embedding_body, "data": []}),
             httpx.Response(200, json=embedding_body),
         ]
     )
-    with pytest.raises(ValueError, match="one embedding"):
-        vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
+    assert vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2") == [
+        0.25,
+        0.75,
+    ]
     assert len(router_requests) == 3
-    assert len(router_responses) == 1
-    assert no_sleep == [2.0, 4.0]
-
-
-@pytest.mark.parametrize("recover", [False, True])
-def test_page_description_http_and_parse_errors_share_one_budget(
-    recover: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.extend(
-        [
-            httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}),
-            chat_response(content="[]"),
-            chat_response(content='{"page_description":"home"}' if recover else "null"),
-        ]
-    )
-    if recover:
-        assert vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL) == (
-            "home",
-            {},
-            [],
-        )
-    else:
-        with pytest.raises(TypeError, match=r"page description.*JSON object"):
-            vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
+    assert len(no_sleep) == 1
 
 
 @pytest.mark.parametrize(
@@ -802,7 +860,7 @@ def test_page_description_http_and_parse_errors_share_one_budget(
         ('{"page_description":"home","elements":[null]}', TypeError, "element description"),
     ],
 )
-def test_malformed_page_description_exhausts_its_retry_budget(
+def test_a_malformed_page_description_is_re_asked_once_then_raises(
     malformed: str,
     error: type[Exception],
     message: str,
@@ -810,14 +868,144 @@ def test_malformed_page_description_exhausts_its_retry_budget(
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     png_screenshot: str,
-    no_sleep: list[float],
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.extend(chat_response(content=malformed) for _ in range(3))
-    with pytest.raises(error, match=message):
+    router_responses.extend(chat_response(content=malformed) for _ in range(2))
+    with pytest.raises(UnusableOutputError, match="Malformed page description") as caught:
         vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-    assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
+    assert isinstance(caught.value.__cause__, error)
+    assert message in str(caught.value.__cause__)
+    assert len(router_requests) == 2
+
+
+@pytest.mark.parametrize("operation", ["verify", "action", "description", "chat"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_a_failed_generation_is_re_asked_once_and_never_becomes_a_fallback(
+    operation: str,
+    recover: bool,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    tracked_usage: vlm.TokenTracker,
+) -> None:
+    good = {"verify": '{"same":true,"reason":"identical"}', **_GOOD_REPLIES}[operation]
+    router_responses.append(chat_response(content="partial", finish_reason="error"))
+    router_responses.append(
+        chat_response(content=good) if recover else chat_response(content="", finish_reason="error")
+    )
+
+    def request() -> object:
+        if operation == "verify":
+            return vlm.verify_same_node(
+                router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+            )["same"]
+        return _request(operation, router_client, png_screenshot)
+
+    if recover:
+        assert request() == {"verify": True, **_RESULTS}[operation]
+    else:
+        with pytest.raises(vlm.GenerationFailedError, match="finish_reason=error"):
+            request()
+    assert len(router_requests) == 2
+    assert tracked_usage.snapshot()["calls"] == 2
+
+
+def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Response:
+    response = chat_response(content='{"same": tr', finish_reason="length")
+    body = response.json()
+    body["usage"]["completion_tokens_details"] = {"reasoning_tokens": 2950}
+    return httpx.Response(200, json=body)
+
+
+@pytest.mark.parametrize(
+    ("operation", "fallback"),
+    [
+        ("verify", {"same": False, "reason": "reply truncated"}),
+        ("normalize", {"instruction_template": "search milk", "is_template": False}),
+        ("merge_audit", {"issues": [], "summary": "reply truncated"}),
+        ("audit", {"issues": [], "summary": "reply truncated"}),
+        ("target", None),
+        ("action", {"action": "wait", "time": 1}),
+    ],
+)
+def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
+    operation: str,
+    fallback: object,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router_responses.append(_truncated_reply(chat_response))
+    with caplog.at_level("WARNING"):
+        match operation:
+            case "verify":
+                result: object = vlm.verify_same_node(
+                    router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+                )
+            case "normalize":
+                normalized = vlm.normalize_edge(
+                    router_client, ["search milk"], settings=PAGE_DETAIL
+                )
+                result = {key: normalized[key] for key in ("instruction_template", "is_template")}
+            case "merge_audit":
+                result = vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
+            case "audit":
+                result = vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
+            case "target":
+                result = vlm.select_exploration_target(
+                    router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL
+                )
+            case _:
+                result = vlm.predict_next_action(
+                    router_client, png_screenshot, "tap", settings=ACTION
+                )[0]
+    assert result == fallback
+    assert len(router_requests) == 1
+    assert "finish_reason=length, reasoning_tokens=2950" in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["description", "planner"])
+def test_a_truncated_reply_without_a_fallback_raises_at_once(
+    operation: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content="", finish_reason="length"))
+
+    def request() -> object:
+        if operation == "description":
+            return vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+        return vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
+
+    with pytest.raises(vlm.TruncatedReplyError, match="token limit"):
+        request()
+    assert len(router_requests) == 1
+
+
+def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_content(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router_responses.append(chat_response(content="Tap", finish_reason="content_filter"))
+    with caplog.at_level("WARNING"):
+        assert (
+            vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
+            == "Tap"
+        )
+    assert "instruction: the provider's content filter stopped the reply" in caplog.text
+    assert len(router_requests) == 1
 
 
 @pytest.mark.parametrize("multipart", [False, True])
@@ -1003,12 +1191,14 @@ def test_malformed_action_output_requests_another_response(
     no_sleep: list[float],
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.extend(
-        chat_response(content='{"action":"click","coordinate":["bad",500]}')
-        for _ in range(1 if recover else 3)
+    router_responses.append(chat_response(content='{"action":"click","coordinate":["bad",500]}'))
+    router_responses.append(
+        chat_response(
+            content='{"action":"click","coordinate":[500,300]}'
+            if recover
+            else '{"action":"click","coordinate":["bad",500]}'
+        )
     )
-    if recover:
-        router_responses.append(chat_response(content='{"action":"click","coordinate":[500,300]}'))
     result = vlm.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
     )
@@ -1016,12 +1206,12 @@ def test_malformed_action_output_requests_another_response(
         assert result[0] == {"action": "tap", "x": 50, "y": 60}
     else:
         assert result == ({"action": "wait", "time": 1}, "Failed to parse action response -> wait")
-    assert len(router_requests) == (2 if recover else 3)
-    assert no_sleep == ([2.0] if recover else [2.0, 4.0])
+    assert len(router_requests) == 2
+    assert no_sleep == []
 
 
-@pytest.mark.parametrize("last", ["success", "schema", "output", "http"])
-def test_action_schema_http_and_output_share_total_budget(
+@pytest.mark.parametrize("last", ["success", "schema", "output", "truncated", "rate_limited"])
+def test_action_sdk_retries_and_the_single_re_ask_are_separate(
     last: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -1032,20 +1222,20 @@ def test_action_schema_http_and_output_share_total_budget(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     bad = {key: value for key, value in chat_body.items() if key != "model"}
-    http_error = httpx.Response(503, json={"error": {"code": 503, "message": "busy"}})
     router_responses.extend(
         [
-            http_error,
+            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
             httpx.Response(200, json=bad),
             {
                 "success": chat_response(content='{"action":"click","coordinate":[500,300]}'),
                 "schema": httpx.Response(200, json=bad),
                 "output": chat_response(content="unreadable"),
-                "http": http_error,
+                "truncated": chat_response(content="", finish_reason="length"),
+                "rate_limited": httpx.Response(429, json={"error": {"message": "slow down"}}),
             }[last],
         ]
     )
-    if last in {"http", "schema"}:
+    if last in {"schema", "rate_limited"}:
         with pytest.raises(OpenRouterError):
             vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
     else:
@@ -1056,7 +1246,7 @@ def test_action_schema_http_and_output_share_total_budget(
             else {"action": "wait", "time": 1}
         )
     assert len(router_requests) == 3
-    assert no_sleep == [2.0, 4.0]
+    assert len(no_sleep) == 1
 
 
 def test_malformed_http_error_never_returns_action_fallback(

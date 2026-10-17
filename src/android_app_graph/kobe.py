@@ -11,7 +11,7 @@ from typing import Any
 from openrouter import OpenRouter
 
 from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
-from android_app_graph.utils import resolve_model_settings
+from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
@@ -92,6 +92,7 @@ class Kobe:
             page_detail=self.page_detail,
             embedding=settings["embedding"],
             similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
+            audit_timeout=resolve_audit_timeout(vlm_config),
         )
 
         base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"

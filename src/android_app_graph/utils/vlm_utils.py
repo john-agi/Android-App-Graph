@@ -14,13 +14,13 @@ from typing import TYPE_CHECKING, Any
 from openrouter import OpenRouter
 from openrouter.components.chatcontenttext import ChatContentText
 from openrouter.components.chatresult import ChatResult
-from openrouter.components.chatusage import ChatUsage
+from openrouter.components.chatusage import ChatUsage, ChatUsageCompletionTokensDetails
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 from PIL import Image
 
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
-from android_app_graph.retrying import DEFAULT_RETRIES, call_with_retry
+from android_app_graph.retrying import UnusableOutputError, call_with_retry
 from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
 if TYPE_CHECKING:
@@ -583,33 +583,87 @@ Look at the screenshot and execute the SINGLE next action to complete the task a
 Focus on the task instruction. The overall goal is only for context when the instruction is ambiguous."""
 
 
-def send_chat(
+class GenerationFailedError(UnusableOutputError):
+    """The provider reported ``finish_reason: "error"``: generation failed partway."""
+
+
+class TruncatedReplyError(Exception):
+    """The reply hit its token limit (``finish_reason: "length"``); asking again cannot help."""
+
+
+def _reasoning_tokens(usage: ChatUsage | None) -> int | None:
+    details = usage.completion_tokens_details if usage is not None else None
+    if not isinstance(details, ChatUsageCompletionTokensDetails):
+        return None
+    return details.reasoning_tokens if isinstance(details.reasoning_tokens, int) else None
+
+
+def _send_chat_once(
     client: OpenRouter,
     *,
+    call_type: str,
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
     max_tokens: int | None = None,
-    retries: int = DEFAULT_RETRIES,
 ) -> ChatResult:
-    """Send a typed, non-streaming completion with bounded application retries."""
-    response: object = call_with_retry(
-        "[API] chat completion",
-        lambda: client.chat.send(
-            model=settings.model,
-            messages=messages,
-            response_format=response_format,
-            max_tokens=max_tokens if max_tokens is not None else UNSET,
-            temperature=settings.temperature if settings.temperature is not None else UNSET,
-            stream=False,
-            retries=None,
-            timeout_ms=int(settings.request_timeout * 1000),
-        ),
-        retries=retries,
+    """Send one completion, record its usage and check how it finished."""
+    response: object = client.chat.send(
+        model=settings.model,
+        messages=messages,
+        response_format=response_format,
+        max_tokens=max_tokens if max_tokens is not None else UNSET,
+        temperature=settings.temperature if settings.temperature is not None else UNSET,
+        stream=False,
+        timeout_ms=int(settings.request_timeout * 1000),
     )
     if not isinstance(response, ChatResult):
         raise TypeError("Expected a non-streaming OpenRouter chat response")
+    token_tracker.record(call_type, settings.model, response.usage)
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    if finish_reason == "error":
+        raise GenerationFailedError(f"{call_type}: the provider reported finish_reason=error")
+    if finish_reason == "length":
+        reasoning_tokens = _reasoning_tokens(response.usage)
+        logger.warning(
+            "%s: the reply hit its token limit (finish_reason=length%s); not asking again",
+            call_type,
+            "" if reasoning_tokens is None else f", reasoning_tokens={reasoning_tokens}",
+        )
+        raise TruncatedReplyError(f"{call_type}: the reply hit its token limit")
+    if finish_reason == "content_filter":
+        logger.warning(
+            "%s: the provider's content filter stopped the reply (finish_reason=content_filter)",
+            call_type,
+        )
     return response
+
+
+def send_chat(
+    client: OpenRouter,
+    *,
+    call_type: str,
+    settings: ModelSettings,
+    messages: list[ChatMessagesTypedDict],
+    response_format: ResponseFormatTypedDict | None = None,
+    max_tokens: int | None = None,
+) -> ChatResult:
+    """Send a non-streaming completion, asking once more if its generation failed.
+
+    ``call_type`` names the call in usage records and logs. A truncated reply
+    raises ``TruncatedReplyError`` for the caller's final fallback.
+    """
+    return call_with_retry(
+        f"[API] {call_type}",
+        lambda: _send_chat_once(
+            client,
+            call_type=call_type,
+            settings=settings,
+            messages=messages,
+            response_format=response_format,
+            max_tokens=max_tokens,
+        ),
+    )
 
 
 def message_text(resp: ChatResult) -> str:
@@ -632,6 +686,30 @@ def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
             "url": f"data:image/png;base64,{screenshot_b64}",
         },
     }
+
+
+def _parse_page_description(text: str) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+    result = json.loads(strip_json_fences(text))
+    if not isinstance(result, dict):
+        raise TypeError("Expected page description to be a JSON object")
+    payload = as_object_dict(result)
+    description = payload.get("page_description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("Expected a non-empty page_description string")
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        raise TypeError("Expected page state to be a JSON object")
+    raw_elements = payload.get("elements", [])
+    if not isinstance(raw_elements, list):
+        raise TypeError("Expected page elements to be a JSON array")
+    elements: list[dict[str, str]] = []
+    for raw_element in raw_elements:
+        element = as_object_dict(raw_element)
+        label, position = element.get("description"), element.get("position")
+        if not isinstance(label, str) or not isinstance(position, str):
+            raise TypeError("Expected element description and position strings")
+        elements.append({"description": label, "position": position})
+    return description, as_object_dict(state), elements
 
 
 def describe_page_and_state(
@@ -704,36 +782,17 @@ def describe_page_and_state(
     ]
 
     def request_description() -> tuple[str, dict[str, object], list[dict[str, str]]]:
-        resp = send_chat(
+        resp = _send_chat_once(
             client,
+            call_type="page_describe_and_state",
             settings=settings,
             messages=messages,
             response_format={"type": "json_object"},
-            retries=0,
         )
-        token_tracker.record("page_describe_and_state", settings.model, resp.usage)
-        raw = strip_json_fences(message_text(resp))
-        result = json.loads(raw)
-        if not isinstance(result, dict):
-            raise TypeError("Expected page description to be a JSON object")
-        payload = as_object_dict(result)
-        description = payload.get("page_description")
-        if not isinstance(description, str) or not description.strip():
-            raise ValueError("Expected a non-empty page_description string")
-        state = payload.get("state", {})
-        if not isinstance(state, dict):
-            raise TypeError("Expected page state to be a JSON object")
-        raw_elements = payload.get("elements", [])
-        if not isinstance(raw_elements, list):
-            raise TypeError("Expected page elements to be a JSON array")
-        elements: list[dict[str, str]] = []
-        for raw_element in raw_elements:
-            element = as_object_dict(raw_element)
-            label, position = element.get("description"), element.get("position")
-            if not isinstance(label, str) or not isinstance(position, str):
-                raise TypeError("Expected element description and position strings")
-            elements.append({"description": label, "position": position})
-        return description, as_object_dict(state), elements
+        try:
+            return _parse_page_description(message_text(resp))
+        except (TypeError, ValueError) as exc:
+            raise UnusableOutputError("Malformed page description") from exc
 
     page_description, state, elements = call_with_retry(
         "[API] page describe and state", request_description
@@ -769,24 +828,27 @@ def verify_same_node(
     screenshot_existing_b64, *_ = _resize_screenshot(screenshot_existing_b64)
 
     prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
-    resp = send_chat(
-        client,
-        settings=settings,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "text", "text": "First screenshot (existing node):"},
-                    build_image_message(screenshot_existing_b64),
-                    {"type": "text", "text": "Second screenshot (new screen):"},
-                    build_image_message(screenshot_new_b64),
-                ],
-            }
-        ],
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("node_verify", settings.model, resp.usage)
+    try:
+        resp = send_chat(
+            client,
+            call_type="node_verify",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": "First screenshot (existing node):"},
+                        build_image_message(screenshot_existing_b64),
+                        {"type": "text", "text": "Second screenshot (new screen):"},
+                        build_image_message(screenshot_new_b64),
+                    ],
+                }
+            ],
+            response_format={"type": "json_object"},
+        )
+    except TruncatedReplyError:
+        return {"same": False, "reason": "reply truncated"}
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
@@ -829,30 +891,34 @@ def normalize_edge(
             input_text += f' → Observation: "{obs}"'
         input_text += "\n"
 
-    resp = send_chat(
-        client,
-        settings=settings,
-        messages=[
-            {
-                "role": "user",
-                "content": f"{NORMALIZE_EDGE_PROMPT}\n\n{input_text}",
-            }
-        ],
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("normalize_edge", settings.model, resp.usage)
+    unchanged = {
+        "instruction_template": instructions[0],
+        "observation_template": target_observations[0] if target_observations else "",
+        "is_template": False,
+        "param_names": [],
+        "examples": [],
+    }
+    try:
+        resp = send_chat(
+            client,
+            call_type="normalize_edge",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{NORMALIZE_EDGE_PROMPT}\n\n{input_text}",
+                }
+            ],
+            response_format={"type": "json_object"},
+        )
+    except TruncatedReplyError:
+        return unchanged
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Failed to parse normalize JSON. Raw:\n%s", raw)
-        return {
-            "instruction_template": instructions[0],
-            "observation_template": target_observations[0] if target_observations else "",
-            "is_template": False,
-            "param_names": [],
-            "examples": [],
-        }
+        return unchanged
 
     logger.debug("Normalize edge: %s", result)
     return result
@@ -972,13 +1038,16 @@ def audit_merge_nodes(
         app_name=app_name,
         graph_description=graph_summary,
     )
-    resp = send_chat(
-        client,
-        settings=settings,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("node_merge_audit", settings.model, resp.usage)
+    try:
+        resp = send_chat(
+            client,
+            call_type="node_merge_audit",
+            settings=settings,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+    except TruncatedReplyError:
+        return {"issues": [], "summary": "reply truncated"}
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
@@ -1045,13 +1114,16 @@ def select_exploration_target(
         app_name=app_name,
         candidates="\n".join(candidate_lines),
     )
-    resp = send_chat(
-        client,
-        settings=settings,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("exploration_target", settings.model, resp.usage)
+    try:
+        resp = send_chat(
+            client,
+            call_type="exploration_target",
+            settings=settings,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+    except TruncatedReplyError:
+        return None
 
     raw = strip_json_fences(message_text(resp))
     try:
@@ -1089,13 +1161,16 @@ def audit_graph(
         app_name=app_name,
         graph_description=graph_summary,
     )
-    resp = send_chat(
-        client,
-        settings=settings,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("graph_audit", settings.model, resp.usage)
+    try:
+        resp = send_chat(
+            client,
+            call_type="graph_audit",
+            settings=settings,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+    except TruncatedReplyError:
+        return {"issues": [], "summary": "reply truncated"}
     finish_reason = resp.choices[0].finish_reason if resp.choices else ""
     raw_original = message_text(resp)
     raw = strip_json_fences(raw_original)
@@ -1120,7 +1195,7 @@ def _embedding_result(
         raise ValueError("Expected one embedding vector from OpenRouter")
     vector = as_float_list(response.data[0].embedding)
     if not vector:
-        raise ValueError("OpenRouter returned an empty, non-finite or non-float embedding")
+        raise UnusableOutputError("OpenRouter returned an empty, non-finite or non-float embedding")
     return vector, response.usage
 
 
@@ -1138,7 +1213,6 @@ def get_embedding(
             model=model,
             input=text,
             encoding_format="float",
-            retries=None,
             timeout_ms=int(request_timeout * 1000),
         )
         return _embedding_result(response)
@@ -1172,7 +1246,6 @@ def get_image_embedding(
             }
         ],
         encoding_format="float",
-        retries=None,
         timeout_ms=int(request_timeout * 1000),
     )
     vector, usage = _embedding_result(response)
@@ -1413,9 +1486,7 @@ def plan_next_action(
             ],
         }
     ]
-    resp = send_chat(client, settings=settings, messages=messages)
-
-    token_tracker.record("instruction", settings.model, resp.usage)
+    resp = send_chat(client, call_type="instruction", settings=settings, messages=messages)
     raw = message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
@@ -1492,7 +1563,7 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, s
         return None, thought, action_desc
 
 
-class _MalformedActionOutput(ValueError):
+class _MalformedActionOutput(UnusableOutputError):
     """An action response can be repaired by requesting a new completion."""
 
 
@@ -1557,9 +1628,8 @@ def predict_next_action(
     ]
 
     def request_action() -> tuple[dict[str, object], str]:
-        # Disable inner retries so transport and malformed output cannot multiply attempts.
-        resp = send_chat(client, settings=settings, messages=messages, retries=0)
-        token_tracker.record("action", settings.model, resp.usage)
+        # One request per attempt, so a failed generation and a malformed action share one re-ask.
+        resp = _send_chat_once(client, call_type="action", settings=settings, messages=messages)
         try:
             tool_args, thought, action_desc = _parse_agent_response(resp)
             if tool_args is None:
@@ -1575,8 +1645,6 @@ def predict_next_action(
 
     try:
         return call_with_retry("[API] action response", request_action)
-    except _MalformedActionOutput:
-        logger.warning(
-            "Action agent parse attempts exhausted, falling back to 'wait'", exc_info=True
-        )
+    except _MalformedActionOutput, TruncatedReplyError:
+        logger.warning("Action agent gave no usable action, falling back to 'wait'", exc_info=True)
         return {"action": "wait", "time": 1}, "Failed to parse action response -> wait"

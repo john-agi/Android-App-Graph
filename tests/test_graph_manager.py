@@ -1981,8 +1981,27 @@ def test_run_audit_returns_the_audit_result(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result["summary"] == "two issues"
     assert fake.calls[0]["app_name"] == "Example"
-    assert fake.calls[0]["settings"] == PAGE_DETAIL
+    assert fake.calls[0]["settings"] == PAGE_DETAIL._replace(request_timeout=300.0)
     assert fake.calls[0]["graph_summary"].startswith("## Nodes (1)")
+
+
+@pytest.mark.parametrize("operation", ["audit", "merge_audit"])
+def test_audits_send_their_own_timeout(
+    operation: str,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    manager = GraphManager(
+        client=router_client, page_detail=PAGE_DETAIL, embedding=EMBEDDING, audit_timeout=120
+    )
+    router_responses.append(chat_response(content='{"issues": [], "summary": "fine"}'))
+    if operation == "audit":
+        assert manager.run_audit()["summary"] == "fine"
+    else:
+        assert manager.run_node_merge_audit()["merged_count"] == 0
+    assert router_requests[0].extensions["timeout"]["read"] == 120
 
 
 def test_run_node_merge_audit_without_a_client_reports_no_merges() -> None:

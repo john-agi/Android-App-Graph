@@ -40,6 +40,7 @@ from android_app_graph.utils import (
     ModelSettings,
     open_client,
     resolve_api_key,
+    resolve_audit_timeout,
     resolve_model_settings,
 )
 from android_app_graph.utils.graph_manager import GraphManager
@@ -623,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
                 page_detail=settings["page_detail"],
                 embedding=settings["embedding"],
                 similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
+                audit_timeout=resolve_audit_timeout(vlm_config),
             )
 
             graph_path = graph_dir / app_name / f"{app_name}.json"

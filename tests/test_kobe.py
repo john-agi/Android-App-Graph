@@ -147,11 +147,11 @@ def test_exploration_wait_recovery_respects_step_limit(
         router_responses.append(chat_response(content="Tap Search"))
         router_responses.extend(
             chat_response(content='{"action":"invented"}' if malformed else '{"action":"wait"}')
-            for _ in range(3 if malformed else 1)
+            for _ in range(2 if malformed else 1)
         )
     kobe.explore(max_steps=2)
     assert kobe.graph.total_steps_completed == 2
     assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 2
-    assert len(router_requests) == (10 if malformed else 6)
+    assert len(router_requests) == (8 if malformed else 6)
     assert len(kobe.graph.graph.edges) == 0
-    assert no_sleep == ([2.0, 4.0, 1, 2.0, 4.0, 1] if malformed else [1, 1])
+    assert no_sleep == [1, 1]

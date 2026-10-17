@@ -11,6 +11,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
 from openrouter.components.security import Security
+from openrouter.types import UNSET
 
 from android_app_graph.utils import (
     REMOVED_KEYS,
@@ -18,6 +19,7 @@ from android_app_graph.utils import (
     ModelSettings,
     open_client,
     resolve_api_key,
+    resolve_audit_timeout,
     resolve_env,
     resolve_model_settings,
     vlm_utils,
@@ -61,8 +63,8 @@ def test_open_client_sends_the_key_and_lets_the_sdk_own_its_http_client() -> Non
     assert client.sdk_configuration.client is None
 
 
-def test_open_client_disables_sdk_retries() -> None:
-    assert open_client("test-key").sdk_configuration.retry_config is None
+def test_open_client_keeps_the_sdk_default_retry_policy() -> None:
+    assert open_client("test-key").sdk_configuration.retry_config is UNSET
 
 
 def test_the_openrouter_key_and_endpoint_are_the_only_ones_on_the_wire(
@@ -137,7 +139,10 @@ def test_one_client_sends_each_roles_model_temperature_and_timeout(
         ModelSettings("openai/gpt-6.1-sol", request_timeout=7),
     ):
         vlm_utils.send_chat(
-            router_client, settings=settings, messages=[{"role": "user", "content": "hi"}]
+            router_client,
+            call_type="chat",
+            settings=settings,
+            messages=[{"role": "user", "content": "hi"}],
         )
     vlm_utils.get_embedding(router_client, "home", "google/gemini-embedding-2", request_timeout=12)
     bodies = [json.loads(request.content) for request in router_requests]
@@ -215,6 +220,22 @@ def test_invalid_explicit_model_cannot_fall_back_to_environment(
     monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/action")
     with pytest.raises(ValueError, match=r"action.model"):
         _settings("action", {"model": value})
+
+
+@pytest.mark.parametrize(("value", "seconds"), [(None, 300.0), (120, 120.0), ("45.5", 45.5)])
+def test_the_audit_timeout_defaults_to_five_minutes(value: object, seconds: float) -> None:
+    page_detail: dict[str, object] = {} if value is None else {"audit_request_timeout": value}
+    assert resolve_audit_timeout({"page_detail": page_detail}) == seconds
+
+
+@pytest.mark.parametrize("value", ["soon", "nan", 0, -1])
+def test_an_invalid_audit_timeout_is_reported_with_the_page_detail_settings(value: object) -> None:
+    config: dict[str, object] = {
+        "page_detail": {"model": "openai/gpt-6.1-sol", "audit_request_timeout": value}
+    }
+    with pytest.raises(ValueError, match=r"page_detail\.audit_request_timeout must be a positive"):
+        resolve_model_settings(config, roles=("page_detail",))
+    resolve_model_settings({**config, "embedding": {"model": "e"}}, roles=("embedding",))
 
 
 def test_image_embedding_settings_inherit_the_embedding_model_and_timeout() -> None:
