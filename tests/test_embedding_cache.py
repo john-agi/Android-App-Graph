@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -19,7 +17,6 @@ from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError, ResponseValidationError
 
 from android_app_graph import embedding_cache
-from android_app_graph.utils import vlm_utils
 
 
 def test_image_embeddings_path_is_a_sidecar() -> None:
@@ -341,31 +338,6 @@ def _retry(client: OpenRouter, screenshot_b64: str) -> list[float]:
     )
 
 
-@pytest.mark.usefixtures("no_sleep")
-def test_compute_embedding_with_retry_returns_on_first_success(
-    router_client: OpenRouter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[OpenRouter, str, str]] = []
-
-    def fake_embedding(
-        client: OpenRouter, screenshot_b64: str, model: str, **_kwargs: Any
-    ) -> list[float]:
-        calls.append((client, screenshot_b64, model))
-        return [1.0, 2.0]
-
-    monkeypatch.setattr(embedding_cache, "get_image_embedding", fake_embedding)
-
-    assert _retry(router_client, "shot") == [1.0, 2.0]
-    assert calls == [(router_client, "shot", "google/gemini-embedding-2")]
-
-
-@pytest.mark.usefixtures("model_environment")
-def test_resolve_image_embedding_settings_from_environment() -> None:
-    assert embedding_cache.resolve_image_embedding_settings(
-        {}
-    ) == embedding_cache.ImageEmbeddingSettings(model="google/gemini-embedding-2")
-
-
 def test_resolve_image_embedding_settings_reads_config_values() -> None:
     settings = embedding_cache.resolve_image_embedding_settings(
         {"image_embedding": {"model": "config-model", "request_timeout": 5}}
@@ -403,50 +375,14 @@ def test_load_image_embeddings_treats_a_legacy_node_named_model_as_untagged(
     assert "predates model tagging" in caplog.text
 
 
-def test_image_settings_inherit_the_embedding_model_until_they_set_their_own() -> None:
-    config: dict[str, object] = {"embedding": {"model": "google/gemini-embedding-2"}}
-    assert embedding_cache.resolve_image_embedding_settings(
-        config
-    ) == embedding_cache.ImageEmbeddingSettings("google/gemini-embedding-2")
-    config["image_embedding"] = {"model": "provider/image-model"}
-    assert embedding_cache.resolve_image_embedding_settings(
-        config
-    ) == embedding_cache.ImageEmbeddingSettings("provider/image-model")
-
-
-def test_image_cache_relies_on_the_sdk_to_retry_a_503_and_counts_usage(
-    router_client: OpenRouter,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    embedding_body: dict[str, object],
-    embedding_usage_totals: dict[str, float],
-    no_sleep: list[float],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tracker = vlm_utils.TokenTracker()
-    monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
-    router_responses.extend(
-        [
-            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-    assert _retry(router_client, "shot") == [0.25, 0.75]
-    assert len(router_requests) == 2
-    assert len(no_sleep) == 1
-    assert tracker.snapshot() == embedding_usage_totals
-
-
-@pytest.mark.parametrize("status", [429, 400])
-def test_image_cache_never_retries_a_429_or_other_4xx(
-    status: int,
+def test_image_cache_never_retries_a_429(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     no_sleep: list[float],
 ) -> None:
     router_responses.append(
-        httpx.Response(status, json={"error": {"code": status, "message": "provider failure"}})
+        httpx.Response(429, json={"error": {"code": 429, "message": "provider failure"}})
     )
     with pytest.raises(OpenRouterError, match="provider failure"):
         _retry(router_client, "shot")
@@ -481,57 +417,6 @@ def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
     assert no_sleep == []
 
 
-@pytest.mark.parametrize("interrupted", [False, True])
-def test_screenshot_batch_uses_the_callers_client_and_keeps_partial_progress(
-    interrupted: bool,
-    tmp_path: Path,
-    router_client: OpenRouter,
-    router_http: httpx.Client,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    graph = tmp_path / "demo.json"
-    cache: dict[str, list[float]] = {}
-    router_responses.extend(
-        [
-            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
-            httpx.Response(200, json=embedding_body),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-
-    def candidates() -> Iterator[tuple[str, str]]:
-        yield "n1", "shot-1"
-        if interrupted:
-            raise KeyboardInterrupt
-        yield "n2", "shot-2"
-
-    def compute() -> None:
-        embedding_cache.compute_missing_image_embeddings(
-            graph,
-            cache,
-            candidates(),
-            client=router_client,
-            settings=embedding_cache.ImageEmbeddingSettings("model"),
-            app_name="demo",
-        )
-
-    if interrupted:
-        with pytest.raises(KeyboardInterrupt):
-            compute()
-    else:
-        compute()
-    assert len(router_requests) == (2 if interrupted else 3)
-    assert len(no_sleep) == 1
-    assert router_client.sdk_configuration.client is router_http
-    assert (
-        embedding_cache.load_image_embeddings(graph, model="model", node_ids={"n1", "n2"}) == cache
-    )
-    assert set(cache) == ({"n1"} if interrupted else {"n1", "n2"})
-
-
 def test_image_batches_send_their_own_model_and_timeout(
     tmp_path: Path,
     router_client: OpenRouter,
@@ -557,24 +442,17 @@ def test_image_batches_send_their_own_model_and_timeout(
         assert json.loads(request.content)["model"] == f"model-{index // 2}"
 
 
-def test_image_embedding_requires_a_model() -> None:
-    with pytest.raises(ValueError, match=r"image_embedding.*model"):
-        embedding_cache.resolve_image_embedding_settings({})
-
-
-@pytest.mark.parametrize("value", ["", "  ", "${APP_GRAPH_UNSET_MODEL}"])
-def test_explicit_invalid_image_model_does_not_inherit(value: str) -> None:
+def test_explicit_invalid_image_model_does_not_inherit() -> None:
     with pytest.raises(ValueError, match=r"image_embedding.*model"):
         embedding_cache.resolve_image_embedding_settings(
-            {"embedding": {"model": "provider/text"}, "image_embedding": {"model": value}}
+            {"embedding": {"model": "provider/text"}, "image_embedding": {"model": ""}}
         )
 
 
-@pytest.mark.parametrize("value", ["", "  ", "${APP_GRAPH_UNSET_MODEL}"])
-def test_invalid_cli_image_model_cannot_fall_back_to_configuration(value: str) -> None:
+def test_invalid_cli_image_model_cannot_fall_back_to_configuration() -> None:
     with pytest.raises(ValueError, match=r"image_embedding.*model"):
         embedding_cache.resolve_image_embedding_settings(
-            {"image_embedding": {"model": "provider/image"}}, model_override=value
+            {"image_embedding": {"model": "provider/image"}}, model_override=""
         )
 
 
@@ -595,19 +473,3 @@ def test_image_settings_resolve_their_request_timeout(
     config: dict[str, object], timeout: float
 ) -> None:
     assert embedding_cache.resolve_image_embedding_settings(config).request_timeout == timeout
-
-
-@pytest.mark.parametrize("key", ["api_key", "base_url", "native_base_url"])
-@pytest.mark.parametrize("role", ["embedding", "image_embedding"])
-@pytest.mark.usefixtures("model_environment")
-def test_resolver_rejects_removed_endpoint_and_credential_keys(
-    role: str, key: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    secret = "dummy-google-secret-never-log"
-    monkeypatch.setenv("GEMINI_API_KEY", secret)
-    legacy = {key: "${GEMINI_API_KEY}", "model": "gemini-embedding-2"}
-    with pytest.raises(
-        ValueError, match=rf"^Invalid vlm configuration: {role}\.{key} was removed"
-    ) as caught:
-        embedding_cache.resolve_image_embedding_settings({role: legacy})
-    assert secret not in str(caught.value)

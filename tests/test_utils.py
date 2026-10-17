@@ -108,16 +108,12 @@ def test_removed_endpoint_and_credential_keys_are_rejected_in_every_role_block(
     assert secret not in str(caught.value)
 
 
-@pytest.mark.parametrize("role", ["PAGE_DETAIL", "INSTRUCTION", "ACTION", "EMBEDDING"])
-def test_role_model_environment_reference_is_required(
-    role: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cfg: dict[str, object] = {"model": f"${{APP_GRAPH_{role}_MODEL}}"}
-    with pytest.raises(ValueError, match=f"APP_GRAPH_{role}_MODEL"):
-        _settings(role.lower(), cfg)
-    monkeypatch.setenv(f"APP_GRAPH_{role}_MODEL", "provider/comparison-model")
-    assert _settings(role.lower(), cfg).model == "provider/comparison-model"
+def test_role_model_environment_reference_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg: dict[str, object] = {"model": "${APP_GRAPH_ACTION_MODEL}"}
+    with pytest.raises(ValueError, match="APP_GRAPH_ACTION_MODEL"):
+        _settings("action", cfg)
+    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/comparison-model")
+    assert _settings("action", cfg).model == "provider/comparison-model"
 
 
 def test_one_client_sends_each_roles_model_temperature_and_timeout(

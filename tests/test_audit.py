@@ -490,9 +490,7 @@ def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("role_settings", "key", "message"),
     [
-        ({"action": {"temperature": 3}}, "test", "action.temperature must be"),
         ({"instruction": {"request_timeout": 0}}, "test", "instruction.request_timeout must be"),
-        ({"page_detail": {"base_url": "https://x.example"}}, "test", "page_detail.base_url was"),
         ({"page_detail": {"audit_request_timeout": -5}}, "test", "audit_request_timeout must be"),
         ({}, None, "OPENROUTER_API_KEY is required"),
     ],

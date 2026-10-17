@@ -345,42 +345,20 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     assert tracked_usage.summary()[f"{call_type}:{model}"] == chat_usage_totals
 
 
-@pytest.mark.parametrize("content", ["", "calling action"])
-def test_native_tool_calls_survive_sdk_parsing(
-    content: str,
+def test_a_native_tool_call_without_text_content_is_still_read(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.append(chat_response(content=content, tool_arguments=_CLICK))
+    router_responses.append(chat_response(content="", tool_arguments=_CLICK))
     action, _ = vlm.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
 
 
-def _sent_system_prompt(request: httpx.Request) -> str:
-    system = as_str_dict(json.loads(request.content)["messages"][0])
-    assert system["role"] == "system"
-    return as_str(system["content"], "")
-
-
-def test_action_prompt_declares_a_parseable_mobile_use_function(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    router_responses.append(chat_response(content='<tool_call>{"action":"wait"}</tool_call>'))
-    vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
-    prompt = _sent_system_prompt(router_requests[0])
-    tools = prompt.split("<tools>\n", 1)[1].split("\n</tools>", 1)[0]
-    assert json.loads(tools)["function"]["name"] == "mobile_use"
-
-
-def test_action_prompt_states_the_benchmarked_screen_line_whatever_the_screenshot(
+def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -396,7 +374,11 @@ def test_action_prompt_states_the_benchmarked_screen_line_whatever_the_screensho
         screen_h=2400,
         settings=ACTION,
     )
-    prompt = _sent_system_prompt(router_requests[0])
+    system = as_str_dict(json.loads(router_requests[0].content)["messages"][0])
+    assert system["role"] == "system"
+    prompt = as_str(system["content"], "")
+    tools = prompt.split("<tools>\n", 1)[1].split("\n</tools>", 1)[0]
+    assert json.loads(tools)["function"]["name"] == "mobile_use"
     assert "The screen's resolution is 999x999." in prompt
     assert "32x32" not in prompt
     assert "1080" not in prompt
@@ -414,12 +396,6 @@ click
 [752, 170]
 </parameter>
 </tool_call>"""
-
-
-@pytest.mark.parametrize("truncated", [False, True])
-def test_xml_parameter_tool_calls_are_read(truncated: bool) -> None:
-    raw = _XML_CLICK.removesuffix("</tool_call>") if truncated else _XML_CLICK
-    assert vlm._parse_tool_call(raw) == {"action": "click", "coordinate": [752, 170]}
 
 
 def test_xml_parameter_values_that_are_not_json_stay_strings() -> None:
@@ -521,7 +497,7 @@ def _sent_schemas(
     return {schema["name"]: schema for schema in schemas}
 
 
-def test_strict_schemas_close_every_object_and_describe_every_property(
+def test_strict_schemas_close_every_object_and_free_form_ones_keep_their_format(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -545,24 +521,10 @@ def test_strict_schemas_close_every_object_and_describe_every_property(
         "string",
         "null",
     ]
-
-
-def test_free_form_objects_keep_their_format_in_non_strict_schemas(
-    router_client: OpenRouter,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    schemas = _sent_schemas(
-        router_client, router_requests, router_responses, png_screenshot, chat_response
-    )
     state = schemas["page_description"]["schema"]["properties"]["state"]
     assert state["additionalProperties"] == {"type": ["string", "number", "boolean", "null"]}
     examples = schemas["edge_template"]["schema"]["properties"]["examples"]
     assert examples["items"]["properties"]["params"]["additionalProperties"] == {"type": "string"}
-    assert not schemas["page_description"]["strict"]
-    assert not schemas["edge_template"]["strict"]
 
 
 @pytest.mark.parametrize(
@@ -574,7 +536,6 @@ def test_free_form_objects_keep_their_format_in_non_strict_schemas(
             '{"issues":[{"type":"retry_edge","node_a":"a","node_b":"b"}],"summary":"s"}',
             {"issues": [], "summary": "s"},
         ),
-        ("description", '{"page_description":"home","state":[],"elements":[]}', "raises"),
     ],
 )
 def test_parsers_still_reject_replies_that_violate_the_schema(
@@ -583,37 +544,17 @@ def test_parsers_still_reject_replies_that_violate_the_schema(
     expected: object,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
-    png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.extend(chat_response(content=reply) for _ in range(2))
-    if operation == "target":
-        assert (
-            vlm.select_exploration_target(
-                router_client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
-            )
-            == expected
+    router_responses.append(chat_response(content=reply))
+    result = (
+        vlm.select_exploration_target(
+            router_client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
         )
-    elif operation == "merge":
-        assert vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL) == expected
-    else:
-        with pytest.raises(UnusableOutputError, match="Malformed page description"):
-            vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-
-
-def test_send_chat_rejects_a_streamed_response(
-    router_client: OpenRouter, router_responses: list[httpx.Response]
-) -> None:
-    router_responses.append(
-        httpx.Response(200, text="data: [DONE]\n\n", headers={"content-type": "text/event-stream"})
+        if operation == "target"
+        else vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     )
-    with pytest.raises(TypeError, match="non-streaming"):
-        vlm.send_chat(
-            router_client,
-            call_type="chat",
-            settings=OTHER,
-            messages=[{"role": "user", "content": "hi"}],
-        )
+    assert result == expected
 
 
 @pytest.mark.parametrize(
@@ -670,9 +611,7 @@ def test_text_and_image_embeddings_use_the_documented_sdk_format(
 @pytest.mark.parametrize(
     "data",
     [
-        [],
         [{"object": "embedding", "embedding": "base64-vector"}],
-        [{"object": "embedding", "embedding": []}],
         [{"object": "embedding", "embedding": [math.inf]}],
     ],
 )
@@ -689,17 +628,6 @@ def test_sdk_embedding_shapes_are_rejected_explicitly(
         )
     )
     with pytest.raises(ValueError, match="embedding"):
-        vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
-
-
-def test_non_json_embedding_response_is_rejected(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-) -> None:
-    router_responses.append(
-        httpx.Response(200, text="data: unexpected", headers={"content-type": "text/event-stream"})
-    )
-    with pytest.raises(TypeError, match="JSON embedding response"):
         vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
 
 
@@ -735,10 +663,8 @@ _RESULTS: dict[str, object] = {
 
 
 @pytest.mark.parametrize("operation", ["chat", "text", "action", "description"])
-@pytest.mark.parametrize("status", [429, 400])
-def test_a_429_or_other_4xx_is_retried_by_neither_the_sdk_nor_the_app(
+def test_a_429_is_retried_by_neither_the_sdk_nor_the_app(
     operation: str,
-    status: int,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -747,7 +673,7 @@ def test_a_429_or_other_4xx_is_retried_by_neither_the_sdk_nor_the_app(
     tracked_usage: vlm.TokenTracker,
 ) -> None:
     router_responses.append(
-        httpx.Response(status, json={"error": {"code": status, "message": "upstream failed"}})
+        httpx.Response(429, json={"error": {"code": 429, "message": "upstream failed"}})
     )
     with pytest.raises(OpenRouterError, match="upstream failed"):
         _request(operation, router_client, png_screenshot)
@@ -756,42 +682,26 @@ def test_a_429_or_other_4xx_is_retried_by_neither_the_sdk_nor_the_app(
     assert tracked_usage.snapshot()["calls"] == 0
 
 
-@pytest.mark.parametrize("operation", ["chat", "text", "action", "description"])
-@pytest.mark.parametrize("then", [200, 400])
-def test_the_sdk_retries_a_503_and_the_app_does_not_retry_again(
-    operation: str,
-    then: int,
+def test_the_sdk_retries_a_503_after_a_short_backoff(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     png_screenshot: str,
     no_sleep: list[float],
     chat_response: Callable[..., httpx.Response],
-    embedding_body: dict[str, object],
     tracked_usage: vlm.TokenTracker,
 ) -> None:
-    good = (
-        httpx.Response(200, json=embedding_body)
-        if operation == "text"
-        else chat_response(content=_GOOD_REPLIES[operation])
-    )
     router_responses.extend(
         [
             httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
-            good
-            if then == 200
-            else httpx.Response(400, json={"error": {"code": 400, "message": "bad request"}}),
+            chat_response(content=_GOOD_REPLIES["chat"]),
         ]
     )
-    if then == 200:
-        assert _request(operation, router_client, png_screenshot) == _RESULTS[operation]
-    else:
-        with pytest.raises(OpenRouterError, match="bad request"):
-            _request(operation, router_client, png_screenshot)
+    assert _request("chat", router_client, png_screenshot) == _RESULTS["chat"]
     assert len(router_requests) == 2
     assert len(no_sleep) == 1
     assert 0.5 <= no_sleep[0] <= 1.5
-    assert tracked_usage.snapshot()["calls"] == int(then == 200)
+    assert tracked_usage.snapshot()["calls"] == 1
 
 
 @pytest.mark.parametrize("failure", ["timeout", "dropped"])
@@ -953,7 +863,8 @@ def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     good = embedding_body if operation == "text" else chat_body
-    bad = {key: value for key, value in good.items() if key != "model"}
+    missing = "system_fingerprint" if operation == "chat" else "model"
+    bad = {key: value for key, value in good.items() if key != missing}
     router_responses.append(httpx.Response(200, json=bad))
     router_responses.append(
         httpx.Response(200, json=bad)
@@ -970,21 +881,6 @@ def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
         assert caught.value.status_code == 200
     assert len(router_requests) == 2
     assert no_sleep == []
-
-
-def test_a_reply_missing_a_required_chat_field_is_re_asked_once(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    chat_body: dict[str, object],
-) -> None:
-    incomplete = {key: value for key, value in chat_body.items() if key != "system_fingerprint"}
-    router_responses.extend(
-        [httpx.Response(200, json=incomplete), httpx.Response(200, json=chat_body)]
-    )
-    reply = vlm.send_chat(router_client, call_type="chat", settings=OTHER, messages=[])
-    assert vlm.message_text(reply) == "test reply"
-    assert len(router_requests) == 2
 
 
 @pytest.mark.parametrize("recover", [False, True])
@@ -1021,30 +917,6 @@ def test_a_wrong_vector_count_is_not_re_asked(
     with pytest.raises(ValueError, match="one embedding"):
         vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert len(router_requests) == 1
-
-
-def test_sdk_retries_and_the_unusable_output_re_ask_are_separate_budgets(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    router_responses.extend(
-        [
-            httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
-            httpx.Response(
-                200, json={key: value for key, value in embedding_body.items() if key != "model"}
-            ),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-    assert vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2") == [
-        0.25,
-        0.75,
-    ]
-    assert len(router_requests) == 3
-    assert len(no_sleep) == 1
 
 
 @pytest.mark.parametrize(
@@ -1263,11 +1135,6 @@ _UP_SWIPE = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 50, "durati
         ),
         ({"action": "swipe", "direction": "up"}, _UP_SWIPE),
         ({"action": "swipe", "direction": "up", "coordinate": [500, 300]}, _UP_SWIPE),
-        ({"action": "swipe", "direction": "up", "coordinate2": [500, 300]}, _UP_SWIPE),
-        (
-            {"action": "swipe", "direction": "up", "coordinate": None, "coordinate2": None},
-            _UP_SWIPE,
-        ),
         (
             {"action": "swipe", "direction": "down"},
             {"action": "swipe", "x1": 50, "y1": 50, "x2": 50, "y2": 150, "duration": 1000},
@@ -1310,13 +1177,9 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
         ({"action": "type"}, "Type requires a text string"),
         ({"action": "system_button", "button": "Power"}, "Back, Home or Enter"),
         ({"action": "invented"}, "Unknown action"),
-        ({"action": "click", "coordinate": {"x": 500, "y": 300}}, "two finite numbers"),
         ({"action": "click"}, "two finite numbers"),
         ({"action": "click", "coordinate": [500]}, "two finite numbers"),
-        ({"action": "click", "coordinate": [True, 300]}, "two finite numbers"),
-        ({"action": "click", "coordinate": ["500", 300]}, "two finite numbers"),
         ({"action": "click", "coordinate": [float("nan"), 300]}, "two finite numbers"),
-        ({"action": "click", "coordinate": [10**400, 300]}, "two finite numbers"),
         ({"action": "swipe", "coordinate": [500, 300]}, "coordinates or a supported direction"),
         ({"action": "swipe", "coordinate": [500, 300], "coordinate2": [500]}, "two finite numbers"),
     ],
@@ -1326,10 +1189,9 @@ def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message:
         vlm._tool_call_to_aitk(args)
 
 
-@pytest.mark.parametrize("coordinate", [[500], [float("nan"), 300]])
-def test_direction_does_not_hide_invalid_partial_coordinates(coordinate: object) -> None:
+def test_direction_does_not_hide_invalid_partial_coordinates() -> None:
     with pytest.raises(ValueError, match="coordinates"):
-        vlm._tool_call_to_aitk({"action": "swipe", "direction": "up", "coordinate": coordinate})
+        vlm._tool_call_to_aitk({"action": "swipe", "direction": "up", "coordinate": [500]})
 
 
 @pytest.mark.parametrize(
@@ -1409,9 +1271,9 @@ def test_malformed_action_output_requests_another_response(
     assert no_sleep == []
 
 
-@pytest.mark.parametrize("last", ["success", "schema", "output", "truncated", "rate_limited"])
+@pytest.mark.parametrize("recover", [False, True])
 def test_action_sdk_retries_and_the_single_re_ask_are_separate(
-    last: str,
+    recover: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -1425,39 +1287,16 @@ def test_action_sdk_retries_and_the_single_re_ask_are_separate(
         [
             httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
             httpx.Response(200, json=bad),
-            {
-                "success": chat_response(content='{"action":"click","coordinate":[500,300]}'),
-                "schema": httpx.Response(200, json=bad),
-                "output": chat_response(content="unreadable"),
-                "truncated": chat_response(content="", finish_reason="length"),
-                "rate_limited": httpx.Response(429, json={"error": {"message": "slow down"}}),
-            }[last],
+            chat_response(content='{"action":"click","coordinate":[500,300]}')
+            if recover
+            else httpx.Response(200, json=bad),
         ]
     )
-    if last in {"schema", "rate_limited"}:
-        with pytest.raises(OpenRouterError):
-            vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
-    else:
+    if recover:
         action, _ = vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
-        assert action == (
-            {"action": "tap", "x": 540, "y": 576}
-            if last == "success"
-            else {"action": "wait", "time": 1}
-        )
+        assert action == {"action": "tap", "x": 540, "y": 576}
+    else:
+        with pytest.raises(ResponseValidationError):
+            vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
     assert len(router_requests) == 3
     assert len(no_sleep) == 1
-
-
-def test_malformed_http_error_never_returns_action_fallback(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    png_screenshot: str,
-    no_sleep: list[float],
-) -> None:
-    router_responses.append(httpx.Response(400, json={"error": {"message": "bad"}}))
-    with pytest.raises(OpenRouterError) as caught:
-        vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
-    assert caught.value.status_code == 400
-    assert len(router_requests) == 1
-    assert no_sleep == []

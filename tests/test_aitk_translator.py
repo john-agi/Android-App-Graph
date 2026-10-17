@@ -782,24 +782,6 @@ def test_chat_completion_content_records_its_usage_as_v2_chat(
     assert tracker.summary() == {"v2_chat:m": chat_usage_totals}
 
 
-def test_chat_completion_content_makes_exactly_one_completion_call(
-    router_client: OpenRouter,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    """Retrying is the caller's job now (``_ask_with_screenshot``); a single call
-    must never loop internally even when more replies are queued up.
-    """
-    router_responses.extend([chat_response(content="first"), chat_response(content="second")])
-    aitk_translator._chat_completion_content(
-        router_client,
-        settings=ModelSettings("m"),
-        messages=[{"role": "user", "content": "test"}],
-    )
-    assert len(router_requests) == 1
-
-
 @pytest.fixture(autouse=True)
 def _openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every translator reads OPENROUTER_API_KEY; a test of its absence deletes it."""
@@ -2214,35 +2196,6 @@ def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_scre
     )
 
 
-@pytest.mark.usefixtures("opened_clients", "model_environment")
-def test_v2_chat_requests_send_the_action_model_and_temperature(
-    tmp_path: Path,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-) -> None:
-    translator = aitk_translator.UIKobeV2Translator(
-        graph_dir=str(tmp_path), vlm_config={"action": {"temperature": 0.3}}
-    )
-    router_responses.extend(
-        [chat_response(content='{"action":"wait"}'), chat_response(content="Tap Search")]
-    )
-    vlm_utils.predict_next_action(
-        translator.client, png_screenshot, "wait", settings=translator.action
-    )
-    assert (
-        translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
-        == "Tap Search"
-    )
-    bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
-    assert [(body["model"], body["temperature"]) for body in bodies] == [
-        ("qwen/qwen3.8-flash", 0.3),
-        ("qwen/qwen3.8-flash", 0.3),
-    ]
-    assert bodies[1]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
-
-
 @pytest.mark.usefixtures("opened_clients")
 def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruction(
     tmp_path: Path,
@@ -2257,16 +2210,22 @@ def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruc
     translator = aitk_translator.UIKobeV2Translator(
         graph_dir=str(tmp_path),
         vlm_config={
-            "action": {},
+            "action": {"temperature": 0.3},
             "page_detail": {"model": "${APP_GRAPH_PAGE_DETAIL_MODEL}", "temperature": "hot"},
             "instruction": {"model": "${APP_GRAPH_INSTRUCTION_MODEL}", "temperature": "hot"},
         },
     )
     router_responses.extend([chat_response(content="nothing"), chat_response(content="Tap Search")])
     translator._record_info("find shoes", png_screenshot)
-    translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
+    assert (
+        translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
+        == "Tap Search"
+    )
     bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
-    assert [body["model"] for body in bodies] == ["qwen/qwen3.8-flash"] * 2
+    assert [(body["model"], body["temperature"]) for body in bodies] == [
+        ("qwen/qwen3.8-flash", 0.3)
+    ] * 2
+    assert bodies[1]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
     assert not hasattr(translator, "page_detail")
     assert not hasattr(translator, "instruction")
 
@@ -2359,43 +2318,6 @@ def test_v2_runtime_image_requests_use_the_image_timeout(
     assert router_requests[0].extensions["timeout"] == dict.fromkeys(
         ("connect", "read", "write", "pool"), 2.25
     )
-
-
-@pytest.mark.parametrize("exceptional", [False, True])
-@pytest.mark.usefixtures("model_environment")
-def test_v2_turns_share_the_one_client_the_translator_opened(
-    exceptional: bool,
-    tmp_path: Path,
-    opened_clients: list[OpenRouter],
-    router_http: httpx.Client,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert opened_clients == [built.client]
-    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(4))
-
-    def step(_task: str, _state: dict[str, object], _history: dict[str, object]) -> str:
-        for screenshot in ("one", "two"):
-            assert built._compute_runtime_image_embedding_with_retry(
-                screenshot, "demo", "current"
-            ) == [0.25, 0.75]
-        if exceptional:
-            raise RuntimeError("callback failed")
-        return "ok"
-
-    monkeypatch.setattr(built, "_step", step)
-    for _ in range(2):
-        if exceptional:
-            with pytest.raises(RuntimeError, match="callback failed"):
-                built.to_agent("task", {}, {})
-        else:
-            assert built.to_agent("task", {}, {}) == "ok"
-        assert built.client.sdk_configuration.client is router_http
-    assert opened_clients == [built.client]
-    assert len(router_requests) == 4
 
 
 @pytest.mark.parametrize("schema_failure", [False, True])

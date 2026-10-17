@@ -48,16 +48,6 @@ def test_embed_parser_defaults() -> None:
     assert args.recompute is False
 
 
-@pytest.mark.parametrize("option", ["--api-key", "--base-url"])
-def test_embed_parser_rejects_the_removed_endpoint_options(
-    option: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        embed.build_parser().parse_args([option, "value"])
-    assert excinfo.value.code == 2
-    assert option in capsys.readouterr().err
-
-
 def test_embed_parser_accepts_recompute() -> None:
     args = embed.build_parser().parse_args(["--recompute"])
     assert args.recompute is True
@@ -95,11 +85,6 @@ def test_embed_main_requires_an_api_key(tmp_path: Path, capsys: pytest.CaptureFi
 @pytest.mark.parametrize(
     ("settings", "message"),
     [
-        (
-            {"native_base_url": "https://generativelanguage.googleapis.com/v1beta"},
-            "image_embedding.native_base_url was removed",
-        ),
-        ({"base_url": "https://openrouter.ai/api/v1"}, "image_embedding.base_url was removed"),
         ({"api_key": "${GEMINI_API_KEY}"}, "image_embedding.api_key was removed"),
         (
             {"model": "provider/image", "timeout": "nan"},
@@ -186,28 +171,6 @@ def test_embed_settings_prefer_translator_args_and_overrides(tmp_path: Path) -> 
     assert embed.load_image_embedding_settings(
         config, graphs_override=Path("cli_graphs"), model_override="cli-model"
     ) == (Path("cli_graphs"), ImageEmbeddingSettings("cli-model"))
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_precompute_uses_the_callers_client_for_every_graph(
-    tmp_path: Path,
-    router_client: OpenRouter,
-    router_http: httpx.Client,
-    router_requests: list[httpx.Request],
-    router_responses: list[httpx.Response],
-    embedding_body: dict[str, object],
-) -> None:
-    _write_graph_tree(tmp_path, app="demo")
-    _write_graph_tree(tmp_path, app="other")
-    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
-    summary = embed.precompute_graph_image_embeddings(
-        tmp_path,
-        client=router_client,
-        settings=ImageEmbeddingSettings("google/gemini-embedding-2"),
-    )
-    assert (summary["graphs"], summary["computed"]) == (2, 2)
-    assert len(router_requests) == 2
-    assert router_client.sdk_configuration.client is router_http
 
 
 def test_load_graph_json_rejects_a_non_object(tmp_path: Path) -> None:

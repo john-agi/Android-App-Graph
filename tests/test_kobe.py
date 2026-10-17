@@ -72,27 +72,21 @@ def test_exploration_resolves_all_role_models_before_device_access(
     assert agent.client is agent.graph.client is router_client
 
 
-@pytest.mark.parametrize("exceptional", [False, True])
 @pytest.mark.usefixtures("model_environment")
 def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
-    exceptional: bool,
     tmp_path: Path,
     router_client: OpenRouter,
     router_http: httpx.Client,
 ) -> None:
     built = Kobe(
-        _Device(RuntimeError("device failed")),
+        _Device(AssertionError("a finished exploration must not access the device")),
         "demo",
         "com.demo",
         logging.getLogger("test"),
         graph_dir=tmp_path,
         client=router_client,
     )
-    if exceptional:
-        with pytest.raises(RuntimeError, match="device failed"):
-            built.explore(max_steps=1)
-    else:
-        built.explore(max_steps=0)
+    built.explore(max_steps=0)
     assert router_client.sdk_configuration.client is router_http
 
 

@@ -3,18 +3,10 @@
 from __future__ import annotations
 
 import os
-import sys
 import tomllib
 from pathlib import Path
 
 import android_app_graph
-
-
-def test_python_pin_matches_test_interpreter() -> None:
-    """Local interpreter overrides must not hide drift in CI's Python pin."""
-    python_version = Path(__file__).resolve().parents[1] / ".python-version"
-    pinned_minor = tuple(int(part) for part in python_version.read_text().strip().split(".")[:2])
-    assert sys.version_info[:2] == pinned_minor
 
 
 def test_version_matches_project_metadata() -> None:

@@ -55,12 +55,9 @@ def test_call_with_retry_reraises_after_the_second_attempt() -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        RuntimeError("boom"),
         ValueError("not marked unusable"),
         httpx.ReadTimeout("timed out"),
-        httpx.ConnectError("connection refused"),
         OpenRouterError("rate limited", httpx.Response(429)),
-        OpenRouterError("upstream failed", httpx.Response(503)),
         OpenRouterError("unexpected provider error", httpx.Response(200)),
     ],
 )

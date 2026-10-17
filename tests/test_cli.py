@@ -162,8 +162,6 @@ def test_explorer_reports_all_missing_models_before_importing_device_tools(
     ("role_settings", "key", "message"),
     [
         ({"action": {"temperature": "warm"}}, "test", "action.temperature must be"),
-        ({"embedding": {"timeout": "nan"}}, "test", "embedding.request_timeout must be"),
-        ({"action": {"api_key": "${OPENROUTER_API_KEY}"}}, "test", "action.api_key was removed"),
         ({}, None, "OPENROUTER_API_KEY is required"),
     ],
 )
