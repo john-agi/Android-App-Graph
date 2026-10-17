@@ -236,7 +236,9 @@ support it; check the model's supported parameters and
 The sample `configs/explore.yaml` sets `temperature: 0.0` on `action` only:
 `qwen/qwen3.8-flash` supports it and upstream UI-KOBE used it, while Sol, the
 sample's page-detail and instruction model, rejects temperature, so those blocks
-leave it out. Zero temperature does not guarantee deterministic output.
+leave it out. The [AITK `controller.yaml` example](#use-android-app-graph-with-aitk)
+sets it on `action` too, since upstream's v2 runtime sent every call at
+temperature 0. Zero temperature does not guarantee deterministic output.
 
 ### Requests and recovery
 
@@ -550,6 +552,7 @@ translator itself stays in the installed package. Verified against AITK commit
          model: ${APP_GRAPH_EMBEDDING_MODEL}
        action:
          model: ${APP_GRAPH_ACTION_MODEL}
+         temperature: 0.0
    ```
 
 6. Smoke-test the import without a device:
