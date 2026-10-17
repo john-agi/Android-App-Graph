@@ -11,20 +11,33 @@ import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-import httpx
-from openai import OpenAI, OpenAIError
+from openrouter import OpenRouter
+from openrouter.components.chatcontenttext import ChatContentText
+from openrouter.components.chatresult import ChatResult
+from openrouter.components.chatusage import (
+    ChatUsage,
+    ChatUsageCompletionTokensDetails,
+    ChatUsagePromptTokensDetails,
+)
+from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
+from openrouter.types import UNSET
 from PIL import Image
 
-from android_app_graph.payloads import as_float_list, as_int, as_str
+from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
+from android_app_graph.retrying import UnusableOutputError, call_with_retry
+from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
 if TYPE_CHECKING:
-    from openai.types import CompletionUsage
-    from openai.types.chat import (
-        ChatCompletion,
-        ChatCompletionContentPartImageParam,
-        ChatCompletionMessageParam,
+    from openrouter.components.chatcontentimage import ChatContentImageTypedDict
+    from openrouter.components.chatmessages import ChatMessagesTypedDict
+    from openrouter.components.chatrequest import (
+        ChatRequestPluginTypedDict,
+        ResponseFormatTypedDict,
     )
-    from openai.types.create_embedding_response import Usage as EmbeddingUsage
+    from openrouter.operations.createembeddings import (
+        CreateEmbeddingsResponse,
+        CreateEmbeddingsUsage,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -99,102 +112,112 @@ def score_by_cosine[K](
     return scored
 
 
+_USAGE_COUNTERS = (
+    "calls",
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "cost",
+)
+
+
+def _cached_prompt_tokens(usage: ChatUsage | CreateEmbeddingsUsage) -> int:
+    details = usage.prompt_tokens_details if isinstance(usage, ChatUsage) else None
+    if isinstance(details, ChatUsagePromptTokensDetails) and isinstance(details.cached_tokens, int):
+        return details.cached_tokens
+    return 0
+
+
+def _reasoning_tokens(usage: ChatUsage | CreateEmbeddingsUsage | None) -> int | None:
+    details = usage.completion_tokens_details if isinstance(usage, ChatUsage) else None
+    if not isinstance(details, ChatUsageCompletionTokensDetails):
+        return None
+    return details.reasoning_tokens if isinstance(details.reasoning_tokens, int) else None
+
+
 class TokenTracker:
-    """Accumulates token usage across all API calls, broken down by call type."""
+    """Accumulates token usage and cost across all API calls, broken down by call type."""
 
     def __init__(self) -> None:
-        self._usage: dict[str, dict[str, int]] = {}
+        self._usage: dict[str, dict[str, float]] = {}
 
     def record(
         self,
         call_type: str,
         model: str,
-        usage: CompletionUsage | EmbeddingUsage | None,
+        usage: ChatUsage | CreateEmbeddingsUsage | None,
     ) -> None:
-        """Record token usage from an API response.
+        """Record the usage OpenRouter reported for one completed request.
 
         Args:
-            call_type: e.g. "page_description", "page_detail", "embedding",
-                       "instruction", "action"
+            call_type: e.g. "page_describe_and_state", "embedding", "instruction", "action"
             model: The model name used.
-            usage: The response.usage object (has prompt_tokens, completion_tokens, total_tokens).
+            usage: The response's usage; cached prompt tokens and reasoning tokens
+                count only when the provider reports them, and cost is in USD.
         """
         if usage is None:
             return
-        key = f"{call_type}:{model}"
-        if key not in self._usage:
-            self._usage[key] = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "calls": 0,
-            }
-        self._usage[key]["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-        self._usage[key]["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
-        self._usage[key]["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
-        self._usage[key]["calls"] += 1
+        totals = self._usage.setdefault(f"{call_type}:{model}", dict.fromkeys(_USAGE_COUNTERS, 0))
+        totals["calls"] += 1
+        totals["prompt_tokens"] += usage.prompt_tokens
+        totals["cached_prompt_tokens"] += _cached_prompt_tokens(usage)
+        totals["completion_tokens"] += (
+            usage.completion_tokens if isinstance(usage, ChatUsage) else 0
+        )
+        totals["reasoning_tokens"] += _reasoning_tokens(usage) or 0
+        totals["total_tokens"] += usage.total_tokens
+        totals["cost"] += usage.cost if isinstance(usage.cost, float) else 0.0
 
-    def snapshot(self) -> dict[str, int]:
+    def snapshot(self) -> dict[str, float]:
         """Return current totals as a flat dict."""
-        total = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "calls": 0,
-        }
-        for u in self._usage.values():
-            for k in total:
-                total[k] += u[k]
+        total = dict.fromkeys(_USAGE_COUNTERS, 0.0)
+        for totals in self._usage.values():
+            for counter in _USAGE_COUNTERS:
+                total[counter] += totals[counter]
         return total
 
     def snapshot_by_type(self) -> dict[str, int]:
         """Return total_tokens per call_type (aggregated across models).
 
-        E.g. {"page_description": 500, "page_detail": 1200, "embedding": 20, ...}
+        E.g. {"page_describe_and_state": 1200, "embedding": 20, ...}
         """
         by_type: dict[str, int] = {}
-        for key, u in self._usage.items():
+        for key, totals in self._usage.items():
             call_type = key.split(":")[0]
-            by_type[call_type] = by_type.get(call_type, 0) + u["total_tokens"]
+            by_type[call_type] = by_type.get(call_type, 0) + int(totals["total_tokens"])
         return by_type
 
-    def summary(self) -> dict[str, dict[str, int]]:
+    def summary(self) -> dict[str, dict[str, float]]:
         """Return accumulated usage by call_type:model."""
         return dict(self._usage)
 
     def print_summary(self) -> None:
-        """Log a formatted summary table of all token usage."""
+        """Log a formatted summary table of all token usage and cost."""
         if not self._usage:
             logger.info("No API calls recorded.")
             return
 
-        total_prompt = 0
-        total_completion = 0
-        total_all = 0
-        total_calls = 0
-
-        lines = ["", "=" * 80, "TOKEN USAGE SUMMARY", "=" * 80]
-        lines.append(
-            f"{'Call Type':<40} {'Calls':>6} {'Prompt':>10} {'Completion':>10} {'Total':>10}"
-        )
-        lines.append("-" * 80)
-
-        for key, u in sorted(self._usage.items()):
-            lines.append(
-                f"{key:<40} {u['calls']:>6} {u['prompt_tokens']:>10} "
-                f"{u['completion_tokens']:>10} {u['total_tokens']:>10}"
+        def row(label: str, totals: dict[str, float]) -> str:
+            return (
+                f"{label:<40} {totals['calls']:>6.0f} {totals['prompt_tokens']:>10.0f} "
+                f"{totals['cached_prompt_tokens']:>8.0f} {totals['completion_tokens']:>10.0f} "
+                f"{totals['reasoning_tokens']:>9.0f} {totals['total_tokens']:>10.0f} "
+                f"{totals['cost']:>12.6f}"
             )
-            total_prompt += u["prompt_tokens"]
-            total_completion += u["completion_tokens"]
-            total_all += u["total_tokens"]
-            total_calls += u["calls"]
 
-        lines.append("-" * 80)
+        width = 112
+        lines = ["", "=" * width, "TOKEN USAGE SUMMARY", "=" * width]
         lines.append(
-            f"{'TOTAL':<40} {total_calls:>6} {total_prompt:>10} "
-            f"{total_completion:>10} {total_all:>10}"
+            f"{'Call Type':<40} {'Calls':>6} {'Prompt':>10} {'Cached':>8} {'Completion':>10} "
+            f"{'Reasoning':>9} {'Total':>10} {'Cost (USD)':>12}"
         )
-        lines.append("=" * 80)
+        lines.append("-" * width)
+        lines.extend(row(key, totals) for key, totals in sorted(self._usage.items()))
+        lines.append("-" * width)
+        lines.append(row("TOTAL", self.snapshot()))
+        lines.append("=" * width)
 
         logger.info("\n".join(lines))
 
@@ -393,6 +416,121 @@ if needed, but it MUST explicitly name what menu is shown (e.g. "results page wi
 "existing_description": "more specific description for the first screenshot", \
 "new_description": "more specific description for the second screenshot"}}"""
 
+_SEVERITY: dict[str, Any] = {
+    "type": "string",
+    "enum": ["high", "medium", "low"],
+    "description": "How likely and how harmful the issue is.",
+}
+
+_EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "instruction_template": {
+            "type": "string",
+            "description": "The instruction with each user-provided value replaced by a "
+            "{placeholder}, or the instruction unchanged when there is none.",
+        },
+        "observation_template": {
+            "type": "string",
+            "description": "The observation normalized the same way, or an empty string.",
+        },
+        "is_template": {
+            "type": "boolean",
+            "description": "Whether any placeholder was inserted.",
+        },
+        "param_names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The placeholder names; empty when is_template is false.",
+        },
+        "examples": {
+            "type": "array",
+            "description": "Each original instruction with the value each placeholder took.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "description": "An original instruction."},
+                    "params": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Placeholder name to the value it took.",
+                    },
+                },
+                "required": ["instruction", "params"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [
+        "instruction_template",
+        "observation_template",
+        "is_template",
+        "param_names",
+        "examples",
+    ],
+    "additionalProperties": False,
+}
+
+_PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "page_description": {
+            "type": "string",
+            "description": "The screen type in under 10 words, with no user-specific content.",
+        },
+        "state": {
+            "type": "object",
+            "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
+            "description": "Flat dynamic state: snake_case keys mapped to the current value, "
+            "or null when it cannot be read.",
+        },
+        "elements": {
+            "type": "array",
+            "description": "Interactable elements, roughly top to bottom and left to right.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "A short label, under 8 words, using the screen's text.",
+                    },
+                    "position": {
+                        "type": "string",
+                        "description": "The general screen region, never pixel coordinates.",
+                    },
+                },
+                "required": ["description", "position"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["page_description", "state", "elements"],
+    "additionalProperties": False,
+}
+
+_NODE_VERIFICATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "same": {
+            "type": "boolean",
+            "description": "Whether the two screenshots show the same screen.",
+        },
+        "reason": {"type": "string", "description": "A brief explanation."},
+        "existing_description": {
+            "type": ["string", "null"],
+            "description": "When the screens differ, a more specific description of the first "
+            "screenshot; null when they are the same.",
+        },
+        "new_description": {
+            "type": ["string", "null"],
+            "description": "When the screens differ, a more specific description of the second "
+            "screenshot; null when they are the same.",
+        },
+    },
+    "required": ["same", "reason", "existing_description", "new_description"],
+    "additionalProperties": False,
+}
+
 NEXT_ACTION_PLAN_PROMPT = """\
 You are an exploration planner for a mobile app. Your goal is to systematically explore \
 the app to discover as many DISTINCT screens and functionalities as possible.
@@ -533,7 +671,7 @@ You may call one or more functions to assist with the user query.
 
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
-{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is {screen_w}x{screen_h}.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application background menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}
+{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is 999x999.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application background menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}}}
 </tools>
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
@@ -574,25 +712,113 @@ Your task: {instruction}
 Look at the screenshot and execute the SINGLE next action to complete the task above.
 Focus on the task instruction. The overall goal is only for context when the instruction is ambiguous."""
 
-DEFAULT_PAGE_DETAIL_MODEL = "gpt-5.4"
-DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2-preview"
-DEFAULT_INSTRUCTION_MODEL = "gpt-5.4"
-DEFAULT_ACTION_MODEL = "qwen3.5-plus-2026-02-15"
+
+def _structured_output(
+    name: str, schema: dict[str, Any], *, strict: bool = True
+) -> ResponseFormatTypedDict:
+    """Ask for JSON matching ``schema``; parsers still validate, since not every provider does."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": strict, "schema_": schema},
+    }
 
 
-def _message_text(resp: ChatCompletion) -> str:
-    """Return the assistant text of a completion, stripped.
+class GenerationFailedError(UnusableOutputError):
+    """The provider reported ``finish_reason: "error"``: generation failed partway."""
 
-    ``message.content`` is ``None`` when the model answered with tool calls or
-    with nothing at all; the callers all treat unparsable text as a parse
-    failure and fall back, so an empty string is the honest value here.
+
+class TruncatedReplyError(Exception):
+    """The reply hit its token limit (``finish_reason: "length"``); asking again cannot help."""
+
+
+def _send_chat_once(
+    client: OpenRouter,
+    *,
+    call_type: str,
+    settings: ModelSettings,
+    messages: list[ChatMessagesTypedDict],
+    response_format: ResponseFormatTypedDict | None = None,
+    plugins: list[ChatRequestPluginTypedDict] | None = None,
+    max_tokens: int | None = None,
+) -> ChatResult:
+    """Send one completion, record its usage and check how it finished."""
+    response: object = client.chat.send(
+        model=settings.model,
+        messages=messages,
+        response_format=response_format,
+        plugins=plugins,
+        max_tokens=max_tokens if max_tokens is not None else UNSET,
+        temperature=settings.temperature if settings.temperature is not None else UNSET,
+        stream=False,
+        timeout_ms=int(settings.request_timeout * 1000),
+    )
+    if not isinstance(response, ChatResult):
+        raise TypeError("Expected a non-streaming OpenRouter chat response")
+    token_tracker.record(call_type, settings.model, response.usage)
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    if finish_reason == "error":
+        raise GenerationFailedError(f"{call_type}: the provider reported finish_reason=error")
+    if finish_reason == "length":
+        reasoning_tokens = _reasoning_tokens(response.usage)
+        logger.warning(
+            "%s: the reply hit its token limit (finish_reason=length%s); not asking again",
+            call_type,
+            "" if reasoning_tokens is None else f", reasoning_tokens={reasoning_tokens}",
+        )
+        raise TruncatedReplyError(f"{call_type}: the reply hit its token limit")
+    if finish_reason == "content_filter":
+        logger.warning(
+            "%s: the provider's content filter stopped the reply (finish_reason=content_filter)",
+            call_type,
+        )
+    return response
+
+
+def send_chat(
+    client: OpenRouter,
+    *,
+    call_type: str,
+    settings: ModelSettings,
+    messages: list[ChatMessagesTypedDict],
+    response_format: ResponseFormatTypedDict | None = None,
+    plugins: list[ChatRequestPluginTypedDict] | None = None,
+    max_tokens: int | None = None,
+) -> ChatResult:
+    """Send a non-streaming completion, asking once more for unusable output.
+
+    Unusable output is a failed generation (``finish_reason: "error"``) or a 2xx
+    reply the SDK cannot validate. ``call_type`` names the call in usage records
+    and logs. A truncated reply raises ``TruncatedReplyError`` for the caller's
+    final fallback.
     """
+    return call_with_retry(
+        f"[API] {call_type}",
+        lambda: _send_chat_once(
+            client,
+            call_type=call_type,
+            settings=settings,
+            messages=messages,
+            response_format=response_format,
+            plugins=plugins,
+            max_tokens=max_tokens,
+        ),
+    )
+
+
+def message_text(resp: ChatResult) -> str:
+    """Read text, multipart text, null or omitted content from the SDK response."""
+    if not resp.choices:
+        return ""
     content = resp.choices[0].message.content
-    return content.strip() if content is not None else ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(part.text for part in content if isinstance(part, ChatContentText)).strip()
+    return ""
 
 
-def build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImageParam:
-    """Build an OpenAI image_url message part from a base64 screenshot."""
+def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
+    """Build an OpenRouter image_url message part from a base64 screenshot."""
     return {
         "type": "image_url",
         "image_url": {
@@ -601,14 +827,39 @@ def build_image_message(screenshot_b64: str) -> ChatCompletionContentPartImagePa
     }
 
 
+def _parse_page_description(text: str) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+    result = json.loads(strip_json_fences(text))
+    if not isinstance(result, dict):
+        raise TypeError("Expected page description to be a JSON object")
+    payload = as_object_dict(result)
+    description = payload.get("page_description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("Expected a non-empty page_description string")
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        raise TypeError("Expected page state to be a JSON object")
+    raw_elements = payload.get("elements", [])
+    if not isinstance(raw_elements, list):
+        raise TypeError("Expected page elements to be a JSON array")
+    elements: list[dict[str, str]] = []
+    for raw_element in raw_elements:
+        element = as_object_dict(raw_element)
+        label, position = element.get("description"), element.get("position")
+        if not isinstance(label, str) or not isinstance(position, str):
+            raise TypeError("Expected element description and position strings")
+        elements.append({"description": label, "position": position})
+    return description, as_object_dict(state), elements
+
+
 def describe_page_and_state(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_b64: str,
     existing_nodes: list[str] | None = None,
     existing_keys: list[str] | None = None,
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
-) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
-    """Call VLM once to get a fresh page description, dynamic state, and interactable elements.
+    *,
+    settings: ModelSettings,
+) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+    """Describe a screen, retrying failed requests and malformed descriptions.
 
     The model always writes its own description based on what it sees. Existing
     node descriptions are provided as context so the model can disambiguate
@@ -659,7 +910,7 @@ def describe_page_and_state(
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
     )
-    messages: list[ChatCompletionMessageParam] = [
+    messages: list[ChatMessagesTypedDict] = [
         {
             "role": "user",
             "content": [
@@ -668,27 +919,28 @@ def describe_page_and_state(
             ],
         }
     ]
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("page_describe_and_state", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse page+state JSON. Raw:\n%s", raw)
-        return raw[:100], {}, []
 
-    page_description = as_str(result.get("page_description"), "unknown screen")
-    state = result.get("state", {})
-    if not isinstance(state, dict):
-        state = {}
-    elements = result.get("elements", [])
-    if not isinstance(elements, list):
-        elements = []
+    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]]]:
+        resp = _send_chat_once(
+            client,
+            call_type="page_describe_and_state",
+            settings=settings,
+            messages=messages,
+            # Not strict: "state" has free-form keys, which strict mode cannot express
+            # because it needs every key listed and additionalProperties false.
+            response_format=_structured_output(
+                "page_description", _PAGE_DESCRIPTION_SCHEMA, strict=False
+            ),
+            plugins=[{"id": "response-healing"}],
+        )
+        try:
+            return _parse_page_description(message_text(resp))
+        except (TypeError, ValueError) as exc:
+            raise UnusableOutputError("Malformed page description") from exc
+
+    page_description, state, elements = call_with_retry(
+        "[API] page describe and state", request_description
+    )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
@@ -696,11 +948,12 @@ def describe_page_and_state(
 
 
 def verify_same_node(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_new_b64: str,
     screenshot_existing_b64: str,
     existing_description: str,
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Compare two screenshots to decide if they are the same screen.
 
@@ -719,25 +972,29 @@ def verify_same_node(
     screenshot_existing_b64, *_ = _resize_screenshot(screenshot_existing_b64)
 
     prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "text", "text": "First screenshot (existing node):"},
-                    build_image_message(screenshot_existing_b64),
-                    {"type": "text", "text": "Second screenshot (new screen):"},
-                    build_image_message(screenshot_new_b64),
-                ],
-            }
-        ],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("node_verify", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
+    try:
+        resp = send_chat(
+            client,
+            call_type="node_verify",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": "First screenshot (existing node):"},
+                        build_image_message(screenshot_existing_b64),
+                        {"type": "text", "text": "Second screenshot (new screen):"},
+                        build_image_message(screenshot_new_b64),
+                    ],
+                }
+            ],
+            response_format=_structured_output("node_verification", _NODE_VERIFICATION_SCHEMA),
+            plugins=[{"id": "response-healing"}],
+        )
+    except TruncatedReplyError:
+        return {"same": False, "reason": "reply truncated"}
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -749,10 +1006,11 @@ def verify_same_node(
 
 
 def normalize_edge(
-    client: OpenAI,
+    client: OpenRouter,
     instructions: list[str],
     target_observations: list[str] | None = None,
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Normalize edge instructions into a reusable template.
 
@@ -778,30 +1036,38 @@ def normalize_edge(
             input_text += f' → Observation: "{obs}"'
         input_text += "\n"
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": f"{NORMALIZE_EDGE_PROMPT}\n\n{input_text}",
-            }
-        ],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("normalize_edge", model, resp.usage)
-    raw = strip_json_fences(_message_text(resp))
+    unchanged = {
+        "instruction_template": instructions[0],
+        "observation_template": target_observations[0] if target_observations else "",
+        "is_template": False,
+        "param_names": [],
+        "examples": [],
+    }
+    try:
+        resp = send_chat(
+            client,
+            call_type="normalize_edge",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{NORMALIZE_EDGE_PROMPT}\n\n{input_text}",
+                }
+            ],
+            # Not strict: each example's "params" maps free-form placeholder names.
+            response_format=_structured_output(
+                "edge_template", _EDGE_TEMPLATE_SCHEMA, strict=False
+            ),
+            plugins=[{"id": "response-healing"}],
+        )
+    except TruncatedReplyError:
+        return unchanged
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Failed to parse normalize JSON. Raw:\n%s", raw)
-        return {
-            "instruction_template": instructions[0],
-            "observation_template": target_observations[0] if target_observations else "",
-            "is_template": False,
-            "param_names": [],
-            "examples": [],
-        }
+        return unchanged
 
     logger.debug("Normalize edge: %s", result)
     return result
@@ -909,25 +1175,144 @@ Return ONLY a JSON object:
 }}"""
 
 
+_MERGE_NODES_ISSUE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": ["merge_nodes"], "description": "The issue type."},
+        "severity": _SEVERITY,
+        "description": {
+            "type": "string",
+            "description": "Why these two nodes may be the same screen.",
+        },
+        "node_a": {"type": "string", "description": "The first node_id."},
+        "node_b": {"type": "string", "description": "The second node_id."},
+    },
+    "required": ["type", "severity", "description", "node_a", "node_b"],
+    "additionalProperties": False,
+}
+
+_NODE_MERGE_AUDIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": _MERGE_NODES_ISSUE,
+            "description": "Likely duplicate screen templates to verify for merging.",
+        },
+        "summary": {"type": "string", "description": "A short summary."},
+    },
+    "required": ["issues", "summary"],
+    "additionalProperties": False,
+}
+
+_GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issues": {
+            "type": "array",
+            "description": "Every merge_nodes, retry_edge and explore_node issue found.",
+            "items": {
+                "anyOf": [
+                    _MERGE_NODES_ISSUE,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["retry_edge"],
+                                "description": "The issue type.",
+                            },
+                            "severity": _SEVERITY,
+                            "description": {
+                                "type": "string",
+                                "description": "Why this edge looks wrong.",
+                            },
+                            "source_node": {
+                                "type": "string",
+                                "description": "The node_id where the edge starts.",
+                            },
+                            "target_node": {
+                                "type": "string",
+                                "description": "The node_id the edge currently goes to.",
+                            },
+                            "instruction": {
+                                "type": "string",
+                                "description": "The edge instruction that looks mismatched.",
+                            },
+                        },
+                        "required": [
+                            "type",
+                            "severity",
+                            "description",
+                            "source_node",
+                            "target_node",
+                            "instruction",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["explore_node"],
+                                "description": "The issue type.",
+                            },
+                            "severity": _SEVERITY,
+                            "description": {
+                                "type": "string",
+                                "description": "What is likely missing from this node.",
+                            },
+                            "node": {
+                                "type": "string",
+                                "description": "The node_id that needs more exploration.",
+                            },
+                            "expected_pages": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Pages that should be reachable from this node.",
+                            },
+                        },
+                        "required": ["type", "severity", "description", "node", "expected_pages"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+        },
+        "summary": {
+            "type": "string",
+            "description": "A one-paragraph overall assessment of graph quality.",
+        },
+    },
+    "required": ["issues", "summary"],
+    "additionalProperties": False,
+}
+
+
 def audit_merge_nodes(
-    client: OpenAI,
+    client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Ask a model only for duplicate-node merge candidates."""
     prompt = NODE_MERGE_AUDIT_PROMPT.format(
         app_name=app_name,
         graph_description=graph_summary,
     )
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("node_merge_audit", model, resp.usage)
-    raw = strip_json_fences((resp.choices[0].message.content or "").strip())
+    try:
+        resp = send_chat(
+            client,
+            call_type="node_merge_audit",
+            settings=settings,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
+            plugins=[{"id": "response-healing"}],
+        )
+    except TruncatedReplyError:
+        return {"issues": [], "summary": "reply truncated"}
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -962,11 +1347,28 @@ Return ONLY a JSON object:
 }}"""
 
 
+def _exploration_target_schema(node_ids: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "node_id": {
+                "type": "string",
+                "enum": node_ids,
+                "description": "The candidate node_id most urgent to continue exploring from.",
+            },
+            "reason": {"type": "string", "description": "A short reason."},
+        },
+        "required": ["node_id", "reason"],
+        "additionalProperties": False,
+    }
+
+
 def select_exploration_target(
-    client: OpenAI,
+    client: OpenRouter,
     app_name: str,
     candidates: list[dict[str, Any]],
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    settings: ModelSettings,
 ) -> str | None:
     """Select a node for periodic live exploration coverage balancing."""
     if not candidates:
@@ -992,15 +1394,21 @@ def select_exploration_target(
         app_name=app_name,
         candidates="\n".join(candidate_lines),
     )
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("exploration_target", model, resp.usage)
+    try:
+        resp = send_chat(
+            client,
+            call_type="exploration_target",
+            settings=settings,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=_structured_output(
+                "exploration_target", _exploration_target_schema(sorted(valid_ids))
+            ),
+            plugins=[{"id": "response-healing"}],
+        )
+    except TruncatedReplyError:
+        return None
 
-    raw = strip_json_fences(_message_text(resp))
+    raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -1018,10 +1426,11 @@ def select_exploration_target(
 
 
 def audit_graph(
-    client: OpenAI,
+    client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
-    model: str = DEFAULT_PAGE_DETAIL_MODEL,
+    *,
+    settings: ModelSettings,
 ) -> dict[str, Any]:
     """Ask a model to review the graph structure for anomalies.
 
@@ -1035,16 +1444,19 @@ def audit_graph(
         app_name=app_name,
         graph_description=graph_summary,
     )
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    token_tracker.record("graph_audit", model, resp.usage)
-    choice = resp.choices[0]
-    finish_reason = getattr(choice, "finish_reason", "")
-    raw_original = (choice.message.content or "").strip()
+    try:
+        resp = send_chat(
+            client,
+            call_type="graph_audit",
+            settings=settings,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
+            plugins=[{"id": "response-healing"}],
+        )
+    except TruncatedReplyError:
+        return {"issues": [], "summary": "reply truncated"}
+    finish_reason = resp.choices[0].finish_reason if resp.choices else ""
+    raw_original = message_text(resp)
     raw = strip_json_fences(raw_original)
     try:
         return json.loads(raw)
@@ -1058,105 +1470,91 @@ def audit_graph(
         return {"issues": [], "summary": "parse error"}
 
 
-def get_embedding(client: OpenAI, text: str, model: str = DEFAULT_EMBEDDING_MODEL) -> list[float]:
-    """Get an embedding vector for a text string."""
-    resp = client.embeddings.create(model=model, input=text)
-    token_tracker.record("embedding", model, resp.usage)
-    return resp.data[0].embedding
+def _embedding_vector(
+    response: CreateEmbeddingsResponse, *, call_type: str, model: str
+) -> list[float]:
+    """Record a completed response's usage, then return its one finite vector."""
+    if not isinstance(response, CreateEmbeddingsResponseBody):
+        raise TypeError("Expected an OpenRouter JSON embedding response")
+    token_tracker.record(call_type, model, response.usage)
+    if len(response.data) != 1:
+        raise ValueError("Expected one embedding vector from OpenRouter")
+    vector = as_float_list(response.data[0].embedding)
+    if not vector:
+        raise UnusableOutputError("OpenRouter returned an empty, non-finite or non-float embedding")
+    return vector
+
+
+def get_embedding(
+    client: OpenRouter,
+    text: str,
+    model: str,
+    *,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> list[float]:
+    """Get a text embedding through the official OpenRouter SDK."""
+
+    def request_embedding() -> list[float]:
+        response = client.embeddings.generate(
+            model=model,
+            input=text,
+            encoding_format="float",
+            timeout_ms=int(request_timeout * 1000),
+        )
+        return _embedding_vector(response, call_type="embedding", model=model)
+
+    return call_with_retry("[API] text embedding", request_embedding)
 
 
 def get_image_embedding(
-    client: OpenAI, screenshot_b64: str, model: str = DEFAULT_EMBEDDING_MODEL
+    client: OpenRouter,
+    screenshot_b64: str,
+    model: str,
+    *,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> list[float]:
-    """Get an embedding vector for a screenshot.
+    """Embed a screenshot using OpenRouter's documented multimodal content array.
 
-    Multimodal embedding providers expose image inputs through different
-    OpenAI-compatible shapes. Try common OpenAI image_url and Gemini content
-    shapes before surfacing the provider error.
+    The shared image-cache loop owns retries for both runtime and offline use.
     """
-    data_url = f"data:image/png;base64,{screenshot_b64}"
-    # Provider-specific shapes that the SDK's own `input` type does not describe.
-    attempts: list[Any] = [
-        [{"type": "image_url", "image_url": {"url": data_url}}],
-        {"type": "image_url", "image_url": {"url": data_url}},
-        [{"mime_type": "image/png", "data": screenshot_b64}],
-        {"mime_type": "image/png", "data": screenshot_b64},
-        [{"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]}],
-        {"parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]},
-        [
+    response = client.embeddings.generate(
+        model=model,
+        input=[
             {
-                "content": {
-                    "parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]
-                }
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                    }
+                ]
             }
         ],
-        {
-            "content": {
-                "parts": [{"inline_data": {"mime_type": "image/png", "data": screenshot_b64}}]
-            }
-        },
-    ]
-
-    errors = []
-    for input_payload in attempts:
-        try:
-            resp = client.embeddings.create(model=model, input=input_payload)
-            token_tracker.record("image_embedding", model, resp.usage)
-            return resp.data[0].embedding
-        except (OpenAIError, TypeError, ValueError) as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
-
-    raise RuntimeError(
-        "Image embedding request failed for all known payload formats: " + " | ".join(errors)
+        encoding_format="float",
+        timeout_ms=int(request_timeout * 1000),
     )
+    return _embedding_vector(response, call_type="image_embedding", model=model)
 
 
-def get_gemini_native_image_embedding(
-    api_key: str,
-    screenshot_b64: str,
-    model: str = "gemini-embedding-2",
-    base_url: str = "https://generativelanguage.googleapis.com/v1beta",
-) -> list[float]:
-    """Get an image embedding through Gemini's native REST API."""
-    base_url = base_url.rstrip("/")
-    model_name = model if model.startswith("models/") else f"models/{model}"
-    url = f"{base_url}/{model_name}:embedContent"
-    payload = {
-        "content": {
-            "parts": [
-                {
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": screenshot_b64,
-                    },
-                }
-            ],
-        },
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
-    }
-    resp = httpx.post(url, headers=headers, json=payload, timeout=60)
-    try:
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeError(f"{resp.status_code} {resp.text}") from exc
+def _parse_xml_parameters(block: str) -> dict[str, object] | None:
+    """Read ``<function=...>`` with one ``<parameter=name>value</parameter>`` per argument.
 
-    data = resp.json()
-    values = data.get("embedding", {}).get("values")
-    if not values and data.get("embeddings"):
-        values = data["embeddings"][0].get("values")
-    embedding = as_float_list(values)
-    if not embedding:
-        raise RuntimeError(
-            f"Gemini native image embedding response missing embedding values: {data}"
-        )
-    return embedding
+    A parameter cut off before its closing tag is dropped, so a truncated reply
+    keeps only the arguments it completed.
+    """
+    if "<function=" not in block:
+        return None
+    arguments: dict[str, object] = {}
+    for name, value in re.findall(r"<parameter=([^>\s]+)>(.*?)</parameter>", block, re.DOTALL):
+        text = value.strip()
+        try:
+            arguments[name] = json.loads(text)
+        except json.JSONDecodeError:
+            arguments[name] = text
+    return arguments
 
 
 def _parse_tool_call(raw: str) -> dict[str, Any] | None:
-    """Extract the JSON arguments from a <tool_call>...</tool_call> block."""
+    """Extract the arguments from a <tool_call>...</tool_call> block, JSON or XML parameters."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
     inner = m.group(1).strip() if m else ""
 
@@ -1165,6 +1563,9 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
         if start == -1:
             return None
         remainder = raw[start + len("<tool_call>") :].lstrip()
+        xml_arguments = _parse_xml_parameters(remainder)
+        if xml_arguments is not None:
+            return xml_arguments
         decoder = json.JSONDecoder()
         try:
             parsed, _end = decoder.raw_decode(remainder)
@@ -1174,6 +1575,9 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
             return parsed["arguments"]
         return parsed
 
+    xml_arguments = _parse_xml_parameters(inner)
+    if xml_arguments is not None:
+        return xml_arguments
     inner = strip_json_fences(inner)
     try:
         parsed = json.loads(inner)
@@ -1186,24 +1590,23 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
 
 
 def _tool_call_to_aitk(
-    args: dict[str, Any], screen_w: int = 1080, screen_h: int = 1920
-) -> dict[str, Any]:
-    """Convert a mobile_use tool-call argument dict to AITK action format.
-
-    Follows the same conversion logic as qwen3_vl.py's to_device() and the
-    AITK UIKobeTranslator._convert_action().
-
-    The VLM outputs coordinates in a normalized 0–1000 range.
-    We convert them to actual device pixels: x_pixel = x_norm / 1000 * screen_w.
-    """
-    if isinstance(args.get("arguments"), dict):
-        args = {**args, **args["arguments"]}
+    args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
+) -> dict[str, object]:
+    """Convert mobile_use arguments using the contract in README.md#action-responses."""
+    nested = args.get("arguments")
+    if isinstance(nested, dict):
+        args = {**args, **as_object_dict(nested)}
 
     action = args.get("action", "")
 
-    def _scale(coord: list[Any]) -> tuple[int, int]:
-        x = int(coord[0] / 1000 * screen_w)
-        y = int(coord[1] / 1000 * screen_h)
+    def _scale(coord: object) -> tuple[int, int]:
+        if not isinstance(coord, list) or len(coord) != 2:
+            raise _MalformedActionOutput("Action coordinates must be two finite numbers")
+        values = as_float_list(coord)
+        if not values:
+            raise _MalformedActionOutput("Action coordinates must be two finite numbers")
+        x = int(values[0] / 1000 * screen_w)
+        y = int(values[1] / 1000 * screen_h)
         return x, y
 
     def _get_duration() -> int:
@@ -1215,23 +1618,23 @@ def _tool_call_to_aitk(
 
     if action == "click":
         coord = args.get("coordinate")
-        if not coord or len(coord) < 2:
-            return {"action": "end"}
         x, y = _scale(coord)
         return {"action": "tap", "x": x, "y": y}
 
     if action == "long_press":
         coord = args.get("coordinate")
-        if not coord or len(coord) < 2:
-            return {"action": "end"}
         x, y = _scale(coord)
         return {"action": "long_press", "x": x, "y": y, "duration": _get_duration()}
 
     if action == "swipe":
-        if args.get("coordinate") is not None and args.get("coordinate2") is not None:
-            x1, y1 = _scale(args["coordinate"])
-            x2, y2 = _scale(args["coordinate2"])
+        start, end = args.get("coordinate"), args.get("coordinate2")
+        if start is not None and end is not None:
+            x1, y1 = _scale(start)
+            x2, y2 = _scale(end)
         elif args.get("direction") is not None:
+            for coordinate in (start, end):
+                if coordinate is not None:
+                    _scale(coordinate)
             direction = args["direction"]
             if direction == "up":
                 x1, y1 = screen_w // 2, screen_h * 3 // 4
@@ -1246,9 +1649,9 @@ def _tool_call_to_aitk(
                 x1, y1 = screen_w // 5, screen_h // 2
                 x2, y2 = screen_w * 4 // 5, screen_h // 2
             else:
-                return {"action": "end"}
+                raise _MalformedActionOutput("Swipe requires a supported direction")
         else:
-            return {"action": "end"}
+            raise _MalformedActionOutput("Swipe requires coordinates or a supported direction")
         return {
             "action": "swipe",
             "x1": x1,
@@ -1259,9 +1662,10 @@ def _tool_call_to_aitk(
         }
 
     if action == "type":
-        if "text" in args:
-            return {"action": "type", "text": args["text"]}
-        return {"action": "end"}
+        text = args.get("text")
+        if not isinstance(text, str):
+            raise _MalformedActionOutput("Type requires a text string")
+        return {"action": "type", "text": text}
 
     if action == "system_button":
         button = args.get("button", "")
@@ -1271,7 +1675,7 @@ def _tool_call_to_aitk(
             return {"action": "home"}
         if button == "Enter":
             return {"action": "enter"}
-        return {"action": "end"}
+        raise _MalformedActionOutput("System button must be Back, Home or Enter")
 
     if action == "wait":
         t = args.get("time") or args.get("duration") or 3
@@ -1286,19 +1690,19 @@ def _tool_call_to_aitk(
     if action == "error":
         return {"action": "end"}
 
-    logger.warning("Unknown action: %s", action)
-    return {"action": "end"}
+    raise _MalformedActionOutput(f"Unknown action: {action}")
 
 
 def plan_next_action(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_b64: str,
     page_description: str,
     explored_edges: list[dict[str, Any]],
     app_name: str = "",
     unexplored_elements: list[dict[str, Any]] | None = None,
     input_status: str = "unknown from screenshot",
-    model: str = DEFAULT_INSTRUCTION_MODEL,
+    *,
+    settings: ModelSettings,
 ) -> str:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
@@ -1355,7 +1759,7 @@ def plan_next_action(
         unexplored_elements_section=unexplored_section,
     )
 
-    messages: list[ChatCompletionMessageParam] = [
+    messages: list[ChatMessagesTypedDict] = [
         {
             "role": "user",
             "content": [
@@ -1364,14 +1768,8 @@ def plan_next_action(
             ],
         }
     ]
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.0,
-    )
-
-    token_tracker.record("instruction", model, resp.usage)
-    raw = _message_text(resp)
+    resp = send_chat(client, call_type="instruction", settings=settings, messages=messages)
+    raw = message_text(resp)
 
     # The planner now returns plain text; try to extract from JSON if it still outputs one
     raw_clean = strip_json_fences(raw)
@@ -1390,7 +1788,7 @@ def plan_next_action(
     return instruction
 
 
-def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, str, str]:
+def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
     Handles both XML <tool_call> responses and native tool calling.
@@ -1398,59 +1796,68 @@ def _parse_agent_response(resp: ChatCompletion) -> tuple[dict[str, Any] | None, 
     Returns:
         (tool_args, thought, action_desc) or (None, "", "") on failure.
     """
-    raw_content = resp.choices[0].message.content
-    if raw_content is None:
-        tool_calls = resp.choices[0].message.tool_calls
-        if tool_calls:
-            logger.info("  Agent used native tool calling")
-            tool_call = tool_calls[0]
-            if tool_call.type != "function":
-                logger.error("Action agent returned an unsupported %s tool call", tool_call.type)
-                return None, "", ""
-            try:
-                tool_args = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError:
-                return None, "", ""
-            return tool_args, "", str(tool_args)
+    if not resp.choices:
+        return None, "", ""
+    raw = message_text(resp)
+    tool_calls = resp.choices[0].message.tool_calls
+    if not raw and not tool_calls:
         logger.error("Action agent returned empty response (no content, no tool_calls)")
         return None, "", ""
-
-    raw = raw_content.strip()
     logger.debug("  Agent raw output: %s", raw)
 
     thought = ""
     thought_m = re.search(r"Thought:\s*(.+?)(?:\n|$)", raw)
     if thought_m:
-        thought = thought_m.group(1).strip()
+        thought = as_str(thought_m.group(1), "").strip()
 
     action_desc = ""
     action_m = re.search(r"Action:\s*(.+?)(?:\n|$)", raw)
     if action_m:
-        action_desc = action_m.group(1).strip()
+        action_desc = as_str(action_m.group(1), "").strip()
+
+    if tool_calls:
+        logger.info("  Agent used native tool calling")
+        try:
+            native_args = json.loads(tool_calls[0].function.arguments)
+        except json.JSONDecodeError:
+            return None, thought, action_desc
+        if not isinstance(native_args, dict):
+            return None, thought, action_desc
+        tool_args = as_object_dict(native_args)
+        return tool_args, thought, action_desc or str(tool_args)
 
     tool_args = _parse_tool_call(raw)
     if tool_args is not None:
-        return tool_args, thought, action_desc
+        return as_object_dict(tool_args), thought, action_desc
 
     raw_json = strip_json_fences(raw)
     try:
         parsed = json.loads(raw_json)
+        if not isinstance(parsed, dict):
+            return None, thought, action_desc
         if "arguments" in parsed:
             parsed = parsed["arguments"]
-        return parsed, thought, action_desc
+        if not isinstance(parsed, dict):
+            return None, thought, action_desc
+        return as_object_dict(parsed), thought, action_desc
     except json.JSONDecodeError:
         logger.warning("Failed to parse action agent response. Raw:\n%s", raw)
         return None, thought, action_desc
 
 
+class _MalformedActionOutput(UnusableOutputError):
+    """An action response can be repaired by requesting a new completion."""
+
+
 def predict_next_action(
-    client: OpenAI,
+    client: OpenRouter,
     screenshot_b64: str,
     instruction: str,
     screen_w: int = 1080,
     screen_h: int = 1920,
     action_history: list[str] | None = None,
-    model: str = DEFAULT_ACTION_MODEL,
+    *,
+    settings: ModelSettings,
     overall_task: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Call the action agent VLM for one step.
@@ -1470,12 +1877,9 @@ def predict_next_action(
         - aitk_action: action dict in AITK format (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
-    screenshot_b64, resized_w, resized_h, _scale_back = _resize_screenshot(screenshot_b64)
+    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
-    system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format(
-        screen_w=resized_w,
-        screen_h=resized_h,
-    )
+    system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format()
 
     if action_history:
         history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(action_history))
@@ -1494,7 +1898,7 @@ def predict_next_action(
         history_section=history_section,
     )
 
-    messages: list[ChatCompletionMessageParam] = [
+    messages: list[ChatMessagesTypedDict] = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
@@ -1504,23 +1908,25 @@ def predict_next_action(
             ],
         },
     ]
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.0,
-    )
 
-    token_tracker.record("action", model, resp.usage)
+    def request_action() -> tuple[dict[str, object], str]:
+        # One request per attempt, so a failed generation and a malformed action share one re-ask.
+        resp = _send_chat_once(client, call_type="action", settings=settings, messages=messages)
+        try:
+            tool_args, thought, action_desc = _parse_agent_response(resp)
+            if tool_args is None:
+                raise _MalformedActionOutput("Action response has no usable arguments")
+            action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
+        except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
+            raise _MalformedActionOutput(
+                "Action response could not be parsed or converted"
+            ) from exc
+        history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
+        logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
+        return as_object_dict(action), history_entry
 
-    tool_args, thought, action_desc = _parse_agent_response(resp)
-    if tool_args is None:
-        logger.warning("Action agent parse failure, falling back to 'wait'")
+    try:
+        return call_with_retry("[API] action response", request_action)
+    except _MalformedActionOutput, TruncatedReplyError:
+        logger.warning("Action agent gave no usable action, falling back to 'wait'", exc_info=True)
         return {"action": "wait", "time": 1}, "Failed to parse action response -> wait"
-
-    action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
-
-    history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
-
-    logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
-
-    return action, history_entry

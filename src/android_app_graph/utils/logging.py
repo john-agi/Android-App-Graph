@@ -137,5 +137,5 @@ def setup_logging(level: int = logging.INFO) -> None:
     root.handlers.clear()
     root.addHandler(handler)
 
-    for noisy in ("httpx", "httpcore", "urllib3", "openai", "openai._base_client"):
+    for noisy in ("httpx", "httpcore", "urllib3", "openrouter"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

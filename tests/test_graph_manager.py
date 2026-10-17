@@ -1,7 +1,8 @@
 """Tests for android_app_graph.utils.graph_manager.
 
-All VLM and embedding calls are replaced by scripted fakes patched onto the
-graph_manager module namespace; no test needs a device, the network or keys.
+Most VLM and embedding calls are replaced by scripted fakes patched onto the
+graph_manager module namespace; the text-embedding provenance tests run the real
+SDK over the offline mock transport. No test needs a device, the network or keys.
 """
 
 from __future__ import annotations
@@ -10,16 +11,19 @@ import base64
 import json
 import logging
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, cast
 
+import httpx
 import networkx as nx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from openai import OpenAI
+from openrouter import OpenRouter
 
+from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
@@ -44,7 +48,9 @@ EMBEDDINGS: dict[str, list[float]] = {
 }
 UNKNOWN_EMBEDDING = [0.5, 0.5, 0.5]
 
-FAKE_CLIENT = cast("OpenAI", object())  # never used: every consumer is patched
+FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
+PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
+EMBEDDING = ModelSettings("google/gemini-embedding-2", request_timeout=4.0)
 
 
 def b64(data: bytes) -> str:
@@ -56,10 +62,11 @@ SHOT_B = b64(b"screenshot-b")
 
 
 def make_manager(similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> GraphManager:
-    """A manager whose two clients are sentinels; every caller of them is patched."""
+    """A manager whose client is a sentinel; every caller of it is patched."""
     return GraphManager(
-        page_detail_client=FAKE_CLIENT,
-        embedding_client=FAKE_CLIENT,
+        client=FAKE_CLIENT,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
         similarity_threshold=similarity_threshold,
     )
 
@@ -80,6 +87,7 @@ def add_screen(
         "last_detail_snapshot": {},
         "interactable_elements": [],
         "description_embedding": EMBEDDINGS.get(description, UNKNOWN_EMBEDDING),
+        "description_embedding_model": gm.embedding_model,
         "reference_screenshot": None,
         "last_normalized_visit_milestone": 0,
         "visit_count": 0,
@@ -100,32 +108,35 @@ class FakeVlm:
 
     def describe_page_and_state(
         self,
-        client: OpenAI | None,
+        client: OpenRouter | None,
         screenshot_b64: str,
         existing_nodes: list[str] | None = None,
         existing_keys: list[str] | None = None,
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
-        call = {"client": client, "screenshot": screenshot_b64, "model": model}
+        call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
         call.update(existing_nodes=existing_nodes, existing_keys=existing_keys)
         self.calls.append(("describe", call))
         return self.descriptions.pop(0)
 
     def verify_same_node(
         self,
-        client: OpenAI | None,
+        client: OpenRouter | None,
         screenshot_new_b64: str,
         screenshot_existing_b64: str,
         existing_description: str,
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
         call = {"client": client, "new": screenshot_new_b64, "existing": screenshot_existing_b64}
-        call.update(existing_description=existing_description, model=model)
+        call.update(existing_description=existing_description, settings=settings)
         self.calls.append(("verify", call))
         return self.verdicts.pop(0)
 
-    def get_embedding(self, client: OpenAI | None, text: str, model: str = "") -> list[float]:
-        self.calls.append(("embed", {"client": client, "text": text, "model": model}))
+    def get_embedding(
+        self, client: OpenRouter | None, text: str, model: str = "", request_timeout: float = 0.0
+    ) -> list[float]:
+        call = {"client": client, "text": text, "model": model, "timeout": request_timeout}
+        self.calls.append(("embed", call))
         return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)
 
     def kinds(self) -> list[str]:
@@ -141,13 +152,13 @@ class FakeAudit:
 
     def __call__(
         self,
-        client: OpenAI | None,
+        client: OpenRouter | None,
         graph_summary: str,
         app_name: str = "",
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
         call = {"client": client, "graph_summary": graph_summary}
-        call.update(app_name=app_name, model=model)
+        call.update(app_name=app_name, settings=settings)
         self.calls.append(call)
         return self.result
 
@@ -159,6 +170,12 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     monkeypatch.setattr(gm_module, "verify_same_node", fake.verify_same_node)
     monkeypatch.setattr(gm_module, "get_embedding", fake.get_embedding)
     return fake
+
+
+def test_a_manager_without_embedding_settings_rejects_reading_its_model() -> None:
+    gm = GraphManager(client=FAKE_CLIENT)
+    with pytest.raises(RuntimeError, match="needs embedding settings"):
+        _ = gm.embedding_model
 
 
 def test_network_guard_blocks_outbound_connections() -> None:
@@ -211,22 +228,23 @@ def test_merge_elements_defaults_a_missing_position_to_an_empty_string() -> None
 def test_construction_defaults() -> None:
     gm = GraphManager()
     assert gm.graph.number_of_nodes() == 0
-    assert gm.page_detail_client is None
-    assert gm.embedding_client is None
+    assert gm.client is None
+    assert gm.page_detail is None
+    assert gm.embedding is None
     assert gm.similarity_threshold == DEFAULT_SIMILARITY_THRESHOLD
     assert gm.total_steps_completed == 0
 
 
-def test_identify_state_without_a_page_detail_client_raises() -> None:
-    gm = GraphManager()
-    with pytest.raises(RuntimeError, match="page_detail_client"):
+def test_identify_state_without_page_detail_settings_raises() -> None:
+    gm = GraphManager(embedding=EMBEDDING)
+    with pytest.raises(RuntimeError, match="needs a client and page_detail settings"):
         gm.identify_state(HOME, SHOT_A)
 
 
-def test_identify_state_without_an_embedding_client_raises(vlm: FakeVlm) -> None:
+def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = GraphManager(page_detail_client=FAKE_CLIENT)
-    with pytest.raises(RuntimeError, match="embedding_client"):
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL)
+    with pytest.raises(RuntimeError, match="needs a client and embedding settings"):
         gm.identify_state(HOME, SHOT_A)
 
 
@@ -256,9 +274,12 @@ def test_identify_state_passes_the_configured_models_and_clients(vlm: FakeVlm) -
 
     gm.identify_state(HOME, SHOT_A)
 
-    assert vlm.calls[0][1]["model"] == gm.page_detail_model
+    assert vlm.calls[0][1]["settings"] == PAGE_DETAIL
     assert vlm.calls[0][1]["client"] is FAKE_CLIENT
-    assert vlm.calls[1][1]["model"] == gm.embedding_model
+    assert (vlm.calls[1][1]["model"], vlm.calls[1][1]["timeout"]) == (
+        EMBEDDING.model,
+        EMBEDDING.request_timeout,
+    )
 
 
 def test_identify_state_cache_hit_skips_the_vlm(vlm: FakeVlm) -> None:
@@ -411,10 +432,11 @@ def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
 def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     vlm: FakeVlm, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A node whose description embedding was computed under a different
-    embedding_model dimension must never be scored against the fresh query
-    vector (see cosine_similarity's ValueError); it is skipped and warned
-    about once, not once per candidate.
+    """A vector tagged with the configured embedding model but of a different
+    dimension must never be scored against the fresh query vector (see
+    cosine_similarity's ValueError); it is skipped and warned about once, not
+    once per candidate. A vector tagged with a different model never gets
+    here: its provenance is rejected first.
     """
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
@@ -458,6 +480,17 @@ def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm) -> Non
 def test_rename_node_returns_a_missing_id_unchanged() -> None:
     gm = make_manager()
     assert gm.rename_node("s9_missing", "Anything") == "s9_missing"
+
+
+def test_rename_node_tags_the_recomputed_embedding_with_the_current_model(vlm: FakeVlm) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", description_embedding_model="provider/old")
+
+    new_id = gm.rename_node("s0_home", "Settings page")
+
+    assert vlm.kinds() == ["embed"]
+    assert gm.graph.nodes[new_id]["description_embedding"] == EMBEDDINGS["Settings page"]
+    assert gm.graph.nodes[new_id]["description_embedding_model"] == gm.embedding_model
 
 
 def test_rename_node_keeps_the_numeric_prefix_and_relabels_edges(vlm: FakeVlm) -> None:
@@ -921,13 +954,13 @@ class FakeNormalizer:
 
     def __call__(
         self,
-        _client: OpenAI | None,
+        _client: OpenRouter | None,
         instructions: list[str],
         target_observations: list[str] | None = None,
-        model: str = "",
+        settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
         call = {"instructions": list(instructions)}
-        call.update(target_observations=target_observations, model=model)
+        call.update(target_observations=target_observations, settings=settings)
         self.calls.append(call)
         return self.result
 
@@ -968,7 +1001,7 @@ def test_normalize_all_edges_templatizes_and_then_skips(normalizer: FakeNormaliz
     assert len(normalizer.calls) == 1
     assert normalizer.calls[0]["instructions"] == ['search for "shoes"', 'search for "hats"']
     assert normalizer.calls[0]["target_observations"] is None
-    assert normalizer.calls[0]["model"] == gm.page_detail_model
+    assert normalizer.calls[0]["settings"] == PAGE_DETAIL
 
     gm.normalize_all_edges()  # the existing template already covers every instruction
 
@@ -1066,7 +1099,7 @@ def test_normalize_all_edges_normalizes_a_long_single_instruction(
 def test_normalize_all_edges_without_a_client_does_nothing(
     normalizer: FakeNormalizer,
 ) -> None:
-    gm = GraphManager()
+    gm = GraphManager(embedding=ModelSettings("test/embedding"))
     _search_graph(gm)
 
     gm.normalize_all_edges()
@@ -1088,7 +1121,7 @@ def test_normalize_node_edges_counts_templatized_edges(normalizer: FakeNormalize
 def test_normalize_node_edges_without_a_client_returns_zero(
     normalizer: FakeNormalizer,
 ) -> None:
-    gm = GraphManager()
+    gm = GraphManager(embedding=ModelSettings("test/embedding"))
     _search_graph(gm)
 
     assert gm.normalize_node_edges("s0_home") == 0
@@ -1492,12 +1525,14 @@ def test_save_writes_dirty_screenshots_once_and_load_restores_them(
     assert png.read_bytes() == b"screenshot-a"
     assert (graph_path.parent / "graph.emb.json").is_file()
 
-    loaded = GraphManager()
+    loaded = make_manager()
     loaded.load_graph(graph_path)
     restored = loaded.get_node(node_id)
     assert restored is not None
     assert restored["reference_screenshot"] == SHOT_A
     assert restored["description_embedding"] == EMBEDDINGS["Home screen"]
+    assert restored["description_embedding_model"] == gm.embedding_model
+    assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
 
     png.unlink()
     gm.save_graph(graph_path)
@@ -1527,7 +1562,10 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     assert data["nodes"][0]["visit_count"] == 3
     assert data["edges"][0]["schema_deltas"] == [{"tab": {"after": "settings"}}]
     embeddings = json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8"))
-    assert embeddings["s0_home"] == EMBEDDINGS["Home screen"]
+    assert embeddings["s0_home"] == {
+        "embedding": EMBEDDINGS["Home screen"],
+        "model": gm.embedding_model,
+    }
 
 
 def test_save_graph_omits_an_empty_activity_list_and_embedding(tmp_path: Path) -> None:
@@ -1851,7 +1889,9 @@ def test_find_node_by_description_skips_a_stale_dimension_embedding_and_logs_onc
 
 def test_find_node_by_description_stringifies_non_string_node_ids(vlm: FakeVlm) -> None:
     gm = make_manager()
-    gm.graph.add_node(7, description_embedding=[1.0, 0.0, 0.0])
+    gm.graph.add_node(
+        7, description_embedding=[1.0, 0.0, 0.0], description_embedding_model=gm.embedding_model
+    )
 
     results = gm.find_node_by_description("Home screen")
 
@@ -1941,8 +1981,27 @@ def test_run_audit_returns_the_audit_result(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result["summary"] == "two issues"
     assert fake.calls[0]["app_name"] == "Example"
-    assert fake.calls[0]["model"] == gm.page_detail_model
+    assert fake.calls[0]["settings"] == PAGE_DETAIL._replace(request_timeout=300.0)
     assert fake.calls[0]["graph_summary"].startswith("## Nodes (1)")
+
+
+@pytest.mark.parametrize("operation", ["audit", "merge_audit"])
+def test_audits_send_their_own_timeout(
+    operation: str,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    manager = GraphManager(
+        client=router_client, page_detail=PAGE_DETAIL, embedding=EMBEDDING, audit_timeout=120
+    )
+    router_responses.append(chat_response(content='{"issues": [], "summary": "fine"}'))
+    if operation == "audit":
+        assert manager.run_audit()["summary"] == "fine"
+    else:
+        assert manager.run_node_merge_audit()["merged_count"] == 0
+    assert router_requests[0].extensions["timeout"]["read"] == 120
 
 
 def test_run_node_merge_audit_without_a_client_reports_no_merges() -> None:
@@ -2086,6 +2145,7 @@ node_attrs = st.fixed_dictionaries(
         "description_embedding": st.lists(
             st.floats(allow_nan=False, allow_infinity=False), max_size=4
         ),
+        "description_embedding_model": st.none() | st.text(min_size=1, max_size=30),
         "last_normalized_visit_milestone": st.integers(min_value=0, max_value=10),
         "visit_count": st.integers(min_value=0, max_value=100),
     }
@@ -2119,6 +2179,10 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "last_detail_snapshot": d.get("last_detail_snapshot", {}),
             "interactable_elements": d.get("interactable_elements", []),
             "description_embedding": d.get("description_embedding") or [],
+            # A tag is stored with its vector; "" and None both mean untagged.
+            "description_embedding_model": (d.get("description_embedding_model") or None)
+            if d.get("description_embedding")
+            else None,
             "last_normalized_visit_milestone": d.get("last_normalized_visit_milestone", 0),
             "visit_count": d.get("visit_count", 0),
         }
@@ -2170,6 +2234,9 @@ def test_save_then_load_round_trips(
     again = tmp_path_factory.mktemp("roundtrip") / "graph.json"
     loaded.save_graph(again)
     assert again.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+    assert again.with_suffix(".emb.json").read_text(encoding="utf-8") == path.with_suffix(
+        ".emb.json"
+    ).read_text(encoding="utf-8")
 
 
 @given(
@@ -2178,7 +2245,7 @@ def test_save_then_load_round_trips(
 def test_readding_an_identical_edge_is_idempotent(
     action: dict[str, Any], repeats: int, instruction: str
 ) -> None:
-    gm = GraphManager()
+    gm = GraphManager(embedding=ModelSettings("test/embedding"))
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
 
@@ -2204,8 +2271,10 @@ operations = st.lists(
 )
 
 
-def fake_get_embedding(_client: OpenAI | None, text: str, **_kwargs: Any) -> list[float]:
-    """Module-level fake for property tests; `model=` arrives through **_kwargs."""
+def fake_get_embedding(
+    _client: OpenRouter | None, text: str, *_args: Any, **_kwargs: Any
+) -> list[float]:
+    """Module-level fake for property tests; the model and timeout arrive through the rest."""
     return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)
 
 
@@ -2240,3 +2309,90 @@ def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path
     with pytest.raises(TypeError, match="must be an object") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
+
+
+@pytest.mark.parametrize("other_package", [False, True])
+def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
+    other_package: bool,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    manager = GraphManager(
+        client=router_client,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
+    )
+    manager.graph.add_node(
+        "old",
+        activity="com.other.Home" if other_package else "com.demo.Home",
+        description_embedding=[0.25, 0.75] if other_package else [],
+    )
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    node = manager.identify_state("com.demo.Home", png_screenshot)
+    assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model
+    assert len(router_requests) == 2
+
+
+@pytest.mark.parametrize("stored", ["inline untagged", "bare sidecar", "mismatched sidecar"])
+@pytest.mark.parametrize("operation", ["find", "identify"])
+def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
+    stored: str,
+    operation: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    path = tmp_path / "demo.json"
+    node: dict[str, object] = {
+        "id": "home",
+        "activity": "com.demo.Home",
+        "page_description": "home",
+    }
+    if stored == "inline untagged":
+        node["description_embedding"] = [0.25, 0.75]
+    path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    if stored != "inline untagged":
+        entry: object = (
+            [0.25, 0.75]
+            if stored == "bare sidecar"
+            else {"model": "provider/old-same-dimensions", "embedding": [0.25, 0.75]}
+        )
+        path.with_suffix(".emb.json").write_text(json.dumps({"home": entry}), encoding="utf-8")
+    manager = GraphManager(
+        client=router_client,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
+    )
+    manager.load_graph(path)
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+        if operation == "identify"
+        else [httpx.Response(200, json=embedding_body)]
+    )
+
+    def compare() -> None:
+        if operation == "find":
+            manager.find_node_by_description("home")
+        else:
+            manager.identify_state("com.demo.Home", png_screenshot)
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):
+            compare()
+        assert router_requests == []

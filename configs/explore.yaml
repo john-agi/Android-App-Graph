@@ -23,26 +23,13 @@ vlm:
 
   page_detail:
     model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
-    base_url: ${APP_GRAPH_PAGE_DETAIL_BASE_URL}
-    api_key: ${APP_GRAPH_PAGE_DETAIL_API_KEY}
 
   embedding:
     model: ${APP_GRAPH_EMBEDDING_MODEL}
-    base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
-    api_key: ${APP_GRAPH_EMBEDDING_API_KEY}
 
   instruction:
     model: ${APP_GRAPH_INSTRUCTION_MODEL}
-    base_url: ${APP_GRAPH_INSTRUCTION_BASE_URL}
-    api_key: ${APP_GRAPH_INSTRUCTION_API_KEY}
 
   action:
     model: ${APP_GRAPH_ACTION_MODEL}
-    base_url: ${APP_GRAPH_ACTION_BASE_URL}
-    api_key: ${APP_GRAPH_ACTION_API_KEY}
-
-  # Optional native Gemini image embedding settings used by the v2 runtime.
-  image_embedding:
-    model: models/gemini-embedding-exp-03-07
-    native_base_url: https://generativelanguage.googleapis.com/v1beta
-    api_key: ${GEMINI_API_KEY}
+    temperature: 0.0

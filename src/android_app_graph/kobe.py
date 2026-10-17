@@ -8,8 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openrouter import OpenRouter
+
 from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
-from android_app_graph.utils import make_client
+from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
@@ -17,6 +19,8 @@ from android_app_graph.utils.vlm_utils import (
     select_exploration_target,
     token_tracker,
 )
+
+EXPLORATION_ROLES = ("page_detail", "embedding", "instruction", "action")
 
 
 def _compute_schema_delta(
@@ -59,6 +63,8 @@ class Kobe:
         max_steps: int = 20,
         coverage_checkpoint_steps: int = 50,
         coverage_checkpoint_top_k: int = 15,
+        *,
+        client: OpenRouter,
     ) -> None:
         self.controller = controller
         self.app_name = app_name
@@ -75,20 +81,18 @@ class Kobe:
         self.coverage_checkpoint_top_k = coverage_checkpoint_top_k
 
         vlm_config = vlm_config or {}
-
-        self.page_detail_client, self.page_detail_model = make_client(vlm_config.get("page_detail"))
-        self.embedding_client, self.embedding_model = make_client(vlm_config.get("embedding"))
-        self.instruction_client, self.instruction_model = make_client(vlm_config.get("instruction"))
-        self.action_client, self.action_model = make_client(vlm_config.get("action"))
-
-        similarity_threshold = vlm_config.get("similarity_threshold", 0.85)
+        settings = resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
+        self.client = client
+        self.page_detail = settings["page_detail"]
+        self.instruction = settings["instruction"]
+        self.action = settings["action"]
 
         self.graph = GraphManager(
-            page_detail_client=self.page_detail_client,
-            page_detail_model=self.page_detail_model,
-            embedding_client=self.embedding_client,
-            embedding_model=self.embedding_model,
-            similarity_threshold=similarity_threshold,
+            client=client,
+            page_detail=self.page_detail,
+            embedding=settings["embedding"],
+            similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
+            audit_timeout=resolve_audit_timeout(vlm_config),
         )
 
         base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
@@ -144,10 +148,10 @@ class Kobe:
             return None
 
         selected = select_exploration_target(
-            self.page_detail_client,
+            self.client,
             app_name=self.app_name,
             candidates=candidates,
-            model=self.page_detail_model,
+            settings=self.page_detail,
         )
         if not selected:
             selected = candidates[0]["node_id"]
@@ -372,26 +376,26 @@ class Kobe:
 
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)
                 instruction = plan_next_action(
-                    client=self.instruction_client,
+                    client=self.client,
                     screenshot_b64=screenshot,
                     page_description=node_data["page_description"],
                     explored_edges=explored_edges,
                     app_name=self.app_name,
                     unexplored_elements=unexplored_elements,
                     input_status=input_status,
-                    model=self.instruction_model,
+                    settings=self.instruction,
                 )
 
                 left_app = False
 
                 action, _history_entry = predict_next_action(
-                    client=self.action_client,
+                    client=self.client,
                     screenshot_b64=screenshot,
                     instruction=instruction + keyboard_hint,
                     screen_w=self.controller.w,
                     screen_h=self.controller.h,
                     action_history=[],
-                    model=self.action_model,
+                    settings=self.action,
                 )
 
                 if action.get("action") == "end":
@@ -405,6 +409,9 @@ class Kobe:
                     self.logger.info("  Action agent requested wait")
                     time.sleep(1)
                     device_state = self.controller.get_state()
+                    step += 1
+                    self.graph.total_steps_completed = step
+                    self.save_graph()
                     continue
                 else:
                     self.controller.exe_action(action)

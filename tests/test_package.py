@@ -19,7 +19,8 @@ def test_version_matches_project_metadata() -> None:
 
 def test_no_credentials_in_environment() -> None:
     """The autouse fixture in conftest.py must have removed every credential variable."""
-    leaked = [n for n in os.environ if n.startswith("APP_GRAPH_")]
+    leaked = [n for n in os.environ if n.startswith(("APP_GRAPH_", "OPENROUTER_"))]
     assert leaked == []
     assert "GEMINI_API_KEY" not in os.environ
+    assert "GOOGLE_API_KEY" not in os.environ
     assert "OPENAI_API_KEY" not in os.environ

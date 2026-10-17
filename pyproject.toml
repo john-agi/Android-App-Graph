@@ -9,16 +9,18 @@ description = "Android-App-Graph: graph-based Android app exploration and runtim
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.14"
+# openrouter requires pydantic<2.13, whose pydantic-core cannot build on Python 3.15;
+# lift this cap once an openrouter release allows pydantic>=2.14.
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "networkx>=3.7",
-    "openai>=3.19.2",
     "pyyaml>=6.0.3",
     "pillow>=12.3.0",
     "rich>=15.0.0",
     "dill>=0.4.1",
     "aitk",
     "httpx>=0.28.1",
+    "openrouter>=1.3.63",
 ]
 authors = [
     { name = "Yuxiang Chai" },
@@ -180,7 +182,7 @@ show_missing = true
 skip_covered = true
 skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised.
-fail_under = 72
+fail_under = 88
 
 [tool.mutmut]
 # scripts/, aitk_files/ and aw_files/ are copy-in adapters, not package code.

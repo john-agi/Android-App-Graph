@@ -8,7 +8,8 @@ from typing import Any
 import yaml
 
 from android_app_graph.device import AvdManager
-from android_app_graph.kobe import Kobe
+from android_app_graph.kobe import EXPLORATION_ROLES, Kobe
+from android_app_graph.utils import open_client, resolve_api_key, resolve_model_settings
 from android_app_graph.utils.logging import setup_logging
 
 
@@ -116,6 +117,15 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    with args.config.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    vlm_config = config.get("vlm", {})
+    try:
+        resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
+        api_key = resolve_api_key()
+    except ValueError as exc:
+        parser.error(str(exc))
+
     try:
         from aitk.utils.adb_controller import ADBController
         from aitk.utils.avd_manager import AVDManager
@@ -125,9 +135,6 @@ def main() -> None:
             "app-graph requires the 'aitk' dependency. Install it first, then rerun the command.\n",
         )
 
-    with args.config.open("r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-
     setup_logging(level=logging.INFO)
     logger = logging.getLogger("android_app_graph.explorer")
 
@@ -136,7 +143,6 @@ def main() -> None:
     controller = ADBController(config, logger)
 
     exp_config = config.get("experiment", {})
-    vlm_config = config.get("vlm", {})
     graph_dir = exp_config.get("graph_dir", "graphs")
 
     max_steps = args.max_steps or exp_config.get("max_steps", 20)
@@ -144,32 +150,34 @@ def main() -> None:
     coverage_checkpoint_steps = exp_config.get("coverage_checkpoint_steps", 50)
     coverage_checkpoint_top_k = exp_config.get("coverage_checkpoint_top_k", 15)
 
-    for app in config["apps"]:
-        app_name = app["name"]
-        package_name = app["package_name"]
+    with open_client(api_key) as client:
+        for app in config["apps"]:
+            app_name = app["name"]
+            package_name = app["package_name"]
 
-        logger.info("Terminating all running apps...")
-        controller._terminate_all_apps()
-        time.sleep(1)
+            logger.info("Terminating all running apps...")
+            controller._terminate_all_apps()
+            time.sleep(1)
 
-        launch_app(config, app, logger)
-        time.sleep(4)
+            launch_app(config, app, logger)
+            time.sleep(4)
 
-        kobe = Kobe(
-            controller,
-            app_name,
-            package_name,
-            logger,
-            vlm_config=vlm_config,
-            graph_dir=graph_dir,
-            max_steps=max_steps,
-            coverage_checkpoint_steps=coverage_checkpoint_steps,
-            coverage_checkpoint_top_k=coverage_checkpoint_top_k,
-        )
-        try:
-            kobe.explore(resume_from=resume_from)
-        finally:
-            kobe.save_graph()
+            kobe = Kobe(
+                controller,
+                app_name,
+                package_name,
+                logger,
+                vlm_config=vlm_config,
+                graph_dir=graph_dir,
+                max_steps=max_steps,
+                coverage_checkpoint_steps=coverage_checkpoint_steps,
+                coverage_checkpoint_top_k=coverage_checkpoint_top_k,
+                client=client,
+            )
+            try:
+                kobe.explore(resume_from=resume_from)
+            finally:
+                kobe.save_graph()
 
 
 if __name__ == "__main__":

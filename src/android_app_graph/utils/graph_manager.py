@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import networkx as nx
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph.android_packages import package_from_activity
 from android_app_graph.graph_files import (
@@ -36,7 +36,8 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
     write_json_atomically,
 )
-from android_app_graph.payloads import as_float_list, as_int_list, as_str_dict
+from android_app_graph.payloads import as_float_list, as_int_list, as_str, as_str_dict
+from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
@@ -119,36 +120,65 @@ class GraphManager:
 
     def __init__(
         self,
-        page_detail_client: OpenAI | None = None,
-        page_detail_model: str = "gpt-5.4",
-        embedding_client: OpenAI | None = None,
-        embedding_model: str = "text-embedding-3-small",
+        client: OpenRouter | None = None,
+        page_detail: ModelSettings | None = None,
+        embedding: ModelSettings | None = None,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        audit_timeout: float = DEFAULT_AUDIT_TIMEOUT,
     ) -> None:
         self.graph = nx.DiGraph()
-        self.page_detail_client = page_detail_client
-        self.page_detail_model = page_detail_model
-        self.embedding_client = embedding_client
-        self.embedding_model = embedding_model
+        self.client = client
+        self.page_detail = page_detail
+        self.embedding = embedding
         self.similarity_threshold = similarity_threshold
+        self.audit_timeout = audit_timeout
         self._next_id = 0
         self._dirty_screenshots: set[str] = set()
         self._last_identify_cache: _IdentifyCacheEntry | None = None
         self.total_steps_completed = 0
 
-    def _require_page_detail_client(self) -> OpenAI:
-        """Return the page-detail client, or raise when none was configured."""
-        if self.page_detail_client is None:
-            msg = "GraphManager needs a page_detail_client for this operation"
+    @property
+    def embedding_model(self) -> str:
+        if self.embedding is None:
+            msg = "GraphManager needs embedding settings for this operation"
             raise RuntimeError(msg)
-        return self.page_detail_client
+        return self.embedding.model
 
-    def _require_embedding_client(self) -> OpenAI:
-        """Return the embedding client, or raise when none was configured."""
-        if self.embedding_client is None:
-            msg = "GraphManager needs an embedding_client for this operation"
+    def _page_detail(self) -> tuple[OpenRouter, ModelSettings] | None:
+        if self.client is None or self.page_detail is None:
+            return None
+        return self.client, self.page_detail
+
+    def _require_page_detail(self) -> tuple[OpenRouter, ModelSettings]:
+        page_detail = self._page_detail()
+        if page_detail is None:
+            msg = "GraphManager needs a client and page_detail settings for this operation"
             raise RuntimeError(msg)
-        return self.embedding_client
+        return page_detail
+
+    def _embed(self, text: str) -> list[float]:
+        if self.client is None or self.embedding is None:
+            msg = "GraphManager needs a client and embedding settings for this operation"
+            raise RuntimeError(msg)
+        return get_embedding(
+            self.client,
+            text,
+            self.embedding.model,
+            request_timeout=self.embedding.request_timeout,
+        )
+
+    def _text_embedding(self, node_id: str, data: dict[str, object]) -> list[float]:
+        vector = data.get("description_embedding")
+        model = data.get("description_embedding_model")
+        if vector and model != self.embedding_model:
+            msg = (
+                f"Text embedding for node {node_id!r} has model provenance {model!r}; "
+                f"the configured model is {self.embedding_model!r}. Rebuild or re-explore "
+                "the graph with the configured embedding model before comparing text vectors. "
+                "Do not relabel existing vectors."
+            )
+            raise ValueError(msg)
+        return as_float_list(vector)
 
     def identify_state(self, activity: str, screenshot_b64: str) -> str:
         """Identify which node the current screen belongs to, or create a new one.
@@ -181,7 +211,11 @@ class GraphManager:
             return cached.node_id
 
         current_pkg = package_from_activity(activity)
-
+        same_pkg_candidates = [
+            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
+            for node_id, data in self.graph.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
+        ]
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
@@ -193,12 +227,13 @@ class GraphManager:
                     if k not in same_pkg_keys:
                         same_pkg_keys.append(k)
 
+        client, page_detail = self._require_page_detail()
         page_description, detail_snapshot, elements = describe_page_and_state(
-            self._require_page_detail_client(),
+            client,
             screenshot_b64,
             existing_nodes=same_pkg_descriptions or None,
             existing_keys=same_pkg_keys or None,
-            model=self.page_detail_model,
+            settings=page_detail,
         )
         logger.info(
             "Describe model output: '%s' | state keys: %s | elements: %d",
@@ -207,15 +242,8 @@ class GraphManager:
             len(elements),
         )
 
-        description_embedding = get_embedding(
-            self._require_embedding_client(), page_description, model=self.embedding_model
-        )
+        description_embedding = self._embed(page_description)
 
-        same_pkg_candidates = (
-            (_node_id(node_id), data.get("description_embedding"))
-            for node_id, data in self.graph.nodes(data=True)
-            if package_from_activity(data.get("activity", "")) == current_pkg
-        )
         scored = score_by_cosine(
             description_embedding,
             same_pkg_candidates,
@@ -245,11 +273,11 @@ class GraphManager:
 
             if candidate_screenshot:
                 verify_result = verify_same_node(
-                    self._require_page_detail_client(),
+                    client,
                     screenshot_new_b64=screenshot_b64,
                     screenshot_existing_b64=candidate_screenshot,
                     existing_description=candidate_data.get("page_description", ""),
-                    model=self.page_detail_model,
+                    settings=page_detail,
                 )
                 if verify_result.get("same", False):
                     matched_node_id = best_node_id
@@ -272,11 +300,7 @@ class GraphManager:
 
                     if refined_new:
                         page_description = refined_new
-                        description_embedding = get_embedding(
-                            self._require_embedding_client(),
-                            page_description,
-                            model=self.embedding_model,
-                        )
+                        description_embedding = self._embed(page_description)
 
                     logger.info(
                         "Verifier rejected match node %s (sim=%.3f): reason: %s | new: %s",
@@ -322,6 +346,7 @@ class GraphManager:
                 state_schema={},
                 interactable_elements=init_elements,
                 description_embedding=description_embedding,
+                description_embedding_model=self.embedding_model,
                 reference_screenshot=screenshot_b64,
                 last_normalized_visit_milestone=0,
                 visit_count=0,
@@ -399,9 +424,8 @@ class GraphManager:
         new_node_id = self._renamed_node_id(node_id, page_description)
 
         node_data["page_description"] = page_description
-        node_data["description_embedding"] = get_embedding(
-            self._require_embedding_client(), page_description, model=self.embedding_model
-        )
+        node_data["description_embedding"] = self._embed(page_description)
+        node_data["description_embedding_model"] = self.embedding_model
 
         if new_node_id != node_id:
             nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
@@ -674,8 +698,10 @@ class GraphManager:
 
     def _normalize_single_edge(self, source: str, target: str) -> bool:
         """Normalize one edge's instructions into a reusable template if possible."""
-        if self.page_detail_client is None:
+        page_detail = self._page_detail()
+        if page_detail is None:
             return False
+        client, settings = page_detail
 
         edge_data = self.graph[source][target]
         instructions = edge_data.get("instructions", [])
@@ -703,10 +729,10 @@ class GraphManager:
                 return False
 
         result = normalize_edge(
-            self.page_detail_client,
+            client,
             instructions,
             target_observations=observations or None,
-            model=self.page_detail_model,
+            settings=settings,
         )
 
         if result.get("is_template"):
@@ -735,7 +761,7 @@ class GraphManager:
 
         Returns the number of outgoing edges that produced a parameterized template.
         """
-        if self.page_detail_client is None or node_id not in self.graph:
+        if self._page_detail() is None or node_id not in self.graph:
             return 0
 
         normalized_count = 0
@@ -784,8 +810,8 @@ class GraphManager:
         For each edge, groups all instructions and their target observations,
         then calls the normalizer to produce templates with {param} placeholders.
         """
-        if self.page_detail_client is None:
-            logger.warning("No page_detail_client — skipping normalization")
+        if self._page_detail() is None:
+            logger.warning("No page_detail settings — skipping normalization")
             return
 
         normalized_count = 0
@@ -1147,7 +1173,7 @@ class GraphManager:
             "edges": [],
         }
 
-        embeddings: dict[str, list[float]] = {}
+        embeddings: dict[str, dict[str, object]] = {}
 
         for node_id, attrs in self.graph.nodes(data=True):
             activities = attrs.get("activities", [attrs.get("activity", "")])
@@ -1166,7 +1192,10 @@ class GraphManager:
 
             emb = attrs.get("description_embedding")
             if emb:
-                embeddings[node_id] = emb
+                embeddings[node_id] = {
+                    "model": attrs.get("description_embedding_model") or None,
+                    "embedding": emb,
+                }
 
         for source, target, attrs in self.graph.edges(data=True):
             edge_data = {
@@ -1217,12 +1246,16 @@ class GraphManager:
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self._embeddings_path(path)
         embeddings: dict[str, list[float]] = {}
+        embedding_models: dict[str, str] = {}
         if emb_path.exists():
             with open(emb_path, "r", encoding="utf-8") as f:
-                embeddings = {
-                    node_id: as_float_list(vector)
-                    for node_id, vector in as_str_dict(json.load(f)).items()
-                }
+                for node_id, entry in as_str_dict(json.load(f)).items():
+                    if isinstance(entry, dict):
+                        tagged = as_str_dict(entry)
+                        embeddings[node_id] = as_float_list(tagged.get("embedding"))
+                        embedding_models[node_id] = as_str(tagged.get("model"), "")
+                    else:
+                        embeddings[node_id] = as_float_list(entry)
 
         self._next_id = data.get("next_id", 0)
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
@@ -1245,6 +1278,11 @@ class GraphManager:
                 last_detail_snapshot=node_data.get("last_detail_snapshot", {}),
                 interactable_elements=node_data.get("interactable_elements", []),
                 description_embedding=emb,
+                description_embedding_model=(
+                    embedding_models.get(node_id, "")
+                    if node_id in embeddings
+                    else as_str(node_data.get("description_embedding_model"), "")
+                ),
                 reference_screenshot=ref_screenshot,
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
@@ -1280,13 +1318,11 @@ class GraphManager:
 
         Returns a list of (node_id, similarity) sorted descending.
         """
-        query_emb = get_embedding(
-            self._require_embedding_client(), query, model=self.embedding_model
-        )
-        candidates = (
-            (_node_id(node_id), data.get("description_embedding"))
+        candidates = [
+            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
             for node_id, data in self.graph.nodes(data=True)
-        )
+        ]
+        query_emb = self._embed(query)
         results = score_by_cosine(
             query_emb,
             candidates,
@@ -1379,18 +1415,20 @@ class GraphManager:
 
         Returns the audit result dict with "issues" and "summary".
         """
-        if self.page_detail_client is None:
-            logger.warning("No page_detail_client — cannot audit")
+        page_detail = self._page_detail()
+        if page_detail is None:
+            logger.warning("No page_detail settings — cannot audit")
             return {"issues": [], "summary": "no client available"}
+        client, settings = page_detail
 
         graph_text = self.format_for_audit()
         logger.info("Running graph audit (%d chars)...", len(graph_text))
 
         result = audit_graph(
-            self.page_detail_client,
+            client,
             graph_text,
             app_name=app_name,
-            model=self.page_detail_model,
+            settings=settings._replace(request_timeout=self.audit_timeout),
         )
 
         logger.info("Audit summary: %s", result.get("summary", ""))
@@ -1439,17 +1477,19 @@ class GraphManager:
 
     def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
         """Run a lightweight node-merge audit and merge verified duplicates."""
-        if self.page_detail_client is None:
-            logger.warning("No page_detail_client — cannot run node merge audit")
+        page_detail = self._page_detail()
+        if page_detail is None:
+            logger.warning("No page_detail settings — cannot run node merge audit")
             return {"issues": [], "results": [], "merged_count": 0}
+        client, settings = page_detail
 
         graph_text = self.format_for_audit()
         logger.info("Running node merge audit (%d chars)...", len(graph_text))
         audit_result = audit_merge_nodes(
-            self.page_detail_client,
+            client,
             graph_text,
             app_name=app_name,
-            model=self.page_detail_model,
+            settings=settings._replace(request_timeout=self.audit_timeout),
         )
         issues = audit_result.get("issues", [])
         results = []
@@ -1507,11 +1547,11 @@ class GraphManager:
                 desc_b,
             )
             verify_result = verify_same_node(
-                self.page_detail_client,
+                client,
                 screenshot_new_b64=screenshot_b,
                 screenshot_existing_b64=screenshot_a,
                 existing_description=ref_desc,
-                model=self.page_detail_model,
+                settings=settings,
             )
             if verify_result.get("same", False):
                 keep, remove = sorted(
