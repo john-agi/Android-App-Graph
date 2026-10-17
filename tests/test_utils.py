@@ -199,8 +199,8 @@ def test_invalid_timeout_is_a_configuration_error(timeout: str) -> None:
         )
 
 
-@pytest.mark.parametrize("temperature", [float("nan"), -0.1, 2.1])
-def test_make_client_rejects_a_temperature_outside_zero_to_two(temperature: float) -> None:
+@pytest.mark.parametrize("temperature", [float("nan"), -0.1, 2.1, "warm", "", True])
+def test_make_client_rejects_an_invalid_temperature(temperature: object) -> None:
     with pytest.raises(ValueError, match=r"action\.temperature must be a finite number"):
         make_client(
             {"model": "qwen/qwen3.8-flash", "api_key": "test", "temperature": temperature},

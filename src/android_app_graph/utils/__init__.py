@@ -185,6 +185,21 @@ def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
     return value
 
 
+def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None:
+    """Validate an optional sampling temperature before creating the client."""
+    message = f"{role}.temperature must be a finite number between 0 and 2"
+    value = resolve_env(cfg.get("temperature"))
+    if value is None:
+        return None
+    try:
+        temperature = float(value)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+        raise ValueError(message)
+    return temperature
+
+
 def make_client(
     cfg: Mapping[str, object] | None,
     *,
@@ -213,10 +228,7 @@ def make_client(
     request_timeout = resolve_request_timeout(
         {"request_timeout": timeout} if timeout is not None else cfg, role=role
     )
-    temperature_value = resolve_env(cfg.get("temperature"))
-    temperature = float(temperature_value) if temperature_value is not None else None
-    if temperature is not None and (not math.isfinite(temperature) or not 0 <= temperature <= 2):
-        raise ValueError(f"{role}.temperature must be a finite number between 0 and 2")
+    temperature = resolve_temperature(cfg, role=role)
     trust_env = _trust_environment(base_url)
     transport_client = (
         http_client
