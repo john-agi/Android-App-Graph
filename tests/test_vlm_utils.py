@@ -788,38 +788,6 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
     assert len(router_requests) == (2 if operation == "action" else 1)
 
 
-@pytest.mark.parametrize("limit", [None, 17])
-def test_chat_omits_unspecified_token_limit_at_strict_endpoint(
-    limit: int | None,
-    chat_body: dict[str, object],
-    no_sleep: list[float],
-) -> None:
-    requests: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        payload = json.loads(request.content)
-        if "max_tokens" in payload and payload["max_tokens"] is None:
-            return httpx.Response(400, json={"error": {"code": 400, "message": "null forbidden"}})
-        return httpx.Response(200, json=chat_body)
-
-    with httpx.Client(transport=httpx.MockTransport(respond)) as borrowed:
-        vlm.send_chat(
-            open_client("test", http_client=borrowed),
-            call_type="chat",
-            settings=PAGE_DETAIL,
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=limit,
-        )
-    payload = json.loads(requests[0].content)
-    if limit is None:
-        assert "max_tokens" not in payload
-    else:
-        assert payload["max_tokens"] == limit
-    assert len(requests) == 1
-    assert no_sleep == []
-
-
 @pytest.mark.parametrize("operation", ["chat", "text", "action"])
 @pytest.mark.parametrize("recover", [False, True])
 def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(

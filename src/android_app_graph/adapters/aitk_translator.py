@@ -54,7 +54,6 @@ logger = logging.getLogger("AITK - Android-App-Graph")
 
 _SEP = "-" * 60
 _SEP_THICK = "=" * 60
-V2_CHAT_MAX_TOKENS = 3000
 V2_PARSE_RETRIES = 1
 # Format-agnostic: it is appropriate whether the caller's parse expects a letter,
 # JSON, or free text, so one reminder covers every _ask_with_screenshot caller.
@@ -534,17 +533,10 @@ def _chat_completion_content(
     *,
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
-    max_tokens: int | None = None,
 ) -> str:
     """Run a typed completion, account for usage and return assistant text."""
     return message_text(
-        send_chat(
-            client,
-            call_type="v2_chat",
-            settings=settings,
-            messages=messages,
-            max_tokens=max_tokens,
-        )
+        send_chat(client, call_type="v2_chat", settings=settings, messages=messages)
     )
 
 
@@ -774,9 +766,6 @@ class UIKobeV2Translator(BaseTranslator):
                     self.client,
                     settings=self.action,
                     messages=[{"role": "user", "content": content}],
-                    # max_tokens, not max_completion_tokens: the action model,
-                    # qwen/qwen3.8-flash, lists only max_tokens.
-                    max_tokens=V2_CHAT_MAX_TOKENS,
                 )
             except TruncatedReplyError:
                 logger.warning("%s reply hit its token limit; not asking again", tag)

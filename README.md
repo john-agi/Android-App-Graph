@@ -281,16 +281,16 @@ Thought, Action and one `<tool_call>` block of JSON, at the role's usual
 temperature. Every other unusable reply, including a failed generation and an SDK
 validation failure, is sent again unchanged.
 
-A reply cut off by its token limit (`finish_reason: "length"`) is never asked
-again, since the same request would be cut off again. The log names the call and
-any reasoning tokens, and the caller applies its final fallback at once: an
-action waits, node verification treats the screens as different, edge
-normalization keeps the instruction, the audits report no issues, the coverage
-checkpoint uses its top candidate, the v2 runtime's own fallback applies, and a
-page description or an exploration plan raises. Token limits include any reasoning
-tokens. A reply stopped by the provider's content filter (`finish_reason:
-"content_filter"`) is logged with the call's name and otherwise handled like any
-other empty or partial reply.
+No request sets `max_tokens`, so a reply stops only at the model's own output
+limit. A reply cut off there (`finish_reason: "length"`) is never asked again,
+since the same request would be cut off again. The log names the call and any
+reasoning tokens, and the caller applies its final fallback at once: an action
+waits, node verification treats the screens as different, edge normalization
+keeps the instruction, the audits report no issues, the coverage checkpoint uses
+its top candidate, the v2 runtime's own fallback applies, and a page description
+or an exploration plan raises. A reply stopped by the provider's content filter
+(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
+handled like any other empty or partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice) ask
@@ -303,12 +303,11 @@ express. OpenRouter routes a `response_format` only to providers that support it
 and not every provider enforces strict schemas, so every reply is still validated
 as before. The action model and the v2 runtime's decisions keep their text formats.
 
-V2 planning caps each completion at 3000 `max_tokens` and permits one
-format-correction retry with a prompt reminder; a failed generation is asked again
-within each completion, and a truncated one ends the retry. Chat responses must
-include every field the SDK requires, including `system_fingerprint`, which may be
-`null` but not omitted. A broken endpoint response cannot become an action's
-fallback wait.
+V2 planning permits one format-correction retry with a prompt reminder; a failed
+generation is asked again within each completion, and a truncated one ends the
+retry. Chat responses must include every field the SDK requires, including
+`system_fingerprint`, which may be `null` but not omitted. A broken endpoint
+response cannot become an action's fallback wait.
 
 Exploration and `app-graph-audit` log a usage summary when they finish, per call
 type and model: calls, prompt tokens and the cached share of them, completion

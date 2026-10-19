@@ -2230,7 +2230,7 @@ def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruc
     assert [(body["model"], body["temperature"]) for body in bodies] == [
         ("qwen/qwen3.8-flash", 0.3)
     ] * 2
-    assert bodies[1]["max_tokens"] == aitk_translator.V2_CHAT_MAX_TOKENS
+    assert "max_tokens" not in bodies[1]
     assert not hasattr(translator, "page_detail")
     assert not hasattr(translator, "instruction")
 

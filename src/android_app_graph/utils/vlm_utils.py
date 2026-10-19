@@ -743,7 +743,6 @@ def _send_chat_once(
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
     plugins: list[ChatRequestPluginTypedDict] | None = None,
-    max_tokens: int | None = None,
 ) -> ChatResult:
     """Send one completion, record its usage and check how it finished."""
     response: object = client.chat.send(
@@ -751,7 +750,6 @@ def _send_chat_once(
         messages=messages,
         response_format=response_format,
         plugins=plugins,
-        max_tokens=max_tokens if max_tokens is not None else UNSET,
         temperature=settings.temperature if settings.temperature is not None else UNSET,
         stream=False,
         timeout_ms=int(settings.request_timeout * 1000),
@@ -786,7 +784,6 @@ def send_chat(
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
     plugins: list[ChatRequestPluginTypedDict] | None = None,
-    max_tokens: int | None = None,
 ) -> ChatResult:
     """Send a non-streaming completion, asking once more for unusable output.
 
@@ -804,7 +801,6 @@ def send_chat(
             messages=messages,
             response_format=response_format,
             plugins=plugins,
-            max_tokens=max_tokens,
         ),
     )
 
