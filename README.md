@@ -313,6 +313,9 @@ Exploration and `app-graph-audit` log a usage summary when they finish, per call
 type and model: calls, prompt tokens and the cached share of them, completion
 tokens and the reasoning share of them, total tokens, and cost in USD, as reported
 by OpenRouter's [usage accounting](https://openrouter.ai/docs/guides/administration/usage-accounting).
+For a request OpenRouter sends with your own provider key (BYOK), the cost adds the
+provider's bill for it, `upstream_inference_cost`, to OpenRouter's charge, so it is
+the full price even though the provider bills that part to your key directly.
 Every completed reply counts, including one that was asked again or cut off,
 since OpenRouter bills it; embedding replies report cost but no cached or
 reasoning tokens.

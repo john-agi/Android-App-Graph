@@ -19,6 +19,7 @@ from openrouter.components.chatusage import (
     ChatUsageCompletionTokensDetails,
     ChatUsagePromptTokensDetails,
 )
+from openrouter.components.costdetails import CostDetails
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 from PIL import Image
@@ -137,6 +138,18 @@ def _reasoning_tokens(usage: ChatUsage | CreateEmbeddingsUsage | None) -> int | 
     return details.reasoning_tokens if isinstance(details.reasoning_tokens, int) else None
 
 
+def _cost(usage: ChatUsage | CreateEmbeddingsUsage) -> float:
+    cost = usage.cost if isinstance(usage.cost, float) else 0.0
+    # On a request sent with the account's own provider key (BYOK), `cost` is only
+    # OpenRouter's charge; the provider bills `upstream_inference_cost` to that key.
+    # https://openrouter.ai/docs/guides/administration/usage-accounting
+    details = usage.cost_details
+    if usage.is_byok and isinstance(details, CostDetails):
+        upstream = details.upstream_inference_cost
+        cost += upstream if isinstance(upstream, float) else 0.0
+    return cost
+
+
 class TokenTracker:
     """Accumulates token usage and cost across all API calls, broken down by call type."""
 
@@ -168,7 +181,7 @@ class TokenTracker:
         )
         totals["reasoning_tokens"] += _reasoning_tokens(usage) or 0
         totals["total_tokens"] += usage.total_tokens
-        totals["cost"] += usage.cost if isinstance(usage.cost, float) else 0.0
+        totals["cost"] += _cost(usage)
 
     def snapshot(self) -> dict[str, float]:
         """Return current totals as a flat dict."""

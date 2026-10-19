@@ -213,6 +213,53 @@ def test_token_tracker_sums_cost_cached_and_reasoning_tokens_and_logs_them(
     assert total.split()[1:] == ["3", "106", "64", "42", "30", "148", "0.013000"]
 
 
+def _cost_details(upstream: float) -> dict[str, float]:
+    return {
+        "upstream_inference_prompt_cost": upstream / 2,
+        "upstream_inference_completions_cost": upstream / 2,
+        "upstream_inference_cost": upstream,
+    }
+
+
+def test_token_tracker_adds_the_provider_bill_of_a_byok_request_to_its_cost() -> None:
+    tracker = vlm.TokenTracker()
+    byok_chat = ChatUsage.model_validate(
+        {
+            "prompt_tokens": 65,
+            "completion_tokens": 26,
+            "total_tokens": 91,
+            "cost": 0,
+            "is_byok": True,
+            "cost_details": _cost_details(0.00002197),
+        }
+    )
+    byok_embedding = CreateEmbeddingsUsage.model_validate(
+        {
+            "prompt_tokens": 5,
+            "total_tokens": 5,
+            "cost": 0.000001,
+            "is_byok": True,
+            "cost_details": _cost_details(0.00001),
+        }
+    )
+    credit_chat = ChatUsage.model_validate(
+        {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "cost": 0.0003,
+            "is_byok": False,
+            "cost_details": _cost_details(0.0003),
+        }
+    )
+    tracker.record("action", "qwen/qwen3.8-flash", byok_chat)
+    tracker.record("action", "qwen/qwen3.8-flash", credit_chat)
+    tracker.record("embedding", "voyageai/voyage-multimodal-3.5", byok_embedding)
+    summary = tracker.summary()
+    assert summary["action:qwen/qwen3.8-flash"]["cost"] == pytest.approx(0.00032197)
+    assert summary["embedding:voyageai/voyage-multimodal-3.5"]["cost"] == pytest.approx(0.000011)
+
+
 _STRUCTURED: dict[str, tuple[str, bool]] = {
     "page": ("page_description", False),
     "verify": ("node_verification", True),
