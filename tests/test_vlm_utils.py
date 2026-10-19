@@ -880,6 +880,7 @@ def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
             _request(operation, router_client, png_screenshot)
         assert caught.value.status_code == 200
     assert len(router_requests) == 2
+    assert router_requests[1].content == router_requests[0].content
     assert no_sleep == []
 
 
@@ -980,6 +981,7 @@ def test_a_failed_generation_is_re_asked_once_and_never_becomes_a_fallback(
         with pytest.raises(vlm.GenerationFailedError, match="finish_reason=error"):
             request()
     assert len(router_requests) == 2
+    assert router_requests[1].content == router_requests[0].content
     assert tracked_usage.snapshot()["calls"] == 2
 
 
@@ -1242,9 +1244,25 @@ def test_tool_arguments_convert_to_aitk_actions(
     assert vlm._tool_call_to_aitk(args) == expected
 
 
-@pytest.mark.parametrize("recover", [False, True])
-def test_malformed_action_output_requests_another_response(
-    recover: bool,
+_NO_JSON = "it had no <tool_call> block with valid JSON"
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        ("Thought: Search is visible\nAction: Tap Search", _NO_JSON),
+        ('<tool_call>{"action": click}</tool_call>', _NO_JSON),
+        ("<tool_call>5</tool_call>", _NO_JSON),
+        ("", _NO_JSON),
+        (
+            '<tool_call>{"name": "mobile_use", "arguments": {"action": "type"}}</tool_call>',
+            "the mobile_use arguments were invalid: Type requires a text string",
+        ),
+    ],
+)
+def test_an_unusable_action_reply_is_retried_with_what_was_wrong(
+    reply: str,
+    reason: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -1252,21 +1270,47 @@ def test_malformed_action_output_requests_another_response(
     no_sleep: list[float],
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.append(chat_response(content='{"action":"click","coordinate":["bad",500]}'))
-    router_responses.append(
-        chat_response(
-            content='{"action":"click","coordinate":[500,300]}'
-            if recover
-            else '{"action":"click","coordinate":["bad",500]}'
-        )
-    )
-    result = vlm.predict_next_action(
+    router_responses.append(chat_response(content=reply))
+    router_responses.append(chat_response(content=f"<tool_call>{_CLICK}</tool_call>"))
+    action, _ = vlm.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
     )
-    if recover:
-        assert result[0] == {"action": "tap", "x": 50, "y": 60}
-    else:
-        assert result == ({"action": "wait", "time": 1}, "Failed to parse action response -> wait")
+    assert action == {"action": "tap", "x": 50, "y": 100}
+    first, retry = (json.loads(request.content)["messages"] for request in router_requests)
+    shown = [{"role": "assistant", "content": reply}] if reply else []
+    assert retry == [
+        *first,
+        *shown,
+        {
+            "role": "user",
+            "content": f"Your previous reply could not be used: {reason}. Reply again with "
+            "Thought, Action, and one <tool_call> block containing only JSON: "
+            '{"name": "mobile_use", "arguments": {...}}.',
+        },
+    ]
+    assert no_sleep == []
+
+
+def test_a_function_tag_inside_the_tool_call_block_is_named_as_the_reason() -> None:
+    assert (
+        vlm._unparsed_reason("<tool_call>\n<function=mobile_use>\n<parameter=action>")
+        == "the <tool_call> block used <function=...> tags instead of JSON"
+    )
+
+
+def test_a_second_unusable_action_reply_falls_back_to_wait(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.extend(chat_response(content="Tap Search") for _ in range(2))
+    assert vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION) == (
+        {"action": "wait", "time": 1},
+        "Failed to parse action response -> wait",
+    )
     assert len(router_requests) == 2
     assert no_sleep == []
 

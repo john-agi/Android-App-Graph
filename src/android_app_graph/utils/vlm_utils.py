@@ -712,6 +712,10 @@ Your task: {instruction}
 Look at the screenshot and execute the SINGLE next action to complete the task above.
 Focus on the task instruction. The overall goal is only for context when the instruction is ambiguous."""
 
+NEXT_ACTION_RETRY_PROMPT = """\
+Your previous reply could not be used: {reason}. Reply again with Thought, Action, and \
+one <tool_call> block containing only JSON: {{"name": "mobile_use", "arguments": {{...}}}}."""
+
 
 def _structured_output(
     name: str, schema: dict[str, Any], *, strict: bool = True
@@ -1601,10 +1605,10 @@ def _tool_call_to_aitk(
 
     def _scale(coord: object) -> tuple[int, int]:
         if not isinstance(coord, list) or len(coord) != 2:
-            raise _MalformedActionOutput("Action coordinates must be two finite numbers")
+            raise ValueError("Action coordinates must be two finite numbers")
         values = as_float_list(coord)
         if not values:
-            raise _MalformedActionOutput("Action coordinates must be two finite numbers")
+            raise ValueError("Action coordinates must be two finite numbers")
         x = int(values[0] / 1000 * screen_w)
         y = int(values[1] / 1000 * screen_h)
         return x, y
@@ -1649,9 +1653,9 @@ def _tool_call_to_aitk(
                 x1, y1 = screen_w // 5, screen_h // 2
                 x2, y2 = screen_w * 4 // 5, screen_h // 2
             else:
-                raise _MalformedActionOutput("Swipe requires a supported direction")
+                raise ValueError("Swipe requires a supported direction")
         else:
-            raise _MalformedActionOutput("Swipe requires coordinates or a supported direction")
+            raise ValueError("Swipe requires coordinates or a supported direction")
         return {
             "action": "swipe",
             "x1": x1,
@@ -1664,7 +1668,7 @@ def _tool_call_to_aitk(
     if action == "type":
         text = args.get("text")
         if not isinstance(text, str):
-            raise _MalformedActionOutput("Type requires a text string")
+            raise ValueError("Type requires a text string")
         return {"action": "type", "text": text}
 
     if action == "system_button":
@@ -1675,7 +1679,7 @@ def _tool_call_to_aitk(
             return {"action": "home"}
         if button == "Enter":
             return {"action": "enter"}
-        raise _MalformedActionOutput("System button must be Back, Home or Enter")
+        raise ValueError("System button must be Back, Home or Enter")
 
     if action == "wait":
         t = args.get("time") or args.get("duration") or 3
@@ -1690,7 +1694,7 @@ def _tool_call_to_aitk(
     if action == "error":
         return {"action": "end"}
 
-    raise _MalformedActionOutput(f"Unknown action: {action}")
+    raise ValueError(f"Unknown action: {action}")
 
 
 def plan_next_action(
@@ -1846,7 +1850,50 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, s
 
 
 class _MalformedActionOutput(UnusableOutputError):
-    """An action response can be repaired by requesting a new completion."""
+    """An action reply that cannot become an action, kept so the retry can show it to the model."""
+
+    def __init__(self, reason: str, reply: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.reply = reply
+
+    def follow_up(self) -> list[ChatMessagesTypedDict]:
+        """Return the failed reply and why it failed, to append to the original messages."""
+        retry: ChatMessagesTypedDict = {
+            "role": "user",
+            "content": NEXT_ACTION_RETRY_PROMPT.format(reason=self.reason),
+        }
+        if not self.reply:
+            # Nothing to show, and some providers reject an empty assistant message.
+            return [retry]
+        return [{"role": "assistant", "content": self.reply}, retry]
+
+
+def _unparsed_reason(raw: str) -> str:
+    """Say why a reply yielded no tool-call arguments."""
+    block = re.search(r"<tool_call>(.*?)(?:</tool_call>|\Z)", raw, re.DOTALL)
+    if block and "<function=" in block.group(1):
+        return "the <tool_call> block used <function=...> tags instead of JSON"
+    return "it had no <tool_call> block with valid JSON"
+
+
+def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[str, object], str]:
+    """Turn an action reply into an AITK action and its history entry."""
+    raw = message_text(resp)
+    try:
+        tool_args, thought, action_desc = _parse_agent_response(resp)
+    except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
+        raise _MalformedActionOutput(_unparsed_reason(raw), raw) from exc
+    if tool_args is None:
+        raise _MalformedActionOutput(_unparsed_reason(raw), raw)
+    try:
+        action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
+    except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
+        reason = f"the mobile_use arguments were invalid: {exc}"
+        raise _MalformedActionOutput(reason, raw) from exc
+    history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
+    logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
+    return as_object_dict(action), history_entry
 
 
 def predict_next_action(
@@ -1909,21 +1956,23 @@ def predict_next_action(
         },
     ]
 
+    failure: _MalformedActionOutput | None = None
+
     def request_action() -> tuple[dict[str, object], str]:
-        # One request per attempt, so a failed generation and a malformed action share one re-ask.
-        resp = _send_chat_once(client, call_type="action", settings=settings, messages=messages)
+        nonlocal failure
+        # At temperature 0 the identical request can repeat the same mistake, so the retry
+        # says what was wrong. A failed generation or a response the SDK cannot validate is
+        # sent again unchanged, since the model did nothing wrong. One request per attempt
+        # keeps every kind of failure within the one re-ask.
+        retry: list[ChatMessagesTypedDict] = [] if failure is None else failure.follow_up()
+        resp = _send_chat_once(
+            client, call_type="action", settings=settings, messages=[*messages, *retry]
+        )
         try:
-            tool_args, thought, action_desc = _parse_agent_response(resp)
-            if tool_args is None:
-                raise _MalformedActionOutput("Action response has no usable arguments")
-            action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
-        except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
-            raise _MalformedActionOutput(
-                "Action response could not be parsed or converted"
-            ) from exc
-        history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
-        logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
-        return as_object_dict(action), history_entry
+            return _read_action(resp, screen_w, screen_h)
+        except _MalformedActionOutput as exc:
+            failure = exc
+            raise
 
     try:
         return call_with_retry("[API] action response", request_action)

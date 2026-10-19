@@ -270,6 +270,17 @@ everything else raises; a failed generation never becomes a parse fallback.
 Exploration counts waits toward `max_steps`, including recovery waits, so repeated
 malformed actions cannot keep the run alive indefinitely.
 
+An action reply that cannot be parsed or converted is asked again with what was
+wrong, since at temperature 0 the same request can repeat the same mistake. The
+second request repeats the instruction and screenshot, adds the failed reply as an
+assistant message (omitted when the reply has no text), and ends with a user
+message naming the problem: the `<tool_call>` block used `<function=...>` tags
+instead of JSON, there was no `<tool_call>` block with valid JSON, or the
+`mobile_use` arguments were invalid, quoting the conversion error. It then asks for
+Thought, Action and one `<tool_call>` block of JSON, at the role's usual
+temperature. Every other unusable reply, including a failed generation and an SDK
+validation failure, is sent again unchanged.
+
 A reply cut off by its token limit (`finish_reason: "length"`) is never asked
 again, since the same request would be cut off again. The log names the call and
 any reasoning tokens, and the caller applies its final fallback at once: an
