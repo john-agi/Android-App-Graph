@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, NoReturn
 
+import httpx
 import pytest
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
+from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils.graph_manager import GraphManager
+
+PAGE_DETAIL = ModelSettings("gpt-test")
 
 
 @pytest.fixture
-def client() -> OpenAI:
-    """An OpenAI client that is never called: every VLM helper is monkeypatched."""
-    return OpenAI(api_key="not-a-real-key")
+def client() -> OpenRouter:
+    """An OpenRouter client that is never called: every VLM helper is monkeypatched."""
+    return open_client("not-a-real-key")
 
 
 def _unreachable_verifier(**_kwargs: Any) -> dict[str, Any]:
@@ -148,7 +154,7 @@ def _merge_issue(node_a: str = "s0_home", node_b: str = "s1_home") -> dict[str, 
 
 
 def test_verify_and_merge_nodes_merges_confirmed_pair(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
@@ -162,7 +168,7 @@ def test_verify_and_merge_nodes_merges_confirmed_pair(
 
     monkeypatch.setattr(audit, "verify_same_node", fake_verify)
 
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, "gpt-test")
+    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
 
     assert result["status"] == "merged"
     assert result["kept"] == "s0_home"
@@ -170,12 +176,12 @@ def test_verify_and_merge_nodes_merges_confirmed_pair(
     assert result["reason"] == "identical screens"
     # The description of the more-visited node is used as the reference.
     assert seen["existing_description"] == "Home"
-    assert seen["model"] == "gpt-test"
+    assert seen["settings"] == PAGE_DETAIL
     assert "s1_home" not in graph.graph
 
 
 def test_verify_and_merge_nodes_keeps_separate(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home"}),
@@ -187,7 +193,7 @@ def test_verify_and_merge_nodes_keeps_separate(
         lambda **_kwargs: {"same": False, "reason": "different content"},
     )
 
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, "gpt-test")
+    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
 
     assert result["status"] == "kept_separate"
     assert result["reason"] == "different content"
@@ -195,7 +201,7 @@ def test_verify_and_merge_nodes_keeps_separate(
 
 
 def test_verify_and_merge_nodes_skips_missing_screenshot(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa"}),
@@ -203,14 +209,14 @@ def test_verify_and_merge_nodes_skips_missing_screenshot(
     )
     monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
 
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, "gpt-test")
+    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
 
     assert result["status"] == "skipped"
     assert result["reason"] == "missing screenshot"
 
 
 def test_verify_and_merge_nodes_skips_a_self_pair(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression for #48: an auditor naming one node twice used to delete it."""
     graph = _graph_with_nodes(
@@ -219,7 +225,7 @@ def test_verify_and_merge_nodes_skips_a_self_pair(
     monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
 
     issue = _merge_issue(node_a="s0_home", node_b="s0_home")
-    (result,) = audit.verify_and_merge_nodes(graph, [issue], client, "gpt-test")
+    (result,) = audit.verify_and_merge_nodes(graph, [issue], client, PAGE_DETAIL)
 
     assert result["status"] == "skipped"
     assert result["reason"] == "same node"
@@ -228,12 +234,12 @@ def test_verify_and_merge_nodes_skips_a_self_pair(
 
 
 def test_verify_and_merge_nodes_skips_removed_node(
-    client: OpenAI, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph = _graph_with_nodes(("s0_home", {"reference_screenshot": "aaa"}))
     monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
 
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, "gpt-test")
+    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
 
     assert result["status"] == "skipped"
     assert result["reason"] == "node removed"
@@ -317,11 +323,23 @@ def _fake_device(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None
 
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_retries_explores_and_skips(
-    client: OpenAI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph, graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
     controller = FakeController("com.demo")
+    models: list[tuple[str, str]] = []
+
+    def plan(*, settings: ModelSettings, **_kwargs: object) -> str:
+        models.append(("plan", settings.model))
+        return "tap the first button"
+
+    def act(*, settings: ModelSettings, **_kwargs: object) -> tuple[dict[str, str], str]:
+        models.append(("act", settings.model))
+        return {"action": "end"}, ""
+
+    monkeypatch.setattr(audit, "plan_next_action", plan)
+    monkeypatch.setattr(audit, "predict_next_action", act)
 
     out_path = tmp_path / "demo" / "demo_audited.json"
     results = audit.re_explore_issues(
@@ -336,14 +354,14 @@ def test_re_explore_issues_retries_explores_and_skips(
         "com.demo",
         out_path,
         client,
-        "instruction-model",
-        client,
-        "action-model",
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
         steps_per_issue=1,
     )
 
     assert [r["status"] for r in results] == ["retried", "explored", "skipped"]
     assert results[2]["reason"] == "source not found"
+    assert models == [("plan", "instruction-model"), ("act", "action-model")] * 2
     # "end" is rewritten to a back press, and every action is recorded with save_flag.
     assert {action["action"] for action, _save_flag in controller.actions} <= {"tap", "back"}
     assert all(save_flag for _action, save_flag in controller.actions)
@@ -353,7 +371,7 @@ def test_re_explore_issues_retries_explores_and_skips(
 
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_skips_unreachable_nodes(
-    client: OpenAI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "find_path", lambda *_args: None)
@@ -370,9 +388,8 @@ def test_re_explore_issues_skips_unreachable_nodes(
         "com.demo",
         tmp_path / "demo" / "demo_audited.json",
         client,
-        "instruction-model",
-        client,
-        "action-model",
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
         steps_per_issue=1,
     )
 
@@ -381,7 +398,9 @@ def test_re_explore_issues_skips_unreachable_nodes(
 
 
 @pytest.mark.usefixtures("_fake_device")
-def test_re_explore_issues_returns_early_for_an_empty_graph(client: OpenAI, tmp_path: Path) -> None:
+def test_re_explore_issues_returns_early_for_an_empty_graph(
+    client: OpenRouter, tmp_path: Path
+) -> None:
     assert (
         audit.re_explore_issues(
             GraphManager(),
@@ -391,9 +410,132 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(client: OpenAI, tmp_
             "com.demo",
             tmp_path / "demo_audited.json",
             client,
-            "instruction-model",
-            client,
-            "action-model",
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
         )
         == []
     )
+
+
+@pytest.mark.parametrize("re_explore", [False, True])
+def test_audit_requires_only_the_models_it_uses(
+    re_explore: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    opened_clients: list[OpenRouter],
+) -> None:
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("APP_GRAPH_PAGE_DETAIL_MODEL", "provider/detail")
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "provider/embedding")
+    args = ["--config", str(config)]
+    if re_explore:
+        with pytest.raises(SystemExit) as caught:
+            audit.main([*args, "--re-explore"])
+        assert caught.value.code == 2
+        error = capsys.readouterr().err
+        assert "APP_GRAPH_INSTRUCTION_MODEL" in error
+        assert "APP_GRAPH_ACTION_MODEL" in error
+        assert opened_clients == []
+    else:
+        assert audit.main(args) == 0
+
+
+@pytest.mark.parametrize("exceptional", [False, True])
+@pytest.mark.usefixtures("model_environment")
+def test_audit_cli_opens_one_client_and_closes_it_on_exit(
+    exceptional: bool,
+    tmp_path: Path,
+    opened_clients: list[OpenRouter],
+    router_http: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    app_dir = graph_dir / "demo"
+    app_dir.mkdir(parents=True)
+    (app_dir / "demo.json").write_text('{"nodes":[],"edges":[]}')
+    config = _write_config(tmp_path, str(graph_dir))
+
+    def audit_graph(graph: GraphManager, _app: str, _path: Path) -> dict[str, object]:
+        assert opened_clients == [graph.client]
+        assert opened_clients[0].sdk_configuration.client is router_http
+        if exceptional:
+            raise RuntimeError("audit failed")
+        return {"issues": []}
+
+    monkeypatch.setattr(audit, "run_audit", audit_graph)
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+    if exceptional:
+        with pytest.raises(RuntimeError, match="audit failed"):
+            audit.main(["-c", str(config)])
+    else:
+        assert audit.main(["-c", str(config)]) == 0
+    assert len(opened_clients) == 1
+    assert opened_clients[0].sdk_configuration.client is None
+
+
+def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    def touched(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("settings must be validated before any device work")
+
+    adb_module = ModuleType("aitk.utils.adb_controller")
+    monkeypatch.setattr(adb_module, "ADBController", touched, raising=False)
+    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
+    monkeypatch.setattr(audit, "launch_app", touched)
+
+
+@pytest.mark.parametrize(
+    ("role_settings", "key", "message"),
+    [
+        ({"instruction": {"request_timeout": 0}}, "test", "instruction.request_timeout must be"),
+        ({"page_detail": {"audit_request_timeout": -5}}, "test", "audit_request_timeout must be"),
+        ({}, None, "OPENROUTER_API_KEY is required"),
+    ],
+)
+@pytest.mark.usefixtures("model_environment")
+def test_audit_rejects_invalid_settings_before_any_device_work(
+    role_settings: dict[str, object],
+    key: str | None,
+    message: str,
+    tmp_path: Path,
+    opened_clients: list[OpenRouter],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if key is not None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", key)
+    _deny_device_work(monkeypatch)
+    config = tmp_path / "audit.yaml"
+    config.write_text(json.dumps({"apps": [], "vlm": role_settings}), encoding="utf-8")
+    with pytest.raises(SystemExit) as caught:
+        audit.main(["--config", str(config), "--re-explore"])
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "Traceback" not in error
+    (line,) = [line for line in error.splitlines() if line.startswith("app-graph-audit: error:")]
+    assert message in line
+    assert error.rstrip().endswith(line)
+    assert opened_clients == []
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_re_explore_session_shares_the_audit_client(
+    tmp_path: Path, opened_clients: list[OpenRouter], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adb_module = ModuleType("aitk.utils.adb_controller")
+    monkeypatch.setattr(
+        adb_module,
+        "ADBController",
+        lambda _config, _logger: FakeController("com.demo"),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\n", encoding="utf-8")
+    assert audit.main(["--config", str(config), "--re-explore"]) == 0
+    assert len(opened_clients) == 1
+    assert opened_clients[0].sdk_configuration.client is None

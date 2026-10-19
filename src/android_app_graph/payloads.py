@@ -85,6 +85,13 @@ def as_str_dict(value: object) -> dict[str, Any]:
     return {k: v for k, v in value.items() if isinstance(k, str)}
 
 
+def as_object_dict(value: object) -> dict[str, object]:
+    """Narrow a JSON object while requiring callers to narrow its values too."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
 def as_list(value: object) -> list[Any]:
     """Return ``value`` when it is a ``list``, else ``[]``.
 

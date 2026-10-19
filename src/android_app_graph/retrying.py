@@ -1,46 +1,53 @@
-"""One retry-with-backoff policy for every remote call, so callers cannot drift on it."""
+"""Ask a model once more for output it cannot use; README.md#requests-and-recovery.
+
+Transport failures never reach this loop as retryable: the OpenRouter SDK has
+already retried them with its own policy, and retrying here too would multiply
+the attempts.
+"""
 
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
+
+from openrouter.errors import ResponseValidationError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETRIES = 2
-DEFAULT_BASE_DELAY_SECONDS = 2.0
+# Upstream UI-KOBE's V2_PARSE_RETRIES = 1: one more attempt after the first.
+UNUSABLE_OUTPUT_ATTEMPTS = 2
 
 
-def call_with_retry[T](
-    label: str,
-    func: Callable[[], T],
-    *,
-    retries: int = DEFAULT_RETRIES,
-    base_delay: float = DEFAULT_BASE_DELAY_SECONDS,
-) -> T:
-    """Run ``func``, retrying up to ``retries`` times with exponential backoff.
+class UnusableOutputError(ValueError):
+    """A completed response the caller cannot use; asking once more may help."""
 
-    A retry loop is a boundary: the traceback is logged (``exc_info=True``) on
-    every failed attempt except the last, where the exception is re-raised
-    instead of being swallowed.
+
+def _is_unusable(exc: Exception) -> bool:
+    if isinstance(exc, ResponseValidationError):
+        return 200 <= exc.status_code < 300
+    return isinstance(exc, UnusableOutputError)
+
+
+def call_with_retry[T](label: str, func: Callable[[], T]) -> T:
+    """Run ``func``, asking once more when it raises for unusable output.
+
+    Unusable output is an ``UnusableOutputError`` or the SDK's
+    ``ResponseValidationError`` on a 2xx response; anything else propagates at
+    once. A retry loop is a boundary: the first failure is logged with its
+    traceback, and the last one is re-raised instead of being swallowed.
     """
-    attempts = retries + 1
-    for attempt in range(attempts):
+    for attempt in range(1, UNUSABLE_OUTPUT_ATTEMPTS + 1):
         try:
             return func()
-        except Exception:
-            if attempt >= attempts - 1:
+        except (UnusableOutputError, ResponseValidationError) as exc:
+            if attempt == UNUSABLE_OUTPUT_ATTEMPTS or not _is_unusable(exc):
                 raise
-            delay = base_delay * (2**attempt)
             logger.warning(
-                "%s failed; retrying in %.1fs (%d/%d).",
+                "%s returned unusable output; asking again (%d/%d).",
                 label,
-                delay,
                 attempt + 1,
-                attempts - 1,
+                UNUSABLE_OUTPUT_ATTEMPTS,
                 exc_info=True,
             )
-            time.sleep(delay)
     msg = f"call_with_retry exhausted its attempts without raising: {label}"
     raise RuntimeError(msg)

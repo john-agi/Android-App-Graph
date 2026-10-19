@@ -1,28 +1,41 @@
-"""Shared pytest configuration: Hypothesis profiles, credential and network guards."""
+"""Shared pytest configuration: Hypothesis profiles, credential and network guards,
+and fixtures that answer OpenRouter SDK requests from an offline mock transport."""
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import socket
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, NoReturn
 
+import httpx
 import pytest
 from hypothesis import settings
+from openrouter import OpenRouter
+from PIL import Image
+
+from android_app_graph import cli
+from android_app_graph.adapters import aitk_translator
+from android_app_graph.commands import audit, embed
+from android_app_graph.utils import open_client
 
 # The built-in "ci" profile (deterministic, no deadline, no example database) is
 # selected automatically when CI is set; re-registered here with more examples.
 settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
 
-_CREDENTIAL_PREFIXES = ("APP_GRAPH_",)
+# The OpenRouter SDK also reads OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPEN_ROUTER_* and
+# OPENROUTER_DEBUG, so the whole prefix is cleared, not only the key.
+_CREDENTIAL_PREFIXES = ("APP_GRAPH_", "OPENROUTER_")
 _CREDENTIAL_NAMES = frozenset({"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"})
 
 
 @pytest.fixture(autouse=True)
 def _clear_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove provider credentials so tests can never use real keys or endpoints."""
+    """Remove provider credentials and SDK settings so tests never use real keys or endpoints."""
     for name in list(os.environ):
         if name.startswith(_CREDENTIAL_PREFIXES) or name in _CREDENTIAL_NAMES:
             monkeypatch.delenv(name)
@@ -45,14 +58,171 @@ def _no_network() -> Iterator[None]:
 
 
 @pytest.fixture
-def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Record retry back-off delays instead of waiting for them.
+def model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit model choices for tests of behavior other than missing configuration."""
+    for role, model in (
+        ("PAGE_DETAIL", "openai/gpt-6.1-sol"),
+        ("EMBEDDING", "google/gemini-embedding-2"),
+        ("INSTRUCTION", "openai/gpt-6.1-sol"),
+        ("ACTION", "qwen/qwen3.8-flash"),
+    ):
+        monkeypatch.setenv(f"APP_GRAPH_{role}_MODEL", model)
 
-    The retry-with-backoff policy (android_app_graph.retrying, used by
-    adapters.aitk_translator and embedding_cache) does ``import time`` and calls
-    ``time.sleep(...)``, so patching the shared stdlib module here covers every
-    caller of it without a per-caller fixture.
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record sleeps instead of waiting for them.
+
+    The OpenRouter SDK's retry back-off and the explorer's settling pauses call
+    ``time.sleep`` on the shared stdlib module, so patching it here covers them
+    all. A test must never let the SDK keep failing: its default policy retries
+    5XX responses and timeouts for up to an hour.
     """
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
     return delays
+
+
+@pytest.fixture
+def router_requests() -> list[httpx.Request]:
+    return []
+
+
+@pytest.fixture
+def router_responses() -> list[httpx.Response]:
+    return []
+
+
+@pytest.fixture
+def router_http(
+    router_requests: list[httpx.Request], router_responses: list[httpx.Response]
+) -> Iterator[httpx.Client]:
+    def respond(request: httpx.Request) -> httpx.Response:
+        router_requests.append(request)
+        return router_responses.pop(0)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        yield http_client
+
+
+@pytest.fixture
+def router_client(router_http: httpx.Client) -> OpenRouter:
+    return open_client("test-router-key", http_client=router_http)
+
+
+@pytest.fixture
+def opened_clients(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> list[OpenRouter]:
+    """Every client a command or the translator opens, each over the mock transport."""
+    opened: list[OpenRouter] = []
+
+    def open_routed(api_key: str) -> OpenRouter:
+        client = open_client(api_key, http_client=router_http)
+        opened.append(client)
+        return client
+
+    for module in (cli, audit, embed, aitk_translator):
+        monkeypatch.setattr(module, "open_client", open_routed)
+    return opened
+
+
+@pytest.fixture
+def chat_body() -> dict[str, object]:
+    return {
+        "id": "chat-test",
+        "created": 0,
+        "model": "test-model",
+        "object": "chat.completion",
+        "system_fingerprint": None,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "test reply",
+                },
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+            "cost": 0.00042,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
+    }
+
+
+@pytest.fixture
+def chat_response(chat_body: dict[str, object]) -> Callable[..., httpx.Response]:
+    """Build ``chat_body`` with one assistant message made of the given fields.
+
+    ``tool_arguments`` adds a native tool call carrying that JSON; ``content``
+    left out is omitted from the message rather than sent as null.
+    """
+
+    def build(
+        *, tool_arguments: str | None = None, finish_reason: str = "stop", **message: object
+    ) -> httpx.Response:
+        if tool_arguments is not None:
+            message["tool_calls"] = [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "mobile_use", "arguments": tool_arguments},
+                }
+            ]
+        choice = {
+            "index": 0,
+            "finish_reason": finish_reason,
+            "message": {"role": "assistant", **message},
+        }
+        return httpx.Response(200, json={**chat_body, "choices": [choice]})
+
+    return build
+
+
+@pytest.fixture
+def chat_usage_totals() -> dict[str, float]:
+    """What one ``chat_body`` reply adds to a TokenTracker."""
+    return {
+        "calls": 1,
+        "prompt_tokens": 7,
+        "cached_prompt_tokens": 2,
+        "completion_tokens": 3,
+        "reasoning_tokens": 1,
+        "total_tokens": 10,
+        "cost": 0.00042,
+    }
+
+
+@pytest.fixture
+def embedding_usage_totals() -> dict[str, float]:
+    """What one ``embedding_body`` reply adds to a TokenTracker."""
+    return {
+        "calls": 1,
+        "prompt_tokens": 5,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 5,
+        "cost": 0.00001,
+    }
+
+
+@pytest.fixture
+def embedding_body() -> dict[str, object]:
+    return {
+        "object": "list",
+        "model": "google/gemini-embedding-2",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
+        "usage": {"prompt_tokens": 5, "total_tokens": 5, "cost": 0.00001},
+    }
+
+
+@pytest.fixture
+def png_screenshot() -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")

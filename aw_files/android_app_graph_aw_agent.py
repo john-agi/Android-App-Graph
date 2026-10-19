@@ -169,7 +169,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         activity = self.env.foreground_activity_name
         package = _component_package(activity)
 
-        response_text = self._runtime._step(
+        response_text = self._runtime.to_agent(
             goal,
             {
                 "screenshot": screenshot_b64,

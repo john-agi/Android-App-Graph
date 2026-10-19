@@ -72,7 +72,6 @@ graph TD;
     adapters --> ec["android_app_graph.embedding_cache"];
     adapters --> gf["android_app_graph.graph_files"];
     adapters --> pay["android_app_graph.payloads"];
-    adapters --> retry["android_app_graph.retrying"];
     adapters --> utils["android_app_graph.utils"];
     adapters --> vlm["android_app_graph.utils.vlm_utils"];
     cmd["android_app_graph.commands"] --> cli["android_app_graph.cli"];
@@ -88,7 +87,7 @@ graph TD;
     cli --> logging;
     ec --> gf;
     ec --> pay;
-    ec --> retry;
+    ec --> retry["android_app_graph.retrying"];
     ec --> utils;
     ec --> vlm;
     kobe --> dev;
@@ -99,7 +98,10 @@ graph TD;
     gm --> gf;
     gm --> pay;
     gm --> vlm;
+    utils --> pay;
     vlm --> pay;
+    vlm --> retry;
+    vlm --> utils;
 ```
 
 ## Prerequisites
@@ -165,17 +167,23 @@ Do not put API keys directly in config files. Use a local `.env` file instead:
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your provider credentials. The template uses the
-previous Android-App-Graph demo defaults:
+The official [OpenRouter Python SDK](https://openrouter.ai/docs/client-sdks/python/overview)
+is installed by `uv sync --locked`. OpenRouter is the only endpoint and
+`OPENROUTER_API_KEY` is the only credential: one key covers chat, text embeddings
+and screenshot embeddings, and a missing or empty key is an error:
 
 ```bash
-APP_GRAPH_PAGE_DETAIL_MODEL=gpt-5.4
-APP_GRAPH_EMBEDDING_MODEL=gemini-embedding-2-preview
-APP_GRAPH_INSTRUCTION_MODEL=gpt-5.4
-APP_GRAPH_ACTION_MODEL=qwen3.5-plus-2026-02-15
+OPENROUTER_API_KEY=your-key
 ```
 
-Load the file before running commands:
+Two optional variables, commented out in `.env.example`, attribute your requests to
+your app in OpenRouter's rankings and analytics
+([app attribution](https://openrouter.ai/docs/app-attribution)):
+`OPENROUTER_HTTP_REFERER` (your app's URL) and `OPENROUTER_X_OPEN_ROUTER_TITLE`
+(its name). The OpenRouter SDK reads them from the environment and sends them as
+the `HTTP-Referer` and `X-OpenRouter-Title` headers.
+
+Export `.env` into the environment before running commands:
 
 ```bash
 set -a
@@ -183,9 +191,204 @@ source .env
 set +a
 ```
 
-`.env` is ignored by git. You can use any OpenAI-compatible endpoint for the
-chat and text embedding providers; update model names and base URLs in `.env`
-to match your provider.
+`.env` is ignored by git. Keep all four model selections from
+[`.env.example`](.env.example), or replace them with exact OpenRouter model IDs.
+The application has no built-in model defaults. Each operation requires explicit,
+nonempty model settings. It validates every setting it uses (models, temperatures,
+timeouts, removed keys and `OPENROUTER_API_KEY`) before any device setup or API
+request: `app-graph`, `app-graph-audit` and `app-graph-embed` report every problem
+in a one-line usage error, and the v2 runtime raises from its constructor. You may
+also supply these environment variables directly in your shell, CI or container; a
+physical `.env` file is not required or loaded automatically.
+
+| Environment variable | Role |
+|---|---|
+| `APP_GRAPH_PAGE_DETAIL_MODEL` | Screen descriptions and graph auditing |
+| `APP_GRAPH_EMBEDDING_MODEL` | Text and screenshot embeddings |
+| `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning |
+| `APP_GRAPH_ACTION_MODEL` | Action prediction and v2 runtime decisions |
+
+The template's model selections were approved from OpenRouter's catalog on
+2026-10-12 based on documented capabilities; Android-task improvements have not
+been measured.
+Check a replacement model's supported input modalities and parameters in the
+[chat catalog](https://openrouter.ai/api/v1/models) or
+[embedding catalog](https://openrouter.ai/api/v1/embeddings/models).
+
+The sample YAML uses `${APP_GRAPH_*_MODEL}` references. An omitted `model` field
+reads the corresponding environment variable; an explicit model ID in YAML or
+the embedding command's `--model` argument takes precedence. An empty value or
+unresolved reference is an error, including an explicit image-model override.
+To compare models, edit `.env`, export it again and restart the command.
+
+Exploration requires all four roles. The v2 runtime requires action and embedding
+models; it never reads a `page_detail` or `instruction` block. A basic audit requires
+page-detail and embedding models; `--re-explore` also requires instruction and
+action models. `app-graph-embed` requires only an embedding model. Help and plotting
+existing graphs need no model configuration or credentials.
+
+Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
+`temperature` in its YAML block: a finite number from 0 to 2, inclusive, or an
+`${ENV_VAR}` reference.
+It is omitted by default. Only set it when the selected model and provider
+support it; check the model's supported parameters and
+[OpenRouter's parameter guidance](https://openrouter.ai/docs/api_reference/parameters).
+The sample `configs/explore.yaml` sets `temperature: 0.0` on `action` only:
+`qwen/qwen3.8-flash` supports it and upstream UI-KOBE used it, while Sol, the
+sample's page-detail and instruction model, rejects temperature, so those blocks
+leave it out. The [AITK `controller.yaml` example](#use-android-app-graph-with-aitk)
+sets it on `action` too, since upstream's v2 runtime sent every call at
+temperature 0. Zero temperature does not guarantee deterministic output.
+
+### Requests and recovery
+
+All model roles accept a positive, finite `request_timeout` (or `timeout`) in
+seconds, sent with each request; the default is 60 seconds. Image embeddings
+inherit the text embedding timeout unless overridden, in both runtime retrieval
+and `app-graph-embed`. The graph audit and node-merge audit send the whole graph in
+one prompt, so they use `page_detail.audit_request_timeout` instead, default 300
+seconds.
+
+The OpenRouter SDK retries transport failures with its default policy, which the
+application keeps as is. It retries 5XX responses, dropped connections (refused,
+reset or failed reads and writes) and timeouts with exponential backoff (0.5 s,
+then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between tries) for up
+to one hour, waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
+header asks instead. It does not retry 429 or other 4xx responses, which fail at
+once, nor a server that closes the connection without sending a response. The
+application never retries what the SDK has given up on. A request that timed out
+can be sent again within that hour, and OpenRouter bills a non-streaming request
+in full even after the client disconnects, so a timeout shorter than the model
+needs can pay for the same request several times.
+
+The application asks a model once more, and only once, for output it cannot use:
+a malformed page description, an action reply that cannot be parsed or converted,
+an SDK validation failure on a 2xx response, an empty or non-finite embedding
+vector, or a reply whose generation failed partway (`finish_reason: "error"`). If
+the second attempt is unusable too, an action falls back to a one-second wait and
+everything else raises; a failed generation never becomes a parse fallback.
+Exploration counts waits toward `max_steps`, including recovery waits, so repeated
+malformed actions cannot keep the run alive indefinitely.
+
+An action reply that cannot be parsed or converted is asked again with what was
+wrong, since at temperature 0 the same request can repeat the same mistake. The
+second request repeats the instruction and screenshot, adds the failed reply as an
+assistant message (omitted when the reply has no text), and ends with a user
+message naming the problem: the `<tool_call>` block used `<function=...>` tags
+instead of JSON, there was no `<tool_call>` block with valid JSON, or the
+`mobile_use` arguments were invalid, quoting the conversion error. It then asks for
+Thought, Action and one `<tool_call>` block of JSON, at the role's usual
+temperature. Every other unusable reply, including a failed generation and an SDK
+validation failure, is sent again unchanged.
+
+No request sets `max_tokens`, so a reply stops only at the model's own output
+limit. A reply cut off there (`finish_reason: "length"`) is never asked again,
+since the same request would be cut off again. The log names the call and any
+reasoning tokens, and the caller applies its final fallback at once: an action
+waits, node verification treats the screens as different, edge normalization
+keeps the instruction, the audits report no issues, the coverage checkpoint uses
+its top candidate, the v2 runtime's own fallback applies, and a page description
+or an exploration plan raises. A reply stopped by the provider's content filter
+(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
+handled like any other empty or partial reply.
+
+The page-detail calls that return JSON (screen descriptions, node verification,
+edge normalization, both audits and the coverage checkpoint's target choice) ask
+for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
+a JSON schema with a description of every property, plus OpenRouter's
+[response-healing](https://openrouter.ai/docs/guides/features/plugins/response-healing)
+plugin. The schemas are strict except for screen descriptions and edge templates,
+whose `state` and `params` objects have free-form keys that strict mode cannot
+express. OpenRouter routes a `response_format` only to providers that support it,
+and not every provider enforces strict schemas, so every reply is still validated
+as before. The action model and the v2 runtime's decisions keep their text formats.
+
+V2 planning permits one format-correction retry with a prompt reminder; a failed
+generation is asked again within each completion, and a truncated one ends the
+retry. Chat responses must include every field the SDK requires, including
+`system_fingerprint`, which may be `null` but not omitted. A broken endpoint
+response cannot become an action's fallback wait.
+
+Exploration and `app-graph-audit` log a usage summary when they finish, per call
+type and model: calls, prompt tokens and the cached share of them, completion
+tokens and the reasoning share of them, total tokens, and cost in USD, as reported
+by OpenRouter's [usage accounting](https://openrouter.ai/docs/guides/administration/usage-accounting).
+For a request OpenRouter sends with your own provider key (BYOK), the cost adds the
+provider's bill for it, `upstream_inference_cost`, to OpenRouter's charge, so it is
+the full price even though the provider bills that part to your key directly.
+Every completed reply counts, including one that was asked again or cut off,
+since OpenRouter bills it; embedding replies report cost but no cached or
+reasoning tokens.
+
+Each command opens one OpenRouter client for the whole run, shares it across every
+role and closes it when the run ends; each request carries its own role's model,
+temperature and timeout. The v2 runtime creates its client when AITK constructs the
+translator and keeps it for the translator's lifetime, because AITK's translator
+interface has no teardown callback; the SDK closes it when the translator is garbage
+collected or the process exits.
+
+### Upgrading provider configuration
+
+Custom endpoints and per-role credentials were removed. A `page_detail`,
+`embedding`, `image_embedding`, `instruction` or `action` block that still sets
+`api_key`, `base_url` or `native_base_url` is rejected, with an error naming each
+key, by every command and by the v2 runtime, even in a block the operation does
+not use. AITK `controller.yaml` files copied from upstream UI-KOBE still set
+these keys: delete them and export `OPENROUTER_API_KEY` instead. The
+`app-graph-embed` options `--api-key` and `--base-url` were removed too.
+
+The v2 runtime and `app-graph-embed` both use OpenRouter's
+[multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
+`vlm.image_embedding` inherits the `embedding` model and timeout when omitted;
+set its `model` or `request_timeout` to override screenshots separately.
+Image embeddings require an image-capable embedding model.
+
+### Embedding caches
+
+Screenshot sidecars (`*.image_emb.json`) carry the exact embedding model ID.
+Old native Gemini tags (including `gemini-embedding-2`) differ from the new
+`google/gemini-embedding-2` ID and are discarded automatically, as are
+untagged caches. Runtime loading recomputes missing vectors. To precompute them,
+see [Visualize or Audit a Graph](#visualize-or-audit-a-graph). `--recompute`
+discards every cached vector, including those under the same model ID, for a
+deliberate refresh or a hand-edited sidecar.
+
+Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
+as `{node_id: {"model": model_id, "embedding": vector}}`. Legacy bare vectors
+and inline vectors without model metadata have unknown provenance. Graphs
+can still be loaded for inspection, but text comparisons reject unknown or
+mismatched models even when dimensions match. These checks run before description
+or embedding requests, so a rejected graph does not spend on model calls.
+Rebuild or re-explore into a new graph directory with the configured embedding
+model before resuming text matching; do not relabel old vectors. The screenshot-only
+`app-graph-embed` command does not migrate text vectors. Newly generated or
+renamed descriptions carry their model metadata through save/load.
+
+### Action responses
+
+The action prompt declares the `mobile_use` function in its text format and gives
+the screen resolution as 999x999 whatever the device or screenshot size; the
+screenshot itself is still downscaled to at most one million pixels.
+On ScreenSpot-v2 mobile (501 screenshots, temperature 0), `qwen/qwen3.8-flash`
+hit the target in 94.2% of taps with that screen line, against 91.0% when the
+prompt stated the resized screenshot size.
+
+A `<tool_call>` block holds one JSON object, `{"name": ..., "arguments": {...}}`
+or the arguments alone. A reply that ends before `</tool_call>` is still read when
+its JSON object is complete. The `<function=mobile_use>` form, with one
+`<parameter=name>` tag per argument, is not read: like any other reply that yields
+no action, it is [asked again](#requests-and-recovery) with the reason.
+
+Textual and native tool calls use the same action conversion. Click and long-press
+coordinates must contain two finite numbers on the model's 0–1000 scale, which
+are scaled to device pixels. A swipe uses two complete coordinate pairs when
+provided; otherwise `up`, `down`, `left` or `right` works with omitted, null or
+one valid coordinate pair. Supplied malformed coordinates still trigger
+[action recovery](#requests-and-recovery). For swipes and long presses, a
+numeric `time` takes precedence over `duration`; the default is 1000 milliseconds.
+Unsupported swipe directions, unknown actions or system buttons, and type
+actions without a text string trigger the same bounded action recovery.
+Explicit `end` and `terminate` remain end signals for the calling runtime to handle.
 
 ## Explore an App
 
@@ -240,20 +443,61 @@ Run the graph audit utility:
 uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 ```
 
-Precompute native Gemini image embeddings for a graph:
+Precompute OpenRouter image embeddings for a graph:
 
 ```bash
 uv run app-graph-embed --config configs/explore.yaml --app <app_name>
 ```
 
-The sidecar is tagged with the embedding model that wrote it, so switching
-`image_embedding.model` is detected automatically and recomputed without any
-flag; an untagged sidecar left over from an older release is recomputed the
-same way, since its vectors carry no record of which model produced them.
-Pass `--recompute` to discard the sidecar and rebuild every vector regardless
-of its model tag -- for a hand-edited sidecar or a deliberate refresh.
+See [Embedding caches](#embedding-caches) for model changes, forced refreshes
+and text-vector migration.
+
+## Verify Provider Setup
+
+Install the checkout being tested with `uv sync --locked`, then follow
+[Configure API Credentials](#configure-api-credentials). These manual checks
+use a live provider and an emulator with your target app installed; they incur
+model usage. Android-App-Graph is a Python package and does not produce an APK.
+
+1. Copy `configs/explore.yaml` to `/tmp/app-graph-smoke.yaml`. Set `device.udid`,
+   `device.avd_name` and the app's `name` and `package_name` for your emulator.
+   Set `experiment.graph_dir` to a new scratch directory to keep existing graphs.
+2. Run exploration, then resume with a higher total step limit:
+
+   ```bash
+   uv run --locked app-graph -c /tmp/app-graph-smoke.yaml --max-steps 2
+   uv run --locked app-graph -c /tmp/app-graph-smoke.yaml --resume-from auto --max-steps 4
+   ```
+
+   Expect model-selected actions on the emulator, saved graph nodes and
+   screenshots under the scratch directory, and model-tagged text vectors in
+   the `.emb.json` sidecar. The second run should continue the saved graph.
+3. Run screenshot precomputation twice without changing the graph:
+
+   ```bash
+   uv run --locked app-graph-embed --config /tmp/app-graph-smoke.yaml
+   uv run --locked app-graph-embed --config /tmp/app-graph-smoke.yaml
+   ```
+
+   The first run should report computed vectors and write `.image_emb.json`.
+   After a successful first run, the second should report cached entries and
+   `computed=0`. Compare migration behavior with [Embedding caches](#embedding-caches).
+
+For V2, install the same checkout in the AITK environment using the steps below.
+Run a task in the target app and check that identification, planning and action
+execution complete using the configured roles.
 
 ## Use Android-App-Graph with AITK
+
+After opening the app, each turn matches the screen to a graph node, records
+task-relevant observations, chooses a neighboring or free-form instruction, and
+executes one action. As in the UI-KOBE paper, one small model runs the turn: node
+identification, recording, the decision, free-form planning, the final answer and
+action execution all use the `action` model, and the embedding model retrieves
+candidate nodes by screenshot. No page description is generated at runtime:
+upstream UI-KOBE asked `page_detail` for one each turn but never used it, and the
+paper identifies nodes from screenshots alone. The roles it requires are listed
+under [Configure API Credentials](#configure-api-credentials).
 
 AITK loads a translator by module name: `register_translator()` in
 `aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
@@ -316,26 +560,11 @@ translator itself stays in the installed package. Verified against AITK commit
      max_pixels: 784000
      vlm_config:
        similarity_threshold: 0.84
-       page_detail:
-         model: ${APP_GRAPH_PAGE_DETAIL_MODEL}
-         base_url: ${APP_GRAPH_PAGE_DETAIL_BASE_URL}
-         api_key: ${APP_GRAPH_PAGE_DETAIL_API_KEY}
        embedding:
          model: ${APP_GRAPH_EMBEDDING_MODEL}
-         base_url: ${APP_GRAPH_EMBEDDING_BASE_URL}
-         api_key: ${APP_GRAPH_EMBEDDING_API_KEY}
-       instruction:
-         model: ${APP_GRAPH_INSTRUCTION_MODEL}
-         base_url: ${APP_GRAPH_INSTRUCTION_BASE_URL}
-         api_key: ${APP_GRAPH_INSTRUCTION_API_KEY}
        action:
          model: ${APP_GRAPH_ACTION_MODEL}
-         base_url: ${APP_GRAPH_ACTION_BASE_URL}
-         api_key: ${APP_GRAPH_ACTION_API_KEY}
-       image_embedding:
-         model: models/gemini-embedding-exp-03-07
-         native_base_url: https://generativelanguage.googleapis.com/v1beta
-         api_key: ${GEMINI_API_KEY}
+         temperature: 0.0
    ```
 
 6. Smoke-test the import without a device:

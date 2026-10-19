@@ -1,28 +1,4 @@
-"""Android-App-Graph v2 translator for AITK.
-
-Loop-based architecture with a single small model (7-9B):
-
-  Step 0 — Open app.
-
-  Step 1+ — Reactive loop (every AITK step):
-    1. IDENTIFY: Match current screen to a graph node (embedding similarity
-       + model picks from top-K candidates).
-    2. RECORD: Model checks if the screen has important info to remember.
-    3. DECIDE: Model sees current node, 1-hop neighbors (with edge
-       descriptions), self-loop actions, task, and memory — picks the next
-       action: stay (execute a self-loop / free action) or go to a neighbor.
-    4. EXECUTE: Action agent converts the refined instruction into one low-level
-       action dictionary for this AITK turn.
-    5. Loop back to step 1.
-
-  Memory module stores:
-    - Completed actions (what's been done)
-    - Extracted information (prices, times, names read from screens)
-    - Observations (anything the model flags as task-relevant)
-
-  Key design: every model call is multiple-choice, slot-filling, or short
-  extraction — never open-ended planning over the full graph.
-"""
+"""AITK v2 translator; setup and runtime flow: README.md#use-android-app-graph-with-aitk."""
 
 from __future__ import annotations
 
@@ -33,12 +9,11 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, override
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
 
-import httpx
 import networkx as nx
 from aitk.translators.base import BaseTranslator
-from openai import OpenAI
+from openrouter import OpenRouter
 
 from android_app_graph import device
 from android_app_graph.android_packages import package_from_activity
@@ -55,21 +30,30 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
 )
 from android_app_graph.payloads import as_int, as_list, as_str, as_str_dict
-from android_app_graph.retrying import call_with_retry
-from android_app_graph.utils import make_client
+from android_app_graph.utils import (
+    ModelSettings,
+    open_client,
+    resolve_api_key,
+    resolve_model_settings,
+)
 from android_app_graph.utils.vlm_utils import (
+    TruncatedReplyError,
     build_image_message,
-    describe_page_and_state,
+    message_text,
     predict_next_action,
     score_by_cosine,
+    send_chat,
     strip_json_fences,
 )
+
+if TYPE_CHECKING:
+    from openrouter.components.chatmessages import ChatMessagesTypedDict
+    from openrouter.components.chatusermessage import ChatUserMessageContentTypedDict
 
 logger = logging.getLogger("AITK - Android-App-Graph")
 
 _SEP = "-" * 60
 _SEP_THICK = "=" * 60
-V2_CHAT_MAX_TOKENS = 3000
 V2_PARSE_RETRIES = 1
 # Format-agnostic: it is appropriate whether the caller's parse expects a letter,
 # JSON, or free text, so one reminder covers every _ask_with_screenshot caller.
@@ -77,6 +61,8 @@ V2_PARSE_RETRY_HINT = (
     "Your previous reply could not be parsed. Reply in exactly the format "
     "requested above and nothing else."
 )
+
+RUNTIME_ROLES = ("action", "image_embedding")
 
 _OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
@@ -543,34 +529,14 @@ def _parse_decide_output(raw: str) -> dict[str, Any] | None:
 
 
 def _chat_completion_content(
-    client: OpenAI,
-    **kwargs: Any,
+    client: OpenRouter,
+    *,
+    settings: ModelSettings,
+    messages: list[ChatMessagesTypedDict],
 ) -> str:
-    """Run one chat completion and return its content."""
-    resp = call_with_retry(
-        "[API] chat completion",
-        lambda: client.chat.completions.create(**kwargs),
-    )
-    # A filtered or refused completion can come back with zero choices; that
-    # is empty content for the parse-retry to handle, not an IndexError.
-    return as_str(resp.choices[0].message.content, "") if resp.choices else ""
-
-
-def _make_no_proxy_client(cfg: dict[str, Any] | None) -> tuple[OpenAI, str]:
-    """Create an OpenAI SDK client for non-embedding v2 calls.
-
-    Native Google image embedding uses httpx directly and keeps the environment
-    proxy. The OpenAI-compatible action/page-detail endpoints are often SSH
-    forwarded locally, so they must ignore HTTP(S)_PROXY.
-    """
-    cfg = cfg or {}
-    request_timeout = float(cfg.get("request_timeout", cfg.get("timeout", 60)))
-    max_retries = int(cfg.get("max_retries", 0))
-    return make_client(
-        cfg,
-        http_client=httpx.Client(trust_env=False),
-        timeout=request_timeout,
-        max_retries=max_retries,
+    """Run a typed completion, account for usage and return assistant text."""
+    return message_text(
+        send_chat(client, call_type="v2_chat", settings=settings, messages=messages)
     )
 
 
@@ -626,22 +592,19 @@ class UIKobeV2Translator(BaseTranslator):
         super().__init__()
         # Set here, not at import time, so importing this module has no global side effect.
         logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("openai").setLevel(logging.WARNING)
+        logging.getLogger("openrouter").setLevel(logging.WARNING)
 
         self.graph_dir = Path(graph_dir)
         # Accepted because AITK forwards every translator_args key and its controller.yaml
         # sets max_pixels; this translator sends screenshots unresized.
         self.max_pixels = max_pixels
         vlm_config = vlm_config or {}
-
-        # The planner and the action agent share one model, configured under "action".
-        self.model_client, self.model_name = _make_no_proxy_client(vlm_config.get("action"))
-        self.desc_client, self.desc_model = _make_no_proxy_client(vlm_config.get("page_detail"))
-        image_embedding_settings = resolve_image_embedding_settings(vlm_config)
-        self.image_embedding_model = image_embedding_settings.model
-        self.image_embedding_api_key = image_embedding_settings.api_key
-        self.image_embedding_base_url = image_embedding_settings.base_url
-
+        settings = resolve_model_settings(vlm_config, roles=RUNTIME_ROLES)
+        self.action = settings["action"]
+        self.image_embedding = resolve_image_embedding_settings(vlm_config)
+        # AITK has no translator teardown, so the client lives as long as the
+        # translator; the SDK closes it when the translator is collected or at exit.
+        self.client = open_client(resolve_api_key())
         self._graphs: dict[str, nx.DiGraph] = {}
         self._package_to_app: dict[str, str] = {}
         self._load_all_graphs()
@@ -664,17 +627,11 @@ class UIKobeV2Translator(BaseTranslator):
         app_name: str,
         node_id: str,
     ) -> list[float]:
-        """Use native Gemini image embeddings for runtime node retrieval, with retry."""
-        if not self.image_embedding_api_key:
-            raise RuntimeError(
-                "Native Gemini image embedding requires image_embedding.api_key "
-                "or GEMINI_API_KEY/GOOGLE_API_KEY."
-            )
+        """Use OpenRouter image embeddings for runtime node retrieval, with retry."""
         return compute_embedding_with_retry(
-            self.image_embedding_api_key,
+            self.client,
             screenshot_b64,
-            model=self.image_embedding_model,
-            base_url=self.image_embedding_base_url,
+            settings=self.image_embedding,
             app_name=app_name,
             node_id=node_id,
         )
@@ -694,10 +651,6 @@ class UIKobeV2Translator(BaseTranslator):
         vector to it in place and persists it (once, not per node -- see its own
         docstring), and only those newly computed vectors are copied back onto
         ``G`` here -- the caller's entries are on ``G`` already.
-
-        A missing ``image_embedding.api_key`` is checked once here, before the
-        retry loop starts, rather than inside it: raising per node would log a
-        full traceback for every candidate instead of one clear error for the graph.
         """
         pending = [
             (node_id, data["reference_screenshot_path"])
@@ -705,12 +658,6 @@ class UIKobeV2Translator(BaseTranslator):
             if data.get("reference_screenshot_path") and not data.get("image_embedding")
         ]
         if not pending:
-            return
-        if not self.image_embedding_api_key:
-            logger.error(
-                "Native Gemini image embedding requires image_embedding.api_key "
-                "or GEMINI_API_KEY/GOOGLE_API_KEY."
-            )
             return
         # Encoded lazily, one screenshot at a time, the same as offline
         # precomputation: at most one base64 payload resident, never every
@@ -720,9 +667,8 @@ class UIKobeV2Translator(BaseTranslator):
             graph_file,
             embeddings,
             candidates,
-            api_key=self.image_embedding_api_key,
-            model=self.image_embedding_model,
-            base_url=self.image_embedding_base_url,
+            client=self.client,
+            settings=self.image_embedding,
             app_name=app_name,
         )
         for node_id, _screenshot_path in pending:
@@ -739,7 +685,7 @@ class UIKobeV2Translator(BaseTranslator):
                 logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
                 G = _load_graph_from_json(graph_file)
                 embeddings = load_image_embeddings(
-                    graph_file, model=self.image_embedding_model, node_ids=set(G.nodes)
+                    graph_file, model=self.image_embedding.model, node_ids=set(G.nodes)
                 )
                 for node_id, emb in embeddings.items():
                     G.nodes[node_id]["image_embedding"] = emb
@@ -803,26 +749,27 @@ class UIKobeV2Translator(BaseTranslator):
         ``parse`` must return ``None`` to request a retry; any other value
         (including a falsy one such as ``{}`` or ``""``) is accepted as success.
         Pass ``screenshot`` to ground the question in a screenshot; ``None`` sends
-        the prompt as plain text. A retry resends the identical prompt at
-        temperature 0.0, so a reply the parser could not read would otherwise come
-        back the same way; every attempt after the first appends a strict-format
-        reminder (``V2_PARSE_RETRY_HINT``) to give the retry an actual chance.
+        the prompt as plain text. Every attempt after the first appends a strict-format reminder
+        (``V2_PARSE_RETRY_HINT``) to help the model repair an unreadable reply. A reply cut
+        off at its token limit returns ``None`` at once: asking again would be cut off too.
         """
         result: T | None = None
         raw = ""
         for attempt in range(V2_PARSE_RETRIES + 1):
             text = prompt if attempt == 0 else f"{prompt}\n\n{V2_PARSE_RETRY_HINT}"
-            content: str | list[Any] = text
+            content: ChatUserMessageContentTypedDict = text
             if screenshot is not None:
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
-            raw = _chat_completion_content(
-                self.model_client,
-                model=self.model_name,
-                messages=[{"role": "user", "content": content}],
-                max_tokens=V2_CHAT_MAX_TOKENS,
-                temperature=0.0,
-            )
+            try:
+                raw = _chat_completion_content(
+                    self.client,
+                    settings=self.action,
+                    messages=[{"role": "user", "content": content}],
+                )
+            except TruncatedReplyError:
+                logger.warning("%s reply hit its token limit; not asking again", tag)
+                return None
             result = parse(raw)
             if result is not None:
                 return result
@@ -833,20 +780,21 @@ class UIKobeV2Translator(BaseTranslator):
         )
         return None
 
-    def _identify_node(self, activity: str, screenshot: str) -> tuple[str | None, str]:
-        """Match current screen to a graph node.
+    def _identify_node(self, activity: str, screenshot: str) -> str | None:
+        """Match the current screen to a graph node, or return ``None`` when none matches.
 
-        1. Get page description via VLM.
-        2. Compute embedding similarity against all nodes (same package).
-        3. Take top-K candidates.
-        4. Ask the model to pick the best match (multiple-choice).
+        1. Embed the screenshot and score it against the same-package nodes'
+           cached screenshot embeddings.
+        2. Ask the model to pick one of the top-K candidates, each shown with its
+           description and similarity, or to reject them all.
 
-        Returns (node_id, page_description).
+        No page description is generated: the paper's runtime identifies nodes by
+        screenshot, and upstream UI-KOBE's describe call here never fed a decision.
         """
         G = self._current_graph
         if G is None:
             logger.warning("[IDENTIFY] No current graph is loaded")
-            return None, ""
+            return None
 
         current_pkg = package_from_activity(activity)
         graph_packages = sorted(_extract_packages_from_graph(G))
@@ -858,42 +806,12 @@ class UIKobeV2Translator(BaseTranslator):
             graph_packages,
         )
 
-        same_pkg_descriptions: list[str] = []
-        same_pkg_keys: list[str] = []
-        same_pkg_node_count = 0
-        for _, data in G.nodes(data=True):
-            if package_from_activity(data.get("activity", "")) == current_pkg:
-                same_pkg_node_count += 1
-                desc = data.get("page_description", "")
-                if desc and desc not in same_pkg_descriptions:
-                    same_pkg_descriptions.append(desc)
-                for k in data.get("state_schema", {}):
-                    if k not in same_pkg_keys:
-                        same_pkg_keys.append(k)
-
-        logger.info(
-            "[IDENTIFY] same-package graph nodes=%d known_descriptions=%d known_state_keys=%d",
-            same_pkg_node_count,
-            len(same_pkg_descriptions),
-            len(same_pkg_keys),
+        same_pkg_node_count = sum(
+            1
+            for _, data in G.nodes(data=True)
+            if package_from_activity(data.get("activity", "")) == current_pkg
         )
-
-        started = time.perf_counter()
-        page_desc, _detail_snapshot, _elements = call_with_retry(
-            "[API] page describe and state",
-            lambda: describe_page_and_state(
-                self.desc_client,
-                screenshot,
-                existing_nodes=same_pkg_descriptions or None,
-                existing_keys=same_pkg_keys or None,
-                model=self.desc_model,
-            ),
-        )
-        logger.info(
-            '[IDENTIFY] screen_description="%s" describe_time=%.1fs',
-            page_desc,
-            time.perf_counter() - started,
-        )
+        logger.info("[IDENTIFY] same-package graph nodes=%d", same_pkg_node_count)
 
         try:
             started = time.perf_counter()
@@ -943,7 +861,7 @@ class UIKobeV2Translator(BaseTranslator):
                     "usable image embedding (missing, or cached at a stale dimension)",
                     same_pkg_node_count,
                 )
-            return None, page_desc
+            return None
 
         # Take top 4 for multiple-choice. Image similarity is retrieval only;
         # the model must always make the final node-identification decision.
@@ -969,12 +887,12 @@ class UIKobeV2Translator(BaseTranslator):
                 "[IDENTIFY] model rejected candidates; not using image similarity as final identity. best_sim=%.3f",
                 candidates[0][1],
             )
-            return None, page_desc
+            return None
 
         idx = letters.index(answer)
         chosen_node = top_k[idx][0]
         logger.info("[IDENTIFY] identified node=%s", chosen_node)
-        return chosen_node, page_desc
+        return chosen_node
 
     def _record_info(self, task: str, screenshot: str) -> None:
         """Check if the current screen has task-relevant info to remember."""
@@ -1291,18 +1209,15 @@ class UIKobeV2Translator(BaseTranslator):
     ) -> tuple[dict[str, Any], str, str]:
         keyboard_hint = device.soft_keyboard_hint()
 
-        aitk_action, history_entry = call_with_retry(
-            "[API] action agent",
-            lambda: predict_next_action(
-                self.model_client,
-                screenshot,
-                task + keyboard_hint,
-                screen_w=self._screen_w,
-                screen_h=self._screen_h,
-                action_history=action_history,
-                model=self.model_name,
-                overall_task=overall_task,
-            ),
+        aitk_action, history_entry = predict_next_action(
+            self.client,
+            screenshot,
+            task + keyboard_hint,
+            screen_w=self._screen_w,
+            screen_h=self._screen_h,
+            action_history=action_history,
+            settings=self.action,
+            overall_task=overall_task,
         )
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
@@ -1347,8 +1262,8 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[LOOP] Step %d", self._step_count)
         logger.info(_SEP_THICK)
 
-        node_id, page_desc = self._identify_node(activity, screenshot)
-        logger.info('[IDENTIFY] Node: %s — "%s"', node_id, page_desc)
+        node_id = self._identify_node(activity, screenshot)
+        logger.info("[IDENTIFY] Node: %s", node_id)
 
         self._record_info(task, screenshot)
         logger.info("[RECORD] Memory: %s", self._memory.format())

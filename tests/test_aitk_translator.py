@@ -1,4 +1,5 @@
-"""Pure helpers of the AITK translator, exercised without adb, emulator, network or keys."""
+"""Tests for the AITK translator: its parsing helpers, graph loading, the decision loop,
+and the runtime client lifecycle over the real SDK and an offline transport."""
 
 from __future__ import annotations
 
@@ -6,16 +7,22 @@ import base64
 import json
 import logging
 import string
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+import httpx
 import networkx as nx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from openrouter import OpenRouter
+from openrouter.errors import ResponseValidationError
 
 from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
+from android_app_graph.payloads import as_list, as_str, as_str_dict
+from android_app_graph.utils import ModelSettings, open_client, vlm_utils
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -729,138 +736,61 @@ def test_memory_numbers_repeated_entries() -> None:
     assert "  1. first\n  2. second" in memory.format()
 
 
-class _FakeMessage:
-    def __init__(self, content: str | None) -> None:
-        self.content = content
+class _RecordedCompletions:
+    def __init__(self, requests: list[httpx.Request]) -> None:
+        self._requests = requests
+
+    @property
+    def calls(self) -> list[dict[str, object]]:
+        return [as_str_dict(json.loads(request.content)) for request in self._requests]
+
+    def prompt_text(self, index: int = 0) -> str:
+        message = as_str_dict(as_list(self.calls[index]["messages"])[0])
+        part = as_str_dict(as_list(message["content"])[0])
+        return as_str(part["text"], "")
 
 
-class _FakeChoice:
-    def __init__(self, content: str | None) -> None:
-        self.message = _FakeMessage(content)
-
-
-class _FakeResponse:
-    def __init__(self, content: str | None) -> None:
-        self.choices = [_FakeChoice(content)]
-
-
-class _FakeCompletions:
-    """Stand-in for ``client.chat.completions`` that replays canned replies."""
-
-    def __init__(self, replies: list[str | None]) -> None:
-        self.replies = list(replies)
-        self.calls: list[dict[str, Any]] = []
-
-    def create(self, **kwargs: Any) -> _FakeResponse:
-        self.calls.append(kwargs)
-        return _FakeResponse(self.replies.pop(0) if self.replies else "")
-
-
-class _FakeChat:
-    def __init__(self, completions: _FakeCompletions) -> None:
-        self.completions = completions
-
-
-class _FakeClient:
-    def __init__(self, *replies: str | None) -> None:
-        self.completions = _FakeCompletions(list(replies))
-        self.chat = _FakeChat(self.completions)
-
-
-def test_chat_completion_content_returns_the_reply_content() -> None:
-    client = _FakeClient("first", "second")
+def test_chat_completion_content_returns_the_reply_content(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.extend([chat_response(content="first"), chat_response(content="second")])
     content = aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-        model="m",
+        router_client,
+        settings=ModelSettings("m"),
+        messages=[{"role": "user", "content": "test"}],
     )
     assert content == "first"
 
 
-def test_chat_completion_content_makes_exactly_one_completion_call() -> None:
-    """Retrying is the caller's job now (``_ask_with_screenshot``); a single call
-    must never loop internally even when more replies are queued up.
-    """
-    client = _FakeClient("first", "second")
+def test_chat_completion_content_records_its_usage_as_v2_chat(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    chat_usage_totals: dict[str, float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = vlm_utils.TokenTracker()
+    monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
+    router_responses.append(chat_response(content="first"))
     aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-        model="m",
+        router_client,
+        settings=ModelSettings("m"),
+        messages=[{"role": "user", "content": "test"}],
     )
-    assert len(client.completions.calls) == 1
+    assert tracker.summary() == {"v2_chat:m": chat_usage_totals}
 
 
-def test_chat_completion_content_turns_a_missing_body_into_an_empty_string() -> None:
-    client = _FakeClient(None)
-    content = aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-        model="m",
-    )
-    assert content == ""
-
-
-class _FakeResponseWithNoChoices:
-    def __init__(self) -> None:
-        self.choices: list[Any] = []
-
-
-class _FakeCompletionsWithNoChoices:
-    def create(self, **_kwargs: Any) -> _FakeResponseWithNoChoices:
-        return _FakeResponseWithNoChoices()
-
-
-class _FakeChatWithNoChoices:
-    def __init__(self) -> None:
-        self.completions = _FakeCompletionsWithNoChoices()
-
-
-class _FakeClientWithNoChoices:
-    def __init__(self) -> None:
-        self.chat = _FakeChatWithNoChoices()
-
-
-def test_chat_completion_content_turns_an_empty_choices_list_into_empty_content() -> None:
-    """A filtered or refused completion can come back with zero choices; that must
-    be empty content the parse-retry handles, not an IndexError.
-    """
-    client = _FakeClientWithNoChoices()
-    content = aitk_translator._chat_completion_content(
-        client,  # ty: ignore[invalid-argument-type]  # duck-typed stand-in for OpenAI
-        model="m",
-    )
-    assert content == ""
-
-
-def test_make_no_proxy_client_defaults() -> None:
-    client, model = aitk_translator._make_no_proxy_client({"api_key": "test-key"})
-    assert model == "gpt-4o"
-    assert client.max_retries == 0
-    assert client.timeout == 60.0
-
-
-def test_make_no_proxy_client_reads_the_config() -> None:
-    client, model = aitk_translator._make_no_proxy_client(
-        {
-            "api_key": "test-key",
-            "base_url": "http://localhost:8000/v1",
-            "model": "qwen",
-            "request_timeout": 12,
-            "max_retries": 3,
-        }
-    )
-    assert model == "qwen"
-    assert str(client.base_url) == "http://localhost:8000/v1/"
-    assert client.timeout == 12.0
-    assert client.max_retries == 3
-
-
-def test_make_no_proxy_client_prefers_the_timeout_alias() -> None:
-    client, _ = aitk_translator._make_no_proxy_client({"api_key": "test-key", "timeout": 5})
-    assert client.timeout == 5.0
+@pytest.fixture(autouse=True)
+def _openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every translator reads OPENROUTER_API_KEY; a test of its absence deletes it."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
 
 _VLM_CONFIG: dict[str, Any] = {
-    "action": {"api_key": "test-key", "model": "action-model"},
-    "page_detail": {"api_key": "test-key", "model": "detail-model"},
-    "image_embedding": {"api_key": "image-key", "model": "img-model"},
+    "action": {"model": "action-model"},
+    "image_embedding": {"model": "img-model"},
 }
 
 _DEMO_NODES: list[dict[str, Any]] = [
@@ -911,21 +841,16 @@ def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translat
     assert isinstance(translator, aitk_translator.UIKobeV2Translator)
     assert set(translator._graphs) == {"demo"}
     assert translator._package_to_app == {"com.demo.app": "demo"}
-    assert translator.model_name == "action-model"
-    assert translator.desc_model == "detail-model"
-    assert translator.image_embedding_model == "img-model"
-    assert translator.image_embedding_api_key == "image-key"
-    # image_embedding.base_url resolution itself is embedding_cache's
-    # resolve_image_embedding_settings; this only checks the translator wires
-    # its result through.
-    assert translator.image_embedding_base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert translator.action.model == "action-model"
+    assert translator.image_embedding.model == "img-model"
+    assert not hasattr(translator, "page_detail")
 
 
 @pytest.mark.usefixtures("translator")
 def test_construction_quiets_the_http_client_loggers() -> None:
-    """The httpx/openai per-request loggers are quieted on construction, not on import."""
+    """The httpx/openrouter per-request loggers are quieted on construction, not on import."""
     assert logging.getLogger("httpx").level == logging.WARNING
-    assert logging.getLogger("openai").level == logging.WARNING
+    assert logging.getLogger("openrouter").level == logging.WARNING
 
 
 def test_load_all_graphs_tolerates_a_missing_graph_dir(tmp_path: Path) -> None:
@@ -1018,7 +943,7 @@ def test_load_all_graphs_streams_screenshot_reads_lazily(
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", fake_embedding)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", fake_embedding)
 
     aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -1055,13 +980,15 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _flaky(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _flaky(
+        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+    ) -> list[float]:
         if screenshot_b64 == b64_by_node["n2"]:
-            msg = "500 upstream error"
+            msg = "embedding failed"
             raise RuntimeError(msg)
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _flaky)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _flaky)
 
     save_calls: list[dict[str, list[float]]] = []
     original_save = embedding_cache.save_image_embeddings
@@ -1110,12 +1037,14 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
         node_id: base64.b64encode(data).decode("ascii") for node_id, data in shots.items()
     }
 
-    def _interrupted_at_n3(_api_key: str, screenshot_b64: str, **_kwargs: Any) -> list[float]:
+    def _interrupted_at_n3(
+        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+    ) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
         return [1.0, 0.0]
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _interrupted_at_n3)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _interrupted_at_n3)
 
     with pytest.raises(_Interrupted):
         aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
@@ -1141,9 +1070,7 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(b"shot-n1")
 
-    monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
-    )
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
 
     def _raise_permission_error(
         _graph_file: Path, _embeddings: dict[str, list[float]], **_kwargs: object
@@ -1334,15 +1261,30 @@ def test_build_options_skips_the_self_loop_when_listing_neighbours(
     ]
 
 
-def _use_model(
+class _UseModel(Protocol):
+    def __call__(
+        self, translator: aitk_translator.UIKobeV2Translator, *replies: str | None
+    ) -> _RecordedCompletions: ...
+
+
+@pytest.fixture
+def use_model(
     monkeypatch: pytest.MonkeyPatch,
-    translator: aitk_translator.UIKobeV2Translator,
-    *replies: str | None,
-) -> _FakeClient:
-    """Answer every chat completion from ``translator.model_client`` with ``replies``."""
-    client = _FakeClient(*replies)
-    monkeypatch.setattr(translator, "model_client", client)
-    return client
+    router_http: httpx.Client,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> _UseModel:
+    """Answer a translator's planning completions with ``replies``, in order."""
+
+    def answer(
+        translator: aitk_translator.UIKobeV2Translator, *replies: str | None
+    ) -> _RecordedCompletions:
+        monkeypatch.setattr(translator, "client", open_client("test-key", http_client=router_http))
+        router_responses.extend(chat_response(content=reply) for reply in replies)
+        return _RecordedCompletions(router_requests)
+
+    return answer
 
 
 def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours(
@@ -1439,90 +1381,127 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
 
 
 def test_record_info_stores_what_the_model_read(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, "The total is 9 EUR")
+    use_model(translator, "The total is 9 EUR")
     translator._record_info("buy shoes", "screenshot")
     assert translator._memory.info == ["The total is 9 EUR"]
 
 
 def test_record_info_keeps_nothing_out_of_memory_in_a_single_call(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     """RECORD takes exactly one completion: a "nothing" reply is never retried."""
-    client = _use_model(monkeypatch, translator, "nothing", "nothing")
+    completions = use_model(translator, "nothing", "nothing")
     translator._record_info("buy shoes", "screenshot")
     assert translator._memory.info == []
-    assert len(client.completions.calls) == 1
+    assert len(completions.calls) == 1
 
 
 def test_generate_answer_returns_the_first_non_empty_reply(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    client = _use_model(monkeypatch, translator, "  ", "9 EUR")
+    completions = use_model(translator, "  ", "9 EUR")
     assert translator._generate_answer("buy shoes") == "9 EUR"
-    assert len(client.completions.calls) == 2
+    assert len(completions.calls) == 2
 
 
 def test_generate_answer_gives_up_after_the_retry(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, "", "")
+    use_model(translator, "", "")
     assert translator._generate_answer("buy shoes") == ""
 
 
 def test_plan_free_action_uses_the_planned_instruction(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, "Tap the cart icon")
+    use_model(translator, "Tap the cart icon")
     instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", ["earlier"])
     assert instruction == "Tap the cart icon"
 
 
 def test_plan_free_action_falls_back_when_the_planner_is_generic(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, "Take the best action", "Take the best action")
+    use_model(translator, "Take the best action", "Take the best action")
     instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
     assert instruction == "Wait briefly for the current screen to finish loading."
 
 
-def test_decide_returns_the_chosen_option(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+def test_a_truncated_v2_reply_is_not_asked_again_and_takes_the_fallback(
+    use_model: _UseModel,
+    translator: aitk_translator.UIKobeV2Translator,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
-    client = _use_model(
-        monkeypatch, translator, '{"choice": "c", "instruction": "tap the shoes result"}'
+    use_model(translator)
+    router_responses.append(chat_response(content="Tap the", finish_reason="length"))
+    instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+    assert instruction == "Wait briefly for the current screen to finish loading."
+    assert len(router_requests) == 1
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_a_failed_v2_generation_is_asked_again_once_then_raises(
+    recover: bool,
+    use_model: _UseModel,
+    translator: aitk_translator.UIKobeV2Translator,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    use_model(translator)
+    router_responses.append(chat_response(content="", finish_reason="error"))
+    router_responses.append(
+        chat_response(content="Tap the cart icon")
+        if recover
+        else chat_response(content="", finish_reason="error")
     )
+
+    def plan() -> str:
+        return translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+
+    if recover:
+        assert plan() == "Tap the cart icon"
+    else:
+        with pytest.raises(vlm_utils.GenerationFailedError):
+            plan()
+    assert len(router_requests) == 2
+
+
+def test_decide_returns_the_chosen_option(
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
+) -> None:
+    completions = use_model(translator, '{"choice": "c", "instruction": "tap the shoes result"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
 
     assert decision["type"] == "neighbor"
     assert decision["instruction"] == "tap the shoes result"
-    assert (
-        "State parameters: [query]"
-        in client.completions.calls[0]["messages"][0]["content"][0]["text"]
-    )
+    assert "State parameters: [query]" in completions.prompt_text()
 
 
 def test_decide_keeps_the_graph_instruction_when_the_model_omits_one(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, '{"choice": "C"}')
+    use_model(translator, '{"choice": "C"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["instruction"] == "tap the first result"
 
 
 def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     """DONE's instruction is never read by _step, so falling back to the whole task
     here is harmless; the type-specific fallback still applies to it."""
-    _use_model(monkeypatch, translator, '{"choice": "A"}')
+    use_model(translator, '{"choice": "A"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "done", "instruction": "buy shoes"}
 
 
 def test_decide_leaves_a_free_pick_without_an_instruction_empty(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     """A FREE pick that writes no instruction resolves to "", not the whole task.
 
@@ -1531,49 +1510,49 @@ def test_decide_leaves_a_free_pick_without_an_instruction_empty(
     re-plans through _plan_free_action; it is unreachable if this falls back to
     the task text instead.
     """
-    _use_model(monkeypatch, translator, '{"choice": "D"}')
+    use_model(translator, '{"choice": "D"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": ""}
 
 
 def test_decide_uses_the_models_instruction_for_a_free_pick(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
+    use_model(translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": "Tap the cart icon"}
 
 
 def test_decide_reports_an_unparseable_reply(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    client = _use_model(monkeypatch, translator, "no json", "still no json")
+    completions = use_model(translator, "no json", "still no json")
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {
         "type": "free",
         "instruction": "",
         "reason": "DECIDE response could not be parsed",
     }
-    assert len(client.completions.calls) == 2
+    assert len(completions.calls) == 2
 
 
 def test_decide_treats_an_empty_json_object_as_parsed_not_failed(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     """DECIDE succeeds on ``is not None``, not truthiness: ``{}`` is a real (if
     unusable) parse, so it must reach the "unrecognized choice" path and not be
     retried as a parse failure."""
-    client = _use_model(monkeypatch, translator, "{}")
+    completions = use_model(translator, "{}")
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["reason"] == "DECIDE returned unrecognized choice ''"
-    assert len(client.completions.calls) == 1
+    assert len(completions.calls) == 1
 
 
 def test_decide_reports_an_unknown_choice(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, translator, '{"choice": "Z", "instruction": "tap something"}')
+    use_model(translator, '{"choice": "Z", "instruction": "tap something"}')
     decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["instruction"] == "tap something"
@@ -1581,77 +1560,41 @@ def test_decide_reports_an_unknown_choice(
 
 
 def test_decide_omits_state_parameters_for_a_node_without_a_schema(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    client = _use_model(monkeypatch, translator, '{"choice": "A"}')
+    completions = use_model(translator, '{"choice": "A"}')
     translator._decide(translator._graphs["demo"], "buy shoes", "results", "screenshot")
-    assert (
-        "State parameters" not in client.completions.calls[0]["messages"][0]["content"][0]["text"]
-    )
-
-
-def test_load_all_graphs_requires_an_api_key_once_per_graph_not_per_node(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A missing ``image_embedding.api_key`` must not raise inside the per-node
-    retry loop -- that would log a full traceback once per candidate node. It
-    is checked once per graph, before the loop starts, and only when the graph
-    actually has a candidate to compute.
-    """
-    path = _write_graph(tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}])
-    screenshots = path.parent / "demo_screenshots"
-    screenshots.mkdir()
-    (screenshots / "n1.png").write_bytes(b"shot-n1")
-    (screenshots / "n2.png").write_bytes(b"shot-n2")
-    config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
-
-    with caplog.at_level("ERROR"):
-        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
-
-    assert set(built._graphs) == {"demo"}
-    key_errors = [m for m in caplog.messages if "Native Gemini image embedding requires" in m]
-    assert len(key_errors) == 1
-    assert not any("Runtime image embedding failed for graph" in m for m in caplog.messages)
-
-
-def test_compute_runtime_image_embedding_with_retry_requires_a_key(graph_dir: Path) -> None:
-    """This is the one remaining caller of the shared api-key check: the runtime
-    query embedding computed once per ``_identify_node`` call, not the per-node
-    cache-fill loop (that check is once-per-graph -- see the test above)."""
-    config = {**_VLM_CONFIG, "image_embedding": {"model": "img-model"}}
-    built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=config)
-    with pytest.raises(RuntimeError, match="Native Gemini image embedding requires"):
-        built._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
+    assert "State parameters" not in completions.prompt_text()
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_compute_runtime_image_embedding_with_retry_propagates_a_persistent_failure(
+def test_runtime_image_embedding_propagates_an_error_without_asking_again(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """The retry loop itself is owned by tests/test_embedding_cache.py; this is the
-    integration point: a persistent failure must still propagate to the caller."""
+    """Only unusable output is asked again (tests/test_retrying.py); any other
+    error reaches the caller from the first attempt."""
+    calls: list[str] = []
 
-    def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
-        raise RuntimeError("rate limited")
+    def _fails(
+        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+    ) -> list[float]:
+        calls.append(screenshot_b64)
+        raise RuntimeError("embedding failed")
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _always_fails)
-    with pytest.raises(RuntimeError, match="rate limited"):
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _fails)
+    with pytest.raises(RuntimeError, match="embedding failed"):
         translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
+    assert calls == ["shot"]
 
 
 @pytest.fixture
 def identifiable(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> aitk_translator.UIKobeV2Translator:
-    """A translator whose page description and image embeddings come from fakes."""
-    monkeypatch.setattr(
-        aitk_translator,
-        "describe_page_and_state",
-        lambda *_args, **_kwargs: ("a home screen", {}, []),
-    )
+    """A translator whose image embeddings come from a fake."""
     monkeypatch.setattr(
         embedding_cache,
-        "get_gemini_native_image_embedding",
+        "get_image_embedding",
         lambda *_args, **_kwargs: [1.0, 0.0],
     )
     G = translator._graphs["demo"]
@@ -1663,21 +1606,32 @@ def identifiable(
 
 
 def test_identify_node_without_a_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator._identify_node("com.demo.app/.HomeActivity", "shot") == (None, "")
+    assert translator._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
 
 def test_identify_node_picks_the_model_choice(
-    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, identifiable, "A")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-        "home",
-        "a home screen",
-    )
+    use_model(identifiable, "A")
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == "home"
+
+
+def test_identify_node_only_asks_the_action_model_to_pick_a_candidate(
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
+) -> None:
+    """The paper's runtime retrieves candidates by screenshot embedding and lets the
+    runtime model pick one; it never describes the screen with the page-detail model."""
+    completions = use_model(identifiable, "A")
+
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == "home"
+
+    assert len(completions.calls) == 1
+    assert completions.calls[0]["model"] == "action-model"
+    assert completions.prompt_text().startswith("You are looking at a mobile app screen.")
 
 
 def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
-    monkeypatch: pytest.MonkeyPatch,
+    use_model: _UseModel,
     identifiable: aitk_translator.UIKobeV2Translator,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1696,10 +1650,10 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
         visit_count=0,
         image_embedding=[1.0, 0.0, 0.0],
     )
-    _use_model(monkeypatch, identifiable, "A")
+    use_model(identifiable, "A")
 
     with caplog.at_level("WARNING"):
-        node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+        node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
     stale_warnings = [
@@ -1711,36 +1665,33 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
 
 
 def test_identify_node_respects_a_rejection(
-    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, identifiable, "none")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-        None,
-        "a home screen",
-    )
+    use_model(identifiable, "none")
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
 
 def test_identify_node_retries_an_unparseable_pick(
-    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    client = _use_model(monkeypatch, identifiable, "hmm", "B")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    completions = use_model(identifiable, "hmm", "B")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
     assert node_id == "results"
-    assert len(client.completions.calls) == 2
+    assert len(completions.calls) == 2
 
 
 def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
-    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     """A "BC"-shaped reply must not be silently mapped to a candidate by substring luck."""
-    client = _use_model(monkeypatch, identifiable, "BC", "B")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    completions = use_model(identifiable, "BC", "B")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
     assert node_id == "results"
-    assert len(client.completions.calls) == 2
+    assert len(completions.calls) == 2
 
 
 def test_identify_node_retry_appends_the_parse_hint_and_recovers(
-    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     """ "A login screen is the best match" reads as the sentence-initial article,
     not a pick, and a top-candidate reply of that shape is common from a model
@@ -1749,33 +1700,33 @@ def test_identify_node_retry_appends_the_parse_hint_and_recovers(
     retry must repeat the identical prompt with a strict-format reminder appended
     rather than guess, so the second attempt (still "A") is what recovers it.
     """
-    client = _use_model(monkeypatch, identifiable, "A login screen is the best match", "A")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    completions = use_model(identifiable, "A login screen is the best match", "A")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
-    assert len(client.completions.calls) == 2
-    first_text = client.completions.calls[0]["messages"][0]["content"][0]["text"]
-    second_text = client.completions.calls[1]["messages"][0]["content"][0]["text"]
+    assert len(completions.calls) == 2
+    first_text = completions.prompt_text()
+    second_text = completions.prompt_text(1)
     assert aitk_translator.V2_PARSE_RETRY_HINT not in first_text
     assert second_text.endswith(aitk_translator.V2_PARSE_RETRY_HINT)
 
 
 def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
-    monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    client = _use_model(monkeypatch, identifiable, "A")
-    node_id, _ = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    completions = use_model(identifiable, "A")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
     assert node_id == "home"
-    assert len(client.completions.calls) == 1
-    text = client.completions.calls[0]["messages"][0]["content"][0]["text"]
+    assert len(completions.calls) == 1
+    text = completions.prompt_text()
     assert aitk_translator.V2_PARSE_RETRY_HINT not in text
 
 
 def test_identify_node_without_candidates_in_the_current_package(
     identifiable: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    assert identifiable._identify_node("org.other.thing/.Main", "shot") == (None, "a home screen")
+    assert identifiable._identify_node("org.other.thing/.Main", "shot") is None
 
 
 def test_identify_node_without_cached_embeddings(
@@ -1784,14 +1735,11 @@ def test_identify_node_without_cached_embeddings(
     G = identifiable._graphs["demo"]
     for node in G.nodes:
         del G.nodes[node]["image_embedding"]
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-        None,
-        "a home screen",
-    )
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
 
 def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, use_model: _UseModel, tmp_path: Path
 ) -> None:
     """A graph loaded with present-but-null fields must not crash IDENTIFY or DECIDE.
 
@@ -1820,12 +1768,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
             }
         ],
     )
-    monkeypatch.setattr(
-        aitk_translator, "describe_page_and_state", lambda *_a, **_kw: ("home screen", {}, [])
-    )
-    monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
-    )
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
     G = translator._graphs["demo"]
     G.nodes["home"]["image_embedding"] = [1.0, 0.0]
@@ -1835,10 +1778,8 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     _text, options = translator._build_options(G, "home")
     assert [opt["type"] for opt in options] == ["done", "free"]
 
-    _use_model(monkeypatch, translator, "A")
-    node_id, page_desc = translator._identify_node("", "shot")
-    assert node_id == "home"
-    assert page_desc == "home screen"
+    use_model(translator, "A")
+    assert translator._identify_node("", "shot") == "home"
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1848,7 +1789,7 @@ def test_identify_node_propagates_an_embedding_failure(
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
         raise RuntimeError("embedding down")
 
-    monkeypatch.setattr(embedding_cache, "get_gemini_native_image_embedding", _always_fails)
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
 
@@ -1981,32 +1922,31 @@ def test_to_agent_without_an_actions_key_resets_state(
 
 
 def test_to_agent_runs_the_loop(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(
-        monkeypatch,
-        stepping,
+    turn_replies = (
         "A",
         "The total is 9 EUR",
         '{"choice": "C", "instruction": "tap the shoes result"}',
     )
+    use_model(stepping, *turn_replies, *turn_replies)
     stepping._app_opened = True
     state, history = _step_payload()
 
-    response = json.loads(stepping.to_agent("buy shoes", state, history))
-
-    assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
-    assert response["message"] == "[Android-App-Graph] Action: tapped the result | on home"
-    assert stepping._step_count == 1
-    assert stepping._memory.actions == ["tap the shoes result"]
-    assert stepping._memory.info == ["The total is 9 EUR"]
-    assert stepping._memory.observations == ["tapped the result"]
+    for turn in range(1, 3):
+        response = json.loads(stepping.to_agent("buy shoes", state, history))
+        assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
+        assert response["message"] == "[Android-App-Graph] Action: tapped the result | on home"
+        assert stepping._step_count == turn
+    assert stepping._memory.actions == ["tap the shoes result"] * 2
+    assert stepping._memory.info == ["The total is 9 EUR"] * 2
+    assert stepping._memory.observations == ["tapped the result"] * 2
 
 
 def test_step_ends_the_task_on_a_done_decision(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, stepping, "A", "nothing", '{"choice": "A"}', "9 EUR")
+    use_model(stepping, "A", "nothing", '{"choice": "A"}', "9 EUR")
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2015,7 +1955,9 @@ def test_step_ends_the_task_on_a_done_decision(
 
 
 def test_step_downgrades_an_early_end_to_a_wait(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    monkeypatch: pytest.MonkeyPatch,
+    use_model: _UseModel,
+    stepping: aitk_translator.UIKobeV2Translator,
 ) -> None:
     """Only the DECIDE step may end a task; a grounding "end" waits one turn instead."""
     monkeypatch.setattr(
@@ -2023,7 +1965,7 @@ def test_step_downgrades_an_early_end_to_a_wait(
         "predict_next_action",
         lambda *_a, **_k: ({"action": "end", "answer": "guessed"}, "gave up | on home"),
     )
-    _use_model(monkeypatch, stepping, "A", "nothing", '{"choice": "C"}')
+    use_model(stepping, "A", "nothing", '{"choice": "C"}')
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2032,9 +1974,9 @@ def test_step_downgrades_an_early_end_to_a_wait(
 
 
 def test_step_plans_a_free_action_when_no_node_matches(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, stepping, "none", "nothing", "Tap the cart icon")
+    use_model(stepping, "none", "nothing", "Tap the cart icon")
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2043,12 +1985,11 @@ def test_step_plans_a_free_action_when_no_node_matches(
 
 
 def test_step_replans_when_decide_produces_no_instruction(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """A matched node whose DECIDE reply never parses must still re-plan through
     _plan_free_action rather than executing the action agent on an empty instruction."""
-    _use_model(
-        monkeypatch,
+    use_model(
         stepping,
         "A",  # IDENTIFY
         "nothing",  # RECORD
@@ -2064,15 +2005,14 @@ def test_step_replans_when_decide_produces_no_instruction(
 
 
 def test_step_replans_when_a_free_pick_has_no_instruction(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """A FREE pick without an instruction re-plans through _plan_free_action.
 
     The alternative is sending the whole task text as one instruction and
     recording it as the completed action.
     """
-    _use_model(
-        monkeypatch,
+    use_model(
         stepping,
         "A",  # IDENTIFY
         "nothing",  # RECORD
@@ -2087,9 +2027,9 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
 
 
 def test_step_resolves_the_graph_from_the_package(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    _use_model(monkeypatch, stepping, "A", "nothing", '{"choice": "C"}')
+    use_model(stepping, "A", "nothing", '{"choice": "C"}')
     stepping._app_opened = True
     stepping._app_name = ""
     stepping._current_graph = None
@@ -2100,10 +2040,10 @@ def test_step_resolves_the_graph_from_the_package(
 
 
 def test_step_warns_when_the_task_names_no_known_app(
-    monkeypatch: pytest.MonkeyPatch, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """An unresolvable app falls straight through to the reactive loop."""
-    _use_model(monkeypatch, stepping, "A", "nothing", '{"choice": "C"}')
+    use_model(stepping, "A", "nothing", '{"choice": "C"}')
     state, history = _step_payload()
 
     response = json.loads(stepping._step("do something unrelated", state, history))
@@ -2188,10 +2128,7 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
         G.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
 
     with caplog.at_level("WARNING"):
-        assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == (
-            None,
-            "a home screen",
-        )
+        assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
 
     expected = (
         f"[IDENTIFY] no candidates: none of the {len(same_pkg)} same-package node(s) has a "
@@ -2217,9 +2154,7 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(b"shot-n1")
 
-    monkeypatch.setattr(
-        embedding_cache, "get_gemini_native_image_embedding", lambda *_a, **_kw: [1.0, 0.0]
-    )
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
@@ -2228,3 +2163,217 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
         "model": model,
         "embeddings": {"n1": [1.0, 0.0]},
     }
+
+
+@pytest.mark.usefixtures("opened_clients", "model_environment")
+def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_screenshots(
+    tmp_path: Path,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
+    graph_path = _write_graph(tmp_path)
+    screenshots = graph_path.parent / "demo_screenshots"
+    screenshots.mkdir()
+    (screenshots / "n1.png").write_bytes(_SCREENSHOT)
+    sidecar = embedding_cache.image_embeddings_path(graph_path)
+    sidecar.write_text(
+        json.dumps({"model": "gemini-embedding-2", "embeddings": {"n1": [1.0, 0.0]}}),
+        encoding="utf-8",
+    )
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [0.25, 0.75]
+    assert json.loads(sidecar.read_text())["model"] == "google/gemini-embedding-2"
+    assert built._compute_runtime_image_embedding_with_retry("live-shot", "demo", "current") == [
+        0.25,
+        0.75,
+    ]
+    assert len(router_requests) == 2
+    for request in router_requests:
+        assert request.headers["authorization"] == "Bearer shared-router-key"
+        assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
+    assert (
+        json.loads(router_requests[1].content)["input"][0]["content"][0]["image_url"]["url"]
+        == "data:image/png;base64,live-shot"
+    )
+
+
+@pytest.mark.usefixtures("opened_clients")
+def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "google/gemini-embedding-2")
+    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "qwen/qwen3.8-flash")
+    translator = aitk_translator.UIKobeV2Translator(
+        graph_dir=str(tmp_path),
+        vlm_config={
+            "action": {"temperature": 0.3},
+            "page_detail": {"model": "${APP_GRAPH_PAGE_DETAIL_MODEL}", "temperature": "hot"},
+            "instruction": {"model": "${APP_GRAPH_INSTRUCTION_MODEL}", "temperature": "hot"},
+        },
+    )
+    router_responses.extend([chat_response(content="nothing"), chat_response(content="Tap Search")])
+    translator._record_info("find shoes", png_screenshot)
+    assert (
+        translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
+        == "Tap Search"
+    )
+    bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]
+    assert [(body["model"], body["temperature"]) for body in bodies] == [
+        ("qwen/qwen3.8-flash", 0.3)
+    ] * 2
+    assert "max_tokens" not in bodies[1]
+    assert not hasattr(translator, "page_detail")
+    assert not hasattr(translator, "instruction")
+
+
+def test_runtime_reports_missing_models_before_creating_clients(
+    tmp_path: Path, opened_clients: list[OpenRouter]
+) -> None:
+    with pytest.raises(ValueError, match="Invalid vlm configuration") as caught:
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    for role in ("EMBEDDING", "ACTION"):
+        assert f"APP_GRAPH_{role}_MODEL" in str(caught.value)
+    assert "PAGE_DETAIL" not in str(caught.value)
+    assert "INSTRUCTION" not in str(caught.value)
+    assert opened_clients == []
+
+
+def test_runtime_keeps_caller_environment_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    config: dict[str, object] = {}
+    for role in ("embedding", "action"):
+        variable = f"APP_GRAPH_{role.upper()}_MODEL"
+        monkeypatch.setenv(variable, f"provider/{role}")
+        config[role] = {"model": f"${{{variable}}}"}
+    first = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
+    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "provider/new-action")
+    second = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=config)
+    assert first.action.model == "provider/action"
+    assert second.action.model == "provider/new-action"
+    assert config["action"] == {"model": "${APP_GRAPH_ACTION_MODEL}"}
+    assert "image_embedding" not in config
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_v2_runtime_without_an_openrouter_key_creates_no_client(
+    tmp_path: Path, opened_clients: list[OpenRouter], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY is required"):
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    assert opened_clients == []
+
+
+@pytest.mark.usefixtures("model_environment")
+def test_v2_runtime_rejects_upstream_endpoint_and_credential_keys(
+    tmp_path: Path, opened_clients: list[OpenRouter], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "dummy-google-secret-never-log"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    upstream = {
+        "action": {"api_key": "${GEMINI_API_KEY}", "base_url": "https://provider.example/v1"},
+        "image_embedding": {
+            "native_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "model": "gemini-embedding-2",
+        },
+        "instruction": {"api_key": "${GEMINI_API_KEY}"},
+    }
+    with pytest.raises(ValueError, match="was removed") as caught:
+        aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=upstream)
+    for name in (
+        "action.api_key",
+        "action.base_url",
+        "image_embedding.native_base_url",
+        "instruction.api_key",
+    ):
+        assert f"{name} was removed" in str(caught.value)
+    assert secret not in str(caught.value)
+    assert opened_clients == []
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_v2_runtime_image_requests_use_the_image_timeout(
+    tmp_path: Path,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    embedding_body: dict[str, object],
+    png_screenshot: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    runtime = aitk_translator.UIKobeV2Translator(
+        graph_dir=str(tmp_path), vlm_config={"image_embedding": {"request_timeout": 2.25}}
+    )
+    assert runtime._compute_runtime_image_embedding_with_retry(png_screenshot, "demo", "home") == [
+        0.25,
+        0.75,
+    ]
+    assert router_requests[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 2.25
+    )
+
+
+@pytest.mark.parametrize("schema_failure", [False, True])
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
+    schema_failure: bool,
+    tmp_path: Path,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_body: dict[str, object],
+    png_screenshot: str,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
+    runtime = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
+    runtime._app_opened = True
+    state: dict[str, object] = {"screenshot": png_screenshot, "activity": "com.demo.Home"}
+    history: dict[str, object] = {"actions": ["started"]}
+    for turn in range(2):
+        router_responses.extend(
+            [
+                chat_response(content="nothing"),
+                chat_response(content="Tap Search"),
+            ]
+        )
+        if turn == 0:
+            router_responses.extend(
+                httpx.Response(
+                    200, json={key: val for key, val in chat_body.items() if key != "id"}
+                )
+                if schema_failure
+                else chat_response(content='{"action":"system_button","button":"Power"}')
+                for _ in range(2)
+            )
+        else:
+            router_responses.append(
+                chat_response(content='{"action":"click","coordinate":[500,500]}')
+            )
+        if turn == 0 and schema_failure:
+            with pytest.raises(ResponseValidationError):
+                runtime.to_agent("Find search", state, history)
+            assert runtime._memory.actions == []
+        else:
+            result = json.loads(runtime.to_agent("Find search", state, history))
+            assert result["aitk_action"] == (
+                {"action": "wait", "time": 1}
+                if turn == 0
+                else {"action": "tap", "x": 540, "y": 960}
+            )
+    assert len(router_requests) == 7
+    assert no_sleep == []
