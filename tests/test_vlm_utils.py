@@ -384,45 +384,17 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     assert "1080" not in prompt
 
 
-_XML_CLICK = """\
-Thought: The search icon is at the top.
-Action: Tap the search icon.
-<tool_call>
-<function=mobile_use>
-<parameter=action>
-click
-</parameter>
-<parameter=coordinate>
-[752, 170]
-</parameter>
-</tool_call>"""
-
-
-def test_xml_parameter_values_that_are_not_json_stay_strings() -> None:
-    raw = (
-        "<tool_call>\n<function=mobile_use>\n<parameter=action>\ntype\n</parameter>\n"
-        "<parameter=text>\nstewed beef\n</parameter>\n<parameter=time>\n2\n</parameter>\n"
-        "</function>\n</tool_call>"
-    )
-    assert vlm._parse_tool_call(raw) == {"action": "type", "text": "stewed beef", "time": 2}
-
-
-def test_a_truncated_xml_parameter_is_dropped() -> None:
-    raw = "<tool_call>\n<function=mobile_use>\n<parameter=action>\nclick\n</parameter>\n"
-    raw += "<parameter=coordinate>\n[752,"
-    assert vlm._parse_tool_call(raw) == {"action": "click"}
-
-
-@pytest.mark.parametrize("truncated", [False, True])
-def test_xml_parameter_tool_calls_become_device_actions(
-    truncated: bool,
+def test_a_tool_call_missing_its_closing_tag_is_still_read(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    content = _XML_CLICK.removesuffix("</tool_call>") if truncated else _XML_CLICK
+    content = (
+        "Thought: The search icon is at the top.\nAction: Tap the search icon.\n<tool_call>\n"
+        '{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [752, 170]}}'
+    )
     router_responses.append(chat_response(content=content))
     action, history = vlm.predict_next_action(
         router_client,
@@ -1244,12 +1216,27 @@ def test_tool_arguments_convert_to_aitk_actions(
     assert vlm._tool_call_to_aitk(args) == expected
 
 
+_XML_CLICK = """\
+Thought: The search icon is at the top.
+Action: Tap the search icon.
+<tool_call>
+<function=mobile_use>
+<parameter=action>
+click
+</parameter>
+<parameter=coordinate>
+[752, 170]
+</parameter>
+</tool_call>"""
 _NO_JSON = "it had no <tool_call> block with valid JSON"
+_XML_TAGS = "the <tool_call> block used <function=...> tags instead of JSON"
 
 
 @pytest.mark.parametrize(
     ("reply", "reason"),
     [
+        (_XML_CLICK, _XML_TAGS),
+        (_XML_CLICK.removesuffix("\n</tool_call>"), _XML_TAGS),
         ("Thought: Search is visible\nAction: Tap Search", _NO_JSON),
         ('<tool_call>{"action": click}</tool_call>', _NO_JSON),
         ("<tool_call>5</tool_call>", _NO_JSON),
@@ -1289,13 +1276,6 @@ def test_an_unusable_action_reply_is_retried_with_what_was_wrong(
         },
     ]
     assert no_sleep == []
-
-
-def test_a_function_tag_inside_the_tool_call_block_is_named_as_the_reason() -> None:
-    assert (
-        vlm._unparsed_reason("<tool_call>\n<function=mobile_use>\n<parameter=action>")
-        == "the <tool_call> block used <function=...> tags instead of JSON"
-    )
 
 
 def test_a_second_unusable_action_reply_falls_back_to_wait(

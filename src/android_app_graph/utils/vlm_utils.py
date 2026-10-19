@@ -1539,26 +1539,8 @@ def get_image_embedding(
     return _embedding_vector(response, call_type="image_embedding", model=model)
 
 
-def _parse_xml_parameters(block: str) -> dict[str, object] | None:
-    """Read ``<function=...>`` with one ``<parameter=name>value</parameter>`` per argument.
-
-    A parameter cut off before its closing tag is dropped, so a truncated reply
-    keeps only the arguments it completed.
-    """
-    if "<function=" not in block:
-        return None
-    arguments: dict[str, object] = {}
-    for name, value in re.findall(r"<parameter=([^>\s]+)>(.*?)</parameter>", block, re.DOTALL):
-        text = value.strip()
-        try:
-            arguments[name] = json.loads(text)
-        except json.JSONDecodeError:
-            arguments[name] = text
-    return arguments
-
-
 def _parse_tool_call(raw: str) -> dict[str, Any] | None:
-    """Extract the arguments from a <tool_call>...</tool_call> block, JSON or XML parameters."""
+    """Extract the JSON arguments from a <tool_call> block, even one missing its </tool_call>."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
     inner = m.group(1).strip() if m else ""
 
@@ -1567,9 +1549,6 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
         if start == -1:
             return None
         remainder = raw[start + len("<tool_call>") :].lstrip()
-        xml_arguments = _parse_xml_parameters(remainder)
-        if xml_arguments is not None:
-            return xml_arguments
         decoder = json.JSONDecoder()
         try:
             parsed, _end = decoder.raw_decode(remainder)
@@ -1579,9 +1558,6 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
             return parsed["arguments"]
         return parsed
 
-    xml_arguments = _parse_xml_parameters(inner)
-    if xml_arguments is not None:
-        return xml_arguments
     inner = strip_json_fences(inner)
     try:
         parsed = json.loads(inner)
@@ -1795,7 +1771,7 @@ def plan_next_action(
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
-    Handles both XML <tool_call> responses and native tool calling.
+    Handles both JSON in a <tool_call> block and native tool calling.
 
     Returns:
         (tool_args, thought, action_desc) or (None, "", "") on failure.

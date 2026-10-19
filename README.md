@@ -371,12 +371,11 @@ On ScreenSpot-v2 mobile (501 screenshots, temperature 0), `qwen/qwen3.8-flash`
 hit the target in 94.2% of taps with that screen line, against 91.0% when the
 prompt stated the resized screenshot size.
 
-A `<tool_call>` block may hold a JSON object (`{"name": ..., "arguments": {...}}`
-or the arguments alone) or the `<function=mobile_use>` form with one
-`<parameter=name>` block per argument. Each parameter value is parsed as JSON
-when it is valid JSON, such as `[752, 170]` or `2`, and kept as a string
-otherwise. A reply cut off before `</tool_call>` keeps every argument it
-completed.
+A `<tool_call>` block holds one JSON object, `{"name": ..., "arguments": {...}}`
+or the arguments alone. A reply that ends before `</tool_call>` is still read when
+its JSON object is complete. The `<function=mobile_use>` form, with one
+`<parameter=name>` tag per argument, is not read: like any other reply that yields
+no action, it is [asked again](#requests-and-recovery) with the reason.
 
 Textual and native tool calls use the same action conversion. Click and long-press
 coordinates must contain two finite numbers on the model's 0–1000 scale, which
