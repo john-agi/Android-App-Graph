@@ -110,6 +110,7 @@ class Kobe:
             self.logger.info("Graph loaded from %s", self.graph_path)
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
+        self.graph.package_name = package_name
 
     def _maybe_continue_from_coverage_checkpoint(
         self,
@@ -409,12 +410,14 @@ class Kobe:
                     settings=self.action,
                 )
 
+                recorded_instruction = instruction
                 if action.get("action") == "end":
                     self.logger.info(
                         '  Action agent said end for: "%s", recording as back',
                         instruction,
                     )
                     action = {"action": "back"}
+                    recorded_instruction = "Press back"
                     self.controller.exe_action(action)
                 elif action.get("action") == "wait":
                     self.logger.info("  Action agent requested wait")
@@ -443,7 +446,7 @@ class Kobe:
                         action_sequence,
                         current_package,
                         device_state,
-                        instruction=instruction,
+                        instruction=recorded_instruction,
                     )
                     device_state = self.controller.get_state()
                     step += 1
@@ -466,6 +469,7 @@ class Kobe:
                     device_state["activity"],
                     device_state["screenshot"],
                 )
+                current_node = self.graph.resolve_node_id(current_node)
 
                 new_node_data = self._require_node(new_node)
                 if new_node == EXTERNAL_WEB_NODE:
@@ -522,7 +526,7 @@ class Kobe:
                     current_node,
                     new_node,
                     action=action_sequence,
-                    instruction=instruction,
+                    instruction=recorded_instruction,
                     target_observation=target_obs,
                     schema_delta=schema_delta,
                     num_steps=len(action_sequence),

@@ -598,6 +598,30 @@ def test_rename_node_updates_the_identify_cache(vlm: FakeVlm) -> None:
     assert vlm.kinds() == ["describe", "embed", "embed"]
 
 
+@pytest.mark.usefixtures("vlm")
+def test_resolve_node_id_follows_a_chain_of_renames() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    feed = gm.rename_node("s0_home", "Home feed")
+
+    settings = gm.rename_node(feed, "Settings page")
+
+    assert gm.resolve_node_id("s0_home") == settings
+    assert gm.resolve_node_id(settings) == settings
+
+
+@pytest.mark.usefixtures("vlm")
+def test_resolve_node_id_after_renaming_back_to_an_earlier_id() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home_screen", "Home screen")
+    feed = gm.rename_node("s0_home_screen", "Home feed")
+
+    assert gm.rename_node(feed, "Home screen") == "s0_home_screen"
+
+    assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
+    assert gm.resolve_node_id(feed) == "s0_home_screen"
+
+
 def test_get_node_returns_a_copy() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -1815,6 +1839,19 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
 
     assert node_id == "s0_home_screen"
     assert "stale" not in caplog.text
+
+
+def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -> None:
+    source = make_manager()
+    source.package_name = "com.example.app"
+    path = tmp_path / "graph.json"
+    source.save_graph(path)
+
+    target = make_manager()
+    target.load_graph(path)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["package_name"] == "com.example.app"
+    assert target.package_name == "com.example.app"
 
 
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:

@@ -331,7 +331,12 @@ def re_explore_issues(
             )
 
             if action.get("action") == "end":
+                logger.info(
+                    '  Action agent said end for: "%s", recording as back',
+                    instruction,
+                )
                 action = {"action": "back"}
+                instruction = "Press back"
                 controller.exe_action(action)
             elif action.get("action") == "wait":
                 time.sleep(1)
@@ -358,6 +363,7 @@ def re_explore_issues(
                 device_state["activity"],
                 device_state["screenshot"],
             )
+            current_node = graph.resolve_node_id(current_node)
 
             new_node_data = graph.get_node(new_node)
             target_obs = new_node_data.get("page_description", "") if new_node_data else ""

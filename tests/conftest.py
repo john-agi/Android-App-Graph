@@ -21,6 +21,7 @@ from PIL import Image
 from android_app_graph import cli
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.commands import audit, embed
+from android_app_graph.device import DeviceController
 from android_app_graph.utils import open_client
 
 # The built-in "ci" profile (deterministic, no deadline, no example database) is
@@ -242,3 +243,31 @@ def png_screenshot() -> str:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+class _ScreenSequence:
+    w = 1080
+    h = 1920
+
+    def __init__(self, *screens: dict[str, Any]) -> None:
+        self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
+        self._screens = list(screens)
+
+    def get_state(self) -> dict[str, Any]:
+        return self._screens[0]
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        assert len(self._screens) > 1, f"No screen scripted after {action}"
+        self._screens.pop(0)
+
+
+@pytest.fixture
+def two_screen_device(png_screenshot: str) -> DeviceController:
+    # Two activities of one package: identify_state still compares the second screen
+    # with the first, but cannot answer it from its last-screen cache.
+    search = {
+        "activity": "com.demo.app.Search",
+        "screenshot": png_screenshot,
+        "package": "com.demo.app",
+    }
+    return _ScreenSequence(search, {**search, "activity": "com.demo.app.Results"})
