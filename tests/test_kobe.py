@@ -843,8 +843,8 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A replay that failed after the app restart used to leave the next step planning
-    from the node the checkpoint had left, on that node's stale screenshot."""
+    """A replay that fails after the app restart continues from the screen the device is
+    on: the next step plans from that screen's node and screenshot."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     open_list = {"action": "tap", "coordinate": [10, 20]}
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
