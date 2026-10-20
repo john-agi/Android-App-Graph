@@ -9,6 +9,7 @@ import os
 import socket
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any, NoReturn
 
 import httpx
@@ -226,3 +227,26 @@ def png_screenshot() -> str:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.fixture
+def dumpsys_package() -> str:
+    """A trimmed ``adb shell dumpsys package com.example.app``, as the permission grant reads it."""
+    return (Path(__file__).parent / "data" / "dumpsys_package.txt").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def requested_permissions() -> list[str]:
+    """The ``requested permissions:`` section of ``dumpsys_package``, in order."""
+    return [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WAKE_LOCK",
+        "com.google.android.c2dm.permission.RECEIVE",
+        "com.example.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+    ]

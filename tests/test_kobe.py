@@ -36,6 +36,26 @@ class _Device:
         raise AssertionError(f"No device action expected: {action}")
 
 
+class _ScriptedDevice:
+    """A DeviceController that reports its states in turn, then repeats the last one."""
+
+    w = 100
+    h = 200
+
+    def __init__(self, *states: dict[str, object]) -> None:
+        self.config: dict[str, object] = {}
+        self.actions: list[dict[str, object]] = []
+        self._states = list(states)
+
+    def get_state(self) -> dict[str, object]:
+        if len(self._states) > 1:
+            return self._states.pop(0)
+        return self._states[0]
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        self.actions.append(action)
+
+
 @pytest.fixture
 def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
     return Kobe(
@@ -184,3 +204,70 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     assert [json.loads(request.content)["model"] for request in router_requests] == [
         "provider/page_detail"
     ] * 2
+
+
+_DIALOG_ACTIVITY = (
+    "com.google.android.permissioncontroller/"
+    "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+    tmp_path: Path,
+    png_screenshot: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for #86: the permission controller's dialog counted as leaving the app,
+    so the step recorded an ``ext_`` node and pressed back, which denied the permission.
+    """
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    home: dict[str, object] = {
+        "activity": "com.demo.Home",
+        "screenshot": png_screenshot,
+        "package": "com.demo",
+    }
+    dialog: dict[str, object] = {
+        "activity": _DIALOG_ACTIVITY,
+        "screenshot": png_screenshot,
+        "package": "com.google.android.permissioncontroller",
+    }
+    device = _ScriptedDevice(home, dialog, home)
+    explorer = Kobe(
+        device,
+        "demo",
+        "com.demo",
+        logging.getLogger("test"),
+        graph_dir=tmp_path,
+        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
+    )
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content="Tap Take photo"),
+            chat_response(content='{"action":"click","coordinate":[500,500]}'),
+            chat_response(content='{"page_description":"camera permission dialog"}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    tap = {"action": "tap", "x": 50, "y": 100}
+    assert device.actions == [tap]
+    graph = explorer.graph.graph
+    nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
+    assert set(nodes) == {"com.demo.Home", _DIALOG_ACTIVITY}
+    dialog_node = graph.nodes[nodes[_DIALOG_ACTIVITY]]
+    assert dialog_node["page_description"] == "camera permission dialog"
+    assert "is_external" not in dialog_node
+    edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
+    assert edge["actions"] == [[tap]]
+    assert edge["instructions"] == ["Tap Take photo"]
+    assert router_responses == []

@@ -420,6 +420,12 @@ uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 
 Exploration writes graph files under `graphs/<app_name>/`.
 
+Before exploring, and before `app-graph-audit --re-explore`, the app is granted
+every permission it requests (`adb shell pm grant`), so no permission prompt
+interrupts it; permissions that `pm grant` refuses, such as `INTERNET`, are
+logged and skipped. A permission prompt, keyboard or system dialog that still
+takes focus is recorded as a screen of the app, not as leaving it.
+
 For long runs, use the auto-resume wrapper:
 
 ```bash

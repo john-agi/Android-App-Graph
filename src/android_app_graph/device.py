@@ -74,3 +74,99 @@ def keyboard_status(hint: str) -> str:
         "No OS keyboard signal detected. Still inspect the screenshot: "
         "a bottom input/keyboard bar can mean a text field is active."
     )
+
+
+_SYSTEM_OVERLAY_PACKAGES = frozenset(
+    {
+        "com.google.android.inputmethod.latin",  # Gboard
+        "com.android.inputmethod.latin",  # AOSP keyboard
+        "com.samsung.android.honeyboard",  # Samsung keyboard
+        "com.swiftkey.swiftkey",  # SwiftKey
+        "com.touchtype.swiftkey",  # SwiftKey (alt)
+        "com.android.systemui",  # Status bar, notifications
+        "com.android.permissioncontroller",  # Permission dialogs
+        "com.google.android.permissioncontroller",  # Permission dialogs (Google)
+        "com.android.packageinstaller",  # Install prompts
+        "android",  # System dialogs
+    }
+)
+
+
+def is_system_overlay(package: str) -> bool:
+    """Return whether ``package`` is a keyboard, permission prompt or system dialog.
+
+    These take focus on top of the app without navigating away from it, so the
+    explorer records their screens as part of the app instead of leaving it.
+    """
+    if package in _SYSTEM_OVERLAY_PACKAGES:
+        return True
+    # Input methods missing from the list usually say so in their package name.
+    lower = package.lower()
+    return "inputmethod" in lower or "keyboard" in lower
+
+
+def grant_runtime_permissions(udid: str, package_name: str) -> None:
+    """Grant ``package_name`` every permission it requests, before it is explored.
+
+    A permission prompt that appears during exploration would be dismissed, which
+    denies the permission and leaves the feature behind it unexplored. ``pm grant``
+    refuses permissions that are not runtime permissions, such as ``INTERNET``;
+    each refusal is logged and skipped.
+    """
+    shell = ["adb", "-s", udid, "shell"]
+    dumpsys = subprocess.run(
+        [*shell, "dumpsys", "package", package_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if dumpsys.returncode != 0:
+        logger.warning(
+            "Could not read the permissions %s requests, so none are granted: %s",
+            package_name,
+            _adb_error(dumpsys),
+        )
+        return
+
+    permissions = _requested_permissions(dumpsys.stdout)
+    granted = 0
+    for permission in permissions:
+        grant = subprocess.run(
+            [*shell, "pm", "grant", package_name, permission],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if grant.returncode == 0:
+            granted += 1
+        else:
+            logger.info("Could not grant %s to %s: %s", permission, package_name, _adb_error(grant))
+    logger.info(
+        "Granted %d of %d requested permissions to %s", granted, len(permissions), package_name
+    )
+
+
+def _requested_permissions(dumpsys_output: str) -> list[str]:
+    """Return the permissions listed under ``requested permissions:`` in ``dumpsys package``.
+
+    Entries are indented below the header and may carry a suffix such as
+    ``: restricted=true``; the first line indented no deeper ends the section.
+    """
+    permissions: list[str] = []
+    section_indent: int | None = None
+    for line in dumpsys_output.splitlines():
+        entry = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if entry == "requested permissions:":
+            section_indent = indent
+        elif section_indent is not None and entry and indent > section_indent:
+            permissions.append(entry.split(":", maxsplit=1)[0])
+        else:
+            section_indent = None
+    return permissions
+
+
+def _adb_error(result: subprocess.CompletedProcess[str]) -> str:
+    """Return adb's error output on one line, without Java stack frames."""
+    lines = (line.strip() for line in (result.stderr or result.stdout).splitlines())
+    return " ".join(line for line in lines if line and not line.startswith("at "))
