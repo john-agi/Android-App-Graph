@@ -165,6 +165,110 @@ def test_exploration_wait_recovery_respects_step_limit(
     assert no_sleep == [1, 1]
 
 
+class _ScriptedDevice:
+    """A DeviceController that shows ``screens[n]`` once it has executed n actions."""
+
+    w = 100
+    h = 200
+
+    def __init__(self, *screens: dict[str, object]) -> None:
+        self.config: dict[str, object] = {}
+        self._screens = screens
+        self.actions: list[dict[str, object]] = []
+
+    def get_state(self) -> dict[str, object]:
+        return self._screens[len(self.actions)]
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        self.actions.append(action)
+
+
+def _explore_one_step_the_action_model_ends(
+    kobe: Kobe,
+    device: _ScriptedDevice,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explore one step on a home screen whose planner says "Tap the Settings icon"."""
+    monkeypatch.setattr(kobe, "controller", device)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    page = {
+        "page_description": "home",
+        "elements": [{"description": "Settings icon", "position": "top right"}],
+    }
+    router_responses.extend(
+        [
+            chat_response(content=json.dumps(page)),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content="Tap the Settings icon"),
+            chat_response(content='{"action":"end"}'),
+        ]
+    )
+    kobe.explore(max_steps=1)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_an_action_model_end_is_recorded_as_the_back_press_it_executes(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    home: dict[str, object] = {
+        "activity": "com.demo.Home",
+        "screenshot": png_screenshot,
+        "package": "com.demo",
+    }
+    device = _ScriptedDevice(home, home)
+    caplog.set_level(logging.INFO, logger="test")
+    _explore_one_step_the_action_model_ends(
+        kobe, device, router_responses, chat_response, embedding_body, monkeypatch
+    )
+    assert device.actions == [{"action": "back"}]
+    [(source, target, edge)] = kobe.graph.graph.edges(data=True)
+    assert source == target
+    assert edge["actions"] == [[{"action": "back"}]]
+    assert edge["instructions"] == ["Press back"]
+    [element] = kobe.graph.graph.nodes[source]["interactable_elements"]
+    assert element["explored"] is True
+    assert '"Tap the Settings icon"' in caplog.text
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_an_action_model_end_whose_back_press_leaves_the_app_is_recorded_as_press_back(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home: dict[str, object] = {
+        "activity": "com.demo.Home",
+        "screenshot": png_screenshot,
+        "package": "com.demo",
+    }
+    launcher: dict[str, object] = {
+        "activity": "com.android.launcher3.Launcher",
+        "screenshot": png_screenshot,
+        "package": "com.android.launcher3",
+    }
+    device = _ScriptedDevice(home, launcher, home)
+    _explore_one_step_the_action_model_ends(
+        kobe, device, router_responses, chat_response, embedding_body, monkeypatch
+    )
+    assert device.actions == [{"action": "back"}] * 2
+    [(_source, target, edge)] = kobe.graph.graph.edges(data=True)
+    assert target == "ext_com.android.launcher3"
+    assert edge["actions"] == [[{"action": "back"}]]
+    assert edge["instructions"] == ["Press back"]
+
+
 def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     kobe: Kobe,
     router_responses: list[httpx.Response],

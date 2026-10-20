@@ -398,12 +398,14 @@ class Kobe:
                     settings=self.action,
                 )
 
+                recorded_instruction = instruction
                 if action.get("action") == "end":
                     self.logger.info(
-                        '  Action agent said end for: "%s", recording as back',
+                        '  Action agent said end for: "%s", recording as "Press back"',
                         instruction,
                     )
                     action = {"action": "back"}
+                    recorded_instruction = "Press back"
                     self.controller.exe_action(action)
                 elif action.get("action") == "wait":
                     self.logger.info("  Action agent requested wait")
@@ -432,7 +434,7 @@ class Kobe:
                         action_sequence,
                         current_package,
                         device_state,
-                        instruction=instruction,
+                        instruction=recorded_instruction,
                     )
                     device_state = self.controller.get_state()
                     step += 1
@@ -507,7 +509,7 @@ class Kobe:
                     current_node,
                     new_node,
                     action=action_sequence,
-                    instruction=instruction,
+                    instruction=recorded_instruction,
                     target_observation=target_obs,
                     schema_delta=schema_delta,
                     num_steps=len(action_sequence),
