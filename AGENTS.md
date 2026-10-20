@@ -64,6 +64,9 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - No issue or pull request numbers in code, comments, docstrings (test
   docstrings included), docs or configuration. Write the reason itself, so
   the line reads without opening GitHub.
+- Comments, docstrings and docs describe the code as it is now; how it used
+  to behave belongs in the pull request description. A regression test's
+  docstring states the behaviour it pins, not the bug it fixed.
 - Annotate everything you touch; no `Any` to silence the checker. Narrow
   untyped payloads with the helpers in `payloads.py`, not with `cast`.
 - Take the `DeviceController` and `AvdManager` Protocols from `device.py`,

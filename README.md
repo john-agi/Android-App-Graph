@@ -339,13 +339,13 @@ collected or the process exits.
 
 ### Upgrading provider configuration
 
-Custom endpoints and per-role credentials were removed. A `page_detail`,
+OpenRouter is the only endpoint and `OPENROUTER_API_KEY` the only credential. A `page_detail`,
 `embedding`, `image_embedding`, `instruction` or `action` block that still sets
 `api_key`, `base_url` or `native_base_url` is rejected, with an error naming each
 key, by every command and by the v2 runtime, even in a block the operation does
 not use. AITK `controller.yaml` files copied from upstream UI-KOBE still set
-these keys: delete them and export `OPENROUTER_API_KEY` instead. The
-`app-graph-embed` options `--api-key` and `--base-url` were removed too.
+these keys: delete them and export `OPENROUTER_API_KEY` instead.
+`app-graph-embed` has no `--api-key` or `--base-url` option either.
 
 The v2 runtime and `app-graph-embed` both use OpenRouter's
 [multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
@@ -683,16 +683,14 @@ The copied shim imports the translator from the installed `android_app_graph`
 package; that is why Android-App-Graph must be installed in the AITK
 environment. Re-copy the shim only when it changes, which it rarely does:
 changes to the translator reach AITK through `uv pip install` of this project,
-not through step 4. The one exception is upgrading from a release where the
-full translator (rather than this shim) was copied into the AITK checkout:
-that old copy imports a private helper name that no longer exists, so it
-fails to import after the `uv pip install` upgrade until the shim is
-re-copied once.
+not through step 4. The one exception is an AITK checkout that holds a full
+copy of the translator rather than this shim: that copy imports a private
+helper name the installed package does not define, so it fails to import
+until the shim is copied over it once.
 
-`UIKobeV2Translator` also no longer accepts a `history_window` constructor
-argument, so a `controller.yaml` upgraded from an older release must drop
-`translator_args.history_window`, or AITK's `register()` call fails with a
-`TypeError`.
+`UIKobeV2Translator` takes no `history_window` constructor argument, so a
+`controller.yaml` that sets `translator_args.history_window` must drop it, or
+AITK's `register()` call fails with a `TypeError`.
 
 ## Use Android-App-Graph with Android World
 

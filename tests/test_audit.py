@@ -236,7 +236,7 @@ def test_verify_and_merge_nodes_skips_missing_screenshot(
 def test_verify_and_merge_nodes_skips_a_self_pair(
     client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An auditor naming one node twice used to delete it."""
+    """An auditor naming one node twice keeps the node."""
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
     )
@@ -506,8 +506,8 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
 ) -> None:
-    """A page still showing after one back press used to become the node the next step
-    acted from, recording an edge out of the shared ext_web node."""
+    """Re-explore keeps pressing back while the page still shows, so the next step acts
+    from an app screen and records no edge out of the shared ext_web node."""
     graph, graph_path = _two_node_graph(tmp_path)
     # identify_state is faked below, so add the node it would create.
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
@@ -551,8 +551,8 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """re_explore_issues used to keep the old ID of the node it acted from, so the
-    step's edge was dropped."""
+    """re_explore_issues acts from the node's new ID after identify_state renames it, so
+    the step's edge is recorded."""
     monkeypatch.setattr(
         audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
     )
@@ -635,7 +635,7 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
 ) -> None:
-    """The launcher intent used to resume the screen the previous issue ended on."""
+    """Each replay starts from a restarted app, not the screen the previous issue ended on."""
     graph, _graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")

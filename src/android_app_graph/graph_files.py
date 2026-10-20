@@ -33,20 +33,17 @@ def write_json_atomically(
 
     A fresh file gets exactly the mode ``open(path, "w")`` would give (0o666
     with the process umask applied by the kernel); a file that already exists
-    keeps its current mode across the rewrite, matching what in-place
-    truncation used to do, so an operator's chmod on a shared graph directory
-    survives a rewrite.
+    keeps its current mode across the rewrite, so an operator's chmod on a
+    shared graph directory survives a rewrite.
 
-    Unlike the in-place truncation this replaced, which needed write
-    permission only on the target file itself, an atomic replace needs write
-    permission on the containing directory too (to create and rename the temp
-    file) -- the accepted cost of never leaving a truncated file behind. But
+    An atomic replace needs write permission on the containing directory, not
+    only on the target file (to create and rename the temp file) -- the
+    accepted cost of never leaving a truncated file behind. But
     ``os.replace`` does not otherwise care whether ``path`` itself is
-    writable, so without an explicit check a directory-writable rewrite would
-    silently defeat an operator's ``chmod 444`` freeze on the file, where the
-    in-place write this replaced would have raised ``PermissionError``. The
-    check runs before the temp file is created, so a read-only target leaves
-    nothing to clean up.
+    writable, so an explicit check raises ``PermissionError`` for a read-only
+    ``path``: without it a directory-writable rewrite would silently defeat an
+    operator's ``chmod 444`` freeze on the file. The check runs before the
+    temp file is created, so a read-only target leaves nothing to clean up.
 
     A symlinked ``path`` is resolved to its real target first, so the temp
     file and the replace happen next to that file: ``os.replace`` over a
@@ -150,16 +147,13 @@ def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     holding something other than a list of objects; every such shape failure
     is reported here, naming the path, rather than surfacing later as a bare
     ``TypeError``/``AttributeError`` with no path once a loader iterates or
-    indexes into it. An absent key is an empty list, not a shape failure --
-    ``GraphManager.load_graph`` accepted a file with no ``edges`` key at all
-    this way before this check existed (``.get("edges", [])``), and a graph
-    with no edges yet is a normal, not malformed, one.
+    indexes into it. An absent key is an empty list, not a shape failure: a
+    graph with no edges yet is a normal, not malformed, one.
 
     A node id of ``""`` is a string, so it would otherwise sail past the
     string check above; rejected here instead of left for each loader to
-    filter on its own, since two loaders filtering separately is exactly how
-    ``commands.embed`` (skipping it) and ``_load_graph_from_json`` (adding it
-    as a node) ended up disagreeing on this one case.
+    filter on its own, since two loaders filtering separately can disagree on
+    this one case, one skipping the node and the other adding it.
     """
     if not isinstance(data, dict):
         raise TypeError(f"Graph JSON must be an object: {path}")
