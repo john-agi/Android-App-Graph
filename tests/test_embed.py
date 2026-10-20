@@ -604,9 +604,8 @@ def test_precompute_writes_the_sidecar_once_for_a_cold_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Rewriting the sidecar after every computed node is O(N^2) for a cold
-    cache, and each write is now a temp-file-and-rename rather than a plain
-    truncation, so the per-node write is also the O(N^2) cost the runtime
-    translator's loop was changed to avoid in a previous round. It must be
+    cache, and each write is a temp-file-and-rename, so the per-node write is
+    also the O(N^2) cost the runtime translator's loop avoids. It must be
     written once, after the whole node loop, for both callers alike.
     """
     app_dir = tmp_path / "demo"

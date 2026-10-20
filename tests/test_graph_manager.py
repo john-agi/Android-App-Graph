@@ -917,7 +917,7 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
 
 
 def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) -> None:
-    """A typo'd endpoint used to become an attribute-less node."""
+    """A typo'd endpoint adds no node."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
 
@@ -968,7 +968,7 @@ def test_merge_nodes_returns_false_when_a_node_is_missing() -> None:
 
 
 def test_merge_nodes_is_a_no_op_when_both_ids_name_the_same_node() -> None:
-    """A self-merge used to double visit_count, then delete the node."""
+    """A self-merge keeps the node with its visit_count unchanged."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", visit_count=3, state_schema={"tab": ["home"]})
     add_screen(gm, "s1_search", "Search screen")
@@ -2007,10 +2007,8 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
 
 
 def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
-    """load_graph used to accept a file without an "edges" key via
-    ``.get("edges", [])`` before require_graph_shape started rejecting the
-    key as missing; an absent "nodes" or "edges" is an empty list, matching
-    that old behaviour, and only a present non-list value is still rejected.
+    """An absent "nodes" or "edges" key is an empty list, so a file without an
+    "edges" key loads; only a present non-list value is rejected.
     """
     path = tmp_path / "graph.json"
     path.write_text(
@@ -2063,7 +2061,7 @@ def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
 
 
 def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
-    """Such an edge used to grow a phantom node on load."""
+    """Such an edge fails the load instead of growing a phantom node."""
     path = tmp_path / "graph.json"
     path.write_text(
         json.dumps(
@@ -2107,8 +2105,7 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
 
 
 def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
-    """Confirmed bug: ``"nodes": null`` used to raise a bare, path-less
-    ``TypeError: 'NoneType' object is not iterable`` from ``load_graph``, which
+    """``"nodes": null`` raises a ``TypeError`` naming the path from ``load_graph``, which
     has no shape check of its own and relies entirely on the shared validator.
     """
     path = tmp_path / "graph.json"
@@ -2123,8 +2120,8 @@ def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -
 def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
     """An int id would otherwise sail through ``require_known_edge_endpoints``,
     which compares ``str()``-normalised ids, and let ``add_edge`` grow a
-    phantom node with a different (string) id -- the same phantom node a
-    genuinely undefined endpoint used to grow.
+    phantom node with a different (string) id -- the same phantom node
+    ``require_known_edge_endpoints`` keeps a genuinely undefined endpoint from growing.
     """
     path = tmp_path / "graph.json"
     path.write_text(json.dumps({"nodes": [{"id": 5}], "edges": []}), encoding="utf-8")
@@ -2357,7 +2354,7 @@ def test_run_node_merge_audit_skips_a_missing_node(monkeypatch: pytest.MonkeyPat
 def test_run_node_merge_audit_skips_a_self_pair(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
 ) -> None:
-    """An auditor naming one node twice used to delete it."""
+    """An auditor naming one node twice keeps the node."""
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     gm = make_manager()

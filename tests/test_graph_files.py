@@ -162,8 +162,8 @@ def test_write_json_atomically_preserves_an_existing_files_mode(tmp_path: Path) 
 def test_write_json_atomically_rejects_a_read_only_target(tmp_path: Path) -> None:
     """``os.replace`` needs only directory write permission, so without this
     guard an operator's ``chmod 444`` freeze on a shared graph directory is
-    silently defeated by a rewrite -- the in-place ``open(path, "w")`` this
-    replaced would have raised ``PermissionError`` instead.
+    silently defeated by a rewrite; the guard raises ``PermissionError``
+    instead and leaves the file and its directory untouched.
     """
     path = tmp_path / "data.json"
     graph_files.write_json_atomically(path, {"n1": [1.0]})
@@ -382,10 +382,8 @@ def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
 def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
     data: dict[str, Any], expected: dict[str, Any]
 ) -> None:
-    """GraphManager.load_graph accepted a file without an "edges" key via
-    ``.get("edges", [])`` before this check existed; an absent key is an
-    empty list here too, not a rejection -- only a present non-list value
-    (``null``, a string, an object) still is.
+    """An absent "nodes" or "edges" key is an empty list, not a rejection --
+    only a present non-list value (``null``, a string, an object) is.
     """
     assert graph_files.require_graph_shape(data, Path()) == expected
 
@@ -403,10 +401,8 @@ def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
 def test_require_graph_shape_rejects_a_malformed_shape(
     tmp_path: Path, data: dict[str, Any], match: str
 ) -> None:
-    """Confirmed bugs: ``"nodes": null`` used to raise a bare, path-less
-    ``TypeError: 'NoneType' object is not iterable``, and ``"nodes": ["s0"]``
-    a bare ``AttributeError`` -- neither naming the file. Every shape failure
-    must instead raise a ``TypeError`` naming the path.
+    """Every shape failure, ``"nodes": null`` and ``"nodes": ["s0"]`` included,
+    raises a ``TypeError`` naming the path.
     """
     path = tmp_path / "demo.json"
     with pytest.raises(TypeError, match=match) as excinfo:
@@ -429,10 +425,8 @@ def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> Non
 
 
 def test_require_graph_shape_rejects_an_empty_node_id(tmp_path: Path) -> None:
-    """``embed.py`` used to skip a ``""`` id with ``if not node_id: continue``
-    while ``_load_graph_from_json`` added it as a node -- the two loaders
-    disagreeing on a case ``require_graph_shape`` had already let through.
-    An empty id is now rejected here, the one place both loaders trust.
+    """An empty id is rejected here, the one place both loaders trust, so neither
+    loader decides on its own whether to skip it or add it as a node.
     """
     path = tmp_path / "demo.json"
     with pytest.raises(TypeError, match="node id must be a non-empty string") as excinfo:
