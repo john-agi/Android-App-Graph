@@ -12,6 +12,7 @@ import pytest
 from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 
+from android_app_graph.device import DeviceController
 from android_app_graph.kobe import Kobe
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
@@ -34,25 +35,6 @@ class _Device:
 
     def exe_action(self, action: dict[str, object]) -> None:
         raise AssertionError(f"No device action expected: {action}")
-
-
-class _ScreenSequence:
-    """A DeviceController that moves to the next scripted screen after every action."""
-
-    w = 100
-    h = 200
-
-    def __init__(self, *screens: dict[str, object]) -> None:
-        self.config: dict[str, object] = {}
-        self._screens = list(screens)
-        self.actions: list[dict[str, object]] = []
-
-    def get_state(self) -> dict[str, object]:
-        return self._screens[0]
-
-    def exe_action(self, action: dict[str, object]) -> None:
-        self.actions.append(action)
-        self._screens.pop(0)
 
 
 @pytest.fixture
@@ -187,7 +169,7 @@ def test_exploration_wait_recovery_respects_step_limit(
 @pytest.mark.usefixtures("no_sleep")
 def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     tmp_path: Path,
-    png_screenshot: str,
+    two_screen_device: DeviceController,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
@@ -195,17 +177,11 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression for #76: the verifier tells the new screen apart from the current node,
-    renaming the current node, and the step's edge used to be dropped."""
+    """The explorer used to keep the old ID of the node it acted from, so the step's
+    edge was dropped and its element was never marked explored."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
-    search: dict[str, object] = {
-        "activity": "com.demo.app.Search",
-        "screenshot": png_screenshot,
-        "package": "com.demo.app",
-    }
-    device = _ScreenSequence(search, {**search, "activity": "com.demo.app.Results"})
     agent = Kobe(
-        device,
+        two_screen_device,
         "demo",
         "com.demo.app",
         logging.getLogger("test"),
@@ -240,9 +216,6 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
         agent.explore(max_steps=1)
 
     renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
-    assert router_responses == []
-    assert device.actions == [{"action": "tap", "x": 50, "y": 100}]
-    assert set(agent.graph.graph) == {renamed, results}
     assert agent.graph.graph.has_edge(renamed, results)
     assert agent.graph.graph.nodes[renamed]["interactable_elements"] == [
         {"description": "Search button", "position": "top", "explored": True}

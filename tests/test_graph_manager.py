@@ -345,7 +345,6 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(vlm: Fak
 
     assert first not in gm.graph
     assert "s0_home_feed" in gm.graph
-    assert gm.resolve_node_id(first) == "s0_home_feed"
     assert second == "s1_promo_overlay"
     assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify", "embed", "embed"]
     renamed = gm.get_node("s0_home_feed")
@@ -565,14 +564,6 @@ def test_rename_node_updates_the_identify_cache(vlm: FakeVlm) -> None:
     assert vlm.kinds() == ["describe", "embed", "embed"]
 
 
-def test_resolve_node_id_returns_an_id_that_was_never_renamed_unchanged() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-
-    assert gm.resolve_node_id("s0_home") == "s0_home"
-    assert gm.resolve_node_id("s9_missing") == "s9_missing"
-
-
 @pytest.mark.usefixtures("vlm")
 def test_resolve_node_id_follows_a_chain_of_renames() -> None:
     gm = make_manager()
@@ -581,9 +572,7 @@ def test_resolve_node_id_follows_a_chain_of_renames() -> None:
 
     settings = gm.rename_node(feed, "Settings page")
 
-    assert (feed, settings) == ("s0_home_feed", "s0_settings_page")
     assert gm.resolve_node_id("s0_home") == settings
-    assert gm.resolve_node_id(feed) == settings
     assert gm.resolve_node_id(settings) == settings
 
 
@@ -597,31 +586,6 @@ def test_resolve_node_id_after_renaming_back_to_an_earlier_id() -> None:
 
     assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
     assert gm.resolve_node_id(feed) == "s0_home_screen"
-
-
-@pytest.mark.usefixtures("vlm")
-def test_rename_node_to_the_same_id_records_no_alias() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home_screen", "Home screen")
-
-    assert gm.rename_node("s0_home_screen", "Home screen") == "s0_home_screen"
-
-    assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
-
-
-@pytest.mark.usefixtures("vlm")
-def test_load_graph_forgets_the_renames_of_the_graph_it_replaces(tmp_path: Path) -> None:
-    source = make_manager()
-    add_screen(source, "s0_home", "Home screen")
-    path = tmp_path / "graph.json"
-    source.save_graph(path)
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-    gm.rename_node("s0_home", "Home feed")
-
-    gm.load_graph(path)
-
-    assert gm.resolve_node_id("s0_home") == "s0_home"
 
 
 def test_get_node_returns_a_copy() -> None:

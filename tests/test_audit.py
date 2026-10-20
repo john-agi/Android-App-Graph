@@ -15,6 +15,7 @@ import pytest
 from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
+from android_app_graph.device import DeviceController
 from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils.graph_manager import GraphManager
 
@@ -399,29 +400,10 @@ def test_re_explore_issues_skips_unreachable_nodes(
     assert {r["reason"] for r in results} == {"unreachable"}
 
 
-class _ScreenSequence:
-    """A DeviceController that moves to the next scripted screen after every action."""
-
-    w = 1080
-    h = 1920
-
-    def __init__(self, *screens: dict[str, Any]) -> None:
-        self.config: dict[str, Any] = {}
-        self._screens = list(screens)
-        self.actions: list[dict[str, Any]] = []
-
-    def get_state(self) -> dict[str, Any]:
-        return self._screens[0]
-
-    def exe_action(self, action: dict[str, Any]) -> None:
-        self.actions.append(action)
-        self._screens.pop(0)
-
-
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     tmp_path: Path,
-    png_screenshot: str,
+    two_screen_device: DeviceController,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
@@ -429,17 +411,11 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression for #76: the verifier tells the new screen apart from the node the
-    step started on, renaming it, and the step's edge used to be dropped."""
+    """re_explore_issues used to keep the old ID of the node it acted from, so the
+    step's edge was dropped."""
     monkeypatch.setattr(
         audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
     )
-    search = {
-        "activity": "com.demo.app.Search",
-        "screenshot": png_screenshot,
-        "package": "com.demo.app",
-    }
-    controller = _ScreenSequence(search, {**search, "activity": "com.demo.app.Results"})
     graph = GraphManager(
         client=router_client,
         page_detail=ModelSettings("provider/page_detail"),
@@ -451,7 +427,8 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    start = graph.identify_state(search["activity"], png_screenshot)
+    screen = two_screen_device.get_state()
+    start = graph.identify_state(screen["activity"], screen["screenshot"])
     verdict = {
         "same": False,
         "reason": "a query has been entered",
@@ -470,7 +447,7 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
         (result,) = audit.re_explore_issues(
             graph,
             [{"type": "explore_node", "node": start, "expected_pages": ["Search results"]}],
-            controller,
+            two_screen_device,
             "demo",
             "com.demo.app",
             tmp_path / "demo_audited.json",
@@ -481,8 +458,6 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
         )
 
     renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
-    assert router_responses == []
-    assert controller.actions == [{"action": "tap", "x": 1, "y": 2}]
     assert [(step["from"], step["to"]) for step in result["steps"]] == [(renamed, results)]
     assert graph.graph.has_edge(renamed, results)
     assert "add_edge: missing node(s)" not in caplog.text

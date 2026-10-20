@@ -452,19 +452,15 @@ class GraphManager:
         return new_node_id
 
     def _record_alias(self, old_id: str, new_id: str) -> None:
-        """Record that the node *old_id* now lives on as *new_id*."""
         # new_id can be an ID that was renamed away earlier; its stale alias would
         # close a cycle that resolve_node_id never leaves.
         self._node_aliases.pop(new_id, None)
         self._node_aliases[old_id] = new_id
 
     def resolve_node_id(self, node_id: str) -> str:
-        """Return the current ID of the node once called *node_id*.
-
-        Any ``identify_state`` call can rename a node, including one the caller
-        still holds, so a caller that keeps an ID across the call resolves it
-        afterwards. ``add_edge`` deliberately does not resolve: a stale endpoint
-        is a caller bug it reports (#62), not one it redirects. See #76.
+        """``identify_state`` can rename any node, including one a caller still holds,
+        so a caller that keeps a node ID across that call passes it through here.
+        ``add_edge`` deliberately does not, so a stale endpoint is still reported.
         """
         while node_id in self._node_aliases:
             node_id = self._node_aliases[node_id]
@@ -1282,7 +1278,6 @@ class GraphManager:
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.graph.clear()
-        self._node_aliases.clear()
 
         for node_data in data.get("nodes", []):
             node_id = node_data["id"]
