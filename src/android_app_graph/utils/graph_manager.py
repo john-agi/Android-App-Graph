@@ -466,41 +466,27 @@ class GraphManager:
         elements = self.graph.nodes[node_id].get("interactable_elements", [])
         return [e for e in elements if not e.get("explored", False)]
 
-    def mark_element_explored(self, node_id: str, instruction: str) -> None:
-        """Mark the element that best matches the instruction as explored.
+    def mark_element_explored(self, node_id: str, element: int | None) -> None:
+        """Mark the element the planner named as explored.
 
-        Uses simple substring matching between the instruction and element
-        descriptions.  The best-matching element (most words in common) is
-        marked explored=True.
+        ``element`` is the planner's 1-based number in
+        ``get_unexplored_elements(node_id)``, the list it was shown. ``None``
+        marks nothing, and so does a number outside that list, with a warning.
         """
-        if node_id not in self.graph:
+        if element is None:
             return
-        elements = self.graph.nodes[node_id].get("interactable_elements", [])
-        if not elements:
-            return
-
-        instr_lower = instruction.lower()
-        best_idx = -1
-        best_score = 0
-        for idx, elem in enumerate(elements):
-            if elem.get("explored", False):
-                continue
-            desc_words = elem.get("description", "").lower().split()
-            if not desc_words:
-                continue
-            score = sum(1 for w in desc_words if w in instr_lower)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        if best_idx >= 0 and best_score > 0:
-            elements[best_idx]["explored"] = True
-            logger.info(
-                "Element explored on %s: '%s' (matched by instruction: '%s')",
+        unexplored = self.get_unexplored_elements(node_id)
+        if not 1 <= element <= len(unexplored):
+            logger.warning(
+                "Element %d is not among the %d unexplored element(s) on %s; marking none",
+                element,
+                len(unexplored),
                 node_id,
-                elements[best_idx]["description"],
-                instruction,
             )
+            return
+        named = unexplored[element - 1]
+        named["explored"] = True
+        logger.info("Element explored on %s: '%s'", node_id, named.get("description", ""))
 
     def merge_nodes(self, keep_id: str, remove_id: str) -> bool:
         """Merge *remove_id* into *keep_id*, rewiring all edges.

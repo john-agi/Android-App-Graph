@@ -663,10 +663,14 @@ change account settings, or perform any action that has real-world side effects.
 You are ONLY exploring the app's UI structure — navigate and observe, but never \
 commit or submit anything. If a screen requires login/signup to proceed, go back instead.
 
-Reply with ONLY the instruction as a plain text string — a single ATOMIC action. \
-Each instruction = one tap, one type, one swipe, or one back. Never combine steps.
+Reply with ONLY a JSON object with two keys:
+- "element": the number of the element in the list of elements NOT interacted with yet \
+that your instruction acts on, or null when it acts on none of them (for example going \
+back, scrolling, or typing into an already focused field).
+- "instruction": a single ATOMIC action. Each instruction = one tap, one type, one \
+swipe, or one back. Never combine steps.
 
-Examples:
+Example instructions:
 - Tap the "Network & internet" menu item near the top of the settings list
 - Tap the rounded search bar at the top of the screen
 - Type 'stewed beef'
@@ -676,7 +680,9 @@ Examples:
 - Scroll down to reveal more settings
 - Go back to the previous screen
 
-Reply with ONLY the JSON, nothing else."""
+Example replies:
+{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}
+{{"element": null, "instruction": "Go back to the previous screen"}}"""
 
 NEXT_ACTION_SYSTEM_PROMPT = """\
 
@@ -1682,6 +1688,24 @@ def _tool_call_to_aitk(
     raise ValueError(f"Unknown action: {action}")
 
 
+_NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "element": {
+            "type": ["integer", "null"],
+            "description": "The number of the listed unexplored element the instruction acts "
+            "on, or null when it acts on none of them.",
+        },
+        "instruction": {
+            "type": "string",
+            "description": "One atomic action: one tap, one type, one swipe, or one back.",
+        },
+    },
+    "required": ["element", "instruction"],
+    "additionalProperties": False,
+}
+
+
 def plan_next_action(
     client: OpenRouter,
     screenshot_b64: str,
@@ -1692,7 +1716,7 @@ def plan_next_action(
     input_status: str = "unknown from screenshot",
     *,
     settings: ModelSettings,
-) -> str:
+) -> tuple[str, int | None]:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
     This separates the "what" (exploration strategy) from the "how" (coordinate grounding).
@@ -1701,11 +1725,14 @@ def plan_next_action(
     Args:
         explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
             each with "target_description", "instructions", "actions", "visit_count".
-        unexplored_elements: List of element dicts not yet interacted with.
+        unexplored_elements: List of element dicts not yet interacted with, shown to
+            the planner numbered from 1.
         input_status: Runtime hint about whether a text field/keyboard is active.
 
     Returns:
-        A plain text instruction string.
+        ``(instruction, element)``: the instruction, and the number of the
+        unexplored element it acts on, or None when it acts on none of them. A
+        number outside the list is logged and returned as None.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
@@ -1726,12 +1753,13 @@ def plan_next_action(
     else:
         instructions_str = "(none — this screen has not been explored yet)"
 
-    if unexplored_elements:
+    listed_elements = unexplored_elements or []
+    if listed_elements:
         elem_lines = []
-        for elem in unexplored_elements:
+        for number, elem in enumerate(listed_elements, start=1):
             desc = elem.get("description", "?")
             pos = elem.get("position", "?")
-            elem_lines.append(f"- {desc} ({pos})")
+            elem_lines.append(f"{number}. {desc} ({pos})")
         unexplored_section = (
             "Elements on this screen that have NOT been interacted with yet:\n"
             + "\n".join(elem_lines)
@@ -1757,24 +1785,33 @@ def plan_next_action(
             ],
         }
     ]
-    resp = send_chat(client, call_type="instruction", settings=settings, messages=messages)
+    resp = send_chat(
+        client,
+        call_type="instruction",
+        settings=settings,
+        messages=messages,
+        response_format=_structured_output("next_action_plan", _NEXT_ACTION_PLAN_SCHEMA),
+        plugins=[{"id": "response-healing"}],
+    )
     raw = message_text(resp)
-
-    # The planner now returns plain text; try to extract from JSON if it still outputs one
-    raw_clean = strip_json_fences(raw)
     try:
-        result = json.loads(raw_clean)
-        if isinstance(result, dict):
-            instruction = as_str(result.get("instruction"), raw)
-        else:
-            instruction = str(result)
+        plan = as_object_dict(json.loads(strip_json_fences(raw)))
     except json.JSONDecodeError:
-        instruction = raw
+        plan = {}
 
-    instruction = instruction.strip().strip('"').strip("'")
+    instruction = as_str(plan.get("instruction"), raw).strip().strip('"').strip("'")
+    element = as_int(plan.get("element"))
+    if element is not None and not 1 <= element <= len(listed_elements):
+        logger.warning(
+            "Planner named element %d, but only %d unexplored element(s) were listed; "
+            "treating it as none",
+            element,
+            len(listed_elements),
+        )
+        element = None
 
-    logger.info("Planned instruction: %s", instruction)
-    return instruction
+    logger.info("Planned instruction: %s (element: %s)", instruction, element)
+    return instruction, element
 
 
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
