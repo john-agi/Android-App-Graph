@@ -446,6 +446,12 @@ decides what counts as external web, so the app's own screens get regular nodes
 even when they run in a web view or mention a privacy policy.
 `app-graph-audit --re-explore` records external web pages the same way.
 
+Every other node records the package the device reported for its screen, and the
+explorer, the audit and the runtime match a screen only with nodes of its package.
+A graph file saved before nodes recorded a package gives every node except the
+`ext_` ones the file's `package_name`, or the app's configured `package_name` when
+the file has none.
+
 ## Visualize or Audit a Graph
 
 Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra

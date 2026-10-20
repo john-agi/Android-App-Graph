@@ -41,7 +41,8 @@ _TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
 def _screen(activity: str, color: str) -> dict[str, object]:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
-    return {"activity": activity, "screenshot": base64.b64encode(buffer.getvalue()).decode("ascii")}
+    screenshot = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return {"activity": activity, "screenshot": screenshot, "package": "com.demo"}
 
 
 HOME_SCREEN = _screen("com.demo.Home", "white")
@@ -110,7 +111,7 @@ def _explorer(device: DeviceController, tmp_path: Path, router_client: OpenRoute
 @pytest.fixture
 def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
     return _explorer(
-        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
+        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot, "package": "com.demo"}),
         tmp_path,
         router_client,
     )
@@ -121,7 +122,10 @@ def replaying_kobe(
     tmp_path: Path, png_screenshot: str, router_client: OpenRouter, device_log: list[object]
 ) -> Kobe:
     return _explorer(
-        _ReplayDevice({"activity": "com.demo.Home", "screenshot": png_screenshot}, device_log),
+        _ReplayDevice(
+            {"activity": "com.demo.Home", "screenshot": png_screenshot, "package": "com.demo"},
+            device_log,
+        ),
         tmp_path,
         router_client,
     )
@@ -197,6 +201,54 @@ def test_exploration_records_the_configured_package_name(
     assert saved["package_name"] == "com.demo"
 
 
+class _Replayed(Exception):
+    """Ends exploration once it has chosen the node to replay to."""
+
+
+@pytest.mark.parametrize("saved_package", [None, "com.whatsapp"])
+def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packages(
+    saved_package: str | None,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every node used to be filtered out: none of these activities has three
+    dot-segments that equal ``com.whatsapp``."""
+    document: dict[str, object] = {
+        "nodes": [
+            {"id": "s0_home", "activity": "com.whatsapp.home.ui.HomeActivity"},
+            {"id": "s1_conversation", "activity": "com.whatsapp.Conversation"},
+        ],
+        "edges": [{"source": "s0_home", "target": "s1_conversation"}],
+    }
+    if saved_package is not None:
+        document["package_name"] = saved_package
+    graph_path = tmp_path / "whatsapp" / "whatsapp.json"
+    graph_path.parent.mkdir()
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    explorer = Kobe(
+        _Device(AssertionError("the replay must start before the device is read")),
+        "whatsapp",
+        "com.whatsapp",
+        logging.getLogger("test"),
+        graph_dir=tmp_path,
+        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
+    )
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> str:
+        replayed.append(node_id)
+        raise _Replayed
+
+    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+
+    with pytest.raises(_Replayed):
+        explorer.explore(max_steps=1, resume_from="auto")
+
+    assert replayed == ["s1_conversation"]
+
+
 def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,
@@ -205,7 +257,7 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
 ) -> None:
     router_responses.append(httpx.Response(401, json={"error": {"message": "bad key"}}))
     with pytest.raises(OpenRouterError):
-        kobe.graph.identify_state("com.demo.Home", png_screenshot)
+        kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
     assert len(kobe.graph.graph) == 0
     assert kobe.graph._last_identify_cache is None
     assert no_sleep == []
@@ -228,7 +280,7 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
                 httpx.Response(200, json=embedding_body),
             ]
         )
-    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot)
+    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
     # The cache would skip the model, and a reference screenshot would add a verify request.
     replaying_kobe.graph._last_identify_cache = None
     replaying_kobe.graph.graph.nodes[node].pop("reference_screenshot", None)

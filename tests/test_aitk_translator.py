@@ -1727,14 +1727,16 @@ def identifiable(
 
 
 def test_identify_node_without_a_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator._identify_node("com.demo.app/.HomeActivity", "shot") is None
+    assert translator._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_picks_the_model_choice(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(identifiable, "A")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == "home"
+    assert (
+        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") == "home"
+    )
 
 
 def test_identify_node_only_asks_the_action_model_to_pick_a_candidate(
@@ -1744,7 +1746,9 @@ def test_identify_node_only_asks_the_action_model_to_pick_a_candidate(
     runtime model pick one; it never describes the screen with the page-detail model."""
     completions = use_model(identifiable, "A")
 
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") == "home"
+    assert (
+        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") == "home"
+    )
 
     assert len(completions.calls) == 1
     assert completions.calls[0]["model"] == "action-model"
@@ -1763,6 +1767,7 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
     G = identifiable._graphs["demo"]
     G.add_node(
         "stale",
+        package="com.demo.app",
         activity="com.demo.app/.HomeActivity",
         page_description="a wrong-dimension screen",
         state_schema={},
@@ -1774,7 +1779,7 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
     use_model(identifiable, "A")
 
     with caplog.at_level("WARNING"):
-        node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+        node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
     assert node_id == "home"
     stale_warnings = [
@@ -1789,14 +1794,14 @@ def test_identify_node_respects_a_rejection(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(identifiable, "none")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_retries_an_unparseable_pick(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(identifiable, "hmm", "B")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
     assert node_id == "results"
     assert len(completions.calls) == 2
 
@@ -1806,7 +1811,7 @@ def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
 ) -> None:
     """A "BC"-shaped reply must not be silently mapped to a candidate by substring luck."""
     completions = use_model(identifiable, "BC", "B")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
     assert node_id == "results"
     assert len(completions.calls) == 2
 
@@ -1822,7 +1827,7 @@ def test_identify_node_retry_appends_the_parse_hint_and_recovers(
     rather than guess, so the second attempt (still "A") is what recovers it.
     """
     completions = use_model(identifiable, "A login screen is the best match", "A")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
     assert node_id == "home"
     assert len(completions.calls) == 2
@@ -1836,7 +1841,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(identifiable, "A")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
     assert node_id == "home"
     assert len(completions.calls) == 1
@@ -1847,7 +1852,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
 def test_identify_node_without_candidates_in_the_current_package(
     identifiable: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    assert identifiable._identify_node("org.other.thing/.Main", "shot") is None
+    assert identifiable._identify_node("org.other.thing/.Main", "shot", "org.other.thing") is None
 
 
 def test_identify_node_without_cached_embeddings(
@@ -1856,7 +1861,7 @@ def test_identify_node_without_cached_embeddings(
     G = identifiable._graphs["demo"]
     for node in G.nodes:
         del G.nodes[node]["image_embedding"]
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
+    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
@@ -1900,7 +1905,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     assert [opt["type"] for opt in options] == ["done", "free"]
 
     use_model(translator, "A")
-    assert translator._identify_node("", "shot") == "home"
+    assert translator._identify_node("", "shot", "com.demo.app") == "home"
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1912,7 +1917,7 @@ def test_identify_node_propagates_an_embedding_failure(
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):
-        identifiable._identify_node("com.demo.app/.HomeActivity", "shot")
+        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
 
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
@@ -2225,6 +2230,84 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
     assert two_apps._memory.actions == ["Open the shop app", "Tap checkout"]
 
 
+def _stepping_over_one_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_name: str,
+    nodes: list[dict[str, Any]],
+    image_embeddings: dict[str, list[float]],
+) -> aitk_translator.UIKobeV2Translator:
+    _write_graph(tmp_path, app="app", package_name=package_name, nodes=nodes)
+    built = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
+    for node_id, vector in image_embeddings.items():
+        built._graphs["app"].nodes[node_id]["image_embedding"] = vector
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr(
+        aitk_translator,
+        "predict_next_action",
+        lambda *_a, **_k: ({"action": "tap", "x": 5, "y": 6}, "tapped | on screen"),
+    )
+    built._app_opened = True
+    return built
+
+
+def test_step_offers_only_the_nodes_of_the_foreground_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_model: _UseModel,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Messages and Gmail share their first three dot-segments, which used to make
+    them one package, so the closer Gmail screen was picked."""
+    messages = "com.google.android.apps.messaging"
+    gmail = "com.google.android.gm"
+    conversations = f"{messages}.ui.ConversationListActivity"
+    stepping = _stepping_over_one_graph(
+        tmp_path,
+        monkeypatch,
+        messages,
+        nodes=[
+            {"id": "inbox", "activity": conversations, "package": messages},
+            {"id": "mail", "activity": f"{gmail}.ConversationListActivityGmail", "package": gmail},
+        ],
+        image_embeddings={"inbox": [0.6, 0.8], "mail": [1.0, 0.0]},
+    )
+    use_model(stepping, "A", "nothing", '{"choice": "B", "instruction": "Open the chat"}')
+    state = {"screenshot": "shot", "activity": conversations, "package": messages}
+
+    with caplog.at_level(logging.INFO, logger=aitk_translator.logger.name):
+        stepping._step("Read the latest message", state, {"actions": []})
+
+    assert "[IDENTIFY] identified node=inbox" in caplog.messages
+
+
+def test_step_identifies_an_android_world_screen_in_a_graph_saved_without_node_packages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_model: _UseModel,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Android World reports ``package/class`` while the graph holds AITK's class
+    names, and Chrome's classes do not start with its package."""
+    chrome = "com.android.chrome"
+    tabbed = "org.chromium.chrome.browser.ChromeTabbedActivity"
+    stepping = _stepping_over_one_graph(
+        tmp_path,
+        monkeypatch,
+        chrome,
+        nodes=[{"id": "tabs", "activity": tabbed}],
+        image_embeddings={"tabs": [1.0, 0.0]},
+    )
+    use_model(stepping, "A", "nothing", '{"choice": "B", "instruction": "Open a new tab"}')
+    state = {"screenshot": "shot", "activity": f"{chrome}/{tabbed}", "package": chrome}
+
+    with caplog.at_level(logging.INFO, logger=aitk_translator.logger.name):
+        stepping._step("Open a new tab", state, {"actions": []})
+
+    assert "[IDENTIFY] identified node=tabs" in caplog.messages
+
+
 def test_step_warns_when_the_task_names_no_known_app(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
@@ -2307,14 +2390,15 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
     node has an embedding when all of them were dropped as stale.
     """
     G = identifiable._graphs["demo"]
-    same_pkg = [
-        n for n, data in G.nodes(data=True) if data.get("activity", "").startswith("com.demo.app/")
-    ]
+    same_pkg = [n for n, data in G.nodes(data=True) if data["package"] == "com.demo.app"]
     for node in same_pkg:
         G.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
 
     with caplog.at_level("WARNING"):
-        assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot") is None
+        assert (
+            identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+            is None
+        )
 
     expected = (
         f"[IDENTIFY] no candidates: none of the {len(same_pkg)} same-package node(s) has a "

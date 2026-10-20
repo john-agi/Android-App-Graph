@@ -16,7 +16,7 @@ from aitk.translators.base import BaseTranslator
 from openrouter import OpenRouter
 
 from android_app_graph import device
-from android_app_graph.android_packages import package_from_activity
+from android_app_graph.android_packages import saved_node_package
 from android_app_graph.embedding_cache import (
     compute_embedding_with_retry,
     compute_missing_image_embeddings,
@@ -232,7 +232,8 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         edge_specs.append((source, target, edge_attrs))
 
-    G = nx.DiGraph(package_name=as_str(data.get("package_name"), ""))
+    package_name = as_str(data.get("package_name"), "")
+    G = nx.DiGraph(package_name=package_name)
     for node_data in data.get("nodes", []):
         node_id = node_data["id"]
         # A path, not the screenshot itself: reading and base64-encoding every
@@ -246,6 +247,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         # iterates or indexes is narrowed here once rather than at each read site.
         G.add_node(
             node_id,
+            package=saved_node_package(node_data, package_name),
             activity=as_str(node_data.get("activity"), ""),
             page_description=as_str(node_data.get("page_description"), ""),
             state_schema=as_str_dict(node_data.get("state_schema")),
@@ -792,11 +794,11 @@ class UIKobeV2Translator(BaseTranslator):
         )
         return None
 
-    def _identify_node(self, activity: str, screenshot: str) -> str | None:
+    def _identify_node(self, activity: str, screenshot: str, package: str) -> str | None:
         """Match the current screen to a graph node, or return ``None`` when none matches.
 
-        1. Embed the screenshot and score it against the same-package nodes'
-           cached screenshot embeddings.
+        1. Embed the screenshot and score it against the cached screenshot embeddings
+           of the nodes of the foreground ``package``.
         2. Ask the model to pick one of the top-K candidates, each shown with its
            description and similarity, or to reject them all.
 
@@ -808,19 +810,16 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("[IDENTIFY] No current graph is loaded")
             return None
 
-        current_pkg = package_from_activity(activity)
         logger.info(
             "[IDENTIFY] activity=%s package=%s graph_app=%s graph_package=%s",
             activity,
-            current_pkg,
+            package,
             self._app_name or "(unknown)",
             _graph_package(G),
         )
 
         same_pkg_node_count = sum(
-            1
-            for _, data in G.nodes(data=True)
-            if package_from_activity(data.get("activity", "")) == current_pkg
+            1 for _, data in G.nodes(data=True) if data.get("package") == package
         )
         logger.info("[IDENTIFY] same-package graph nodes=%d", same_pkg_node_count)
 
@@ -842,7 +841,7 @@ class UIKobeV2Translator(BaseTranslator):
         same_pkg_image_candidates = (
             (str(node_id), data.get("image_embedding"))
             for node_id, data in G.nodes(data=True)
-            if package_from_activity(data.get("activity", "")) == current_pkg
+            if data.get("package") == package
         )
         scored = score_by_cosine(
             query_image_emb,
@@ -863,7 +862,7 @@ class UIKobeV2Translator(BaseTranslator):
             if same_pkg_node_count == 0:
                 logger.warning(
                     "[IDENTIFY] no candidates: current package %s has no nodes in selected graph %s",
-                    current_pkg,
+                    package,
                     self._app_name or "(unknown)",
                 )
             else:
@@ -1270,7 +1269,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[LOOP] Step %d", self._step_count)
         logger.info(_SEP_THICK)
 
-        node_id = self._identify_node(activity, screenshot)
+        node_id = self._identify_node(activity, screenshot, package)
         logger.info("[IDENTIFY] Node: %s", node_id)
 
         self._record_info(task, screenshot)

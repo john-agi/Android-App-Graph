@@ -106,7 +106,7 @@ class Kobe:
         self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
 
         if self.graph_path.exists():
-            self.graph.load_graph(self.graph_path)
+            self.graph.load_graph(self.graph_path, default_package_name=package_name)
             self.logger.info("Graph loaded from %s", self.graph_path)
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
@@ -248,6 +248,7 @@ class Kobe:
             return self.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
+                device_state["package"],
             )
 
         self.logger.info(
@@ -288,6 +289,7 @@ class Kobe:
         actual_node = self.graph.identify_state(
             device_state["activity"],
             device_state["screenshot"],
+            device_state["package"],
         )
         if actual_node != target_node:
             self.logger.warning(
@@ -350,6 +352,7 @@ class Kobe:
                 current_node = self.graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
+                    device_state["package"],
                 )
         elif start_step > 0:
             self.logger.info(
@@ -361,12 +364,14 @@ class Kobe:
             current_node = self.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
+                device_state["package"],
             )
         else:
             device_state = self.controller.get_state()
             current_node = self.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
+                device_state["package"],
             )
 
         step = start_step
@@ -456,6 +461,7 @@ class Kobe:
                     current_node = self.graph.identify_state(
                         device_state["activity"],
                         device_state["screenshot"],
+                        device_state["package"],
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,
@@ -468,6 +474,7 @@ class Kobe:
                 new_node = self.graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
+                    device_state["package"],
                 )
                 current_node = self.graph.resolve_node_id(current_node)
 
@@ -493,6 +500,7 @@ class Kobe:
                     current_node = self.graph.identify_state(
                         device_state["activity"],
                         device_state["screenshot"],
+                        device_state["package"],
                     )
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,
