@@ -446,11 +446,15 @@ survives.
 A step that opens another app records an edge to an `ext_<package>` node. A step
 that opens web content from outside the app, such as a browser or custom tab
 showing an address bar or URL, records an edge to the single shared `ext_web`
-node. Either way the explorer then presses back. The screen-description model
-decides what counts as external web, so the app's own screens get regular nodes
-even when they run in a web view or mention a privacy policy. A permission
-prompt, keyboard or system dialog belongs to another package but sits on top of
-the app, so it gets a regular node and no back press.
+node. Either way the explorer then presses back. A redirecting link or a browser's
+own history can keep an outside web page up, so the explorer presses back again,
+a few times at most, and if the page is still showing restarts the app as before
+a [replay](#replaying-to-a-node). It never records an edge out of an `ext_` node,
+so a replay never passes through one. The screen-description model decides what
+counts as external web, so the app's own screens get regular nodes even when they
+run in a web view or mention a privacy policy. A permission prompt, keyboard or
+system dialog belongs to another package but sits on top of the app, so it gets a
+regular node and no back press.
 `app-graph-audit --re-explore` records external web pages and these dialogs the
 same way.
 
