@@ -105,7 +105,6 @@ class FakeVlm:
         default_factory=list
     )
     external_web: set[str] = field(default_factory=set)
-    """Descriptions the fake reports with ``is_external_web`` set."""
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
@@ -308,11 +307,8 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(vlm: FakeV
     assert first == second == EXTERNAL_WEB_NODE
     assert list(gm.graph) == [EXTERNAL_WEB_NODE]
     assert gm.get_node(EXTERNAL_WEB_NODE) == {
-        "activity": HOME,
         "page_description": "[external web page]",
-        "state_schema": {},
         "visit_count": 2,
-        "is_external": True,
     }
     assert vlm.kinds() == ["describe", "describe"]
     assert gm.get_start_node() is None

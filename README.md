@@ -426,6 +426,16 @@ For long runs, use the auto-resume wrapper:
 ./scripts/run_explore.sh -c configs/explore.yaml
 ```
 
+### External apps and web pages
+
+A step that opens another app records an edge to an `ext_<package>` node. A step
+that opens web content from outside the app, such as a browser or custom tab
+showing an address bar or URL, records an edge to the single shared `ext_web`
+node. Either way the explorer then presses back. The screen-description model
+decides what counts as external web, so the app's own screens get regular nodes
+even when they run in a web view or mention a privacy policy.
+`app-graph-audit --re-explore` records external web pages the same way.
+
 ## Visualize or Audit a Graph
 
 Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra

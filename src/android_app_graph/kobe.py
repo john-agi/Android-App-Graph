@@ -474,7 +474,6 @@ class Kobe:
                     device_state = self.controller.get_state()
                     step += 1
                     self.graph.total_steps_completed = step
-                    self.graph.maybe_normalize_node_edges(current_node)
                     self.save_graph()
                     current_node = self.graph.identify_state(
                         device_state["activity"],

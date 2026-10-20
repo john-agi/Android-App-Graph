@@ -52,8 +52,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
-# The ext_ prefix, unlike the is_external attribute, survives a save and reload, and it
-# keeps the node out of start-node and exploration-target selection like ext_<package>.
+# The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
 
 
@@ -190,8 +189,6 @@ class GraphManager:
         1. Collect existing same-package node descriptions and state keys.
         2. Single VLM call → model outputs a fresh description + dynamic state.
            Existing node list is provided as context for disambiguation only.
-           Web content from outside the app returns ``EXTERNAL_WEB_NODE`` here,
-           shared by every such page, instead of a regular node.
         3. Compute embedding, find best matching node by similarity.
         4. If similarity >= threshold → ALWAYS call verifier with both screenshots.
            Verifier can confirm match, reject it, and rename the existing node.
@@ -202,7 +199,8 @@ class GraphManager:
         screen reached via different Android activities is merged into one node.
 
         Returns:
-            The node ID (str) for this state.
+            The node ID (str) for this state, or ``EXTERNAL_WEB_NODE`` for any web
+            content from outside the app.
         """
         screen_hash = hash(screenshot_b64)
         cached = self._last_identify_cache
@@ -247,7 +245,12 @@ class GraphManager:
             len(elements),
         )
         if is_external_web:
-            return self._visit_external_web(activity)
+            # Returning before the cache update leaves the cache on the screen behind the
+            # page, where a back press usually lands.
+            self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+            node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
+            node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+            return EXTERNAL_WEB_NODE
 
         description_embedding = self._embed(page_description)
 
@@ -387,26 +390,6 @@ class GraphManager:
         )
         self._last_identify_cache = _IdentifyCacheEntry(screen_hash, activity, node_id)
         return node_id
-
-    def _visit_external_web(self, activity: str) -> str:
-        """Count a visit to ``EXTERNAL_WEB_NODE``, creating it on the first one.
-
-        The identify cache is left on the screen behind the web page, the one a
-        back press usually returns to.
-        """
-        if EXTERNAL_WEB_NODE not in self.graph:
-            self.graph.add_node(
-                EXTERNAL_WEB_NODE,
-                activity=activity,
-                page_description="[external web page]",
-                state_schema={},
-                visit_count=0,
-                is_external=True,
-            )
-        node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
-        node_data["visit_count"] = node_data.get("visit_count", 0) + 1
-        logger.info("External web page: %s, visit #%d", EXTERNAL_WEB_NODE, node_data["visit_count"])
-        return EXTERNAL_WEB_NODE
 
     def _make_node_id(self, page_description: str) -> str:
         """Generate a unique, human-readable node ID."""

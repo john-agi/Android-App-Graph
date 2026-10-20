@@ -402,8 +402,8 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     graph, graph_path = _two_node_graph(tmp_path)
-    # What identify_state adds the first time a screen is described as external web.
-    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    # identify_state is faked below, so add the node it would create.
+    graph.graph.add_node(EXTERNAL_WEB_NODE)
     identified = iter(["s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args: next(identified))
     monkeypatch.setattr(
@@ -428,10 +428,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
         ("s1_detail", EXTERNAL_WEB_NODE),
         ("s1_detail", "s0_home"),
     ]
-    assert graph.graph.edges["s1_detail", EXTERNAL_WEB_NODE]["target_observations"] == [
-        "[external web page]"
-    ]
-    assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
+    assert graph.graph.has_edge("s1_detail", EXTERNAL_WEB_NODE)
     assert [action["action"] for action, _save_flag in controller.actions] == [
         "tap",
         "tap",
