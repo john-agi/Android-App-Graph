@@ -2333,8 +2333,8 @@ def test_step_offers_only_the_nodes_of_the_foreground_package(
     use_model: _UseModel,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Messages and Gmail share their first three dot-segments, which used to make
-    them one package, so the closer Gmail screen was picked."""
+    """Messages and Gmail nodes stay in separate packages although they share their
+    first three dot-segments, so a Messages screen is never offered a Gmail node."""
     messages = "com.google.android.apps.messaging"
     gmail = "com.google.android.gm"
     conversations = f"{messages}.ui.ConversationListActivity"
@@ -2363,8 +2363,9 @@ def test_step_identifies_an_android_world_screen_in_a_graph_saved_without_node_p
     use_model: _UseModel,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Android World reports ``package/class`` while the graph holds AITK's class
-    names, and Chrome's classes do not start with its package."""
+    """A screen that Android World reports as ``package/class`` matches the nodes of
+    its package although the graph holds AITK's class names, which for Chrome do not
+    start with the package."""
     chrome = "com.android.chrome"
     tabbed = "org.chromium.chrome.browser.ChromeTabbedActivity"
     stepping = _stepping_over_one_graph(

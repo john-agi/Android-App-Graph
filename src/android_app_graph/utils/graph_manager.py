@@ -1260,8 +1260,8 @@ class GraphManager:
     def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
         """Load graph from a JSON file (and companion embeddings file).
 
-        ``default_package_name`` stands in for the ``package_name`` of a file saved
-        before graph files recorded one.
+        ``default_package_name`` stands in for the ``package_name`` of a file that has
+        none.
         """
         path = Path(path)
         with open(path, "r", encoding="utf-8") as f:

@@ -40,8 +40,8 @@ SETTINGS = "com.example.app.SettingsActivity"
 OTHER_PACKAGE = "org.other.tool"
 OTHER_APP = "org.other.tool.MainActivity"
 
-# Activity class names as AITK reports them. Neither package has three dot-segments,
-# and Messages and Gmail share their first three.
+# Activity class names as AITK reports them, for packages of two and five dot-segments.
+# Messages and Gmail share their first three segments but are separate packages.
 WHATSAPP = "com.whatsapp"
 WHATSAPP_HOME = "com.whatsapp.home.ui.HomeActivity"
 WHATSAPP_GROUP_INFO = "com.whatsapp.chatinfo.group.GroupChatInfoActivity"
@@ -1957,8 +1957,8 @@ def test_save_graph_and_load_graph_round_trip_each_node_package(tmp_path: Path) 
 def test_load_graph_gives_the_app_package_to_each_screen_saved_without_one(
     tmp_path: Path, saved_package_name: str | None, configured_package_name: str
 ) -> None:
-    """The explorer turns every screen of another app into an ``ext_`` placeholder, and
-    an app's classes need not live under its package, so the activity cannot tell."""
+    """Every node saved without a package but the ``ext_`` placeholders gets the app's
+    package, including one whose activity class lives outside the package."""
     document: dict[str, Any] = {
         "nodes": [
             {"id": "s0_home", "activity": WHATSAPP_HOME},

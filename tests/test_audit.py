@@ -788,7 +788,8 @@ def test_audit_of_one_app_keeps_the_package_name_it_loaded(
 def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Re-exploration compares each screen only with the nodes of its package."""
+    """The nodes of a graph file without a ``package_name`` get the configured package,
+    so re-exploration matches each screen with the nodes of its package."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     graph_dir = tmp_path / "graphs"
     app_dir = graph_dir / "demo"

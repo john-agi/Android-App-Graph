@@ -212,8 +212,8 @@ def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packag
     router_client: OpenRouter,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every node used to be filtered out: none of these activities has three
-    dot-segments that equal ``com.whatsapp``."""
+    """A graph whose nodes record no package resumes at a node of ``com.whatsapp``,
+    although no activity's first three dot-segments equal the package."""
     document: dict[str, object] = {
         "nodes": [
             {"id": "s0_home", "activity": "com.whatsapp.home.ui.HomeActivity"},
