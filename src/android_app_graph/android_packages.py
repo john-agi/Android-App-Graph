@@ -10,16 +10,14 @@ from collections.abc import Mapping
 
 
 def package_from_activity(activity: str) -> str:
-    """Return the first three dot-segments of ``activity``, without its ``/component``.
+    """Return the package before the ``/`` of a ``package/component`` name, or ``""``.
 
-    ``com.citymapper.app/com.citymapper.app.MainActivity`` -> ``com.citymapper.app``
+    ``com.google.android.apps.maps/com.google.Main`` -> ``com.google.android.apps.maps``.
+    A bare class name such as ``com.whatsapp.home.ui.HomeActivity`` names no package:
+    neither its dot-segments nor its prefix need match the app's package.
     """
-    if "/" in activity:
-        activity = activity.split("/", maxsplit=1)[0]
-    parts = activity.split(".")
-    if len(parts) >= 3:
-        return ".".join(parts[:3])
-    return activity
+    package, slash, _component = activity.partition("/")
+    return package if slash else ""
 
 
 def saved_node_package(node: Mapping[str, object], graph_package: str) -> str:

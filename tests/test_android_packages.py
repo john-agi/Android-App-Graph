@@ -1,15 +1,13 @@
 """Tests for android_app_graph.android_packages.
 
 Both graph loaders, utils.graph_manager and adapters.aitk_translator, read a
-node's package through this module; it owns the tests so the two consumers do
-not each pin their own copy.
+node's package through this module, and the Android World adapter a screen's;
+it owns the tests so its consumers do not each pin their own copy.
 """
 
 from __future__ import annotations
 
 import pytest
-from hypothesis import given
-from hypothesis import strategies as st
 
 from android_app_graph.android_packages import package_from_activity, saved_node_package
 
@@ -18,26 +16,14 @@ from android_app_graph.android_packages import package_from_activity, saved_node
     ("activity", "expected"),
     [
         ("com.example.app/.MainActivity", "com.example.app"),
-        ("com.google.android.apps.maps/com.google.Main", "com.google.android"),
-        ("com.example.app", "com.example.app"),
-        ("com.citymapper.app.home.HomeActivity2", "com.citymapper.app"),
-        ("com.citymapper.app/com.citymapper.app.MainActivity", "com.citymapper.app"),
-        ("two.parts", "two.parts"),
-        ("single", "single"),
+        ("com.google.android.apps.maps/com.google.Main", "com.google.android.apps.maps"),
+        ("com.whatsapp/com.whatsapp.home.ui.HomeActivity", "com.whatsapp"),
+        ("com.whatsapp.home.ui.HomeActivity", ""),
         ("", ""),
     ],
 )
 def test_package_from_activity(activity: str, expected: str) -> None:
     assert package_from_activity(activity) == expected
-
-
-@given(st.text())
-def test_package_from_activity_keeps_at_most_three_components(activity: str) -> None:
-    """The package is a dotted prefix of the activity's component, never longer."""
-    package = package_from_activity(activity)
-    component = activity.split("/", maxsplit=1)[0]
-    assert component.startswith(package)
-    assert len(package.split(".")) <= max(3, len(component.split(".")))
 
 
 @pytest.mark.parametrize(
