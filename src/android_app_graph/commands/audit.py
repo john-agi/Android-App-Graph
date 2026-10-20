@@ -358,6 +358,7 @@ def re_explore_issues(
                 device_state["activity"],
                 device_state["screenshot"],
             )
+            current_node = graph.resolve_node_id(current_node)
 
             new_node_data = graph.get_node(new_node)
             target_obs = new_node_data.get("page_description", "") if new_node_data else ""

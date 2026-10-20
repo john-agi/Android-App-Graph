@@ -156,6 +156,7 @@ class GraphManager:
         self._next_id = 0
         self._dirty_screenshots: set[str] = set()
         self._last_identify_cache: _IdentifyCacheEntry | None = None
+        self._node_aliases: dict[str, str] = {}
         self.total_steps_completed = 0
 
     @property
@@ -450,6 +451,7 @@ class GraphManager:
 
         if new_node_id != node_id:
             nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
+            self._record_alias(node_id, new_node_id)
             if node_id in self._dirty_screenshots:
                 self._dirty_screenshots.discard(node_id)
             if self.graph.nodes[new_node_id].get("reference_screenshot"):
@@ -469,6 +471,21 @@ class GraphManager:
             page_description,
         )
         return new_node_id
+
+    def _record_alias(self, old_id: str, new_id: str) -> None:
+        # new_id can be an ID that was renamed away earlier; its stale alias would
+        # close a cycle that resolve_node_id never leaves.
+        self._node_aliases.pop(new_id, None)
+        self._node_aliases[old_id] = new_id
+
+    def resolve_node_id(self, node_id: str) -> str:
+        """``identify_state`` can rename any node, including one a caller still holds,
+        so a caller that keeps a node ID across that call passes it through here.
+        ``add_edge`` deliberately does not, so a stale endpoint is still reported.
+        """
+        while node_id in self._node_aliases:
+            node_id = self._node_aliases[node_id]
+        return node_id
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Return node attributes or None if the node doesn't exist."""

@@ -466,6 +466,7 @@ class Kobe:
                     device_state["activity"],
                     device_state["screenshot"],
                 )
+                current_node = self.graph.resolve_node_id(current_node)
 
                 new_node_data = self._require_node(new_node)
                 if self._is_external_web(

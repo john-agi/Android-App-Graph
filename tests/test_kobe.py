@@ -13,6 +13,7 @@ import pytest
 from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 
+from android_app_graph.device import DeviceController
 from android_app_graph.kobe import Kobe
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
@@ -227,6 +228,63 @@ def test_exploration_wait_recovery_respects_step_limit(
     ]
     assert len(kobe.graph.graph.edges) == 0
     assert no_sleep == [1, 1]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
+    tmp_path: Path,
+    two_screen_device: DeviceController,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The explorer used to keep the old ID of the node it acted from, so the step's
+    edge was dropped and its element was never marked explored."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    agent = Kobe(
+        two_screen_device,
+        "demo",
+        "com.demo.app",
+        logging.getLogger("test"),
+        graph_dir=tmp_path,
+        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
+    )
+    search_page = {
+        "page_description": "Chat search page",
+        "elements": [{"description": "Search button", "position": "top"}],
+    }
+    verdict = {
+        "same": False,
+        "reason": "a query has been entered",
+        "existing_description": "Chat search page with recent searches",
+        "new_description": "Chat search results page",
+    }
+    router_responses.extend(
+        [
+            chat_response(content=json.dumps(search_page)),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content="Tap the Search button"),
+            chat_response(content="", tool_arguments='{"action":"click","coordinate":[500,500]}'),
+            chat_response(content='{"page_description":"Chat search results"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(verdict)),
+            *[httpx.Response(200, json=embedding_body) for _ in range(2)],
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="android_app_graph"):
+        agent.explore(max_steps=1)
+
+    renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
+    assert agent.graph.graph.has_edge(renamed, results)
+    assert agent.graph.graph.nodes[renamed]["interactable_elements"] == [
+        {"description": "Search button", "position": "top", "explored": True}
+    ]
+    assert "add_edge: missing node(s)" not in caplog.text
 
 
 def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
