@@ -250,7 +250,7 @@ class _ScreenSequence:
     h = 1920
 
     def __init__(self, *screens: dict[str, Any]) -> None:
-        self.config: dict[str, Any] = {}
+        self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
         self._screens = list(screens)
 
     def get_state(self) -> dict[str, Any]:
