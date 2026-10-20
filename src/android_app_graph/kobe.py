@@ -210,7 +210,8 @@ class Kobe:
         """Return the node of the screen a navigation left when it failed after the restart.
 
         A screen of another app, such as the launcher a failed launch leaves, gets
-        one more restart first, so exploration continues inside the app.
+        one more restart first, and an outside web page is left with back presses,
+        so exploration continues inside the app.
         """
         device_state = self.controller.get_state()
         package = device_state.get("package", "").strip()
@@ -219,7 +220,10 @@ class Kobe:
                 self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
             )
             device_state = self.controller.get_state()
-        return self.graph.identify_state(device_state["activity"], device_state["screenshot"])
+        node = self.graph.identify_state(device_state["activity"], device_state["screenshot"])
+        if node == EXTERNAL_WEB_NODE:
+            node, _ = self._leave_external_web()
+        return node
 
     def _require_node(self, node_id: str) -> dict[str, Any]:
         """Return a node's attributes.

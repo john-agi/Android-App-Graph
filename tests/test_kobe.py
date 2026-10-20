@@ -922,6 +922,41 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The next step never starts from ``ext_web``, even when the app's own web view
+    shows the outside page."""
+    open_list = {"action": "tap", "coordinate": [10, 20]}
+    open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
+    web_page, item_list = _in_app("Article", "orange"), _in_app("List", "blue")
+    device = _ReplayScript(device_log, web_page, item_list, broken=open_item)
+    explorer = _explorer(device, tmp_path, router_client)
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_list", "s2_detail"])
+    explorer.graph.add_edge("s0_home", "s1_list", action=[open_list])
+    explorer.graph.add_edge("s1_list", "s2_detail", action=[open_item])
+    router_responses.extend(
+        [
+            chat_response(content=_NO_DUPLICATES),
+            chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
+        ]
+    )
+    nodes = {"com.demo.Article": EXTERNAL_WEB_NODE, "com.demo.List": "s1_list"}
+    monkeypatch.setattr(
+        explorer.graph, "identify_state", lambda activity, _screenshot: nodes[activity]
+    )
+
+    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
+    back = {"action": "back"}
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, back]
+
+
+@pytest.mark.usefixtures("no_sleep")
 @pytest.mark.parametrize("force_stop_refused", [False, True], ids=["no path", "force-stop refused"])
 def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_state(
     force_stop_refused: bool,
