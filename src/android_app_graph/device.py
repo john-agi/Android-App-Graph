@@ -106,14 +106,13 @@ def restart_app(
     launch_activity: str | None,
     logger: logging.Logger,
 ) -> None:
-    """Force-stop the app on ``controller``'s device, launch it again and let it settle.
+    """Put the app on its start screen, where every replay from the start node begins.
 
-    A replay of recorded actions from the start node needs the app on its start
-    screen, and a launch alone does not put it there: launching an app whose task
-    still exists brings that task to the foreground as it was
+    A launch alone does not: launching an app whose task still exists brings that
+    task to the foreground as it was
     (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
-    A failed force-stop raises ``CalledProcessError`` before anything is launched,
-    so no replay starts from an unknown screen.
+    A failed force-stop raises before anything is launched, so no replay starts
+    from an unknown screen.
     """
     config = controller.config
     subprocess.run(

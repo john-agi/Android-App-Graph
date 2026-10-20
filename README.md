@@ -425,6 +425,16 @@ For long runs, use the auto-resume wrapper:
 ./scripts/run_explore.sh -c configs/explore.yaml
 ```
 
+### Replaying to a node
+
+`--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
+steps and each issue that `app-graph-audit --re-explore` works on reach their node
+by replaying recorded actions from the app's start screen. Before every replay the
+app is force-stopped (`adb shell am force-stop <package_name>`) and launched again,
+through its `launch_activity` when the config sets one. Whatever the app holds only
+in memory, such as an unsaved form, is lost at each replay; data it has stored
+survives.
+
 ## Visualize or Audit a Graph
 
 Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra

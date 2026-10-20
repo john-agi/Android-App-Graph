@@ -282,8 +282,6 @@ class FakeController:
 
 
 class _LoggingController(FakeController):
-    """A FakeController that also appends each action to ``log``."""
-
     def __init__(self, package_name: str, log: list[object]) -> None:
         super().__init__(package_name)
         self._log = log
@@ -434,72 +432,44 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
     )
 
 
-def _re_explore_detail_twice(
-    graph: GraphManager,
-    controller: FakeController,
+@pytest.mark.parametrize(
+    ("launch_activity", "launch"), [(None, _PACKAGE_LAUNCH), ("com.demo/.Main", _ACTIVITY_LAUNCH)]
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_issues_restarts_the_app_before_each_replay(
+    launch_activity: str | None,
+    launch: list[str],
     client: OpenRouter,
-    out_path: Path,
-    **options: str,
-) -> list[dict[str, Any]]:
-    """Run one retry_edge and one explore_node issue, both replaying to s1_detail.
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    """The launcher intent used to resume the screen the previous issue ended on."""
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
 
-    ``options`` reach re_explore_issues only when given, so the default launch is
-    tested without naming ``launch_activity``.
-    """
-    return audit.re_explore_issues(
+    results = audit.re_explore_issues(
         graph,
         [
             {"type": "retry_edge", "source_node": "s1_detail", "target_node": "s0_home"},
             {"type": "explore_node", "node": "s1_detail", "expected_pages": ["Settings"]},
         ],
-        controller,
+        _LoggingController("com.demo", device_log),
         "demo",
         "com.demo",
-        out_path,
+        tmp_path / "demo_audited.json",
         client,
         ModelSettings("instruction-model"),
         ModelSettings("action-model"),
         steps_per_issue=1,
-        **options,
+        launch_activity=launch_activity,
     )
-
-
-@pytest.mark.usefixtures("_fake_device")
-def test_re_explore_issues_restarts_the_app_before_each_replay(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
-) -> None:
-    """Regression for #79: the launcher intent resumed the screen the last issue ended on."""
-    graph, _graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
-    controller = _LoggingController("com.demo", device_log)
-
-    results = _re_explore_detail_twice(graph, controller, client, tmp_path / "demo_audited.json")
 
     assert [r["status"] for r in results] == ["retried", "explored"]
     replay = {"action": "tap", "coordinate": [10, 20]}
     explore_step = {"action": "back"}
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay, explore_step] * 2
-
-
-@pytest.mark.usefixtures("_fake_device")
-def test_re_explore_issues_restarts_the_app_through_its_launch_activity(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
-) -> None:
-    graph, _graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
-    controller = FakeController("com.demo")
-
-    _re_explore_detail_twice(
-        graph,
-        controller,
-        client,
-        tmp_path / "demo_audited.json",
-        launch_activity="com.demo/.Main",
-    )
-
-    assert device_log == [_FORCE_STOP, _ACTIVITY_LAUNCH] * 2
+    assert device_log == [_FORCE_STOP, launch, replay, explore_step] * 2
 
 
 @pytest.mark.parametrize("re_explore", [False, True])

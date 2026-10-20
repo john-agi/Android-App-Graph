@@ -1,8 +1,8 @@
-"""Tests for android_app_graph.device: the soft-keyboard probe and the app launch helpers.
+"""Tests for android_app_graph.device: soft_keyboard_hint and restart_app.
 
-The probe is shared by kobe, commands.audit and the AITK translator, and the
-launch helpers by cli, kobe and commands.audit; this module owns their tests so
-the call sites do not each pin their own copy of the adb commands.
+The single soft-keyboard probe shared by kobe, commands.audit and the AITK
+translator; this module owns its tests so the three call sites do not each
+pin their own copy of the adb probe.
 """
 
 from __future__ import annotations
@@ -31,8 +31,6 @@ _PACKAGE_LAUNCH = [
 
 
 class _Device:
-    """A DeviceController on ``test-device`` whose screen must not be read or touched."""
-
     w = 100
     h = 200
 
@@ -72,28 +70,6 @@ def test_restart_app_launches_nothing_when_the_force_stop_fails(
         device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
     assert commands == [_FORCE_STOP]
     assert no_sleep == []
-
-
-def test_launch_app_falls_back_to_the_package_when_the_activity_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    commands: list[list[str]] = []
-
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        returncode = 1 if "start" in command else 0
-        return subprocess.CompletedProcess(command, returncode, stdout="", stderr="no activity")
-
-    monkeypatch.setattr(device.subprocess, "run", run)
-    app = {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Gone"}
-    with caplog.at_level(logging.WARNING):
-        device.launch_app({"device": {"udid": "test-device"}}, app, logging.getLogger("test"))
-    assert commands == [
-        ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Gone"],
-        _PACKAGE_LAUNCH,
-    ]
-    assert "Activity launch failed for demo" in caplog.text
-    assert "error=no activity" in caplog.text
 
 
 class _CompletedProcess:

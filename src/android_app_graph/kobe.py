@@ -220,8 +220,8 @@ class Kobe:
     def navigate_to_node(self, target_node: str) -> str:
         """Navigate to a target node by replaying saved edges from the start node.
 
-        This restarts the app, then executes the shortest path of already-known
-        actions from the app's entry point to the target node — no VLM calls needed.
+        This executes the shortest path of already-known actions from the
+        app's entry point to the target node — no VLM calls needed.
 
         Args:
             target_node: The node ID to navigate to.
@@ -242,7 +242,7 @@ class Kobe:
         )
 
         if len(path) <= 1:
-            self.logger.info("Target node %s is the start node", target_node)
+            self.logger.info("Already at target node %s", target_node)
             device_state = self.controller.get_state()
             return self.graph.identify_state(
                 device_state["activity"],

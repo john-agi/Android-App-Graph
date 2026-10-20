@@ -52,8 +52,6 @@ class _Device:
 
 
 class _ReplayDevice(_Device):
-    """A _Device on ``test-device`` that appends each action it executes to ``log``."""
-
     def __init__(self, state: dict[str, object], log: list[object]) -> None:
         super().__init__(state)
         self.config = {"device": {"udid": "test-device"}}
@@ -81,7 +79,6 @@ def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe
 def replaying_kobe(
     tmp_path: Path, png_screenshot: str, router_client: OpenRouter, device_log: list[object]
 ) -> Kobe:
-    """A Kobe whose device actions and adb commands both land in ``device_log``."""
     return Kobe(
         _ReplayDevice({"activity": "com.demo.Home", "screenshot": png_screenshot}, device_log),
         "demo",
@@ -176,25 +173,12 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
 
 @pytest.mark.usefixtures("no_sleep")
 def test_navigation_restarts_the_app_through_its_launch_activity(
-    tmp_path: Path,
-    png_screenshot: str,
-    router_client: OpenRouter,
-    device_log: list[object],
-    monkeypatch: pytest.MonkeyPatch,
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent = Kobe(
-        _ReplayDevice({"activity": "com.demo.Home", "screenshot": png_screenshot}, device_log),
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
-        client=router_client,
-        launch_activity="com.demo/.Main",
-    )
-    agent.graph.graph.add_node("s0_home")
-    monkeypatch.setattr(agent.graph, "identify_state", lambda *_args: "s0_home")
-    assert agent.navigate_to_node("s0_home") == "s0_home"
+    replaying_kobe.launch_activity = "com.demo/.Main"
+    replaying_kobe.graph.graph.add_node("s0_home")
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s0_home")
+    assert replaying_kobe.navigate_to_node("s0_home") == "s0_home"
     assert device_log == [_FORCE_STOP, _ACTIVITY_LAUNCH]
 
 
@@ -274,7 +258,7 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for #79: the replay from the start node ran on whatever screen was showing."""
+    """The replay from the start node used to run on whatever screen was showing."""
     open_settings = {"action": "tap", "coordinate": [10, 20]}
     open_detail = {"action": "tap", "coordinate": [30, 40]}
     replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])

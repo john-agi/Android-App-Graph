@@ -86,10 +86,8 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 @pytest.fixture
 def device_log(monkeypatch: pytest.MonkeyPatch) -> list[object]:
-    """Record each ``subprocess.run`` command instead of running it; every one succeeds.
-
-    A fake controller can append its actions to the same list, so a test sees adb
-    commands and device actions in the order they happened.
+    """Fake controllers append their actions here too, so a test sees adb commands
+    and device actions in the order the device would have received them.
     """
     log: list[object] = []
 

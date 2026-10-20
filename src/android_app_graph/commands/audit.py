@@ -241,8 +241,6 @@ def re_explore_issues(
 ) -> list[dict[str, Any]]:
     """Re-explore flagged issues on device.
 
-    Each issue restarts the app first, so its replay starts from the start node.
-
     For retry_edge: navigates to source node, re-runs the exploration step
     with a hint to retry the specific instruction.
 
