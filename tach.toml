@@ -32,7 +32,6 @@ depends_on = []
 [[modules]]
 path = "android_app_graph.commands"
 depends_on = [
-    "android_app_graph.cli",
     "android_app_graph.device",
     "android_app_graph.embedding_cache",
     "android_app_graph.graph_files",

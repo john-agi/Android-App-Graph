@@ -74,15 +74,14 @@ graph TD;
     adapters --> pay["android_app_graph.payloads"];
     adapters --> utils["android_app_graph.utils"];
     adapters --> vlm["android_app_graph.utils.vlm_utils"];
-    cmd["android_app_graph.commands"] --> cli["android_app_graph.cli"];
-    cmd --> dev;
+    cmd["android_app_graph.commands"] --> dev;
     cmd --> ec;
     cmd --> gf;
     cmd --> utils;
     cmd --> gm["android_app_graph.utils.graph_manager"];
     cmd --> logging["android_app_graph.utils.logging"];
     cmd --> vlm;
-    cli --> dev;
+    cli["android_app_graph.cli"] --> dev;
     cli --> kobe;
     cli --> logging;
     ec --> gf;
@@ -425,6 +424,16 @@ For long runs, use the auto-resume wrapper:
 ```bash
 ./scripts/run_explore.sh -c configs/explore.yaml
 ```
+
+### Replaying to a node
+
+`--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
+steps and each issue that `app-graph-audit --re-explore` works on reach their node
+by replaying recorded actions from the app's start screen. Before every replay the
+app is force-stopped (`adb shell am force-stop <package_name>`) and launched again,
+through its `launch_activity` when the config sets one. Whatever the app holds only
+in memory, such as an unsaved form, is lost at each replay; data it has stored
+survives.
 
 ## Visualize or Audit a Graph
 
