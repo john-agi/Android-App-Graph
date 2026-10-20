@@ -674,10 +674,14 @@ change account settings, or perform any action that has real-world side effects.
 You are ONLY exploring the app's UI structure — navigate and observe, but never \
 commit or submit anything. If a screen requires login/signup to proceed, go back instead.
 
-Reply with ONLY the instruction as a plain text string — a single ATOMIC action. \
-Each instruction = one tap, one type, one swipe, or one back. Never combine steps.
+Reply with ONLY a JSON object with two keys:
+- "element": the number of the element in the list of elements NOT interacted with yet \
+that your instruction acts on, or null when it acts on none of them (for example going \
+back, scrolling, or typing into an already focused field).
+- "instruction": a single ATOMIC action. Each instruction = one tap, one type, one \
+swipe, or one back. Never combine steps.
 
-Examples:
+Example instructions:
 - Tap the "Network & internet" menu item near the top of the settings list
 - Tap the rounded search bar at the top of the screen
 - Type 'stewed beef'
@@ -687,7 +691,8 @@ Examples:
 - Scroll down to reveal more settings
 - Go back to the previous screen
 
-Reply with ONLY the JSON, nothing else."""
+Example reply:
+{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}"""
 
 NEXT_ACTION_SYSTEM_PROMPT = """\
 
@@ -1706,6 +1711,24 @@ def _tool_call_to_aitk(
     raise ValueError(f"Unknown action: {action}")
 
 
+_NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "element": {
+            "type": ["integer", "null"],
+            "description": "The number of the listed unexplored element the instruction acts "
+            "on, or null when it acts on none of them.",
+        },
+        "instruction": {
+            "type": "string",
+            "description": "One atomic action: one tap, one type, one swipe, or one back.",
+        },
+    },
+    "required": ["element", "instruction"],
+    "additionalProperties": False,
+}
+
+
 def plan_next_action(
     client: OpenRouter,
     screenshot_b64: str,
@@ -1716,7 +1739,7 @@ def plan_next_action(
     input_status: str = "unknown from screenshot",
     *,
     settings: ModelSettings,
-) -> str:
+) -> tuple[str, int | None]:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
     This separates the "what" (exploration strategy) from the "how" (coordinate grounding).
@@ -1729,7 +1752,8 @@ def plan_next_action(
         input_status: Runtime hint about whether a text field/keyboard is active.
 
     Returns:
-        A plain text instruction string.
+        ``(instruction, element)``, where ``element`` is the number of the listed
+        unexplored element the instruction acts on, or None.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
@@ -1752,10 +1776,10 @@ def plan_next_action(
 
     if unexplored_elements:
         elem_lines = []
-        for elem in unexplored_elements:
+        for number, elem in enumerate(unexplored_elements, start=1):
             desc = elem.get("description", "?")
             pos = elem.get("position", "?")
-            elem_lines.append(f"- {desc} ({pos})")
+            elem_lines.append(f"{number}. {desc} ({pos})")
         unexplored_section = (
             "Elements on this screen that have NOT been interacted with yet:\n"
             + "\n".join(elem_lines)
@@ -1781,24 +1805,24 @@ def plan_next_action(
             ],
         }
     ]
-    resp = send_chat(client, call_type="instruction", settings=settings, messages=messages)
+    resp = send_chat(
+        client,
+        call_type="instruction",
+        settings=settings,
+        messages=messages,
+        response_format=_structured_output("next_action_plan", _NEXT_ACTION_PLAN_SCHEMA),
+        plugins=[{"id": "response-healing"}],
+    )
     raw = message_text(resp)
-
-    # The planner now returns plain text; try to extract from JSON if it still outputs one
-    raw_clean = strip_json_fences(raw)
     try:
-        result = json.loads(raw_clean)
-        if isinstance(result, dict):
-            instruction = as_str(result.get("instruction"), raw)
-        else:
-            instruction = str(result)
+        plan = as_object_dict(json.loads(strip_json_fences(raw)))
     except json.JSONDecodeError:
-        instruction = raw
+        plan = {}
 
-    instruction = instruction.strip().strip('"').strip("'")
-
-    logger.info("Planned instruction: %s", instruction)
-    return instruction
+    instruction = as_str(plan.get("instruction"), raw).strip().strip('"').strip("'")
+    element = as_int(plan.get("element"))
+    logger.info("Planned instruction: %s (element: %s)", instruction, element)
+    return instruction, element
 
 
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:

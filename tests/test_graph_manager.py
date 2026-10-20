@@ -669,71 +669,42 @@ def test_get_unexplored_elements_filters_out_explored_ones() -> None:
     assert [e["description"] for e in unexplored] == ["Menu"]
 
 
-def test_mark_element_explored_marks_the_best_word_overlap() -> None:
-    gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home",
-        "Home screen",
-        interactable_elements=[
-            {"description": "settings gear", "explored": False},
-            {"description": "search box", "explored": False},
-        ],
-    )
-
-    gm.mark_element_explored("s0_home", "tap the search box at the top")
-
-    elements = gm.graph.nodes["s0_home"]["interactable_elements"]
-    assert elements[1]["explored"] is True
-    assert elements[0]["explored"] is False
-
-
-def test_mark_element_explored_ignores_already_explored_and_empty_descriptions() -> None:
-    gm = make_manager()
+def _add_home_with_two_unexplored_elements(gm: GraphManager) -> None:
     add_screen(
         gm,
         "s0_home",
         "Home screen",
         interactable_elements=[
             {"description": "search box", "explored": True},
-            {"description": "", "explored": False},
+            {"description": "Turn on dark mode toggle", "explored": False},
+            {"description": "Compose FAB", "explored": False},
         ],
     )
 
-    gm.mark_element_explored("s0_home", "tap the search box")
 
-    assert gm.get_unexplored_elements("s0_home") == [{"description": "", "explored": False}]
-
-
-def test_mark_element_explored_without_overlap_is_a_no_op() -> None:
+def test_mark_element_explored_counts_from_the_first_unexplored_element() -> None:
     gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home",
-        "Home screen",
-        interactable_elements=[{"description": "settings gear", "explored": False}],
-    )
+    _add_home_with_two_unexplored_elements(gm)
 
-    gm.mark_element_explored("s0_home", "swipe up")
+    gm.mark_element_explored("s0_home", 2)
 
     assert gm.get_unexplored_elements("s0_home") == [
-        {"description": "settings gear", "explored": False}
+        {"description": "Turn on dark mode toggle", "explored": False}
     ]
 
 
-def test_mark_element_explored_on_a_missing_node_is_a_no_op() -> None:
+@pytest.mark.parametrize("element", [0, 3, -1])
+def test_mark_element_explored_outside_the_unexplored_list_marks_nothing_and_warns(
+    element: int, caplog: pytest.LogCaptureFixture
+) -> None:
     gm = make_manager()
-    gm.mark_element_explored("s9_missing", "tap search")
-    assert gm.graph.number_of_nodes() == 0
+    _add_home_with_two_unexplored_elements(gm)
 
+    with caplog.at_level("WARNING"):
+        gm.mark_element_explored("s0_home", element)
 
-def test_mark_element_explored_on_a_node_without_elements_is_a_no_op() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-
-    gm.mark_element_explored("s0_home", "tap search")
-
-    assert gm.graph.nodes["s0_home"]["interactable_elements"] == []
+    assert len(gm.get_unexplored_elements("s0_home")) == 2
+    assert f"Element {element} is not among the 2 unexplored element(s) on s0_home" in caplog.text
 
 
 def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:

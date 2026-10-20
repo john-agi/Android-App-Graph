@@ -310,7 +310,7 @@ def re_explore_issues(
             keyboard_hint = soft_keyboard_hint()
             input_status = keyboard_status(keyboard_hint)
 
-            instruction = plan_next_action(
+            instruction, _planned_element = plan_next_action(
                 client=client,
                 screenshot_b64=screenshot,
                 page_description=page_desc,

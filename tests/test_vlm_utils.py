@@ -267,6 +267,7 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
     "merge": ("node_merge_audit", True),
     "audit": ("graph_audit", True),
     "target": ("exploration_target", True),
+    "planner": ("next_action_plan", True),
 }
 
 
@@ -310,8 +311,8 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
             "planner",
             "instruction",
             "openai/gpt-6.1-sol",
-            '```json\n{"instruction":"Tap Search"}\n```',
-            "Tap Search",
+            '```json\n{"element":null,"instruction":"Tap Search"}\n```',
+            ("Tap Search", None),
         ),
         (
             "action",
@@ -843,10 +844,9 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
             "summary": "parse error",
         }
     elif operation == "planner":
-        assert (
-            vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
-            == ""
-        )
+        assert vlm.plan_next_action(
+            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+        ) == ("", None)
     else:
         assert vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION) == (
             {"action": "wait", "time": 1},
@@ -1107,12 +1107,37 @@ def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_conte
 ) -> None:
     router_responses.append(chat_response(content="Tap", finish_reason="content_filter"))
     with caplog.at_level("WARNING"):
-        assert (
-            vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
-            == "Tap"
-        )
+        assert vlm.plan_next_action(
+            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+        ) == ("Tap", None)
     assert "instruction: the provider's content filter stopped the reply" in caplog.text
     assert len(router_requests) == 1
+
+
+def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_names(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    instruction = "Tap the floating action button in the bottom right"
+    router_responses.append(
+        chat_response(content=json.dumps({"element": 2, "instruction": instruction}))
+    )
+    assert vlm.plan_next_action(
+        router_client,
+        png_screenshot,
+        "home",
+        [],
+        unexplored_elements=[
+            {"description": "Turn on dark mode toggle", "position": "top"},
+            {"description": "Compose FAB", "position": "bottom right"},
+        ],
+        settings=PAGE_DETAIL,
+    ) == (instruction, 2)
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    assert "1. Turn on dark mode toggle (top)\n2. Compose FAB (bottom right)\n" in prompt
 
 
 @pytest.mark.parametrize("multipart", [False, True])
