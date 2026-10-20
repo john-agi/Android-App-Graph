@@ -631,6 +631,27 @@ def test_audit_cli_opens_one_client_and_closes_it_on_exit(
     assert opened_clients[0].sdk_configuration.client is None
 
 
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_of_one_app_keeps_the_package_name_it_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--app`` audits without the config's apps, so the package must come from the file."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    app_dir = graph_dir / "demo"
+    app_dir.mkdir(parents=True)
+    (app_dir / "demo.json").write_text(
+        json.dumps({"package_name": "com.demo.app", "nodes": [], "edges": []}), encoding="utf-8"
+    )
+    config = _write_config(tmp_path, str(graph_dir))
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+
+    assert audit.main(["-c", str(config), "--app", "demo"]) == 0
+
+    audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
+    assert audited["package_name"] == "com.demo.app"
+
+
 def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
     def touched(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("settings must be validated before any device work")

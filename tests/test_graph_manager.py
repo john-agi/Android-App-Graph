@@ -1807,6 +1807,19 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
     assert "stale" not in caplog.text
 
 
+def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -> None:
+    source = make_manager()
+    source.package_name = "com.example.app"
+    path = tmp_path / "graph.json"
+    source.save_graph(path)
+
+    target = make_manager()
+    target.load_graph(path)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["package_name"] == "com.example.app"
+    assert target.package_name == "com.example.app"
+
+
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     source = make_manager()
     add_screen(source, "s0_home", "Home screen")

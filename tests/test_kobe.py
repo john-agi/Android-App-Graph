@@ -132,6 +132,35 @@ def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
     assert router_client.sdk_configuration.client is router_http
 
 
+@pytest.mark.parametrize("saved_package", [None, "com.stale"])
+def test_exploration_records_the_configured_package_name(
+    saved_package: str | None,
+    tmp_path: Path,
+    png_screenshot: str,
+    router_client: OpenRouter,
+) -> None:
+    """The configured package wins over whatever, if anything, an earlier graph saved."""
+    if saved_package is not None:
+        graph_path = tmp_path / "demo" / "demo.json"
+        graph_path.parent.mkdir()
+        graph_path.write_text(
+            json.dumps({"package_name": saved_package, "nodes": [], "edges": []}),
+            encoding="utf-8",
+        )
+    built = Kobe(
+        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
+        "demo",
+        "com.demo",
+        logging.getLogger("test"),
+        graph_dir=tmp_path,
+        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
+    )
+    built.save_graph()
+    saved = json.loads((tmp_path / "demo" / "demo.json").read_text(encoding="utf-8"))
+    assert saved["package_name"] == "com.demo"
+
+
 def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,

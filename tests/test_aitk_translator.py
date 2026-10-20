@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
-import networkx as nx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -37,6 +36,7 @@ def _write_graph(
     tmp_path: Path,
     *,
     app: str = "demo",
+    package_name: str | None = None,
     audited: bool = False,
     nodes: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
@@ -49,6 +49,7 @@ def _write_graph(
     path.write_text(
         json.dumps(
             {
+                "package_name": f"com.{app}.app" if package_name is None else package_name,
                 "nodes": nodes
                 if nodes is not None
                 else [{"id": "n1", "activity": "com.a.b/.Main"}],
@@ -58,23 +59,6 @@ def _write_graph(
         encoding="utf-8",
     )
     return path
-
-
-def test_extract_packages_from_graph_skips_nodes_without_activity() -> None:
-    G = nx.DiGraph()
-    G.add_node("a", activity="com.example.app/.Main")
-    G.add_node("b", activity="com.example.app/.Detail")
-    G.add_node("c", activity="org.other.thing/.Main")
-    G.add_node("d", activity="")
-    G.add_node("e")
-    assert aitk_translator._extract_packages_from_graph(G) == {
-        "com.example.app",
-        "org.other.thing",
-    }
-
-
-def test_extract_packages_from_empty_graph() -> None:
-    assert aitk_translator._extract_packages_from_graph(nx.DiGraph()) == set()
 
 
 def test_after_last_think_tag_returns_none_without_a_tag() -> None:
@@ -841,7 +825,7 @@ def translator(graph_dir: Path) -> aitk_translator.UIKobeV2Translator:
 def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
     assert isinstance(translator, aitk_translator.UIKobeV2Translator)
     assert set(translator._graphs) == {"demo"}
-    assert translator._package_to_app == {"com.demo.app": "demo"}
+    assert translator._app_by_package == {"com.demo.app": "demo"}
     assert translator.action.model == "action-model"
     assert translator.image_embedding.model == "img-model"
     assert not hasattr(translator, "page_detail")
@@ -866,6 +850,88 @@ def test_load_all_graphs_skips_a_broken_graph(tmp_path: Path) -> None:
     app_dir.mkdir()
     (app_dir / "broken.json").write_text("{not json", encoding="utf-8")
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+    assert built._graphs == {}
+
+
+@pytest.mark.parametrize("package_name", [None, ""])
+def test_load_all_graphs_skips_a_graph_without_a_package_name_and_names_the_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, package_name: str | None
+) -> None:
+    unnamed = tmp_path / "unnamed" / "unnamed.json"
+    unnamed.parent.mkdir()
+    document: dict[str, Any] = {"nodes": [{"id": "n1"}], "edges": []}
+    if package_name is not None:
+        document["package_name"] = package_name
+    unnamed.write_text(json.dumps(document), encoding="utf-8")
+    _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+
+    with caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name):
+        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert set(built._graphs) == {"demo"}
+    assert built._app_by_package == {"com.demo.app": "demo"}
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert str(unnamed) in error.getMessage()
+    assert "package_name" in error.getMessage()
+
+
+def test_load_all_graphs_loads_neither_graph_that_shares_a_package_name(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    first = _write_graph(tmp_path, app="demo", package_name="com.shared.app")
+    second = _write_graph(tmp_path, app="clone", package_name="com.shared.app")
+    _write_graph(tmp_path, app="other")
+
+    with caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name):
+        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert set(built._graphs) == {"other"}
+    assert built._app_by_package == {"com.other.app": "other"}
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert str(first) in error.getMessage()
+    assert str(second) in error.getMessage()
+    assert "com.shared.app" in error.getMessage()
+
+
+def test_load_all_graphs_skips_a_graph_whose_embeddings_fail_and_keeps_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    failing = _write_graph(tmp_path, app="failing")
+    _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    load_image_embeddings = aitk_translator.load_image_embeddings
+
+    def _fail_for_one_graph(
+        graph_path: Path, *, model: str, node_ids: set[str]
+    ) -> dict[str, list[float]]:
+        if graph_path == failing:
+            raise RuntimeError("embedding store unavailable")
+        return load_image_embeddings(graph_path, model=model, node_ids=node_ids)
+
+    monkeypatch.setattr(aitk_translator, "load_image_embeddings", _fail_for_one_graph)
+
+    with caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name):
+        built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
+    assert built._app_by_package == {"com.demo.app": "demo"}
+    assert set(built._graphs) == {"demo"}
+    assert f"Failed to load graph {failing}" in caplog.messages
+
+
+def test_load_all_graphs_embeds_no_screenshot_of_a_graph_it_does_not_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for app in ("demo", "clone"):
+        path = _write_graph(tmp_path, app=app, package_name="com.shared.app")
+        (path.parent / f"{app}_screenshots").mkdir()
+        (path.parent / f"{app}_screenshots" / "n1.png").write_bytes(_SCREENSHOT)
+
+    def _no_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+        raise AssertionError("a graph that is not loaded needs no image embedding")
+
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _no_embedding)
+
+    built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
+
     assert built._graphs == {}
 
 
@@ -1101,24 +1167,15 @@ def test_resolve_app_from_task(
 
 @pytest.mark.parametrize(
     "package",
-    ["com.demo.app", "com.demo.app/.HomeActivity", "com.demo.app.free", "com.demo"],
+    ["com.demo.app.free", "com.demo", "com.demo.app/.HomeActivity", "org.other.thing", ""],
 )
-def test_get_graph_for_package_matches(
+def test_select_graph_matches_no_graph_for_another_package(
     translator: aitk_translator.UIKobeV2Translator, package: str
 ) -> None:
-    assert translator._get_graph_for_package(package) is translator._graphs["demo"]
-    assert translator._app_name == "demo"
-
-
-def test_get_graph_for_unknown_package(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator._get_graph_for_package("org.other.thing") is None
-
-
-def test_get_graph_for_an_empty_package_matches_nothing(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
-    """An empty package must not bind the first loaded graph via a vacuous prefix match."""
-    assert translator._get_graph_for_package("") is None
+    """Only the exact package selects a graph; sharing a prefix with it is not enough."""
+    translator._select_graph("com.demo.app")
+    translator._select_graph(package)
+    assert translator._current_graph is None
     assert translator._app_name == ""
 
 
@@ -2101,6 +2158,71 @@ def test_step_resolves_the_graph_from_the_package(
 
     json.loads(stepping._step("buy shoes", state, history))
     assert stepping._app_name == "demo"
+
+
+def test_step_uses_no_graph_while_no_graph_matches_the_foreground_package(
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
+) -> None:
+    """The app the task named only decides what to open; the foreground decides the graph."""
+    use_model(stepping, "nothing", "Tap the Demo icon")
+    stepping._app_opened = True
+    state, history = _step_payload()
+
+    stepping._step("Open demo", {**state, "package": "com.launcher"}, history)
+
+    assert stepping._current_graph is None
+    assert stepping._memory.actions == ["Tap the Demo icon"]
+
+
+_SHOP_NODES: list[dict[str, Any]] = [
+    {"id": "cart", "activity": "com.shop.app/.CartActivity", "page_description": "cart"}
+]
+
+
+@pytest.fixture
+def two_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> aitk_translator.UIKobeV2Translator:
+    _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    _write_graph(tmp_path, app="shop", nodes=_SHOP_NODES)
+    built = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
+    built._graphs["demo"].nodes["home"]["image_embedding"] = [1.0, 0.0]
+    built._graphs["demo"].nodes["results"]["image_embedding"] = [0.0, 1.0]
+    built._graphs["shop"].nodes["cart"]["image_embedding"] = [1.0, 0.0]
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr(
+        aitk_translator,
+        "predict_next_action",
+        lambda *_a, **_k: ({"action": "tap", "x": 5, "y": 6}, "tapped | on screen"),
+    )
+    built._app_opened = True
+    return built
+
+
+def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
+    use_model: _UseModel, two_apps: aitk_translator.UIKobeV2Translator
+) -> None:
+    """The graph used to be chosen once per task, so a second app's steps used the first's."""
+    use_model(
+        two_apps,
+        *("A", "nothing", '{"choice": "D", "instruction": "Open the shop app"}'),
+        *("A", "nothing", '{"choice": "B", "instruction": "Tap checkout"}'),
+    )
+    history = {"actions": ["earlier"]}
+
+    two_apps._step(
+        "buy shoes in shop",
+        {"screenshot": "shot", "activity": "com.demo.app/.HomeActivity", "package": "com.demo.app"},
+        history,
+    )
+    assert two_apps._current_graph is two_apps._graphs["demo"]
+
+    two_apps._step(
+        "buy shoes in shop",
+        {"screenshot": "shot", "activity": "com.shop.app/.CartActivity", "package": "com.shop.app"},
+        history,
+    )
+    assert two_apps._current_graph is two_apps._graphs["shop"]
+    assert two_apps._memory.actions == ["Open the shop app", "Tap checkout"]
 
 
 def test_step_warns_when_the_task_names_no_known_app(
