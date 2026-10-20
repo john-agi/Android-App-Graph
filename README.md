@@ -420,6 +420,11 @@ uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 
 Exploration writes graph files under `graphs/<app_name>/`.
 
+Before exploring, and before `app-graph-audit --re-explore`, the app is granted
+every permission it requests with `adb shell pm grant`, so no permission prompt
+interrupts exploration. The grants stay on the device. Permissions that
+`pm grant` refuses, such as `INTERNET`, are logged and skipped.
+
 For long runs, use the auto-resume wrapper:
 
 ```bash
@@ -443,8 +448,11 @@ that opens web content from outside the app, such as a browser or custom tab
 showing an address bar or URL, records an edge to the single shared `ext_web`
 node. Either way the explorer then presses back. The screen-description model
 decides what counts as external web, so the app's own screens get regular nodes
-even when they run in a web view or mention a privacy policy.
-`app-graph-audit --re-explore` records external web pages the same way.
+even when they run in a web view or mention a privacy policy. A permission
+prompt, keyboard or system dialog belongs to another package but sits on top of
+the app, so it gets a regular node and no back press.
+`app-graph-audit --re-explore` records external web pages and these dialogs the
+same way.
 
 Every other node records the package the device reported for its screen, and the
 explorer, the audit and the runtime match a screen only with nodes of its package.

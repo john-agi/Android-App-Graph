@@ -12,6 +12,7 @@ from openrouter import OpenRouter
 
 from android_app_graph.device import (
     DeviceController,
+    is_system_overlay,
     keyboard_status,
     restart_app,
     soft_keyboard_hint,
@@ -139,9 +140,7 @@ class Kobe:
                 merged_count,
             )
             self.save_graph()
-
-            if current_node not in self.graph.graph:
-                current_node = self.graph.get_start_node() or current_node
+            current_node = self.graph.resolve_node_id(current_node)
 
         candidates = self.graph.get_exploration_target_candidates(
             package_name=self.package_name,
@@ -214,7 +213,8 @@ class Kobe:
             current_node,
         )
         if not checkpoint_node:
-            return current_node, device_state
+            # The checkpoint's merge audit can merge the caller's node away without navigating.
+            return self.graph.resolve_node_id(current_node), device_state
 
         return checkpoint_node, self.controller.get_state()
 
@@ -442,7 +442,11 @@ class Kobe:
 
                 if not left_app:
                     current_package = device_state.get("package", "").strip()
-                    if current_package and current_package != self.package_name:
+                    if (
+                        current_package
+                        and current_package != self.package_name
+                        and not is_system_overlay(current_package)
+                    ):
                         left_app = True
 
                 if left_app:
@@ -620,30 +624,6 @@ class Kobe:
             self.graph.graph.number_of_edges(),
         )
         token_tracker.print_summary()
-
-    # These sit on top of the app but do not represent real navigation away.
-    _SYSTEM_OVERLAY_PACKAGES = frozenset(
-        {
-            "com.google.android.inputmethod.latin",  # Gboard
-            "com.android.inputmethod.latin",  # AOSP keyboard
-            "com.samsung.android.honeyboard",  # Samsung keyboard
-            "com.swiftkey.swiftkey",  # SwiftKey
-            "com.touchtype.swiftkey",  # SwiftKey (alt)
-            "com.android.systemui",  # Status bar, notifications
-            "com.android.permissioncontroller",  # Permission dialogs
-            "com.google.android.permissioncontroller",  # Permission dialogs (Google)
-            "com.android.packageinstaller",  # Install prompts
-            "android",  # System dialogs
-        }
-    )
-
-    def _is_system_overlay(self, package: str) -> bool:
-        """Check if a package is a system overlay (keyboard, dialog, etc.)."""
-        if package in self._SYSTEM_OVERLAY_PACKAGES:
-            return True
-        # Heuristic: input method packages usually contain "inputmethod" or "keyboard"
-        lower = package.lower()
-        return "inputmethod" in lower or "keyboard" in lower or "ime" in lower
 
     def _handle_external_app(
         self,

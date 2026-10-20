@@ -611,6 +611,48 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
     assert device_log == [_FORCE_STOP, launch, replay, explore_step] * 2
 
 
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    graph.graph.add_node("s2_camera_permission", page_description="Camera permission dialog")
+    reached = iter(["s1_detail", "s2_camera_permission"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+
+    (result,) = audit.re_explore_issues(
+        graph,
+        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        _LoggingController("com.google.android.permissioncontroller", device_log),
+        "demo",
+        "com.demo",
+        tmp_path / "demo" / "demo_audited.json",
+        client,
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
+        steps_per_issue=1,
+    )
+
+    assert result["steps"] == [
+        {
+            "step": 1,
+            "from": "s1_detail",
+            "to": "s2_camera_permission",
+            "instruction": "tap the first button",
+            "action": tap,
+        }
+    ]
+    assert graph.graph.has_edge("s1_detail", "s2_camera_permission")
+    replay = {"action": "tap", "coordinate": [10, 20]}
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay, tap]
+
+
 @pytest.mark.parametrize("re_explore", [False, True])
 def test_audit_requires_only_the_models_it_uses(
     re_explore: bool,
@@ -777,3 +819,50 @@ def test_re_explore_session_shares_the_audit_client(
     assert audit.main(["--config", str(config), "--re-explore"]) == 0
     assert len(opened_clients) == 1
     assert opened_clients[0].sdk_configuration.client is None
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
+def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adb_module = ModuleType("aitk.utils.adb_controller")
+    monkeypatch.setattr(
+        adb_module,
+        "ADBController",
+        lambda _config, _logger: FakeController("com.demo"),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    (graph_dir / "demo").mkdir(parents=True)
+    (graph_dir / "demo" / "demo.json").write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
+    config = tmp_path / "audit.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "device": {"udid": "emulator-5554"},
+                "experiment": {"graph_dir": str(graph_dir)},
+                "apps": [{"name": "demo", "package_name": "com.demo"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[tuple[object, ...]] = []
+
+    def re_explore(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        events.append(("re-explore",))
+        return []
+
+    monkeypatch.setattr(
+        audit, "run_audit", lambda *_args: {"issues": [{"type": "explore_node", "node": "s0"}]}
+    )
+    monkeypatch.setattr(
+        audit, "grant_runtime_permissions", lambda *args: events.append(("grant", *args))
+    )
+    monkeypatch.setattr(audit, "launch_app", lambda *_args: events.append(("launch",)))
+    monkeypatch.setattr(audit, "re_explore_issues", re_explore)
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+
+    assert audit.main(["--config", str(config), "--re-explore"]) == 0
+    assert events == [("grant", "emulator-5554", "com.demo"), ("launch",), ("re-explore",)]
