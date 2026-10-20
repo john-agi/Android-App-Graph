@@ -401,7 +401,7 @@ class Kobe:
                 recorded_instruction = instruction
                 if action.get("action") == "end":
                     self.logger.info(
-                        '  Action agent said end for: "%s", recording as "Press back"',
+                        '  Action agent said end for: "%s", recording as back',
                         instruction,
                     )
                     action = {"action": "back"}

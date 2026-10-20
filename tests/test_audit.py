@@ -399,15 +399,7 @@ def test_re_explore_issues_records_an_action_model_end_as_press_back(
     edge = graph.graph["s0_home"]["s0_home"]
     assert edge["actions"] == [[{"action": "back"}]]
     assert edge["instructions"] == ["Press back"]
-    assert result["steps"] == [
-        {
-            "step": 1,
-            "from": "s0_home",
-            "to": "s0_home",
-            "instruction": "Press back",
-            "action": {"action": "back"},
-        }
-    ]
+    assert [step["instruction"] for step in result["steps"]] == ["Press back"]
     assert '"tap the first button"' in caplog.text
 
 

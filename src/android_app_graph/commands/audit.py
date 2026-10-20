@@ -353,7 +353,7 @@ def re_explore_issues(
 
             if action.get("action") == "end":
                 logger.info(
-                    '  Action agent said end for: "%s", recording as "Press back"',
+                    '  Action agent said end for: "%s", recording as back',
                     instruction,
                 )
                 action = {"action": "back"}
