@@ -35,6 +35,8 @@ from openrouter import OpenRouter
 
 from android_app_graph.device import (
     DeviceController,
+    grant_runtime_permissions,
+    is_system_overlay,
     keyboard_status,
     launch_app,
     restart_app,
@@ -348,7 +350,11 @@ def re_explore_issues(
             device_state = controller.get_state()
 
             current_package = device_state.get("package", "").strip()
-            if current_package and current_package != package_name:
+            if (
+                current_package
+                and current_package != package_name
+                and not is_system_overlay(current_package)
+            ):
                 logger.warning("Left app during re-explore, pressing back")
                 controller.exe_action({"action": "back"})
                 time.sleep(1)
@@ -668,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
             if session is not None and other_issues:
                 logger.info("Starting re-exploration for %d issues...", len(other_issues))
 
+                grant_runtime_permissions(config["device"]["udid"], package_name)
                 launch_app(config, app, logger)
                 time.sleep(4)
 

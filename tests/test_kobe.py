@@ -701,3 +701,57 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
     assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
+
+
+_DIALOG_ACTIVITY = (
+    "com.google.android.permissioncontroller/"
+    "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing back on a permission dialog would deny the permission."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    home: dict[str, object] = {
+        "activity": "com.demo.Home",
+        "screenshot": png_screenshot,
+        "package": "com.demo",
+    }
+    dialog: dict[str, object] = {
+        "activity": _DIALOG_ACTIVITY,
+        "screenshot": png_screenshot,
+        "package": "com.google.android.permissioncontroller",
+    }
+    device = _ScriptedDevice(home, dialog, home)
+    monkeypatch.setattr(kobe, "controller", device)
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":null,"instruction":"Tap Take photo"}'),
+            chat_response(content='{"action":"click","coordinate":[500,500]}'),
+            chat_response(content='{"page_description":"camera permission dialog"}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    kobe.explore(max_steps=1)
+
+    tap = {"action": "tap", "x": 50, "y": 100}
+    assert device.actions == [tap]
+    graph = kobe.graph.graph
+    nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
+    assert set(nodes) == {"com.demo.Home", _DIALOG_ACTIVITY}
+    dialog_node = graph.nodes[nodes[_DIALOG_ACTIVITY]]
+    assert dialog_node["page_description"] == "camera permission dialog"
+    assert "is_external" not in dialog_node
+    edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
+    assert edge["actions"] == [[tap]]

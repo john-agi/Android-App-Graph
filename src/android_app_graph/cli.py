@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from android_app_graph.device import AvdManager, launch_app
+from android_app_graph.device import AvdManager, grant_runtime_permissions, launch_app
 from android_app_graph.kobe import EXPLORATION_ROLES, Kobe
 from android_app_graph.utils import open_client, resolve_api_key, resolve_model_settings
 from android_app_graph.utils.logging import setup_logging
@@ -107,6 +107,7 @@ def main() -> None:
             controller._terminate_all_apps()
             time.sleep(1)
 
+            grant_runtime_permissions(config["device"]["udid"], package_name)
             launch_app(config, app, logger)
             time.sleep(4)
 

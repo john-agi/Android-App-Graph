@@ -56,6 +56,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     config.write_text(
         json.dumps(
             {
+                "device": {"udid": "emulator-5554"},
                 "vlm": vlm,
                 "apps": [
                     {"name": "demo", "package_name": "com.demo"},
@@ -127,12 +128,20 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     monkeypatch.setitem(sys.modules, avd_module.__name__, avd_module)
     monkeypatch.setattr(cli, "Kobe", Explorer)
     monkeypatch.setattr(cli, "check_avd", check_avd)
+    grants: list[tuple[str, str]] = []
+
+    def grant(udid: str, package_name: str) -> None:
+        grants.append((udid, package_name))
+        events.append("grant")
+
+    monkeypatch.setattr(cli, "grant_runtime_permissions", grant)
     monkeypatch.setattr(cli, "launch_app", lambda *_args: events.append("launch"))
     monkeypatch.setattr(
         sys, "argv", ["app-graph", "-c", str(config), "--max-steps", "3", "--resume-from", "auto"]
     )
     main()
-    assert events == ["avd", "device", *["terminate", "launch", "explore", "save"] * 2]
+    assert events == ["avd", "device", *["terminate", "grant", "launch", "explore", "save"] * 2]
+    assert grants == [("emulator-5554", "com.demo"), ("emulator-5554", "com.other")]
     assert launch_activities == [None, "com.other/.Main"]
     assert opened_clients == clients[:1] == clients[1:]
     assert opened_clients[0].sdk_configuration.client is None

@@ -1,4 +1,4 @@
-"""Tests for android_app_graph.device: soft_keyboard_hint and restart_app.
+"""Tests for android_app_graph.device.
 
 The single soft-keyboard probe shared by kobe, commands.audit and the AITK
 translator; this module owns its tests so the three call sites do not each
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -141,3 +142,79 @@ def test_keyboard_status_when_the_keyboard_is_hidden() -> None:
         "No OS keyboard signal detected. Still inspect the screenshot: "
         "a bottom input/keyboard bar can mean a text field is active."
     )
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        "com.google.android.permissioncontroller",
+        "com.android.permissioncontroller",
+        "org.example.inputmethod.pinyin",
+        "com.example.keyboard",
+    ],
+)
+def test_a_system_overlay_package_is_recognised(package: str) -> None:
+    assert device.is_system_overlay(package)
+
+
+@pytest.mark.parametrize("package", ["com.amazon.primevideo", "com.example.timetracker"])
+def test_an_app_package_is_not_a_system_overlay(package: str) -> None:
+    """Both contain "ime" without being keyboards."""
+    assert not device.is_system_overlay(package)
+
+
+# Hand-written in the layout of `adb shell dumpsys package`, not captured from a device.
+_DUMPSYS_PACKAGE = Path(__file__).parent / "data" / "dumpsys_package.txt"
+_REQUESTED_PERMISSIONS = [
+    "android.permission.INTERNET",
+    "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.CAMERA",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.POST_NOTIFICATIONS",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WAKE_LOCK",
+    "com.google.android.c2dm.permission.RECEIVE",
+    "com.example.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+]
+_REFUSAL = (
+    "Exception occurred while executing 'grant':\n"
+    "java.lang.SecurityException: Permission android.permission.INTERNET requested by "
+    "com.example.app is not a changeable permission type\n"
+    "\tat com.android.server.pm.permission.PermissionManagerServiceImpl"
+    ".grantRuntimePermissionInternal(PermissionManagerServiceImpl.java:1433)\n"
+    "\tat com.android.server.pm.permission.PermissionManagerServiceImpl"
+    ".grantRuntimePermission(PermissionManagerServiceImpl.java:1364)\n"
+)
+
+
+def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    dumpsys_package = _DUMPSYS_PACKAGE.read_text(encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def adb(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        if "dumpsys" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=dumpsys_package, stderr="")
+        if args[-1] == "android.permission.INTERNET":
+            return subprocess.CompletedProcess(args, 255, stdout="", stderr=_REFUSAL)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(device.subprocess, "run", adb)
+    with caplog.at_level(logging.INFO, logger="android_app_graph.device"):
+        device.grant_runtime_permissions("emulator-5554", "com.example.app")
+
+    shell = ["adb", "-s", "emulator-5554", "shell"]
+    assert commands == [
+        [*shell, "dumpsys", "package", "com.example.app"],
+        *([*shell, "pm", "grant", "com.example.app", name] for name in _REQUESTED_PERMISSIONS),
+    ]
+    refusal = (
+        "Could not grant android.permission.INTERNET to com.example.app: "
+        "Exception occurred while executing 'grant': java.lang.SecurityException: "
+        "Permission android.permission.INTERNET requested by com.example.app "
+        "is not a changeable permission type"
+    )
+    assert caplog.messages == [refusal, "Granted 9 of 10 requested permissions to com.example.app"]
