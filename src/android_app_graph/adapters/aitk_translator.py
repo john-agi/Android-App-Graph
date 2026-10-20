@@ -227,9 +227,8 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             "target_observations": as_list(edge_data.get("target_observations")),
             "num_steps": edge_data.get("num_steps", []),
             "visit_count": edge_data.get("visit_count", 0),
+            "schema_deltas": as_list(edge_data.get("schema_deltas")),
         }
-        if edge_data.get("schema_deltas"):
-            edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         edge_specs.append((source, target, edge_attrs))
 
     G = nx.DiGraph()
@@ -937,13 +936,14 @@ class UIKobeV2Translator(BaseTranslator):
         return ", ".join(parts)
 
     def _edge_effect_hint(self, edge_data: dict[str, Any], index: int | None = None) -> str:
-        """Return a concise effect hint from schema deltas, if available."""
-        deltas = edge_data.get("schema_deltas", [])
-        if not deltas:
-            return ""
+        """Return a concise effect hint from schema deltas, if available.
 
-        if index is not None and index < len(deltas):
-            return self._format_schema_delta(deltas[index])
+        With an index, the hint is that action's own delta, if it recorded one;
+        without one, as for a template standing for every action, it merges them.
+        """
+        deltas = edge_data.get("schema_deltas", [])
+        if index is not None:
+            return self._format_schema_delta(deltas[index]) if index < len(deltas) else ""
 
         merged: dict[str, Any] = {}
         for delta in deltas:
