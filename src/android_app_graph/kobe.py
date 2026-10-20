@@ -18,7 +18,11 @@ from android_app_graph.device import (
     soft_keyboard_hint,
 )
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
-from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
+from android_app_graph.utils.graph_manager import (
+    EXTERNAL_WEB_BACK_PRESSES,
+    EXTERNAL_WEB_NODE,
+    GraphManager,
+)
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
@@ -495,17 +499,10 @@ class Kobe:
                         instruction=recorded_instruction,
                         target_observation=new_node_data.get("page_description", ""),
                     )
-                    self.controller.exe_action({"action": "back"})
-                    time.sleep(1)
-                    device_state = self.controller.get_state()
                     step += 1
                     self.graph.total_steps_completed = step
                     self.save_graph()
-                    current_node = self.graph.identify_state(
-                        device_state["activity"],
-                        device_state["screenshot"],
-                        device_state["package"],
-                    )
+                    current_node, device_state = self._leave_external_web()
                     current_node, device_state = self._apply_coverage_checkpoint_after_step(
                         step,
                         max_steps,
@@ -624,6 +621,36 @@ class Kobe:
             self.graph.graph.number_of_edges(),
         )
         token_tracker.print_summary()
+
+    def _leave_external_web(self) -> tuple[str, dict[str, Any]]:
+        """Press back until the screen is no longer an outside web page, restarting the
+        app if a few presses do not leave it, and return the screen's node and state.
+
+        A step from the shared ``ext_web`` node would act on a page outside the app, and
+        ``add_edge`` would refuse its edge.
+        """
+        for _ in range(EXTERNAL_WEB_BACK_PRESSES):
+            self.controller.exe_action({"action": "back"})
+            time.sleep(1)
+            device_state = self.controller.get_state()
+            node = self.graph.identify_state(
+                device_state["activity"], device_state["screenshot"], device_state["package"]
+            )
+            if node != EXTERNAL_WEB_NODE:
+                return node, device_state
+        self.logger.warning(
+            "Still on an external web page after %d back presses. Restarting %s.",
+            EXTERNAL_WEB_BACK_PRESSES,
+            self.package_name,
+        )
+        restart_app(
+            self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
+        )
+        device_state = self.controller.get_state()
+        node = self.graph.identify_state(
+            device_state["activity"], device_state["screenshot"], device_state["package"]
+        )
+        return node, device_state
 
     def _handle_external_app(
         self,

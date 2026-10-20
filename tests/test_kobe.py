@@ -425,6 +425,83 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     assert [action["action"] for action in device.actions] == [executed, "back"]
 
 
+class _ScreensByLog:
+    """A DeviceController that shows the next screen after each entry in ``log``.
+
+    Its actions share the log with the adb commands ``device_log`` captures, so an app
+    restart moves the device on too.
+    """
+
+    w = 100
+    h = 200
+
+    def __init__(self, log: list[object], *screens: dict[str, object]) -> None:
+        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
+        self._log = log
+        self._screens = screens
+
+    def get_state(self) -> dict[str, object]:
+        return self._screens[min(len(self._log), len(self._screens) - 1)]
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        self._log.append(action)
+
+
+_BACK = {"action": "back"}
+
+
+@pytest.mark.parametrize(
+    ("back_presses_on_the_page", "leaving"),
+    [(1, [_BACK, _BACK]), (3, [_BACK, _BACK, _BACK, _FORCE_STOP, _PACKAGE_LAUNCH])],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
+    back_presses_on_the_page: int,
+    leaving: list[object],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page still showing after one back press used to become the node the next step
+    acted from, and its edge out of the shared ext_web node gave find_path a shortcut
+    between unrelated screens."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    web_page = _screen("com.demo.ArticleActivity", "blue")
+    settings = _screen("com.demo.Settings", "gray")
+    device = _ScreensByLog(
+        device_log, HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings
+    )
+    explorer = _explorer(device, tmp_path, router_client)
+    external = '{"page_description":"news article","is_external_web":true}'
+    orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
+            chat_response(content=_TAP_REPLY),
+            *[chat_response(content=external) for _ in range(1 + back_presses_on_the_page)],
+            chat_response(content='{"element":null,"instruction":"Tap Settings"}'),
+            chat_response(content=_TAP_REPLY),
+            chat_response(content='{"page_description":"settings"}'),
+            httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
+        ]
+    )
+
+    explorer.explore(max_steps=2)
+
+    assert set(explorer.graph.graph.edges) == {
+        ("s0_home", EXTERNAL_WEB_NODE),
+        ("s0_home", "s1_settings"),
+    }
+    tap = {"action": "tap", "x": 50, "y": 100}
+    assert device_log == [tap, *leaving, tap]
+
+
 @pytest.mark.parametrize(
     ("element", "explored", "warned"),
     [(2, ["Compose FAB"], False), (None, [], False), (3, [], True)],

@@ -286,10 +286,11 @@ since the same request would be cut off again. The log names the call and any
 reasoning tokens, and the caller applies its final fallback at once: an action
 waits, node verification treats the screens as different, edge normalization
 keeps the instruction, the audits report no issues, the coverage checkpoint uses
-its top candidate, the v2 runtime's own fallback applies, and a page description
-or an exploration plan raises. A reply stopped by the provider's content filter
-(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
-handled like any other empty or partial reply.
+its top candidate, the v2 runtime's other steps apply their own fallback, and a
+page description, an exploration plan or a v2 RECORD reply raises. A reply
+stopped by the provider's content filter (`finish_reason: "content_filter"`) is
+logged with the call's name and otherwise handled like any other empty or
+partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice) and
@@ -308,6 +309,14 @@ generation is asked again within each completion, and a truncated one ends the
 retry. Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. A broken endpoint
 response cannot become an action's fallback wait.
+
+RECORD, the v2 step that stores task-relevant facts in memory before each
+decision, has no format-correction retry. It replies with a JSON object,
+`{"information": "<short factual statement>"}`, or `{"information": null}` when
+no new information is relevant, optionally after brief reasoning. Any other
+reply, or one cut off at its token limit, raises and stops the AITK or Android
+World run: a fact guessed at or silently lost would mislead every later decision
+and the final answer.
 
 Exploration and `app-graph-audit` log a usage summary when they finish, per call
 type and model: calls, prompt tokens and the cached share of them, completion
@@ -446,11 +455,15 @@ survives.
 A step that opens another app records an edge to an `ext_<package>` node. A step
 that opens web content from outside the app, such as a browser or custom tab
 showing an address bar or URL, records an edge to the single shared `ext_web`
-node. Either way the explorer then presses back. The screen-description model
-decides what counts as external web, so the app's own screens get regular nodes
-even when they run in a web view or mention a privacy policy. A permission
-prompt, keyboard or system dialog belongs to another package but sits on top of
-the app, so it gets a regular node and no back press.
+node. Either way the explorer then presses back. A redirecting link or a browser's
+own history can keep an outside web page up, so the explorer presses back again,
+a few times at most, and if the page is still showing restarts the app as before
+a [replay](#replaying-to-a-node). It never records an edge out of an `ext_` node,
+so a replay never passes through one. The screen-description model decides what
+counts as external web, so the app's own screens get regular nodes even when they
+run in a web view or mention a privacy policy. A permission prompt, keyboard or
+system dialog belongs to another package but sits on top of the app, so it gets a
+regular node and no back press.
 `app-graph-audit --re-explore` records external web pages and these dialogs the
 same way.
 

@@ -488,6 +488,56 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
     ]
 
 
+_BACK = {"action": "back"}
+
+
+@pytest.mark.parametrize(
+    ("back_presses_on_the_page", "leaving"),
+    [(1, [_BACK, _BACK]), (3, [_BACK, _BACK, _BACK, _FORCE_STOP, _PACKAGE_LAUNCH])],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
+    back_presses_on_the_page: int,
+    leaving: list[object],
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    """A page still showing after one back press used to become the node the next step
+    acted from, recording an edge out of the shared ext_web node."""
+    graph, graph_path = _two_node_graph(tmp_path)
+    # identify_state is faked below, so add the node it would create.
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    on_the_page = [EXTERNAL_WEB_NODE] * (1 + back_presses_on_the_page)
+    identified = iter(["s1_detail", *on_the_page, "s1_detail", "s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(identified))
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+
+    (result,) = audit.re_explore_issues(
+        graph,
+        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        _LoggingController("com.demo", device_log),
+        "demo",
+        "com.demo",
+        graph_path,
+        client,
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
+        steps_per_issue=2,
+    )
+
+    assert [(step["from"], step["to"]) for step in result["steps"]] == [
+        ("s1_detail", EXTERNAL_WEB_NODE),
+        ("s1_detail", "s0_home"),
+    ]
+    assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
+    replay = {"action": "tap", "coordinate": [10, 20]}
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay, tap, *leaving, tap]
+
+
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     tmp_path: Path,

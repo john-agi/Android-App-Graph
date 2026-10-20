@@ -930,6 +930,23 @@ def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) 
     assert caplog.text.count("add_edge: missing node(s)") == 2
 
 
+@pytest.mark.parametrize("external", [EXTERNAL_WEB_NODE, "ext_com.android.chrome"])
+def test_add_edge_refuses_an_edge_out_of_an_external_node(
+    external: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every outside web page shares one node, so an edge out of it joined unrelated
+    screens into a path that find_path replayed."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, external, "Outside page")
+
+    with caplog.at_level(logging.WARNING, logger=gm_module.__name__):
+        gm.add_edge(external, "s0_home", {"action": "tap"})
+
+    assert gm.graph.number_of_edges() == 0
+    assert f"add_edge: refusing an edge out of external node {external}" in caplog.text
+
+
 def test_add_edge_ignores_a_self_loop_on_an_unknown_node() -> None:
     """The self-loop branch must not create the node it loops on either."""
     gm = make_manager()
