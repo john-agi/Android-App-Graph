@@ -787,7 +787,8 @@ def _re_explore(
 def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reaches(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
-    """re_explore_issues used to leave a flagged edge as it was and only explore around it."""
+    """A flagged edge whose action reaches another node moves that action to the edge toward
+    it and is removed once empty."""
     graph = _flagged_graph()
     reached = iter(["s0_home", "s2_settings", "s0_home", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))

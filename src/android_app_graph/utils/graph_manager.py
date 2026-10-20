@@ -772,8 +772,8 @@ class GraphManager:
     def relabel_edge_action(self, source: str, target: str, index: int, instruction: str) -> None:
         """Replace the instruction of action *index* on source→target.
 
-        The edge's templates are dropped, since they were generalised from the old instruction,
-        and the next normalization rebuilds them.
+        The edge's templates are dropped, since they were generalised from the instruction
+        this replaces, and the next normalization rebuilds them.
         """
         edge_data = self.graph[source][target]
         edge_data.update(_aligned_lists(edge_data))
