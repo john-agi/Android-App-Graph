@@ -332,8 +332,18 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     ]
 
 
+@pytest.mark.parametrize(
+    ("action_reply", "executed", "recorded"),
+    [
+        (_TAP_REPLY, "tap", "Tap the privacy policy link"),
+        ('{"action":"end"}', "back", "Press back"),
+    ],
+)
 @pytest.mark.usefixtures("no_sleep")
 def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
+    action_reply: str,
+    executed: str,
+    recorded: str,
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -350,7 +360,7 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content="Tap the privacy policy link"),
-            chat_response(content=_TAP_REPLY),
+            chat_response(content=action_reply),
             chat_response(content='{"page_description":"news article","is_external_web":true}'),
         ]
     )
@@ -359,7 +369,8 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
 
     assert set(explorer.graph.graph) == {"s0_home", EXTERNAL_WEB_NODE}
     assert list(explorer.graph.graph.edges) == [("s0_home", EXTERNAL_WEB_NODE)]
-    assert [action["action"] for action in device.actions] == ["tap", "back"]
+    assert explorer.graph.graph.edges["s0_home", EXTERNAL_WEB_NODE]["instructions"] == [recorded]
+    assert [action["action"] for action in device.actions] == [executed, "back"]
 
 
 class _ScriptedDevice:

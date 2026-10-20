@@ -481,7 +481,7 @@ class Kobe:
                         current_node,
                         new_node,
                         action=action_sequence,
-                        instruction=instruction,
+                        instruction=recorded_instruction,
                         target_observation=new_node_data.get("page_description", ""),
                     )
                     self.controller.exe_action({"action": "back"})
