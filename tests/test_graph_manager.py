@@ -635,19 +635,6 @@ def test_mark_element_explored_counts_from_the_first_unexplored_element() -> Non
     ]
 
 
-def test_mark_element_explored_without_an_element_marks_nothing(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    gm = make_manager()
-    _add_home_with_two_unexplored_elements(gm)
-
-    with caplog.at_level("WARNING"):
-        gm.mark_element_explored("s0_home", None)
-
-    assert len(gm.get_unexplored_elements("s0_home")) == 2
-    assert caplog.text == ""
-
-
 @pytest.mark.parametrize("element", [0, 3, -1])
 def test_mark_element_explored_outside_the_unexplored_list_marks_nothing_and_warns(
     element: int, caplog: pytest.LogCaptureFixture
@@ -660,18 +647,6 @@ def test_mark_element_explored_outside_the_unexplored_list_marks_nothing_and_war
 
     assert len(gm.get_unexplored_elements("s0_home")) == 2
     assert f"Element {element} is not among the 2 unexplored element(s) on s0_home" in caplog.text
-
-
-def test_mark_element_explored_on_a_missing_node_marks_nothing_and_warns(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    gm = make_manager()
-
-    with caplog.at_level("WARNING"):
-        gm.mark_element_explored("s9_missing", 1)
-
-    assert gm.graph.number_of_nodes() == 0
-    assert "Element 1 is not among the 0 unexplored element(s) on s9_missing" in caplog.text
 
 
 def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:

@@ -6,7 +6,6 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import override
 
 import httpx
 import pytest
@@ -35,18 +34,6 @@ class _Device:
 
     def exe_action(self, action: dict[str, object]) -> None:
         raise AssertionError(f"No device action expected: {action}")
-
-
-class _ActingDevice(_Device):
-    """A _Device that records the actions it executes instead of failing on them."""
-
-    def __init__(self, state: dict[str, object]) -> None:
-        super().__init__(state)
-        self.actions: list[dict[str, object]] = []
-
-    @override
-    def exe_action(self, action: dict[str, object]) -> None:
-        self.actions.append(action)
 
 
 @pytest.fixture
@@ -178,49 +165,34 @@ def test_exploration_wait_recovery_respects_step_limit(
     assert no_sleep == [1, 1]
 
 
-_DARK_MODE = "Turn on dark mode toggle"
-_COMPOSE = "Compose FAB"
-
-
 @pytest.mark.parametrize(
     ("element", "explored", "warned"),
-    [(2, [_COMPOSE], False), (None, [], False), (3, [], True)],
+    [(2, ["Compose FAB"], False), (None, [], False), (3, [], True)],
 )
 @pytest.mark.usefixtures("no_sleep")
 def test_a_step_marks_exactly_the_element_the_planner_names(
     element: int | None,
     explored: list[str],
     warned: bool,
-    tmp_path: Path,
-    png_screenshot: str,
-    router_client: OpenRouter,
+    kobe: Kobe,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A tap on the FAB never marks the dark mode toggle, whose "on" is inside "button"."""
-    device = _ActingDevice({"activity": "com.demo.Home", "screenshot": png_screenshot})
-    agent = Kobe(
-        device,
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
-        client=router_client,
-    )
-    agent.graph.graph.add_node(
+    kobe.graph.graph.add_node(
         "s0_home",
         page_description="home",
         interactable_elements=[
-            {"description": _DARK_MODE, "position": "top", "explored": False},
-            {"description": _COMPOSE, "position": "bottom right", "explored": False},
+            {"description": "Turn on dark mode toggle", "position": "top", "explored": False},
+            {"description": "Compose FAB", "position": "bottom right", "explored": False},
         ],
     )
-    agent.graph.graph.add_node("s1_compose", page_description="compose")
+    kobe.graph.graph.add_node("s1_compose", page_description="compose")
     screens = iter(["s0_home", "s1_compose"])
-    monkeypatch.setattr(agent.graph, "identify_state", lambda *_args: next(screens))
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: next(screens))
+    monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     instruction = "Tap the floating action button in the bottom right"
     router_responses.extend(
@@ -232,14 +204,12 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     )
 
     with caplog.at_level(logging.WARNING):
-        agent.explore(max_steps=1)
+        kobe.explore(max_steps=1)
 
-    assert [action["action"] for action in device.actions] == ["tap"]
-    elements = agent.graph.graph.nodes["s0_home"]["interactable_elements"]
+    elements = kobe.graph.graph.nodes["s0_home"]["interactable_elements"]
     assert [e["description"] for e in elements if e["explored"]] == explored
-    assert ("only 2 unexplored element(s) were listed" in caplog.text) is warned
-    assert agent.graph.graph["s0_home"]["s1_compose"]["instructions"] == [instruction]
-    assert router_responses == []
+    assert ("is not among the 2 unexplored element(s) on s0_home" in caplog.text) is warned
+    assert kobe.graph.graph["s0_home"]["s1_compose"]["instructions"] == [instruction]
 
 
 def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(

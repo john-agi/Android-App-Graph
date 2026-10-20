@@ -680,9 +680,8 @@ Example instructions:
 - Scroll down to reveal more settings
 - Go back to the previous screen
 
-Example replies:
-{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}
-{{"element": null, "instruction": "Go back to the previous screen"}}"""
+Example reply:
+{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}"""
 
 NEXT_ACTION_SYSTEM_PROMPT = """\
 
@@ -1725,14 +1724,12 @@ def plan_next_action(
     Args:
         explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
             each with "target_description", "instructions", "actions", "visit_count".
-        unexplored_elements: List of element dicts not yet interacted with, shown to
-            the planner numbered from 1.
+        unexplored_elements: List of element dicts not yet interacted with.
         input_status: Runtime hint about whether a text field/keyboard is active.
 
     Returns:
-        ``(instruction, element)``: the instruction, and the number of the
-        unexplored element it acts on, or None when it acts on none of them. A
-        number outside the list is logged and returned as None.
+        ``(instruction, element)``, where ``element`` is the number of the listed
+        unexplored element the instruction acts on, or None.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
@@ -1753,10 +1750,9 @@ def plan_next_action(
     else:
         instructions_str = "(none — this screen has not been explored yet)"
 
-    listed_elements = unexplored_elements or []
-    if listed_elements:
+    if unexplored_elements:
         elem_lines = []
-        for number, elem in enumerate(listed_elements, start=1):
+        for number, elem in enumerate(unexplored_elements, start=1):
             desc = elem.get("description", "?")
             pos = elem.get("position", "?")
             elem_lines.append(f"{number}. {desc} ({pos})")
@@ -1801,15 +1797,6 @@ def plan_next_action(
 
     instruction = as_str(plan.get("instruction"), raw).strip().strip('"').strip("'")
     element = as_int(plan.get("element"))
-    if element is not None and not 1 <= element <= len(listed_elements):
-        logger.warning(
-            "Planner named element %d, but only %d unexplored element(s) were listed; "
-            "treating it as none",
-            element,
-            len(listed_elements),
-        )
-        element = None
-
     logger.info("Planned instruction: %s (element: %s)", instruction, element)
     return instruction, element
 

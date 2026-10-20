@@ -467,12 +467,7 @@ class GraphManager:
         return [e for e in elements if not e.get("explored", False)]
 
     def mark_element_explored(self, node_id: str, element: int | None) -> None:
-        """Mark the element the planner named as explored.
-
-        ``element`` is the planner's 1-based number in
-        ``get_unexplored_elements(node_id)``, the list it was shown. ``None``
-        marks nothing, and so does a number outside that list, with a warning.
-        """
+        """``element`` is the 1-based number the planner saw in ``get_unexplored_elements``."""
         if element is None:
             return
         unexplored = self.get_unexplored_elements(node_id)
