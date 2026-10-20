@@ -330,7 +330,7 @@ graph of an app where each node is a distinct SCREEN TYPE (template).
 
 {existing_keys_section}
 
-Analyze this screenshot and return a JSON object with exactly three keys:
+Analyze this screenshot and return a JSON object with exactly four keys:
 
 1. "page_description": The screen TYPE in under 10 words. This is a reusable label for the \
 screen template — it must NOT contain any user-specific content (search queries, item names, \
@@ -382,6 +382,11 @@ Element rules:
 - Do NOT include non-interactable text, decorative images, status bar icons, or background areas.
 - Order roughly top-to-bottom, left-to-right as they appear on screen.
 
+4. "is_external_web": true only when this screen shows web content from outside the app, \
+such as a browser or a custom tab that displays an address bar or a URL. The app's own \
+screens are false, including screens it renders in a web view and screens that mention \
+or link to a website, a privacy policy or terms of service.
+
 Return ONLY the JSON object, nothing else.
 Example:
 {{"page_description": "product search results", "state": {{"search_query": "keyboard", "filter_brand": "logitech"}}, \
@@ -392,7 +397,8 @@ Example:
 {{"description": "product result items", "position": "center list"}}, \
 {{"description": "Home tab", "position": "bottom navigation bar"}}, \
 {{"description": "Cart tab", "position": "bottom navigation bar"}}, \
-{{"description": "Account tab", "position": "bottom navigation bar"}}]}}"""
+{{"description": "Account tab", "position": "bottom navigation bar"}}], \
+"is_external_web": false}}"""
 
 NODE_VERIFY_PROMPT = """\
 You are comparing two mobile app screenshots to decide if they are the SAME screen or DIFFERENT screens.
@@ -516,8 +522,13 @@ _PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        "is_external_web": {
+            "type": "boolean",
+            "description": "True only for web content from outside the app, such as a browser "
+            "or custom tab showing an address bar or URL; the app's own web views are false.",
+        },
     },
-    "required": ["page_description", "state", "elements"],
+    "required": ["page_description", "state", "elements", "is_external_web"],
     "additionalProperties": False,
 }
 
@@ -840,7 +851,9 @@ def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
     }
 
 
-def _parse_page_description(text: str) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+def _parse_page_description(
+    text: str,
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     result = json.loads(strip_json_fences(text))
     if not isinstance(result, dict):
         raise TypeError("Expected page description to be a JSON object")
@@ -861,7 +874,10 @@ def _parse_page_description(text: str) -> tuple[str, dict[str, object], list[dic
         if not isinstance(label, str) or not isinstance(position, str):
             raise TypeError("Expected element description and position strings")
         elements.append({"description": label, "position": position})
-    return description, as_object_dict(state), elements
+    is_external_web = payload.get("is_external_web", False)
+    if not isinstance(is_external_web, bool):
+        raise TypeError("Expected is_external_web to be a boolean")
+    return description, as_object_dict(state), elements, is_external_web
 
 
 def describe_page_and_state(
@@ -871,7 +887,7 @@ def describe_page_and_state(
     existing_keys: list[str] | None = None,
     *,
     settings: ModelSettings,
-) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
     The model always writes its own description based on what it sees. Existing
@@ -883,8 +899,9 @@ def describe_page_and_state(
         existing_keys: State keys already seen across same-package nodes.
 
     Returns:
-        (page_description, state_dict, elements_list)
-        where elements_list is a list of {"description": str, "position": str} dicts.
+        (page_description, state_dict, elements_list, is_external_web)
+        where elements_list is a list of {"description": str, "position": str} dicts
+        and is_external_web is true only for web content from outside the app.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
@@ -933,7 +950,7 @@ def describe_page_and_state(
         }
     ]
 
-    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]]]:
+    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
         resp = _send_chat_once(
             client,
             call_type="page_describe_and_state",
@@ -951,13 +968,13 @@ def describe_page_and_state(
         except (TypeError, ValueError) as exc:
             raise UnusableOutputError("Malformed page description") from exc
 
-    page_description, state, elements = call_with_retry(
+    page_description, state, elements, is_external_web = call_with_retry(
         "[API] page describe and state", request_description
     )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
-    return page_description, state, elements
+    return page_description, state, elements, is_external_web
 
 
 def verify_same_node(

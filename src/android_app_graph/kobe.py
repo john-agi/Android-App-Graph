@@ -12,7 +12,7 @@ from openrouter import OpenRouter
 
 from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
-from android_app_graph.utils.graph_manager import GraphManager
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
@@ -457,19 +457,24 @@ class Kobe:
                 )
 
                 new_node_data = self._require_node(new_node)
-                if self._is_external_web(
-                    device_state.get("activity", ""),
-                    new_node_data.get("page_description", ""),
-                ):
+                if new_node == EXTERNAL_WEB_NODE:
                     self.logger.warning(
-                        "In-app external web detected at node %s. Pressing back.",
+                        "External web page opened from %s. Recording the edge and pressing back.",
+                        current_node,
+                    )
+                    self.graph.add_edge(
+                        current_node,
                         new_node,
+                        action=action_sequence,
+                        instruction=instruction,
+                        target_observation=new_node_data.get("page_description", ""),
                     )
                     self.controller.exe_action({"action": "back"})
                     time.sleep(1)
                     device_state = self.controller.get_state()
                     step += 1
                     self.graph.total_steps_completed = step
+                    self.graph.maybe_normalize_node_edges(current_node)
                     self.save_graph()
                     current_node = self.graph.identify_state(
                         device_state["activity"],
@@ -593,58 +598,6 @@ class Kobe:
             self.graph.graph.number_of_edges(),
         )
         token_tracker.print_summary()
-
-    _WEBVIEW_ACTIVITY_PATTERNS = (
-        "webview",
-        "customtab",
-        "browser",
-        "chromeclient",
-        "inappbrowser",
-    )
-
-    _WEB_DESCRIPTION_KEYWORDS = (
-        "web page",
-        "webpage",
-        "website",
-        "browser",
-        "external link",
-        "url bar",
-        "address bar",
-        "loading a web",
-        "cookie consent",
-        "cookie policy",
-        "privacy policy",
-        "terms of service",
-        "terms and conditions",
-    )
-
-    def _is_external_web(self, activity: str, page_description: str) -> bool:
-        """Detect if the current screen is an in-app WebView showing external content.
-
-        Uses two signals:
-        1. Activity name contains WebView/browser patterns.
-        2. Page description mentions web/browser keywords.
-        """
-        activity_lower = activity.lower()
-        for pattern in self._WEBVIEW_ACTIVITY_PATTERNS:
-            if pattern in activity_lower:
-                self.logger.info(
-                    "External web detected via activity: %s",
-                    activity,
-                )
-                return True
-
-        desc_lower = page_description.lower()
-        for keyword in self._WEB_DESCRIPTION_KEYWORDS:
-            if keyword in desc_lower:
-                self.logger.info(
-                    'External web detected via description keyword "%s": %s',
-                    keyword,
-                    page_description,
-                )
-                return True
-
-        return False
 
     # These sit on top of the app but do not represent real navigation away.
     _SYSTEM_OVERLAY_PACKAGES = frozenset(
