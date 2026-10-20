@@ -59,7 +59,11 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
                 "vlm": vlm,
                 "apps": [
                     {"name": "demo", "package_name": "com.demo"},
-                    {"name": "other", "package_name": "com.other"},
+                    {
+                        "name": "other",
+                        "package_name": "com.other",
+                        "launch_activity": "com.other/.Main",
+                    },
                 ],
                 "experiment": {"graph_dir": str(tmp_path / "graphs")},
             }
@@ -71,6 +75,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     events: list[str] = []
     clients: list[OpenRouter] = []
+    launch_activities: list[str | None] = []
 
     class Device:
         def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
@@ -91,6 +96,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
             graph_dir: str,
             max_steps: int,
             client: OpenRouter,
+            launch_activity: str | None,
             **_kwargs: object,
         ) -> None:
             assert isinstance(controller, Device)
@@ -100,6 +106,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
             assert max_steps == 3
             assert client.sdk_configuration.client is router_http
             clients.append(client)
+            launch_activities.append(launch_activity)
 
         def explore(self, *, resume_from: str) -> None:
             assert resume_from == "auto"
@@ -126,6 +133,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     )
     main()
     assert events == ["avd", "device", *["terminate", "launch", "explore", "save"] * 2]
+    assert launch_activities == [None, "com.other/.Main"]
     assert opened_clients == clients[:1] == clients[1:]
     assert opened_clients[0].sdk_configuration.client is None
 

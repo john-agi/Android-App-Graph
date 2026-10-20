@@ -953,8 +953,8 @@ class UIKobeV2Translator(BaseTranslator):
         if not deltas:
             return ""
 
-        if index is not None and index < len(deltas):
-            return self._format_schema_delta(deltas[index])
+        if index is not None:
+            return self._format_schema_delta(deltas[index]) if index < len(deltas) else ""
 
         merged: dict[str, Any] = {}
         for delta in deltas:
@@ -990,6 +990,8 @@ class UIKobeV2Translator(BaseTranslator):
         else:
             for i, raw_instr in enumerate(edge_data.get("instructions", [])):
                 instr = as_str(raw_instr, "")
+                if not instr:
+                    continue
                 effect = self._edge_effect_hint(edge_data, i)
                 option: _Option = {
                     "letter": "",
