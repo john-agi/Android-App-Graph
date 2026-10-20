@@ -1,17 +1,99 @@
-"""Tests for android_app_graph.device.soft_keyboard_hint.
+"""Tests for android_app_graph.device: the soft-keyboard probe and the app launch helpers.
 
-The single soft-keyboard probe shared by kobe, commands.audit and the AITK
-translator; this module owns its tests so the three call sites do not each
-pin their own copy of the adb probe.
+The probe is shared by kobe, commands.audit and the AITK translator, and the
+launch helpers by cli, kobe and commands.audit; this module owns their tests so
+the call sites do not each pin their own copy of the adb commands.
 """
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from typing import Any
 
 import pytest
 
 from android_app_graph import device
+
+_FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
+_PACKAGE_LAUNCH = [
+    "adb",
+    "-s",
+    "test-device",
+    "shell",
+    "monkey",
+    "-p",
+    "com.demo",
+    "-c",
+    "android.intent.category.LAUNCHER",
+    "1",
+]
+
+
+class _Device:
+    """A DeviceController on ``test-device`` whose screen must not be read or touched."""
+
+    w = 100
+    h = 200
+
+    def __init__(self) -> None:
+        self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
+
+    def get_state(self) -> dict[str, Any]:
+        raise AssertionError("restarting the app must not read the screen")
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        raise AssertionError(f"restarting the app must not act on the screen: {action}")
+
+
+def test_restart_app_force_stops_then_launches_and_waits_for_the_screen(
+    device_log: list[object], no_sleep: list[float]
+) -> None:
+    device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert no_sleep == [4]
+
+
+def test_restart_app_launches_nothing_when_the_force_stop_fails(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    commands: list[list[str]] = []
+
+    def offline(
+        command: list[str], *, check: bool = False, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if check:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="device offline")
+
+    monkeypatch.setattr(device.subprocess, "run", offline)
+    with pytest.raises(subprocess.CalledProcessError):
+        device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
+    assert commands == [_FORCE_STOP]
+    assert no_sleep == []
+
+
+def test_launch_app_falls_back_to_the_package_when_the_activity_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        returncode = 1 if "start" in command else 0
+        return subprocess.CompletedProcess(command, returncode, stdout="", stderr="no activity")
+
+    monkeypatch.setattr(device.subprocess, "run", run)
+    app = {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Gone"}
+    with caplog.at_level(logging.WARNING):
+        device.launch_app({"device": {"udid": "test-device"}}, app, logging.getLogger("test"))
+    assert commands == [
+        ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Gone"],
+        _PACKAGE_LAUNCH,
+    ]
+    assert "Activity launch failed for demo" in caplog.text
+    assert "error=no activity" in caplog.text
 
 
 class _CompletedProcess:

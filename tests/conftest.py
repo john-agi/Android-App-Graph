@@ -7,6 +7,7 @@ import base64
 import io
 import os
 import socket
+import subprocess
 import time
 from collections.abc import Callable, Iterator
 from typing import Any, NoReturn
@@ -81,6 +82,23 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
     return delays
+
+
+@pytest.fixture
+def device_log(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record each ``subprocess.run`` command instead of running it; every one succeeds.
+
+    A fake controller can append its actions to the same list, so a test sees adb
+    commands and device actions in the order they happened.
+    """
+    log: list[object] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        log.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return log
 
 
 @pytest.fixture

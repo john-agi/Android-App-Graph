@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -34,8 +33,13 @@ from typing import Any, NamedTuple
 import yaml
 from openrouter import OpenRouter
 
-from android_app_graph.cli import launch_app
-from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
+from android_app_graph.device import (
+    DeviceController,
+    keyboard_status,
+    launch_app,
+    restart_app,
+    soft_keyboard_hint,
+)
 from android_app_graph.utils import (
     ModelSettings,
     open_client,
@@ -233,8 +237,11 @@ def re_explore_issues(
     instruction_settings: ModelSettings,
     action_settings: ModelSettings,
     steps_per_issue: int = 5,
+    launch_activity: str | None = None,
 ) -> list[dict[str, Any]]:
     """Re-explore flagged issues on device.
+
+    Each issue restarts the app first, so its replay starts from the start node.
 
     For retry_edge: navigates to source node, re-runs the exploration step
     with a hint to retry the specific instruction.
@@ -247,32 +254,6 @@ def re_explore_issues(
     if start_node is None:
         logger.warning("Graph is empty — nothing to re-explore")
         return results
-
-    def _relaunch_app() -> None:
-        relaunch = subprocess.run(
-            [
-                "adb",
-                "-s",
-                controller.config.get("device", controller.config).get("udid", "emulator-5554"),
-                "shell",
-                "monkey",
-                "-p",
-                package_name,
-                "-c",
-                "android.intent.category.LAUNCHER",
-                "1",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if relaunch.returncode != 0:
-            logger.warning(
-                "Relaunch of %s exited with %d; continuing, the next state check will confirm",
-                package_name,
-                relaunch.returncode,
-            )
-        time.sleep(4)
 
     def _navigate_to(target_node: str) -> str | None:
         """Navigate to target node by replaying shortest path. Returns actual node reached."""
@@ -436,7 +417,7 @@ def re_explore_issues(
                 instr,
             )
 
-            _relaunch_app()
+            restart_app(controller, app_name, package_name, launch_activity, logger)
             actual = _navigate_to(source)
             if actual is None:
                 results.append({"issue": issue, "status": "skipped", "reason": "unreachable"})
@@ -478,7 +459,7 @@ def re_explore_issues(
                 expected,
             )
 
-            _relaunch_app()
+            restart_app(controller, app_name, package_name, launch_activity, logger)
             actual = _navigate_to(node)
             if actual is None:
                 results.append({"issue": issue, "status": "skipped", "reason": "unreachable"})
@@ -688,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
                     session.instruction,
                     session.action,
                     steps_per_issue=args.steps_per_issue,
+                    launch_activity=app.get("launch_activity"),
                 )
 
                 results_path = graph_path.parent / f"{app_name}_re_explore.json"
