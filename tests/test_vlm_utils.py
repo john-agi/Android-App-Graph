@@ -1118,6 +1118,29 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     assert "1. Turn on dark mode toggle (top)\n2. Compose FAB (bottom right)\n" in prompt
 
 
+@pytest.mark.parametrize(
+    ("reply", "instruction"),
+    [
+        ('{"element": null, "instruction": "Type \'stewed beef\'"}', "Type 'stewed beef'"),
+        ('{"element": null, "instruction": "Tap \\"Save\\""}', 'Tap "Save"'),
+        ('"Tap Search"', "Tap Search"),
+        ("'Type 'stewed beef''", "Type 'stewed beef'"),
+    ],
+)
+def test_the_planner_removes_only_quotes_that_wrap_the_whole_instruction(
+    reply: str,
+    instruction: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content=reply))
+    assert vlm.plan_next_action(
+        router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+    ) == (instruction, None)
+
+
 @pytest.mark.parametrize("multipart", [False, True])
 @pytest.mark.parametrize("native", [False, True])
 def test_action_text_observations_survive_native_calls(
