@@ -261,7 +261,6 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
 
 
 def _graph_package(G: nx.DiGraph) -> str:
-    """Return the ``package_name`` that ``_load_graph_from_json`` stored on ``G``."""
     return as_str(G.graph.get("package_name"), "")
 
 
@@ -269,12 +268,10 @@ type _ParsedGraph = tuple[str, Path, nx.DiGraph]
 
 
 def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
-    """Parse every app's graph file and key it by its ``package_name``.
-
-    Each step selects the graph whose ``package_name`` is the foreground package,
-    so a file without one could never be selected and two files with the same one
-    could not be told apart: both cases are logged as errors and left out. Run
-    before any image embedding, so no screenshot is embedded for a left-out file.
+    """Each step selects the graph whose ``package_name`` is the foreground package,
+    so a file without one could never be selected and files that share one could
+    not be told apart. Both are left out here, before any of their screenshots is
+    embedded.
     """
     parsed: dict[str, list[_ParsedGraph]] = {}
     for app_name, graph_file in iter_graph_files(graph_dir):
@@ -713,8 +710,7 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("Graph dir %s does not exist", self.graph_dir)
             return
         logger.info("[GRAPH] Loading runtime graphs from %s", self.graph_dir)
-        graphs = _parse_graphs_by_package(self.graph_dir)
-        for package, (app_name, graph_file, G) in graphs.items():
+        for package, (app_name, graph_file, G) in _parse_graphs_by_package(self.graph_dir).items():
             try:
                 embeddings = load_image_embeddings(
                     graph_file, model=self.image_embedding.model, node_ids=set(G.nodes)
@@ -750,10 +746,8 @@ class UIKobeV2Translator(BaseTranslator):
         return None
 
     def _select_graph(self, package: str) -> None:
-        """Use the graph whose ``package_name`` is exactly ``package``, or none."""
         self._app_name = self._app_by_package.get(package, "")
         self._current_graph = self._graphs.get(self._app_name)
-        logger.info("[GRAPH] package=%s graph=%s", package, self._app_name or "(none)")
 
     def _ask_with_screenshot[T](
         self,

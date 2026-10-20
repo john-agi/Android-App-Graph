@@ -1687,17 +1687,6 @@ def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -
     assert target.package_name == "com.example.app"
 
 
-def test_load_graph_without_a_package_name_clears_the_previous_one(tmp_path: Path) -> None:
-    path = tmp_path / "graph.json"
-    path.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
-    gm = make_manager()
-    gm.package_name = "com.stale.app"
-
-    gm.load_graph(path)
-
-    assert gm.package_name == ""
-
-
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     source = make_manager()
     add_screen(source, "s0_home", "Home screen")

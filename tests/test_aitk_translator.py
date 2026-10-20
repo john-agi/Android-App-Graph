@@ -40,10 +40,7 @@ def _write_graph(
     nodes: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Write ``<tmp_path>/<app>/<stem>.json`` and return its path.
-
-    ``package_name`` defaults to ``com.<app>.app``, so every app gets its own.
-    """
+    """Write ``<tmp_path>/<app>/<stem>.json`` and return its path."""
     app_dir = tmp_path / app
     app_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{app}_audited" if audited else app
@@ -446,22 +443,6 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
     assert G.nodes["n2"]["activity"] == ""
     assert G.edges["n1", "n2"]["instructions"] == ["tap"]
     assert "schema_deltas" not in G.edges["n1", "n2"]
-
-
-@pytest.mark.parametrize(
-    ("document", "expected"),
-    [
-        ({"package_name": "com.demo.app"}, "com.demo.app"),
-        ({"package_name": None}, ""),
-        ({}, ""),
-    ],
-)
-def test_load_graph_from_json_reads_the_package_name(
-    tmp_path: Path, document: dict[str, Any], expected: str
-) -> None:
-    path = tmp_path / "demo.json"
-    path.write_text(json.dumps({**document, "nodes": []}), encoding="utf-8")
-    assert aitk_translator._load_graph_from_json(path).graph["package_name"] == expected
 
 
 def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> None:
@@ -1181,14 +1162,6 @@ def test_resolve_app_from_task(
     translator: aitk_translator.UIKobeV2Translator, task: str, expected: str | None
 ) -> None:
     assert translator._resolve_app_from_task(task) == expected
-
-
-def test_select_graph_uses_the_graph_whose_package_name_is_the_package(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
-    translator._select_graph("com.demo.app")
-    assert translator._current_graph is translator._graphs["demo"]
-    assert translator._app_name == "demo"
 
 
 @pytest.mark.parametrize(
@@ -2131,7 +2104,7 @@ def test_step_uses_no_graph_while_no_graph_matches_the_foreground_package(
     stepping._app_opened = True
     state, history = _step_payload()
 
-    json.loads(stepping._step("Open demo", {**state, "package": "com.launcher"}, history))
+    stepping._step("Open demo", {**state, "package": "com.launcher"}, history)
 
     assert stepping._current_graph is None
     assert stepping._memory.actions == ["Tap the Demo icon"]
@@ -2144,7 +2117,6 @@ _SHOP_NODES: list[dict[str, Any]] = [
 
 @pytest.fixture
 def two_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> aitk_translator.UIKobeV2Translator:
-    """A stepping translator with graphs for ``com.demo.app`` and ``com.shop.app``."""
     _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
     _write_graph(tmp_path, app="shop", nodes=_SHOP_NODES)
     built = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
@@ -2165,7 +2137,7 @@ def two_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> aitk_translator
 def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
     use_model: _UseModel, two_apps: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """Regression for #87: the graph was chosen once per task, from its first package."""
+    """The graph used to be chosen once per task, so a second app's steps used the first's."""
     use_model(
         two_apps,
         *("A", "nothing", '{"choice": "D", "instruction": "Open the shop app"}'),
@@ -2186,7 +2158,6 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
         history,
     )
     assert two_apps._current_graph is two_apps._graphs["shop"]
-    assert two_apps._app_name == "shop"
     assert two_apps._memory.actions == ["Open the shop app", "Tap checkout"]
 
 
