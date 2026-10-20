@@ -253,6 +253,55 @@ def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
     assert "query" in self_loop_label
 
 
+def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: Path) -> None:
+    graph_path = tmp_path / "demo.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "s0_list", "page_description": "Shopping list"},
+                    {"id": "s1_info", "page_description": "Item info"},
+                ],
+                "edges": [
+                    {
+                        "source": "s0_list",
+                        "target": "s0_list",
+                        "actions": [
+                            {"action": "swipe"},
+                            {"action": "back"},
+                            {"action": "type", "text": "milk"},
+                        ],
+                        "instructions": ["Scroll down the list", "", "Type 'milk'"],
+                        "schema_deltas": [
+                            {"first_visible_item": {"before": "A", "after": "K"}},
+                            None,
+                            {"search_query": {"before": None, "after": "milk"}},
+                        ],
+                        "num_steps": [1, 1, 1],
+                    },
+                    {
+                        "source": "s0_list",
+                        "target": "s1_info",
+                        "actions": [{"action": "tap", "x": 9, "y": 40}],
+                        "instructions": [""],
+                        "schema_deltas": [None],
+                        "num_steps": [1],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _data, graph = plot.load_graph(str(graph_path))
+
+    assert graph.edges["s0_list", "s0_list"]["label"] == (
+        "Scroll down the list\nType 'milk'\n"
+        "[Δ first_visible_item: A → K, search_query: None → milk]\n[1 step]"
+    )
+    assert graph.edges["s0_list", "s1_info"]["label"] == "tap (9, 40)\n[1 step]"
+
+
 def test_load_graph_falls_back_to_the_unaudited_screenshots(tmp_path: Path) -> None:
     graph_path = _write_graph(tmp_path, stem="demo_audited")
     screenshots = tmp_path / "demo_screenshots"

@@ -232,7 +232,7 @@ def test_verify_and_merge_nodes_skips_missing_screenshot(
 def test_verify_and_merge_nodes_skips_a_self_pair(
     client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression for #48: an auditor naming one node twice used to delete it."""
+    """An auditor naming one node twice used to delete it."""
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
     )

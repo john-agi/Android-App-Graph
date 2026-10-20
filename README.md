@@ -728,6 +728,15 @@ maps its output into Android World's `JSONAction` format. For other tools, write
 an equivalent adapter that maps graph-guided decisions into that tool's action
 space.
 
+### Graph edges
+
+Each edge in a graph file lists its actions in `actions`. The `num_steps`,
+`instructions`, `target_observations` and `schema_deltas` lists hold one entry
+per action, in the same order, so entry *i* of each describes `actions[i]`. An
+action that recorded no instruction or observation has `""` in that list, and an
+action that recorded no state change has `null` in `schema_deltas`; only
+self-loop actions record one. Skip those entries when you read an edge.
+
 ## Development
 
 This repository uses [uv](https://docs.astral.sh/uv/) as its only project

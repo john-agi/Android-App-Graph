@@ -99,7 +99,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
 
     for edge in data["edges"]:
         templates = edge.get("instruction_templates", [])
-        instructions = edge.get("instructions", [])
+        instructions = [instruction for instruction in edge.get("instructions", []) if instruction]
 
         if templates and isinstance(templates[0], dict) and templates[0].get("template"):
             label = templates[0]["template"]
