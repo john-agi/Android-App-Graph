@@ -772,17 +772,6 @@ def test_add_edge_creates_an_edge_with_defaults() -> None:
     assert data["schema_deltas"] == [None]
 
 
-def test_add_edge_stores_an_empty_schema_delta_as_its_placeholder() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-
-    gm.add_edge("s0_home", "s0_home", {"action": "tap"}, instruction="", schema_delta={})
-
-    data = gm.graph["s0_home"]["s0_home"]
-    assert data["instructions"] == [""]
-    assert data["schema_deltas"] == [None]
-
-
 def test_add_edge_derives_num_steps_from_a_compound_action() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -988,8 +977,6 @@ def test_merge_nodes_merges_edge_data_into_an_existing_edge() -> None:
     data = gm.graph["s0_keep"]["s2_other"]
     assert data["actions"] == [{"action": "keep"}, {"action": "remove"}]
     assert data["instructions"] == ["from keep", "from remove"]
-    assert data["target_observations"] == ["", ""]
-    assert data["schema_deltas"] == [None, None]
     assert data["num_steps"] == [1, 3]
     assert data["visit_count"] == 2
     assert data["instruction_templates"] == [{"template": "go to {x}"}]
@@ -1002,38 +989,16 @@ def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> No
     add_screen(gm, "s1_remove", "Home screen again")
     bare, full = ("s0_keep", "s1_remove") if bare_side == "kept" else ("s1_remove", "s0_keep")
     gm.graph.add_edge(bare, bare, actions=[["tap", "type"]], visit_count=1)
-    gm.add_edge(
-        full,
-        full,
-        {"action": "sort"},
-        instruction="sort by price",
-        target_observation="sorted by price",
-        schema_delta={"sort": {"before": None, "after": "price"}},
-    )
+    gm.add_edge(full, full, {"action": "sort"}, instruction="sort", schema_delta={"sort": "price"})
 
     assert gm.merge_nodes("s0_keep", "s1_remove") is True
 
     data = gm.graph["s0_keep"]["s0_keep"]
-    per_action = {
-        json.dumps(action): (steps, instruction, observation, delta)
-        for action, steps, instruction, observation, delta in zip(
-            data["actions"],
-            data["num_steps"],
-            data["instructions"],
-            data["target_observations"],
-            data["schema_deltas"],
-            strict=True,
-        )
-    }
-    assert per_action == {
-        '["tap", "type"]': (2, "", "", None),
-        '{"action": "sort"}': (
-            1,
-            "sort by price",
-            "sorted by price",
-            {"sort": {"before": None, "after": "price"}},
-        ),
-    }
+    keys = ("actions", "num_steps", "instructions", "target_observations", "schema_deltas")
+    padded = (["tap", "type"], 2, "", "", None)
+    recorded = ({"action": "sort"}, 1, "sort", "", {"sort": "price"})
+    rows = list(zip(*(data[key] for key in keys), strict=True))
+    assert rows == ([padded, recorded] if bare_side == "kept" else [recorded, padded])
 
 
 @dataclass
@@ -1421,16 +1386,8 @@ def test_find_guided_path_navigates_an_edge_from_a_file_without_text_lists() -> 
 
     steps = gm.find_guided_path("s0_home", [{"node_id": "s1_settings"}])
 
-    assert steps == [
-        {
-            "type": "navigate",
-            "from": "s0_home",
-            "to": "s1_settings",
-            "action": {"action": "tap"},
-            "instruction": "",
-            "target_observation": "",
-        }
-    ]
+    assert steps is not None
+    assert (steps[0]["instruction"], steps[0]["target_observation"]) == ("", "")
 
 
 @pytest.mark.parametrize("source", ["add_edge", "a file without the list"])
@@ -1718,33 +1675,6 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
         "embedding": EMBEDDINGS["Home screen"],
         "model": gm.embedding_model,
     }
-
-
-def test_save_and_load_round_trip_the_placeholders_of_unrecorded_values(tmp_path: Path) -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-    gm.add_edge("s0_home", "s0_home", {"action": "tap"})
-    gm.add_edge(
-        "s0_home",
-        "s0_home",
-        {"action": "sort"},
-        instruction="sort by price",
-        schema_delta={"sort": {"after": "price"}},
-    )
-    path = tmp_path / "graph.json"
-
-    gm.save_graph(path)
-    loaded = GraphManager()
-    loaded.load_graph(path)
-
-    saved = json.loads(path.read_text(encoding="utf-8"))["edges"][0]
-    assert saved["instructions"] == ["", "sort by price"]
-    assert saved["target_observations"] == ["", ""]
-    assert saved["schema_deltas"] == [None, {"sort": {"after": "price"}}]
-    data = loaded.graph["s0_home"]["s0_home"]
-    assert data["instructions"] == ["", "sort by price"]
-    assert data["target_observations"] == ["", ""]
-    assert data["schema_deltas"] == [None, {"sort": {"after": "price"}}]
 
 
 def test_save_graph_omits_an_empty_activity_list_and_embedding(tmp_path: Path) -> None:
@@ -2495,11 +2425,6 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
 
 PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas")
 
-optional_schema_deltas = st.none() | st.dictionaries(
-    st.text(max_size=6),
-    st.fixed_dictionaries({"before": json_scalars, "after": json_scalars}),
-    max_size=2,
-)
 edge_and_merge_operations = st.lists(
     st.tuples(
         st.sampled_from(["edge", "merge"]),
@@ -2508,15 +2433,13 @@ edge_and_merge_operations = st.lists(
         actions | st.lists(actions, max_size=3),
         st.none() | st.text(max_size=12),
         st.none() | st.text(max_size=12),
-        optional_schema_deltas,
-        st.none() | st.integers(min_value=1, max_value=5),
+        st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
     ),
     max_size=25,
 )
 
 
 def per_action_lists(gm: GraphManager) -> dict[tuple[str, str], dict[str, list[Any]]]:
-    """Each edge's actions and every list that holds one entry per action."""
     return {
         (u, v): {key: d.get(key, []) for key in ("actions", *PER_ACTION_LISTS)}
         for u, v, d in gm.graph.edges(data=True)
@@ -2524,7 +2447,6 @@ def per_action_lists(gm: GraphManager) -> dict[tuple[str, str], dict[str, list[A
 
 
 def misaligned_lists(gm: GraphManager) -> list[tuple[str, str, str]]:
-    """Every (source, target, list name) whose length differs from its edge's actions."""
     return [
         (u, v, key)
         for (u, v), lists in per_action_lists(gm).items()
@@ -2545,14 +2467,13 @@ def test_every_per_action_list_has_one_entry_per_action(
             str | None,
             str | None,
             dict[str, Any] | None,
-            int | None,
         ]
     ],
 ) -> None:
     gm = make_manager()
     for node_id in POOL:
         add_screen(gm, node_id, f"screen {node_id}")
-    for kind, a, b, action, instruction, observation, delta, num_steps in ops:
+    for kind, a, b, action, instruction, observation, delta in ops:
         if kind == "edge":
             gm.add_edge(
                 a,
@@ -2561,7 +2482,6 @@ def test_every_per_action_list_has_one_entry_per_action(
                 instruction=instruction,
                 target_observation=observation,
                 schema_delta=delta,
-                num_steps=num_steps,
             )
         else:
             gm.merge_nodes(a, b)

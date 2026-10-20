@@ -459,12 +459,10 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
     assert G.nodes["n1"]["reference_screenshot_path"] is None
     assert G.nodes["n2"]["activity"] == ""
     assert G.edges["n1", "n2"]["instructions"] == ["tap"]
-    assert G.edges["n1", "n2"]["schema_deltas"] == []
+    assert "schema_deltas" not in G.edges["n1", "n2"]
 
 
-def test_load_graph_from_json_keeps_schema_deltas_with_their_placeholders(
-    tmp_path: Path,
-) -> None:
+def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> None:
     path = _write_graph(
         tmp_path,
         nodes=[{"id": "n1"}, {"id": "n2"}],
@@ -472,14 +470,14 @@ def test_load_graph_from_json_keeps_schema_deltas_with_their_placeholders(
             {
                 "source": "n1",
                 "target": "n2",
-                "schema_deltas": [None, {"cart": {"before": 0, "after": 1}}],
+                "schema_deltas": [{"cart": {"before": 0, "after": 1}}],
             },
             {"source": "n2", "target": "n1", "schema_deltas": []},
         ],
     )
     G = aitk_translator._load_graph_from_json(path)
-    assert G.edges["n1", "n2"]["schema_deltas"] == [None, {"cart": {"before": 0, "after": 1}}]
-    assert G.edges["n2", "n1"]["schema_deltas"] == []
+    assert G.edges["n1", "n2"]["schema_deltas"] == [{"cart": {"before": 0, "after": 1}}]
+    assert "schema_deltas" not in G.edges["n2", "n1"]
 
 
 def test_load_graph_from_json_records_the_reference_screenshot_path(tmp_path: Path) -> None:
@@ -572,7 +570,7 @@ def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
     assert G.edges["n1", "n2"]["instructions"] == []
     assert G.edges["n1", "n2"]["instruction_templates"] == []
     assert G.edges["n1", "n2"]["target_observations"] == []
-    assert G.edges["n1", "n2"]["schema_deltas"] == []
+    assert "schema_deltas" not in G.edges["n1", "n2"]
 
 
 def test_load_graph_from_json_rejects_a_non_string_node_id(tmp_path: Path) -> None:
@@ -1201,7 +1199,6 @@ def test_edge_effect_hint_uses_the_indexed_delta(
 def test_edge_effect_hint_is_empty_for_an_action_without_a_delta(
     translator: aitk_translator.UIKobeV2Translator, index: int
 ) -> None:
-    """An index names one action, so it never borrows another action's delta."""
     edge = {"schema_deltas": [{"a": "one"}, None]}
     assert translator._edge_effect_hint(edge, index) == ""
 
@@ -1210,8 +1207,8 @@ def test_edge_effect_hint_without_an_index_merges_every_delta(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
     """Earlier deltas win: the merge keeps the first value seen for each key."""
-    edge = {"schema_deltas": [{"a": "one"}, None, {"a": "two", "b": "three"}, "not a delta"]}
-    assert translator._edge_effect_hint(edge) == "a: one, b: three"
+    edge = {"schema_deltas": [{"a": "one"}, {"a": "two"}, "not a delta"]}
+    assert translator._edge_effect_hint(edge) == "a: one"
 
 
 def test_build_options_lists_done_self_loops_neighbours_and_free(
@@ -1242,11 +1239,10 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
     G.add_edge(
         "results",
         "results",
-        actions=[{"action": "swipe", "direction": "up"}, {"action": "swipe", "direction": "down"}],
         instructions=["scroll down", "scroll up"],
-        target_observations=["more results", ""],
+        target_observations=["more results"],
         instruction_templates=[],
-        schema_deltas=[{"page": "1 -> 2"}, None],
+        schema_deltas=[{"page": "1 -> 2"}],
     )
     text, options = translator._build_options(G, "results")
 
@@ -1261,7 +1257,7 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
 def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    """Regression for #81: an action that changed nothing shifted every later delta."""
+    """A self-loop action that changed nothing used to show the next action's changes."""
     gm = GraphManager()
     gm.graph.add_node("s0_list", page_description="shopping list")
     for action, instruction, delta in (

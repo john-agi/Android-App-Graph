@@ -1035,13 +1035,12 @@ def test_normalize_edge_pairs_each_instruction_with_its_own_observation(
     router_requests: list[httpx.Request],
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    """An edge keeps one entry per action, and an empty entry records nothing."""
     router_responses.append(_truncated_reply(chat_response))
 
     normalized = vlm.normalize_edge(
         router_client,
         ["", "search milk", "search eggs"],
-        target_observations=["the observation of an unrecorded instruction", "milk results", ""],
+        target_observations=["unpaired", "milk results", ""],
         settings=PAGE_DETAIL,
     )
 

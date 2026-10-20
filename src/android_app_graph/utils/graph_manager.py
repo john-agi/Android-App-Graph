@@ -120,11 +120,7 @@ def _default_num_steps(action: object) -> int:
 
 
 def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
-    """Return copies of an edge's per-action lists, each with one entry per action.
-
-    A missing or short list is padded with placeholders: the action's default
-    step count, "" for an instruction or observation, None for a schema delta.
-    """
+    """Readers pair entry i of every per-action list with actions[i] and skip placeholders."""
     actions = list(edge_data.get("actions", []))
     num_steps = list(edge_data.get("num_steps", []))
     num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
@@ -627,7 +623,7 @@ class GraphManager:
                 "visit_count", 0
             )
         else:
-            self.graph.add_edge(source, target, **{**new_data, **_aligned_lists(new_data)})
+            self.graph.add_edge(source, target, **new_data)
 
     def add_edge(
         self,
@@ -656,10 +652,6 @@ class GraphManager:
         If an edge with the same action already exists, it is not duplicated.
         Instead, a visit counter is incremented.
 
-        Every per-action list gets one entry per action, so a missing
-        instruction or observation is stored as "" and a missing or empty
-        schema delta as None.
-
         The edge is dropped with a warning when either endpoint is missing.
         """
         # networkx would otherwise create the missing endpoint bare.  See #62.
@@ -685,7 +677,7 @@ class GraphManager:
             ("num_steps", num_steps),
             ("instructions", instruction or ""),
             ("target_observations", target_observation or ""),
-            ("schema_deltas", schema_delta or None),
+            ("schema_deltas", schema_delta),
         ):
             edge_data[key].append(value)
 
@@ -838,11 +830,7 @@ class GraphManager:
         )
 
     def get_all_edges_from_node(self, node_id: str) -> list[dict[str, Any]]:
-        """Return all outgoing edges from a node as a list of dicts.
-
-        The instruction, observation and schema-delta lists hold only recorded
-        values: the placeholders of actions that recorded none are skipped.
-        """
+        """Return all outgoing edges from a node as a list of dicts."""
         edges = []
         for _, target, data in self.graph.out_edges(node_id, data=True):
             edge_info = {
@@ -1221,8 +1209,10 @@ class GraphManager:
                 "target_observations": attrs.get("target_observations", []),
                 "num_steps": attrs.get("num_steps", []),
                 "visit_count": attrs.get("visit_count", 0),
-                "schema_deltas": attrs.get("schema_deltas", []),
             }
+            schema_deltas = attrs.get("schema_deltas")
+            if schema_deltas:
+                edge_data["schema_deltas"] = schema_deltas
             data["edges"].append(edge_data)
 
         write_json_atomically(path, data, indent=2, ensure_ascii=False)
@@ -1308,8 +1298,10 @@ class GraphManager:
                 "target_observations": edge_data.get("target_observations", []),
                 "num_steps": edge_data.get("num_steps", []),
                 "visit_count": edge_data.get("visit_count", 0),
-                "schema_deltas": edge_data.get("schema_deltas", []),
             }
+            schema_deltas = edge_data.get("schema_deltas")
+            if schema_deltas:
+                edge_attrs["schema_deltas"] = schema_deltas
             self.graph.add_edge(
                 edge_data["source"],
                 edge_data["target"],
