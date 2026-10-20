@@ -125,7 +125,7 @@ known_first_party = ["android_app_graph"]
 
 [tool.deptry.per_rule_ignores]
 # aw_files/android_app_graph_aw_agent.py is a copy-in adapter; android_world is not declared here.
-# It is not on PyPI and not installable on Python 3.14, so it cannot be declared (decision in #19).
+# It is not on PyPI and not installable on Python 3.14, so it cannot be declared.
 DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
 DEP002 = ["dill"]

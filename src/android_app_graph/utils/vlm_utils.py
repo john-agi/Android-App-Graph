@@ -1031,7 +1031,8 @@ def normalize_edge(
     and produces a template with placeholders (e.g. "search for {query}").
 
     Args:
-        instructions: List of concrete instruction strings to normalize.
+        instructions: List of concrete instruction strings to normalize, at
+            least one of them non-empty.
         target_observations: Optional list of corresponding target observations.
 
     Returns a dict with keys:
@@ -1041,17 +1042,23 @@ def normalize_edge(
         - param_names: list[str] — placeholder names
         - examples: list[dict] — original instructions with extracted param values
     """
+    observations = target_observations or []
+    recorded = [
+        (inst, observations[i] if i < len(observations) else "")
+        for i, inst in enumerate(instructions)
+        if inst
+    ]
     input_text = "Instructions to normalize:\n"
-    for i, inst in enumerate(instructions):
-        obs = target_observations[i] if target_observations and i < len(target_observations) else ""
+    for inst, obs in recorded:
         input_text += f'- Instruction: "{inst}"'
         if obs:
             input_text += f' → Observation: "{obs}"'
         input_text += "\n"
 
+    first_instruction, first_observation = recorded[0]
     unchanged = {
-        "instruction_template": instructions[0],
-        "observation_template": target_observations[0] if target_observations else "",
+        "instruction_template": first_instruction,
+        "observation_template": first_observation,
         "is_template": False,
         "param_names": [],
         "examples": [],

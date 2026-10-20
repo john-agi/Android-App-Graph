@@ -23,6 +23,7 @@ from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.payloads import as_list, as_str, as_str_dict
 from android_app_graph.utils import ModelSettings, open_client, vlm_utils
+from android_app_graph.utils.graph_manager import GraphManager
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -1194,12 +1195,19 @@ def test_edge_effect_hint_uses_the_indexed_delta(
     assert translator._edge_effect_hint(edge, 1) == "b: two"
 
 
-def test_edge_effect_hint_merges_when_the_index_is_out_of_range(
+@pytest.mark.parametrize("index", [1, 9])
+def test_edge_effect_hint_is_empty_for_an_action_without_a_delta(
+    translator: aitk_translator.UIKobeV2Translator, index: int
+) -> None:
+    edge = {"schema_deltas": [{"a": "one"}, None]}
+    assert translator._edge_effect_hint(edge, index) == ""
+
+
+def test_edge_effect_hint_without_an_index_merges_every_delta(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
     """Earlier deltas win: the merge keeps the first value seen for each key."""
     edge = {"schema_deltas": [{"a": "one"}, {"a": "two"}, "not a delta"]}
-    assert translator._edge_effect_hint(edge, 9) == "a: one"
     assert translator._edge_effect_hint(edge) == "a: one"
 
 
@@ -1243,8 +1251,64 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
     assert options[2]["instruction"] == "scroll up"
     lines = text.splitlines()
     assert lines[1] == 'B) Stay here — "scroll down" → more results | changes: page: 1 -> 2'
-    # The second instruction has no delta of its own, so the merged hint is reused.
-    assert lines[2] == 'C) Stay here — "scroll up" | changes: page: 1 -> 2'
+    assert lines[2] == 'C) Stay here — "scroll up"'
+
+
+def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    """A self-loop action that changed nothing used to show the next action's changes."""
+    gm = GraphManager()
+    gm.graph.add_node("s0_list", page_description="shopping list")
+    for action, instruction, delta in (
+        (
+            {"action": "swipe", "direction": "up"},
+            "Scroll down the list",
+            {"first_visible_item": {"before": "A", "after": "K"}},
+        ),
+        ({"action": "click", "x": 9, "y": 40}, "Tap the info icon", None),
+        (
+            {"action": "type", "text": "milk"},
+            "Type 'milk'",
+            {"search_query": {"before": None, "after": "milk"}},
+        ),
+    ):
+        gm.add_edge(
+            "s0_list",
+            "s0_list",
+            action,
+            instruction=instruction,
+            target_observation="list",
+            schema_delta=delta,
+        )
+
+    text, _ = translator._build_options(gm.graph, "s0_list")
+
+    assert text.splitlines()[1:4] == [
+        'B) Stay here — "Scroll down the list" → list | changes: first_visible_item: A -> K',
+        'C) Stay here — "Tap the info icon" → list',
+        "D) Stay here — \"Type 'milk'\" → list | changes: search_query: None -> milk",
+    ]
+
+
+def test_build_options_lists_no_self_loop_action_without_an_instruction(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    gm = GraphManager()
+    gm.graph.add_node("s0_list", page_description="shopping list")
+    for action, instruction, delta in (
+        ({"action": "swipe"}, "Scroll down the list", {"top_item": {"before": "A", "after": "K"}}),
+        ({"action": "click"}, "", {"sort": {"before": "name", "after": "price"}}),
+        ({"action": "type"}, "Type 'milk'", {"query": {"before": None, "after": "milk"}}),
+    ):
+        gm.add_edge("s0_list", "s0_list", action, instruction=instruction, schema_delta=delta)
+
+    text, _ = translator._build_options(gm.graph, "s0_list")
+
+    assert text.splitlines()[1:-1] == [
+        'B) Stay here — "Scroll down the list" | changes: top_item: A -> K',
+        "C) Stay here — \"Type 'milk'\" | changes: query: None -> milk",
+    ]
 
 
 def test_build_options_skips_the_self_loop_when_listing_neighbours(
