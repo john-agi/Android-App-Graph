@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
+# The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
+EXTERNAL_WEB_NODE = "ext_web"
 
 
 class _IdentifyCacheEntry(NamedTuple):
@@ -220,7 +222,8 @@ class GraphManager:
         screen reached via different Android activities is merged into one node.
 
         Returns:
-            The node ID (str) for this state.
+            The node ID (str) for this state, or ``EXTERNAL_WEB_NODE`` for any web
+            content from outside the app.
         """
         screen_hash = hash(screenshot_b64)
         cached = self._last_identify_cache
@@ -251,7 +254,7 @@ class GraphManager:
                         same_pkg_keys.append(k)
 
         client, page_detail = self._require_page_detail()
-        page_description, detail_snapshot, elements = describe_page_and_state(
+        page_description, detail_snapshot, elements, is_external_web = describe_page_and_state(
             client,
             screenshot_b64,
             existing_nodes=same_pkg_descriptions or None,
@@ -264,6 +267,13 @@ class GraphManager:
             list(detail_snapshot.keys()) if detail_snapshot else "[]",
             len(elements),
         )
+        if is_external_web:
+            # Returning before the cache update leaves the cache on the screen behind the
+            # page, where a back press usually lands.
+            self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+            node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
+            node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+            return EXTERNAL_WEB_NODE
 
         description_embedding = self._embed(page_description)
 
