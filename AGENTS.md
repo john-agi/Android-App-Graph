@@ -59,7 +59,11 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - Comments explain why, never what. A comment that describes what the code does
   is deleted and the code made to say it, by renaming or extracting. A comment
   stays only when it records what the code cannot show: a workaround, an
-  invariant, a decision with its link. This applies to configuration files too.
+  invariant, the reason for a decision. This applies to configuration files
+  too.
+- No issue or pull request numbers in code, comments, docstrings (test
+  docstrings included), docs or configuration. Write the reason itself, so
+  the line reads without opening GitHub.
 - Annotate everything you touch; no `Any` to silence the checker. Narrow
   untyped payloads with the helpers in `payloads.py`, not with `cast`.
 - Take the `DeviceController` and `AvdManager` Protocols from `device.py`,
@@ -109,8 +113,14 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
   with `Closes #<n>` when one exists. The clone is a fork: run
   `gh repo set-default john-agi/Android-App-Graph` once.
 - Keep mechanical changes (autofixes, formatting, lock updates) in their own
-  commits. Review `git diff main...HEAD` before opening the pull request and
-  remove what the task did not ask for.
+  commits. Review `git diff main...HEAD` line by line before opening the pull
+  request and remove every line that is not worth it, even one the issue asks
+  for; name each omission and why in the description.
+- Write the pull request description from `.github/pull_request_template.md`
+  and fill every section; `gh pr create --body-file` does not apply the
+  template, so start the file from it. It reads on its own, months later:
+  never a bare link to an issue, pull request, Slack thread or ticket without
+  the reasoning it holds, and nothing sensitive. Issues follow the same rule.
 - If the task is wrong, impossible or ambiguous, stop and report instead of
   improvising.
 - `main` is protected by the `main` ruleset in `.github/rulesets/`: a pull
@@ -138,7 +148,9 @@ Each fact has one home. Other places link to it and never restate it.
 | Commands, task order, thresholds, rule lists | The configuration that enforces them: `pyproject.toml`, `tach.toml`, `.github/` |
 | Rules for agents and contributors | This file |
 | Multi-step procedures | One skill each under `.agents/skills/`; Claude Code reads them through the `.claude/skills` symlink |
-| Setup and usage for people | `README.md` |
+| Setup, usage, and the lasting behaviour and values users or operators rely on | `README.md`, updated in the pull request that changes them |
+| Why one change was made: decisions and alternatives, testing, trade-offs, what was left out | The pull request description, never the docs |
+| Structure of a pull request description | `.github/pull_request_template.md` |
 | Why a setting exists | A comment on the setting, only when the reason is not obvious |
 
 Skills: `adopt-tool` (adding a check to `poe check`), `security-triage` (a red

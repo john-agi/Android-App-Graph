@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,88 @@ class AvdManager(Protocol):
     def get_running_avd_list(self) -> list[dict[str, Any]] | None: ...
 
     def duplicate_avd(self, avd_name: str) -> None: ...
+
+
+def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> None:
+    """Launch an app using an explicit activity when configured."""
+    udid = config["device"]["udid"]
+    app_name = app["name"]
+    package_name = app["package_name"]
+    launch_activity = app.get("launch_activity")
+
+    if launch_activity:
+        logger.info("Launching app %s via activity %s ...", app_name, launch_activity)
+        result = subprocess.run(
+            [
+                "adb",
+                "-s",
+                udid,
+                "shell",
+                "am",
+                "start",
+                "-n",
+                launch_activity,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        logger.warning(
+            "Activity launch failed for %s; falling back to package launch. error=%s",
+            app_name,
+            (result.stderr or result.stdout or "").strip(),
+        )
+
+    logger.info("Launching app %s (%s) ...", app_name, package_name)
+    subprocess.run(
+        [
+            "adb",
+            "-s",
+            udid,
+            "shell",
+            "monkey",
+            "-p",
+            package_name,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+
+_LAUNCH_SETTLE_SECONDS = 4
+
+
+def restart_app(
+    controller: DeviceController,
+    app_name: str,
+    package_name: str,
+    launch_activity: str | None,
+    logger: logging.Logger,
+) -> None:
+    """Put the app on its start screen, where every replay from the start node begins.
+
+    A launch alone does not: launching an app whose task still exists brings that
+    task to the foreground as it was
+    (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
+    A failed force-stop raises before anything is launched, so no replay starts
+    from an unknown screen.
+    """
+    config = controller.config
+    subprocess.run(
+        ["adb", "-s", config["device"]["udid"], "shell", "am", "force-stop", package_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    app = {"name": app_name, "package_name": package_name, "launch_activity": launch_activity}
+    launch_app(config, app, logger)
+    time.sleep(_LAUNCH_SETTLE_SECONDS)
 
 
 def soft_keyboard_hint() -> str:

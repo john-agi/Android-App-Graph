@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import override
 
 import httpx
 import pytest
@@ -15,6 +16,20 @@ from openrouter.errors import OpenRouterError
 from android_app_graph.kobe import Kobe
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
+_FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
+_PACKAGE_LAUNCH = [
+    "adb",
+    "-s",
+    "test-device",
+    "shell",
+    "monkey",
+    "-p",
+    "com.demo",
+    "-c",
+    "android.intent.category.LAUNCHER",
+    "1",
+]
+_ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
 
 
 class _Device:
@@ -36,28 +51,48 @@ class _Device:
         raise AssertionError(f"No device action expected: {action}")
 
 
-class _ScriptedDevice:
-    w = 100
-    h = 200
+class _ReplayDevice(_Device):
+    def __init__(self, state: dict[str, object], log: list[object]) -> None:
+        super().__init__(state)
+        self.config = {"device": {"udid": "test-device"}}
+        self._log = log
 
-    def __init__(self, *states: dict[str, object]) -> None:
-        self.config: dict[str, object] = {}
-        self.actions: list[dict[str, object]] = []
-        self._states = list(states)
+    @override
+    def exe_action(self, action: dict[str, object]) -> None:
+        self._log.append(action)
 
+
+class _ScriptedDevice(_ReplayDevice):
+    def __init__(self, states: list[dict[str, object]], log: list[object]) -> None:
+        super().__init__(states[0], log)
+        self._states = states
+
+    @override
     def get_state(self) -> dict[str, object]:
         if len(self._states) > 1:
             return self._states.pop(0)
         return self._states[0]
-
-    def exe_action(self, action: dict[str, object]) -> None:
-        self.actions.append(action)
 
 
 @pytest.fixture
 def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
     return Kobe(
         _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
+        "demo",
+        "com.demo",
+        logging.getLogger("test"),
+        graph_dir=tmp_path,
+        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
+    )
+
+
+@pytest.fixture
+def replaying_kobe(
+    tmp_path: Path, png_screenshot: str, router_client: OpenRouter, device_log: list[object]
+) -> Kobe:
+    return Kobe(
+        _ReplayDevice({"activity": "com.demo.Home", "screenshot": png_screenshot}, device_log),
         "demo",
         "com.demo",
         logging.getLogger("test"),
@@ -122,13 +157,15 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     assert no_sleep == []
 
 
-def test_navigating_to_the_start_node_identifies_the_screen_again(
-    kobe: Kobe,
+@pytest.mark.usefixtures("no_sleep")
+def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen_again(
+    replaying_kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
+    device_log: list[object],
 ) -> None:
     for _ in range(2):
         router_responses.extend(
@@ -137,12 +174,33 @@ def test_navigating_to_the_start_node_identifies_the_screen_again(
                 httpx.Response(200, json=embedding_body),
             ]
         )
-    node = kobe.graph.identify_state("com.demo.Home", png_screenshot)
+    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot)
     # The cache would skip the model, and a reference screenshot would add a verify request.
-    kobe.graph._last_identify_cache = None
-    kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
-    assert kobe.navigate_to_node(node) == node
+    replaying_kobe.graph._last_identify_cache = None
+    replaying_kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
+    assert replaying_kobe.navigate_to_node(node) == node
     assert len(router_requests) == 4
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_navigation_restarts_the_app_through_its_launch_activity(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replaying_kobe.launch_activity = "com.demo/.Main"
+    replaying_kobe.graph.graph.add_node("s0_home")
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s0_home")
+    assert replaying_kobe.navigate_to_node("s0_home") == "s0_home"
+    assert device_log == [_FORCE_STOP, _ACTIVITY_LAUNCH]
+
+
+def test_navigation_without_a_recorded_path_leaves_the_app_running(
+    replaying_kobe: Kobe, device_log: list[object]
+) -> None:
+    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_orphan"])
+    with pytest.raises(ValueError, match="No path from s0_home to s1_orphan"):
+        replaying_kobe.navigate_to_node("s1_orphan")
+    assert device_log == []
 
 
 @pytest.mark.parametrize("malformed", [False, True])
@@ -204,6 +262,34 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     ] * 2
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
+    replaying_kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replay from the start node used to run on whatever screen was showing."""
+    open_settings = {"action": "tap", "coordinate": [10, 20]}
+    open_detail = {"action": "tap", "coordinate": [30, 40]}
+    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])
+    replaying_kobe.graph.add_edge("s0_home", "s1_settings", action=[open_settings])
+    replaying_kobe.graph.add_edge("s1_settings", "s2_detail", action=[open_detail])
+    router_responses.extend(
+        [
+            chat_response(content='{"issues":[],"summary":"no duplicates"}'),
+            chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
+        ]
+    )
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_settings")
+    assert (
+        replaying_kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
+        == "s1_settings"
+    )
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_settings]
+
+
 _DIALOG_ACTIVITY = (
     "com.google.android.permissioncontroller/"
     "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
@@ -218,6 +304,7 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
+    device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pressing back on a permission dialog would deny the permission."""
@@ -232,9 +319,8 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
         "screenshot": png_screenshot,
         "package": "com.google.android.permissioncontroller",
     }
-    device = _ScriptedDevice(home, dialog, home)
     explorer = Kobe(
-        device,
+        _ScriptedDevice([home, dialog], device_log),
         "demo",
         "com.demo",
         logging.getLogger("test"),
@@ -256,7 +342,7 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     explorer.explore(max_steps=1)
 
     tap = {"action": "tap", "x": 50, "y": 100}
-    assert device.actions == [tap]
+    assert device_log == [tap]
     graph = explorer.graph.graph
     nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
     assert set(nodes) == {"com.demo.Home", _DIALOG_ACTIVITY}

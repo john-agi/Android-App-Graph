@@ -7,6 +7,14 @@
   "forkProcessing": "enabled",
   "dependencyDashboard": true,
   "automerge": false,
+  "packageRules": [
+    {
+      "description": "A Python minor upgrade needs every locked native dependency to support it; see requires-python in pyproject.toml.",
+      "matchPackageNames": ["python"],
+      "matchUpdateTypes": ["major", "minor"],
+      "dependencyDashboardApproval": true
+    }
+  ],
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["* 0-3 * * 1"]

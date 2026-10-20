@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from android_app_graph.device import AvdManager, grant_runtime_permissions
+from android_app_graph.device import AvdManager, grant_runtime_permissions, launch_app
 from android_app_graph.kobe import EXPLORATION_ROLES, Kobe
 from android_app_graph.utils import open_client, resolve_api_key, resolve_model_settings
 from android_app_graph.utils.logging import setup_logging
@@ -34,58 +34,6 @@ def check_avd(avd_manager: AvdManager, config: dict[str, Any], logger: logging.L
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     logger.info("Waiting for AVD '%s' to start and load...", dup_name)
     time.sleep(60)
-
-
-def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> None:
-    """Launch an app using an explicit activity when configured."""
-    udid = config["device"]["udid"]
-    app_name = app["name"]
-    package_name = app["package_name"]
-    launch_activity = app.get("launch_activity")
-
-    if launch_activity:
-        logger.info("Launching app %s via activity %s ...", app_name, launch_activity)
-        result = subprocess.run(
-            [
-                "adb",
-                "-s",
-                udid,
-                "shell",
-                "am",
-                "start",
-                "-n",
-                launch_activity,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        logger.warning(
-            "Activity launch failed for %s; falling back to package launch. error=%s",
-            app_name,
-            (result.stderr or result.stdout or "").strip(),
-        )
-
-    logger.info("Launching app %s (%s) ...", app_name, package_name)
-    subprocess.run(
-        [
-            "adb",
-            "-s",
-            udid,
-            "shell",
-            "monkey",
-            "-p",
-            package_name,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -174,6 +122,7 @@ def main() -> None:
                 coverage_checkpoint_steps=coverage_checkpoint_steps,
                 coverage_checkpoint_top_k=coverage_checkpoint_top_k,
                 client=client,
+                launch_activity=app.get("launch_activity"),
             )
             try:
                 kobe.explore(resume_from=resume_from)
