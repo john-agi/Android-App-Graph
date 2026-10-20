@@ -622,6 +622,19 @@ def test_resolve_node_id_after_renaming_back_to_an_earlier_id() -> None:
     assert gm.resolve_node_id(feed) == "s0_home_screen"
 
 
+@pytest.mark.usefixtures("vlm")
+def test_resolve_node_id_follows_renames_and_merges_together() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_home", "Home screen")
+    renamed = gm.rename_node("s1_home", "Home feed")
+    assert gm.merge_nodes("s0_home", renamed) is True
+
+    kept = gm.rename_node("s0_home", "Settings page")
+
+    assert {gm.resolve_node_id(node) for node in ("s1_home", renamed, "s0_home")} == {kept}
+
+
 def test_get_node_returns_a_copy() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")

@@ -140,9 +140,7 @@ class Kobe:
                 merged_count,
             )
             self.save_graph()
-
-            if current_node not in self.graph.graph:
-                current_node = self.graph.get_start_node() or current_node
+            current_node = self.graph.resolve_node_id(current_node)
 
         candidates = self.graph.get_exploration_target_candidates(
             package_name=self.package_name,
@@ -215,7 +213,8 @@ class Kobe:
             current_node,
         )
         if not checkpoint_node:
-            return current_node, device_state
+            # The checkpoint's merge audit can merge the caller's node away without navigating.
+            return self.graph.resolve_node_id(current_node), device_state
 
         return checkpoint_node, self.controller.get_state()
 
