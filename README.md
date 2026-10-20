@@ -499,6 +499,12 @@ upstream UI-KOBE asked `page_detail` for one each turn but never used it, and th
 paper identifies nodes from screenshots alone. The roles it requires are listed
 under [Configure API Credentials](#configure-api-credentials).
 
+Exploration records the app's configured `package_name` in its graph file, and
+each turn uses the graph whose `package_name` is the foreground package; when no
+graph has that package, the turn plans a free-form action. The runtime does not
+load a graph file without `package_name`, nor any of several files that share
+one, and logs an error naming each such file.
+
 AITK loads a translator by module name: `register_translator()` in
 `aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
 from `configs/controller.yaml`, imports it with `importlib.import_module`, and

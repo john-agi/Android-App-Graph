@@ -127,6 +127,7 @@ class GraphManager:
         audit_timeout: float = DEFAULT_AUDIT_TIMEOUT,
     ) -> None:
         self.graph = nx.DiGraph()
+        self.package_name = ""
         self.client = client
         self.page_detail = page_detail
         self.embedding = embedding
@@ -1166,6 +1167,7 @@ class GraphManager:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
+            "package_name": self.package_name,
             "next_id": self._next_id,
             "similarity_threshold": self.similarity_threshold,
             "total_steps_completed": self.total_steps_completed,
@@ -1257,6 +1259,7 @@ class GraphManager:
                     else:
                         embeddings[node_id] = as_float_list(entry)
 
+        self.package_name = as_str(data.get("package_name"), "")
         self._next_id = data.get("next_id", 0)
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
         self.total_steps_completed = data.get("total_steps_completed", 0)

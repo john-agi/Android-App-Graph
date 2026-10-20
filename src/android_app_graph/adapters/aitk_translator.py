@@ -232,7 +232,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
             edge_attrs["schema_deltas"] = as_list(edge_data["schema_deltas"])
         edge_specs.append((source, target, edge_attrs))
 
-    G = nx.DiGraph()
+    G = nx.DiGraph(package_name=as_str(data.get("package_name"), ""))
     for node_data in data.get("nodes", []):
         node_id = node_data["id"]
         # A path, not the screenshot itself: reading and base64-encoding every
@@ -260,13 +260,46 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
     return G
 
 
-def _extract_packages_from_graph(G: nx.DiGraph) -> set[str]:
-    packages = set()
-    for _, data in G.nodes(data=True):
-        activity = data.get("activity", "")
-        if activity:
-            packages.add(package_from_activity(activity))
-    return packages
+def _graph_package(G: nx.DiGraph) -> str:
+    """Return the ``package_name`` that ``_load_graph_from_json`` stored on ``G``."""
+    return as_str(G.graph.get("package_name"), "")
+
+
+type _ParsedGraph = tuple[str, Path, nx.DiGraph]
+
+
+def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
+    """Parse every app's graph file and key it by its ``package_name``.
+
+    Each step selects the graph whose ``package_name`` is the foreground package,
+    so a file without one could never be selected and two files with the same one
+    could not be told apart: both cases are logged as errors and left out. Run
+    before any image embedding, so no screenshot is embedded for a left-out file.
+    """
+    parsed: dict[str, list[_ParsedGraph]] = {}
+    for app_name, graph_file in iter_graph_files(graph_dir):
+        logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
+        try:
+            G = _load_graph_from_json(graph_file)
+        except Exception:
+            logger.exception("Failed to load graph %s", graph_file)
+            continue
+        package = _graph_package(G)
+        if package:
+            parsed.setdefault(package, []).append((app_name, graph_file, G))
+        else:
+            logger.error("[GRAPH] Not loading %s: it has no package_name", graph_file)
+    unique: dict[str, _ParsedGraph] = {}
+    for package, graphs in parsed.items():
+        if len(graphs) == 1:
+            unique[package] = graphs[0]
+        else:
+            logger.error(
+                "[GRAPH] Not loading %s: they share package_name %s",
+                ", ".join(str(graph_file) for _app, graph_file, _graph in graphs),
+                package,
+            )
+    return unique
 
 
 def _after_last_think_tag(text: str) -> str | None:
@@ -606,7 +639,7 @@ class UIKobeV2Translator(BaseTranslator):
         # translator; the SDK closes it when the translator is collected or at exit.
         self.client = open_client(resolve_api_key())
         self._graphs: dict[str, nx.DiGraph] = {}
-        self._package_to_app: dict[str, str] = {}
+        self._app_by_package: dict[str, str] = {}
         self._load_all_graphs()
 
         # A device property: only to_device updates it, and a task reset must not.
@@ -680,10 +713,9 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("Graph dir %s does not exist", self.graph_dir)
             return
         logger.info("[GRAPH] Loading runtime graphs from %s", self.graph_dir)
-        for app_name, graph_file in iter_graph_files(self.graph_dir):
+        graphs = _parse_graphs_by_package(self.graph_dir)
+        for package, (app_name, graph_file, G) in graphs.items():
             try:
-                logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
-                G = _load_graph_from_json(graph_file)
                 embeddings = load_image_embeddings(
                     graph_file, model=self.image_embedding.model, node_ids=set(G.nodes)
                 )
@@ -705,13 +737,8 @@ class UIKobeV2Translator(BaseTranslator):
                 )
                 self._compute_missing_image_embeddings(G, app_name, graph_file, embeddings)
                 self._graphs[app_name] = G
-                for pkg in _extract_packages_from_graph(G):
-                    self._package_to_app[pkg] = app_name
-                logger.info(
-                    "[GRAPH] %s loaded: packages=%s",
-                    app_name,
-                    sorted(_extract_packages_from_graph(G)),
-                )
+                self._app_by_package[package] = app_name
+                logger.info("[GRAPH] %s loaded: package=%s", app_name, package)
             except Exception:
                 logger.exception("Failed to load graph %s", graph_file)
 
@@ -722,20 +749,11 @@ class UIKobeV2Translator(BaseTranslator):
                 return app_name
         return None
 
-    def _get_graph_for_package(self, package: str) -> nx.DiGraph | None:
-        if not package:
-            return None
-        app_name = self._package_to_app.get(package)
-        if not app_name:
-            app_name = self._package_to_app.get(package_from_activity(package))
-        if app_name and app_name in self._graphs:
-            self._app_name = app_name
-            return self._graphs[app_name]
-        for pkg_prefix, name in self._package_to_app.items():
-            if package.startswith(pkg_prefix) or pkg_prefix.startswith(package):
-                self._app_name = name
-                return self._graphs.get(name)
-        return None
+    def _select_graph(self, package: str) -> None:
+        """Use the graph whose ``package_name`` is exactly ``package``, or none."""
+        self._app_name = self._app_by_package.get(package, "")
+        self._current_graph = self._graphs.get(self._app_name)
+        logger.info("[GRAPH] package=%s graph=%s", package, self._app_name or "(none)")
 
     def _ask_with_screenshot[T](
         self,
@@ -797,13 +815,12 @@ class UIKobeV2Translator(BaseTranslator):
             return None
 
         current_pkg = package_from_activity(activity)
-        graph_packages = sorted(_extract_packages_from_graph(G))
         logger.info(
-            "[IDENTIFY] activity=%s package=%s graph_app=%s graph_packages=%s",
+            "[IDENTIFY] activity=%s package=%s graph_app=%s graph_package=%s",
             activity,
             current_pkg,
             self._app_name or "(unknown)",
-            graph_packages,
+            _graph_package(G),
         )
 
         same_pkg_node_count = sum(
@@ -1249,12 +1266,7 @@ class UIKobeV2Translator(BaseTranslator):
                 )
             logger.warning("[OPEN] Could not resolve app from task: %s", task)
 
-        if self._current_graph is None:
-            if self._app_name and self._app_name in self._graphs:
-                self._current_graph = self._graphs[self._app_name]
-            else:
-                self._current_graph = self._get_graph_for_package(package)
-
+        self._select_graph(package)
         G = self._current_graph
 
         self._step_count += 1
