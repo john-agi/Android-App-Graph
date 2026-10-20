@@ -195,7 +195,7 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
     Shared by both graph loaders (runtime and GraphManager): networkx's
     add_edge would otherwise silently create an attribute-less node for an
     undefined endpoint, so a hand-edited or truncated file would load
-    quietly. See #62/#63.
+    quietly.
 
     ``require_graph_shape`` runs first, so every id and endpoint read below is
     already confirmed to be a string -- a missing, malformed or non-string

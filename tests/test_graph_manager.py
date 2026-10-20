@@ -734,7 +734,28 @@ def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:
     assert edges[0]["target_observations"] == ["the settings page"]
     assert edges[0]["instruction_templates"] == []
     assert edges[0]["visit_count"] == 1
-    assert "schema_deltas" not in edges[0]
+    assert edges[0]["schema_deltas"] == []
+
+
+def test_get_all_edges_from_node_skips_the_placeholders_of_unrecorded_values() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    gm.add_edge("s0_home", "s0_home", {"action": "tap"})
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "swipe"},
+        instruction="scroll the feed",
+        target_observation="more posts",
+        schema_delta={"first_post": {"before": "a", "after": "b"}},
+    )
+
+    edges = gm.get_all_edges_from_node("s0_home")
+
+    assert edges[0]["actions"] == [{"action": "tap"}, {"action": "swipe"}]
+    assert edges[0]["instructions"] == ["scroll the feed"]
+    assert edges[0]["target_observations"] == ["more posts"]
+    assert edges[0]["schema_deltas"] == [{"first_post": {"before": "a", "after": "b"}}]
 
 
 def test_get_all_edges_from_node_includes_a_non_empty_schema_delta() -> None:
@@ -780,7 +801,9 @@ def test_add_edge_creates_an_edge_with_defaults() -> None:
     assert data["actions"] == [{"action": "tap"}]
     assert data["num_steps"] == [1]
     assert data["visit_count"] == 1
-    assert "instructions" not in data
+    assert data["instructions"] == [""]
+    assert data["target_observations"] == [""]
+    assert data["schema_deltas"] == [None]
 
 
 def test_add_edge_derives_num_steps_from_a_compound_action() -> None:
@@ -822,9 +845,23 @@ def test_add_edge_appends_a_different_action_with_its_metadata() -> None:
     assert data["actions"] == [{"action": "tap"}, {"action": "swipe"}]
     assert data["num_steps"] == [1, 1]
     assert data["instructions"] == ["open settings", "swipe to settings"]
-    assert data["target_observations"] == ["the settings page"]
-    assert data["schema_deltas"] == [{"tab": {"after": "settings"}}]
+    assert data["target_observations"] == ["", "the settings page"]
+    assert data["schema_deltas"] == [None, {"tab": {"after": "settings"}}]
     assert data["visit_count"] == 1
+
+
+def test_add_edge_pads_an_edge_whose_lists_are_missing_before_appending() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    gm.graph.add_edge("s0_home", "s0_home", actions=[{"action": "tap"}, ["a", "b"]])
+
+    gm.add_edge("s0_home", "s0_home", {"action": "swipe"}, instruction="scroll")
+
+    data = gm.graph["s0_home"]["s0_home"]
+    assert data["num_steps"] == [1, 2, 1]
+    assert data["instructions"] == ["", "", "scroll"]
+    assert data["target_observations"] == ["", "", ""]
+    assert data["schema_deltas"] == [None, None, None]
 
 
 def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
@@ -847,7 +884,7 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
 
 
 def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) -> None:
-    """Regression for #62: a typo'd endpoint used to become an attribute-less node."""
+    """A typo'd endpoint used to become an attribute-less node."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
 
@@ -881,7 +918,7 @@ def test_merge_nodes_returns_false_when_a_node_is_missing() -> None:
 
 
 def test_merge_nodes_is_a_no_op_when_both_ids_name_the_same_node() -> None:
-    """Regression for #48: a self-merge used to double visit_count, then delete."""
+    """A self-merge used to double visit_count, then delete the node."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", visit_count=3, state_schema={"tab": ["home"]})
     add_screen(gm, "s1_search", "Search screen")
@@ -977,6 +1014,25 @@ def test_merge_nodes_merges_edge_data_into_an_existing_edge() -> None:
     assert data["num_steps"] == [1, 3]
     assert data["visit_count"] == 2
     assert data["instruction_templates"] == [{"template": "go to {x}"}]
+
+
+@pytest.mark.parametrize("bare_side", ["kept", "removed"])
+def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_keep", "Home screen")
+    add_screen(gm, "s1_remove", "Home screen again")
+    bare, full = ("s0_keep", "s1_remove") if bare_side == "kept" else ("s1_remove", "s0_keep")
+    gm.graph.add_edge(bare, bare, actions=[["tap", "type"]], visit_count=1)
+    gm.add_edge(full, full, {"action": "sort"}, instruction="sort", schema_delta={"sort": "price"})
+
+    assert gm.merge_nodes("s0_keep", "s1_remove") is True
+
+    data = gm.graph["s0_keep"]["s0_keep"]
+    keys = ("actions", "num_steps", "instructions", "target_observations", "schema_deltas")
+    padded = (["tap", "type"], 2, "", "", None)
+    recorded = ({"action": "sort"}, 1, "sort", "", {"sort": "price"})
+    rows = list(zip(*(data[key] for key in keys), strict=True))
+    assert rows == ([padded, recorded] if bare_side == "kept" else [recorded, padded])
 
 
 @dataclass
@@ -1098,6 +1154,43 @@ def test_normalize_all_edges_skips_an_edge_without_instructions(
     gm.normalize_all_edges()
 
     assert normalizer.calls == []
+
+
+def test_normalize_all_edges_counts_only_the_recorded_instructions(
+    normalizer: FakeNormalizer,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_results", "Search results")
+    gm.add_edge("s0_home", "s1_results", {"action": "tap"})
+    gm.add_edge("s0_home", "s1_results", {"type": "shoes"}, instruction='search for "shoes"')
+    gm.add_edge("s0_home", "s1_results", {"type": "hats"}, instruction='search for "hats"')
+
+    gm.normalize_all_edges()
+    gm.normalize_all_edges()  # two examples cover the two recorded instructions
+
+    assert len(normalizer.calls) == 1
+    assert normalizer.calls[0]["instructions"] == [
+        "",
+        'search for "shoes"',
+        'search for "hats"',
+    ]
+    assert normalizer.calls[0]["target_observations"] is None
+
+
+def test_normalize_all_edges_applies_the_single_instruction_heuristic_past_placeholders(
+    normalizer: FakeNormalizer,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_results", "Search results")
+    gm.add_edge("s0_home", "s1_results", {"action": "tap"})
+    gm.add_edge("s0_home", "s1_results", {"action": "click"}, instruction="open search")
+
+    gm.normalize_all_edges()
+
+    assert normalizer.calls == []
+    assert gm.graph["s0_home"]["s1_results"]["instruction_templates"] == []
 
 
 def test_normalize_all_edges_skips_a_short_single_instruction(normalizer: FakeNormalizer) -> None:
@@ -1319,10 +1412,26 @@ def test_find_guided_path_records_a_schema_gap_when_no_delta_matches() -> None:
     assert steps[0]["type"] == "schema_gap"
 
 
-def test_find_guided_path_ignores_a_self_loop_without_schema_deltas() -> None:
+def test_find_guided_path_navigates_an_edge_from_a_file_without_text_lists() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    gm.add_edge("s0_home", "s0_home", {"action": "sort"})
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "tap"}], num_steps=[1])
+
+    steps = gm.find_guided_path("s0_home", [{"node_id": "s1_settings"}])
+
+    assert steps is not None
+    assert (steps[0]["instruction"], steps[0]["target_observation"]) == ("", "")
+
+
+@pytest.mark.parametrize("source", ["add_edge", "a file without the list"])
+def test_find_guided_path_ignores_a_self_loop_without_schema_deltas(source: str) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    if source == "add_edge":
+        gm.add_edge("s0_home", "s0_home", {"action": "sort"})
+    else:
+        gm.graph.add_edge("s0_home", "s0_home", actions=[{"action": "sort"}])
 
     steps = gm.find_guided_path(
         "s0_home", [{"node_id": "s0_home", "required_schema": {"sort": "price"}}]
@@ -1778,7 +1887,7 @@ def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
 
 
 def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
-    """Regression for #62: such an edge used to grow a phantom node on load."""
+    """Such an edge used to grow a phantom node on load."""
     path = tmp_path / "graph.json"
     path.write_text(
         json.dumps(
@@ -1838,8 +1947,8 @@ def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -
 def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
     """An int id would otherwise sail through ``require_known_edge_endpoints``,
     which compares ``str()``-normalised ids, and let ``add_edge`` grow a
-    phantom node with a different (string) id -- the same bug #62 fixed for a
-    genuinely undefined endpoint.
+    phantom node with a different (string) id -- the same phantom node a
+    genuinely undefined endpoint used to grow.
     """
     path = tmp_path / "graph.json"
     path.write_text(json.dumps({"nodes": [{"id": 5}], "edges": []}), encoding="utf-8")
@@ -1989,6 +2098,18 @@ def test_format_for_audit_lists_nodes_edges_and_marks_self_loops() -> None:
     assert "[self-loop]" in text
 
 
+def test_format_for_audit_pairs_each_instruction_with_its_own_observation() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, target_observation="first only")
+    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, instruction="swipe to settings")
+
+    edge_lines = gm.format_for_audit().split("## Edges (1)\n", 1)[1].splitlines()
+
+    assert edge_lines[1:] == ['    - "swipe to settings"']
+
+
 def test_run_audit_without_a_client_reports_no_issues() -> None:
     result = GraphManager().run_audit(app_name="Example")
 
@@ -2060,7 +2181,7 @@ def test_run_node_merge_audit_skips_a_missing_node(monkeypatch: pytest.MonkeyPat
 def test_run_node_merge_audit_skips_a_self_pair(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
 ) -> None:
-    """Regression for #48: an auditor naming one node twice used to delete it."""
+    """An auditor naming one node twice used to delete it."""
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     gm = make_manager()
@@ -2334,6 +2455,79 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
                 assert v in gm.graph
                 assert "page_description" in gm.graph.nodes[u]
                 assert "page_description" in gm.graph.nodes[v]
+
+
+PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas")
+
+edge_and_merge_operations = st.lists(
+    st.tuples(
+        st.sampled_from(["edge", "merge"]),
+        st.sampled_from(POOL),
+        st.sampled_from(POOL),
+        actions | st.lists(actions, max_size=3),
+        st.none() | st.text(max_size=12),
+        st.none() | st.text(max_size=12),
+        st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
+    ),
+    max_size=25,
+)
+
+
+def per_action_lists(gm: GraphManager) -> dict[tuple[str, str], dict[str, list[Any]]]:
+    return {
+        (u, v): {key: d.get(key, []) for key in ("actions", *PER_ACTION_LISTS)}
+        for u, v, d in gm.graph.edges(data=True)
+    }
+
+
+def misaligned_lists(gm: GraphManager) -> list[tuple[str, str, str]]:
+    return [
+        (u, v, key)
+        for (u, v), lists in per_action_lists(gm).items()
+        for key in PER_ACTION_LISTS
+        if len(lists[key]) != len(lists["actions"])
+    ]
+
+
+@given(ops=edge_and_merge_operations)
+def test_every_per_action_list_has_one_entry_per_action(
+    tmp_path_factory: pytest.TempPathFactory,
+    ops: list[
+        tuple[
+            str,
+            str,
+            str,
+            dict[str, Any] | list[dict[str, Any]],
+            str | None,
+            str | None,
+            dict[str, Any] | None,
+        ]
+    ],
+) -> None:
+    gm = make_manager()
+    for node_id in POOL:
+        add_screen(gm, node_id, f"screen {node_id}")
+    for kind, a, b, action, instruction, observation, delta in ops:
+        if kind == "edge":
+            gm.add_edge(
+                a,
+                b,
+                action,
+                instruction=instruction,
+                target_observation=observation,
+                schema_delta=delta,
+            )
+        else:
+            gm.merge_nodes(a, b)
+        assert misaligned_lists(gm) == []
+    path = tmp_path_factory.mktemp("aligned") / "graph.json"
+
+    gm.save_graph(path)
+    loaded = GraphManager()
+    loaded.load_graph(path)
+
+    assert misaligned_lists(loaded) == []
+    assert per_action_lists(loaded) == per_action_lists(gm)
 
 
 def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path) -> None:
