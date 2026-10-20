@@ -540,7 +540,7 @@ class GraphManager:
             logger.warning("merge_nodes: missing node(s) — keep=%s, remove=%s", keep_id, remove_id)
             return False
 
-        # Falling through is not a harmless no-op: it deletes the node.  See #48.
+        # Falling through is not a harmless no-op: it deletes the node.
         if keep_id == remove_id:
             logger.warning("merge_nodes: refusing to merge node %s into itself", keep_id)
             return False
@@ -654,7 +654,7 @@ class GraphManager:
 
         The edge is dropped with a warning when either endpoint is missing.
         """
-        # networkx would otherwise create the missing endpoint bare.  See #62.
+        # networkx would otherwise create the missing endpoint as a node with no attributes.
         if source not in self.graph or target not in self.graph:
             logger.warning("add_edge: missing node(s) — source=%s, target=%s", source, target)
             return
