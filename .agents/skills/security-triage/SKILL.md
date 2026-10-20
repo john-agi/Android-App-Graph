@@ -17,8 +17,9 @@ needs the network, and its result changes as advisories are published.
    `uv lock --upgrade-package <name>` and commit the lockfile change on its
    own. Never hand-edit `uv.lock`.
 4. No fixed version exists: add the advisory ID to
-   `[tool.uv.audit] ignore-until-fixed` with a comment and a linked issue. A
-   plain `ignore` needs a written justification in the pull request.
+   `[tool.uv.audit] ignore-until-fixed` with a comment that itself states
+   what the advisory affects and why it cannot be fixed yet. A plain `ignore`
+   needs a written justification in the pull request.
 5. On a dependency-changing pull request a red run blocks that pull request. A
    red scheduled or manual run is triaged the same day in its own pull request.
    Never silence it by disabling the workflow, the job or the check.

@@ -1029,6 +1029,31 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
     assert "finish_reason=length, reasoning_tokens=2950" in caplog.text
 
 
+def test_normalize_edge_pairs_each_instruction_with_its_own_observation(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(_truncated_reply(chat_response))
+
+    normalized = vlm.normalize_edge(
+        router_client,
+        ["", "search milk", "search eggs"],
+        target_observations=["unpaired", "milk results", ""],
+        settings=PAGE_DETAIL,
+    )
+
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"]
+    assert prompt.endswith(
+        "Instructions to normalize:\n"
+        '- Instruction: "search milk" → Observation: "milk results"\n'
+        '- Instruction: "search eggs"\n'
+    )
+    assert normalized["instruction_template"] == "search milk"
+    assert normalized["observation_template"] == "milk results"
+
+
 @pytest.mark.parametrize("operation", ["description", "planner"])
 def test_a_truncated_reply_without_a_fallback_raises_at_once(
     operation: str,

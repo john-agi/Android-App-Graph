@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, NoReturn
+from typing import Any, NoReturn, override
 
 import httpx
 import pytest
@@ -17,6 +17,20 @@ from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils.graph_manager import GraphManager
 
 PAGE_DETAIL = ModelSettings("gpt-test")
+_FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
+_PACKAGE_LAUNCH = [
+    "adb",
+    "-s",
+    "test-device",
+    "shell",
+    "monkey",
+    "-p",
+    "com.demo",
+    "-c",
+    "android.intent.category.LAUNCHER",
+    "1",
+]
+_ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
 
 
 @pytest.fixture
@@ -218,7 +232,7 @@ def test_verify_and_merge_nodes_skips_missing_screenshot(
 def test_verify_and_merge_nodes_skips_a_self_pair(
     client: OpenRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression for #48: an auditor naming one node twice used to delete it."""
+    """An auditor naming one node twice used to delete it."""
     graph = _graph_with_nodes(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
     )
@@ -267,15 +281,15 @@ class FakeController:
         self.actions.append((action, save_flag))
 
 
-class _FakeCompletedProcess:
-    """The subset of subprocess.CompletedProcess the auditor reads."""
+class _LoggingController(FakeController):
+    def __init__(self, package_name: str, log: list[object]) -> None:
+        super().__init__(package_name)
+        self._log = log
 
-    returncode = 0
-    stdout = ""
-
-
-def _fake_run(*_args: object, **_kwargs: object) -> _FakeCompletedProcess:
-    return _FakeCompletedProcess()
+    @override
+    def exe_action(self, action: dict[str, Any], save_flag: bool = True) -> None:
+        super().exe_action(action, save_flag)
+        self._log.append(action)
 
 
 def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
@@ -313,10 +327,11 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
 
 
 @pytest.fixture
-def _fake_device(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
+def _fake_device(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float], device_log: list[object]
+) -> None:
     """Silence every side effect re_explore_issues has outside the graph."""
-    del no_sleep  # requested for its side effect: no_sleep patches time.sleep
-    monkeypatch.setattr(audit.subprocess, "run", _fake_run)
+    del no_sleep, device_log  # requested for their side effects on time.sleep and subprocess.run
     monkeypatch.setattr(audit, "plan_next_action", lambda **_kwargs: ("tap the first button", None))
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "end"}, ""))
 
@@ -415,6 +430,46 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    ("launch_activity", "launch"), [(None, _PACKAGE_LAUNCH), ("com.demo/.Main", _ACTIVITY_LAUNCH)]
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_issues_restarts_the_app_before_each_replay(
+    launch_activity: str | None,
+    launch: list[str],
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    """The launcher intent used to resume the screen the previous issue ended on."""
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
+
+    results = audit.re_explore_issues(
+        graph,
+        [
+            {"type": "retry_edge", "source_node": "s1_detail", "target_node": "s0_home"},
+            {"type": "explore_node", "node": "s1_detail", "expected_pages": ["Settings"]},
+        ],
+        _LoggingController("com.demo", device_log),
+        "demo",
+        "com.demo",
+        tmp_path / "demo_audited.json",
+        client,
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
+        steps_per_issue=1,
+        launch_activity=launch_activity,
+    )
+
+    assert [r["status"] for r in results] == ["retried", "explored"]
+    replay = {"action": "tap", "coordinate": [10, 20]}
+    explore_step = {"action": "back"}
+    assert device_log == [_FORCE_STOP, launch, replay, explore_step] * 2
 
 
 @pytest.mark.parametrize("re_explore", [False, True])

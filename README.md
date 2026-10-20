@@ -74,15 +74,14 @@ graph TD;
     adapters --> pay["android_app_graph.payloads"];
     adapters --> utils["android_app_graph.utils"];
     adapters --> vlm["android_app_graph.utils.vlm_utils"];
-    cmd["android_app_graph.commands"] --> cli["android_app_graph.cli"];
-    cmd --> dev;
+    cmd["android_app_graph.commands"] --> dev;
     cmd --> ec;
     cmd --> gf;
     cmd --> utils;
     cmd --> gm["android_app_graph.utils.graph_manager"];
     cmd --> logging["android_app_graph.utils.logging"];
     cmd --> vlm;
-    cli --> dev;
+    cli["android_app_graph.cli"] --> dev;
     cli --> kobe;
     cli --> logging;
     ec --> gf;
@@ -427,6 +426,16 @@ For long runs, use the auto-resume wrapper:
 ./scripts/run_explore.sh -c configs/explore.yaml
 ```
 
+### Replaying to a node
+
+`--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
+steps and each issue that `app-graph-audit --re-explore` works on reach their node
+by replaying recorded actions from the app's start screen. Before every replay the
+app is force-stopped (`adb shell am force-stop <package_name>`) and launched again,
+through its `launch_activity` when the config sets one. Whatever the app holds only
+in memory, such as an unsaved form, is lost at each replay; data it has stored
+survives.
+
 ## Visualize or Audit a Graph
 
 Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra
@@ -719,6 +728,15 @@ runtime to another interactive system. It wraps the Android-App-Graph AITK trans
 maps its output into Android World's `JSONAction` format. For other tools, write
 an equivalent adapter that maps graph-guided decisions into that tool's action
 space.
+
+### Graph edges
+
+Each edge in a graph file lists its actions in `actions`. The `num_steps`,
+`instructions`, `target_observations` and `schema_deltas` lists hold one entry
+per action, in the same order, so entry *i* of each describes `actions[i]`. An
+action that recorded no instruction or observation has `""` in that list, and an
+action that recorded no state change has `null` in `schema_deltas`; only
+self-loop actions record one. Skip those entries when you read an edge.
 
 ## Development
 
