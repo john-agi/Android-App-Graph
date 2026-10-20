@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
+# The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
+EXTERNAL_WEB_NODE = "ext_web"
 
 
 class _IdentifyCacheEntry(NamedTuple):
@@ -220,7 +222,8 @@ class GraphManager:
         screen reached via different Android activities is merged into one node.
 
         Returns:
-            The node ID (str) for this state.
+            The node ID (str) for this state, or ``EXTERNAL_WEB_NODE`` for any web
+            content from outside the app.
         """
         screen_hash = hash(screenshot_b64)
         cached = self._last_identify_cache
@@ -251,7 +254,7 @@ class GraphManager:
                         same_pkg_keys.append(k)
 
         client, page_detail = self._require_page_detail()
-        page_description, detail_snapshot, elements = describe_page_and_state(
+        page_description, detail_snapshot, elements, is_external_web = describe_page_and_state(
             client,
             screenshot_b64,
             existing_nodes=same_pkg_descriptions or None,
@@ -264,6 +267,13 @@ class GraphManager:
             list(detail_snapshot.keys()) if detail_snapshot else "[]",
             len(elements),
         )
+        if is_external_web:
+            # Returning before the cache update leaves the cache on the screen behind the
+            # page, where a back press usually lands.
+            self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+            node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
+            node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+            return EXTERNAL_WEB_NODE
 
         description_embedding = self._embed(page_description)
 
@@ -505,41 +515,22 @@ class GraphManager:
         elements = self.graph.nodes[node_id].get("interactable_elements", [])
         return [e for e in elements if not e.get("explored", False)]
 
-    def mark_element_explored(self, node_id: str, instruction: str) -> None:
-        """Mark the element that best matches the instruction as explored.
-
-        Uses simple substring matching between the instruction and element
-        descriptions.  The best-matching element (most words in common) is
-        marked explored=True.
-        """
-        if node_id not in self.graph:
+    def mark_element_explored(self, node_id: str, element: int | None) -> None:
+        """``element`` is the 1-based number the planner saw in ``get_unexplored_elements``."""
+        if element is None:
             return
-        elements = self.graph.nodes[node_id].get("interactable_elements", [])
-        if not elements:
-            return
-
-        instr_lower = instruction.lower()
-        best_idx = -1
-        best_score = 0
-        for idx, elem in enumerate(elements):
-            if elem.get("explored", False):
-                continue
-            desc_words = elem.get("description", "").lower().split()
-            if not desc_words:
-                continue
-            score = sum(1 for w in desc_words if w in instr_lower)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        if best_idx >= 0 and best_score > 0:
-            elements[best_idx]["explored"] = True
-            logger.info(
-                "Element explored on %s: '%s' (matched by instruction: '%s')",
+        unexplored = self.get_unexplored_elements(node_id)
+        if not 1 <= element <= len(unexplored):
+            logger.warning(
+                "Element %d is not among the %d unexplored element(s) on %s; marking none",
+                element,
+                len(unexplored),
                 node_id,
-                elements[best_idx]["description"],
-                instruction,
             )
+            return
+        named = unexplored[element - 1]
+        named["explored"] = True
+        logger.info("Element explored on %s: '%s'", node_id, named.get("description", ""))
 
     def merge_nodes(self, keep_id: str, remove_id: str) -> bool:
         """Merge *remove_id* into *keep_id*, rewiring all edges.

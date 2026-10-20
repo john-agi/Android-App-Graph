@@ -49,7 +49,7 @@ from android_app_graph.utils import (
     resolve_audit_timeout,
     resolve_model_settings,
 )
-from android_app_graph.utils.graph_manager import GraphManager
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
@@ -312,7 +312,7 @@ def re_explore_issues(
             keyboard_hint = soft_keyboard_hint()
             input_status = keyboard_status(keyboard_hint)
 
-            instruction = plan_next_action(
+            instruction, _planned_element = plan_next_action(
                 client=client,
                 screenshot_b64=screenshot,
                 page_description=page_desc,
@@ -404,6 +404,15 @@ def re_explore_issues(
 
             graph.save_graph(graph_path)
             current_node = new_node
+            if current_node == EXTERNAL_WEB_NODE:
+                logger.warning("Opened an external web page during re-explore, pressing back")
+                controller.exe_action({"action": "back"})
+                time.sleep(1)
+                device_state = controller.get_state()
+                current_node = graph.identify_state(
+                    device_state["activity"],
+                    device_state["screenshot"],
+                )
 
         return step_results
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 from collections.abc import Callable
@@ -12,9 +14,11 @@ import httpx
 import pytest
 from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
+from PIL import Image
 
 from android_app_graph.device import DeviceController
 from android_app_graph.kobe import Kobe
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -31,6 +35,34 @@ _PACKAGE_LAUNCH = [
     "1",
 ]
 _ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
+_TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
+
+
+def _screen(activity: str, color: str) -> dict[str, object]:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+    return {"activity": activity, "screenshot": base64.b64encode(buffer.getvalue()).decode("ascii")}
+
+
+HOME_SCREEN = _screen("com.demo.Home", "white")
+
+
+class _Screens:
+    """A DeviceController that records each action and then shows the next screen, if any."""
+
+    w = 100
+    h = 200
+
+    def __init__(self, *screens: dict[str, object]) -> None:
+        self.config: dict[str, object] = {}
+        self._screens = screens
+        self.actions: list[dict[str, object]] = []
+
+    def get_state(self) -> dict[str, object]:
+        return self._screens[min(len(self.actions), len(self._screens) - 1)]
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        self.actions.append(action)
 
 
 class _Device:
@@ -63,10 +95,9 @@ class _ReplayDevice(_Device):
         self._log.append(action)
 
 
-@pytest.fixture
-def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
+def _explorer(device: DeviceController, tmp_path: Path, router_client: OpenRouter) -> Kobe:
     return Kobe(
-        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
+        device,
         "demo",
         "com.demo",
         logging.getLogger("test"),
@@ -77,17 +108,22 @@ def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe
 
 
 @pytest.fixture
+def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
+    return _explorer(
+        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
+        tmp_path,
+        router_client,
+    )
+
+
+@pytest.fixture
 def replaying_kobe(
     tmp_path: Path, png_screenshot: str, router_client: OpenRouter, device_log: list[object]
 ) -> Kobe:
-    return Kobe(
+    return _explorer(
         _ReplayDevice({"activity": "com.demo.Home", "screenshot": png_screenshot}, device_log),
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
-        client=router_client,
+        tmp_path,
+        router_client,
     )
 
 
@@ -259,6 +295,131 @@ def test_exploration_wait_recovery_respects_step_limit(
     assert no_sleep == [1, 1]
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A "privacy policy" keyword in a description used to make the app's own page external."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    about = _screen("com.demo.SettingsActivity", "gray")
+    device = _Screens(HOME_SCREEN, about)
+    explorer = _explorer(device, tmp_path, router_client)
+    orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":null,"instruction":"Tap the About row"}'),
+            chat_response(content=_TAP_REPLY),
+            chat_response(
+                content='{"page_description":"About page with privacy policy link",'
+                '"is_external_web":false}'
+            ),
+            httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert [action["action"] for action in device.actions] == ["tap"]
+    assert list(explorer.graph.graph.edges) == [
+        ("s0_home", "s1_about_page_with_privacy_policy_link")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("action_reply", "executed", "recorded"),
+    [
+        (_TAP_REPLY, "tap", "Tap the privacy policy link"),
+        ('{"action":"end"}', "back", "Press back"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
+    action_reply: str,
+    executed: str,
+    recorded: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    browser = _screen("com.demo.ArticleActivity", "blue")
+    device = _Screens(HOME_SCREEN, browser, HOME_SCREEN)
+    explorer = _explorer(device, tmp_path, router_client)
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
+            chat_response(content=action_reply),
+            chat_response(content='{"page_description":"news article","is_external_web":true}'),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert set(explorer.graph.graph) == {"s0_home", EXTERNAL_WEB_NODE}
+    assert list(explorer.graph.graph.edges) == [("s0_home", EXTERNAL_WEB_NODE)]
+    assert explorer.graph.graph.edges["s0_home", EXTERNAL_WEB_NODE]["instructions"] == [recorded]
+    assert [action["action"] for action in device.actions] == [executed, "back"]
+
+
+@pytest.mark.parametrize(
+    ("element", "explored", "warned"),
+    [(2, ["Compose FAB"], False), (None, [], False), (3, [], True)],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_marks_exactly_the_element_the_planner_names(
+    element: int | None,
+    explored: list[str],
+    warned: bool,
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tap on the FAB never marks the dark mode toggle, whose "on" is inside "button"."""
+    kobe.graph.graph.add_node(
+        "s0_home",
+        page_description="home",
+        interactable_elements=[
+            {"description": "Turn on dark mode toggle", "position": "top", "explored": False},
+            {"description": "Compose FAB", "position": "bottom right", "explored": False},
+        ],
+    )
+    kobe.graph.graph.add_node("s1_compose", page_description="compose")
+    screens = iter(["s0_home", "s1_compose"])
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: next(screens))
+    monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    instruction = "Tap the floating action button in the bottom right"
+    router_responses.extend(
+        [
+            chat_response(content=json.dumps({"element": element, "instruction": instruction})),
+            chat_response(content="", tool_arguments='{"action":"click","coordinate":[900,900]}'),
+            chat_response(content='{"is_template":false}'),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        kobe.explore(max_steps=1)
+
+    elements = kobe.graph.graph.nodes["s0_home"]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == explored
+    assert ("is not among the 2 unexplored element(s) on s0_home" in caplog.text) is warned
+    assert kobe.graph.graph["s0_home"]["s1_compose"]["instructions"] == [instruction]
+
+
 class _ScriptedDevice:
     w = 100
     h = 200
@@ -287,13 +448,17 @@ def _explore_one_step_the_action_model_ends(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     page = {
         "page_description": "home",
-        "elements": [{"description": "Settings icon", "position": "top right"}],
+        "elements": [
+            {"description": "Search box", "position": "top left"},
+            {"description": "Settings icon", "position": "top right"},
+        ],
     }
+    plan = {"element": 2, "instruction": "Tap the Settings icon"}
     router_responses.extend(
         [
             chat_response(content=json.dumps(page)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap the Settings icon"),
+            chat_response(content=json.dumps(plan)),
             chat_response(content='{"action":"end"}'),
         ]
     )
@@ -324,8 +489,8 @@ def test_an_action_model_end_is_recorded_as_the_back_press_it_executes(
     [(source, _target, edge)] = kobe.graph.graph.edges(data=True)
     assert edge["actions"] == [[{"action": "back"}]]
     assert edge["instructions"] == ["Press back"]
-    [element] = kobe.graph.graph.nodes[source]["interactable_elements"]
-    assert element["explored"] is True
+    elements = kobe.graph.graph.nodes[source]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == ["Settings icon"]
     assert '"Tap the Settings icon"' in caplog.text
 
 
@@ -394,7 +559,7 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
         [
             chat_response(content=json.dumps(search_page)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap the Search button"),
+            chat_response(content='{"element":1,"instruction":"Tap the Search button"}'),
             chat_response(content="", tool_arguments='{"action":"click","coordinate":[500,500]}'),
             chat_response(content='{"page_description":"Chat search results"}'),
             httpx.Response(200, json=embedding_body),
@@ -496,7 +661,7 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
         [
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap Take photo"),
+            chat_response(content='{"element":null,"instruction":"Tap Take photo"}'),
             chat_response(content='{"action":"click","coordinate":[500,500]}'),
             chat_response(content='{"page_description":"camera permission dialog"}'),
             httpx.Response(200, json=embedding_body),

@@ -267,6 +267,7 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
     "merge": ("node_merge_audit", True),
     "audit": ("graph_audit", True),
     "target": ("exploration_target", True),
+    "planner": ("next_action_plan", True),
 }
 
 
@@ -281,7 +282,7 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
                 '{"page_description":"home","state":{"tab":"all"},'
                 '"elements":[{"description":"Search","position":"top"}]}'
             ),
-            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}]),
+            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}], False),
         ),
         ("verify", "node_verify", "openai/gpt-6.1-sol", '{"same":true}', {"same": True}),
         (
@@ -310,8 +311,8 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
             "planner",
             "instruction",
             "openai/gpt-6.1-sol",
-            '```json\n{"instruction":"Tap Search"}\n```',
-            "Tap Search",
+            '```json\n{"element":null,"instruction":"Tap Search"}\n```',
+            ("Tap Search", None),
         ),
         (
             "action",
@@ -544,6 +545,27 @@ def test_strict_schemas_close_every_object_and_free_form_ones_keep_their_format(
     assert state["additionalProperties"] == {"type": ["string", "number", "boolean", "null"]}
     examples = schemas["edge_template"]["schema"]["properties"]["examples"]
     assert examples["items"]["properties"]["params"]["additionalProperties"] == {"type": "string"}
+
+
+def test_the_page_description_asks_for_and_reads_the_external_web_flag(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(
+        chat_response(content='{"page_description":"news article","is_external_web":true}')
+    )
+    *_, is_external_web = vlm.describe_page_and_state(
+        router_client, png_screenshot, settings=PAGE_DETAIL
+    )
+    assert is_external_web is True
+    body = json.loads(router_requests[0].content)
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["is_external_web"]["type"] == "boolean"
+    assert "is_external_web" in schema["required"]
+    assert '"is_external_web"' in body["messages"][0]["content"][0]["text"]
 
 
 @pytest.mark.parametrize(
@@ -822,10 +844,9 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
             "summary": "parse error",
         }
     elif operation == "planner":
-        assert (
-            vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
-            == ""
-        )
+        assert vlm.plan_next_action(
+            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+        ) == ("", None)
     else:
         assert vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION) == (
             {"action": "wait", "time": 1},
@@ -917,6 +938,7 @@ def test_a_wrong_vector_count_is_not_re_asked(
         ('{"page_description":"home","state":[]}', TypeError, "page state"),
         ('{"page_description":"home","elements":{}}', TypeError, "page elements"),
         ('{"page_description":"home","elements":[null]}', TypeError, "element description"),
+        ('{"page_description":"home","is_external_web":"yes"}', TypeError, "is_external_web"),
     ],
 )
 def test_a_malformed_page_description_is_re_asked_once_then_raises(
@@ -1085,12 +1107,60 @@ def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_conte
 ) -> None:
     router_responses.append(chat_response(content="Tap", finish_reason="content_filter"))
     with caplog.at_level("WARNING"):
-        assert (
-            vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
-            == "Tap"
-        )
+        assert vlm.plan_next_action(
+            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+        ) == ("Tap", None)
     assert "instruction: the provider's content filter stopped the reply" in caplog.text
     assert len(router_requests) == 1
+
+
+def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_names(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    instruction = "Tap the floating action button in the bottom right"
+    router_responses.append(
+        chat_response(content=json.dumps({"element": 2, "instruction": instruction}))
+    )
+    assert vlm.plan_next_action(
+        router_client,
+        png_screenshot,
+        "home",
+        [],
+        unexplored_elements=[
+            {"description": "Turn on dark mode toggle", "position": "top"},
+            {"description": "Compose FAB", "position": "bottom right"},
+        ],
+        settings=PAGE_DETAIL,
+    ) == (instruction, 2)
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    assert "1. Turn on dark mode toggle (top)\n2. Compose FAB (bottom right)\n" in prompt
+
+
+@pytest.mark.parametrize(
+    ("reply", "instruction"),
+    [
+        ('{"element": null, "instruction": "Type \'stewed beef\'"}', "Type 'stewed beef'"),
+        ('{"element": null, "instruction": "Tap \\"Save\\""}', 'Tap "Save"'),
+        ('"Tap Search"', "Tap Search"),
+        ("'Type 'stewed beef''", "Type 'stewed beef'"),
+    ],
+)
+def test_the_planner_removes_only_quotes_that_wrap_the_whole_instruction(
+    reply: str,
+    instruction: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content=reply))
+    assert vlm.plan_next_action(
+        router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+    ) == (instruction, None)
 
 
 @pytest.mark.parametrize("multipart", [False, True])

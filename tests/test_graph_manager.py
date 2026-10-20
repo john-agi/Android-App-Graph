@@ -27,6 +27,7 @@ from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
+    EXTERNAL_WEB_NODE,
     NORMALIZE_EVERY_N_VISITS,
     GraphManager,
     _merge_elements,
@@ -103,6 +104,7 @@ class FakeVlm:
     descriptions: list[tuple[str, dict[str, Any], list[dict[str, str]]]] = field(
         default_factory=list
     )
+    external_web: set[str] = field(default_factory=set)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
@@ -113,11 +115,12 @@ class FakeVlm:
         existing_nodes: list[str] | None = None,
         existing_keys: list[str] | None = None,
         settings: ModelSettings | None = None,
-    ) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool]:
         call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
         call.update(existing_nodes=existing_nodes, existing_keys=existing_keys)
         self.calls.append(("describe", call))
-        return self.descriptions.pop(0)
+        description, state, elements = self.descriptions.pop(0)
+        return description, state, elements, description in self.external_web
 
     def verify_same_node(
         self,
@@ -291,6 +294,37 @@ def test_identify_state_cache_hit_skips_the_vlm(vlm: FakeVlm) -> None:
 
     assert second == first
     assert vlm.kinds() == ["describe", "embed"]
+
+
+def test_identify_state_reports_external_web_pages_as_one_shared_node(vlm: FakeVlm) -> None:
+    vlm.descriptions.extend([("News article", {"title": "x"}, []), ("Sign-in form", {}, [])])
+    vlm.external_web.update({"News article", "Sign-in form"})
+    gm = make_manager()
+
+    first = gm.identify_state(HOME, SHOT_A)
+    second = gm.identify_state(SETTINGS, SHOT_B)
+
+    assert first == second == EXTERNAL_WEB_NODE
+    assert list(gm.graph) == [EXTERNAL_WEB_NODE]
+    assert gm.get_node(EXTERNAL_WEB_NODE) == {
+        "page_description": "[external web page]",
+        "visit_count": 2,
+    }
+    assert vlm.kinds() == ["describe", "describe"]
+    assert gm.get_start_node() is None
+
+
+def test_identify_state_keeps_the_cached_screen_behind_an_external_web_page(
+    vlm: FakeVlm,
+) -> None:
+    vlm.descriptions.extend([("Home screen", {}, []), ("News article", {}, [])])
+    vlm.external_web.add("News article")
+    gm = make_manager()
+    home = gm.identify_state(HOME, SHOT_A)
+    gm.identify_state(HOME, SHOT_B)
+
+    assert gm.identify_state(HOME, SHOT_A) == home
+    assert vlm.kinds() == ["describe", "embed", "describe"]
 
 
 def test_identify_state_verified_match_merges_into_existing_node(vlm: FakeVlm) -> None:
@@ -635,71 +669,42 @@ def test_get_unexplored_elements_filters_out_explored_ones() -> None:
     assert [e["description"] for e in unexplored] == ["Menu"]
 
 
-def test_mark_element_explored_marks_the_best_word_overlap() -> None:
-    gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home",
-        "Home screen",
-        interactable_elements=[
-            {"description": "settings gear", "explored": False},
-            {"description": "search box", "explored": False},
-        ],
-    )
-
-    gm.mark_element_explored("s0_home", "tap the search box at the top")
-
-    elements = gm.graph.nodes["s0_home"]["interactable_elements"]
-    assert elements[1]["explored"] is True
-    assert elements[0]["explored"] is False
-
-
-def test_mark_element_explored_ignores_already_explored_and_empty_descriptions() -> None:
-    gm = make_manager()
+def _add_home_with_two_unexplored_elements(gm: GraphManager) -> None:
     add_screen(
         gm,
         "s0_home",
         "Home screen",
         interactable_elements=[
             {"description": "search box", "explored": True},
-            {"description": "", "explored": False},
+            {"description": "Turn on dark mode toggle", "explored": False},
+            {"description": "Compose FAB", "explored": False},
         ],
     )
 
-    gm.mark_element_explored("s0_home", "tap the search box")
 
-    assert gm.get_unexplored_elements("s0_home") == [{"description": "", "explored": False}]
-
-
-def test_mark_element_explored_without_overlap_is_a_no_op() -> None:
+def test_mark_element_explored_counts_from_the_first_unexplored_element() -> None:
     gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home",
-        "Home screen",
-        interactable_elements=[{"description": "settings gear", "explored": False}],
-    )
+    _add_home_with_two_unexplored_elements(gm)
 
-    gm.mark_element_explored("s0_home", "swipe up")
+    gm.mark_element_explored("s0_home", 2)
 
     assert gm.get_unexplored_elements("s0_home") == [
-        {"description": "settings gear", "explored": False}
+        {"description": "Turn on dark mode toggle", "explored": False}
     ]
 
 
-def test_mark_element_explored_on_a_missing_node_is_a_no_op() -> None:
+@pytest.mark.parametrize("element", [0, 3, -1])
+def test_mark_element_explored_outside_the_unexplored_list_marks_nothing_and_warns(
+    element: int, caplog: pytest.LogCaptureFixture
+) -> None:
     gm = make_manager()
-    gm.mark_element_explored("s9_missing", "tap search")
-    assert gm.graph.number_of_nodes() == 0
+    _add_home_with_two_unexplored_elements(gm)
 
+    with caplog.at_level("WARNING"):
+        gm.mark_element_explored("s0_home", element)
 
-def test_mark_element_explored_on_a_node_without_elements_is_a_no_op() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-
-    gm.mark_element_explored("s0_home", "tap search")
-
-    assert gm.graph.nodes["s0_home"]["interactable_elements"] == []
+    assert len(gm.get_unexplored_elements("s0_home")) == 2
+    assert f"Element {element} is not among the 2 unexplored element(s) on s0_home" in caplog.text
 
 
 def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:

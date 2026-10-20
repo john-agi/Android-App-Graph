@@ -330,7 +330,7 @@ graph of an app where each node is a distinct SCREEN TYPE (template).
 
 {existing_keys_section}
 
-Analyze this screenshot and return a JSON object with exactly three keys:
+Analyze this screenshot and return a JSON object with exactly four keys:
 
 1. "page_description": The screen TYPE in under 10 words. This is a reusable label for the \
 screen template — it must NOT contain any user-specific content (search queries, item names, \
@@ -382,6 +382,11 @@ Element rules:
 - Do NOT include non-interactable text, decorative images, status bar icons, or background areas.
 - Order roughly top-to-bottom, left-to-right as they appear on screen.
 
+4. "is_external_web": true only when this screen shows web content from outside the app, \
+such as a browser or a custom tab that displays an address bar or a URL. The app's own \
+screens are false, including screens it renders in a web view and screens that mention \
+or link to a website, a privacy policy or terms of service.
+
 Return ONLY the JSON object, nothing else.
 Example:
 {{"page_description": "product search results", "state": {{"search_query": "keyboard", "filter_brand": "logitech"}}, \
@@ -392,7 +397,8 @@ Example:
 {{"description": "product result items", "position": "center list"}}, \
 {{"description": "Home tab", "position": "bottom navigation bar"}}, \
 {{"description": "Cart tab", "position": "bottom navigation bar"}}, \
-{{"description": "Account tab", "position": "bottom navigation bar"}}]}}"""
+{{"description": "Account tab", "position": "bottom navigation bar"}}], \
+"is_external_web": false}}"""
 
 NODE_VERIFY_PROMPT = """\
 You are comparing two mobile app screenshots to decide if they are the SAME screen or DIFFERENT screens.
@@ -516,8 +522,13 @@ _PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        "is_external_web": {
+            "type": "boolean",
+            "description": "True only for web content from outside the app, such as a browser "
+            "or custom tab showing an address bar or URL; the app's own web views are false.",
+        },
     },
-    "required": ["page_description", "state", "elements"],
+    "required": ["page_description", "state", "elements", "is_external_web"],
     "additionalProperties": False,
 }
 
@@ -663,10 +674,14 @@ change account settings, or perform any action that has real-world side effects.
 You are ONLY exploring the app's UI structure — navigate and observe, but never \
 commit or submit anything. If a screen requires login/signup to proceed, go back instead.
 
-Reply with ONLY the instruction as a plain text string — a single ATOMIC action. \
-Each instruction = one tap, one type, one swipe, or one back. Never combine steps.
+Reply with ONLY a JSON object with two keys:
+- "element": the number of the element in the list of elements NOT interacted with yet \
+that your instruction acts on, or null when it acts on none of them (for example going \
+back, scrolling, or typing into an already focused field).
+- "instruction": a single ATOMIC action. Each instruction = one tap, one type, one \
+swipe, or one back. Never combine steps.
 
-Examples:
+Example instructions:
 - Tap the "Network & internet" menu item near the top of the settings list
 - Tap the rounded search bar at the top of the screen
 - Type 'stewed beef'
@@ -676,7 +691,8 @@ Examples:
 - Scroll down to reveal more settings
 - Go back to the previous screen
 
-Reply with ONLY the JSON, nothing else."""
+Example reply:
+{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}"""
 
 NEXT_ACTION_SYSTEM_PROMPT = """\
 
@@ -840,7 +856,9 @@ def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
     }
 
 
-def _parse_page_description(text: str) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+def _parse_page_description(
+    text: str,
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     result = json.loads(strip_json_fences(text))
     if not isinstance(result, dict):
         raise TypeError("Expected page description to be a JSON object")
@@ -861,7 +879,10 @@ def _parse_page_description(text: str) -> tuple[str, dict[str, object], list[dic
         if not isinstance(label, str) or not isinstance(position, str):
             raise TypeError("Expected element description and position strings")
         elements.append({"description": label, "position": position})
-    return description, as_object_dict(state), elements
+    is_external_web = payload.get("is_external_web", False)
+    if not isinstance(is_external_web, bool):
+        raise TypeError("Expected is_external_web to be a boolean")
+    return description, as_object_dict(state), elements, is_external_web
 
 
 def describe_page_and_state(
@@ -871,7 +892,7 @@ def describe_page_and_state(
     existing_keys: list[str] | None = None,
     *,
     settings: ModelSettings,
-) -> tuple[str, dict[str, object], list[dict[str, str]]]:
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
     The model always writes its own description based on what it sees. Existing
@@ -883,8 +904,9 @@ def describe_page_and_state(
         existing_keys: State keys already seen across same-package nodes.
 
     Returns:
-        (page_description, state_dict, elements_list)
-        where elements_list is a list of {"description": str, "position": str} dicts.
+        (page_description, state_dict, elements_list, is_external_web)
+        where elements_list is a list of {"description": str, "position": str} dicts
+        and is_external_web is true only for web content from outside the app.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
@@ -933,7 +955,7 @@ def describe_page_and_state(
         }
     ]
 
-    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]]]:
+    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
         resp = _send_chat_once(
             client,
             call_type="page_describe_and_state",
@@ -951,13 +973,13 @@ def describe_page_and_state(
         except (TypeError, ValueError) as exc:
             raise UnusableOutputError("Malformed page description") from exc
 
-    page_description, state, elements = call_with_retry(
+    page_description, state, elements, is_external_web = call_with_retry(
         "[API] page describe and state", request_description
     )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
-    return page_description, state, elements
+    return page_description, state, elements, is_external_web
 
 
 def verify_same_node(
@@ -1689,6 +1711,31 @@ def _tool_call_to_aitk(
     raise ValueError(f"Unknown action: {action}")
 
 
+def _strip_wrapping_quotes(text: str) -> str:
+    """Unwrap a reply quoted as a whole; a quote at one end belongs to quoted screen text."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+_NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "element": {
+            "type": ["integer", "null"],
+            "description": "The number of the listed unexplored element the instruction acts "
+            "on, or null when it acts on none of them.",
+        },
+        "instruction": {
+            "type": "string",
+            "description": "One atomic action: one tap, one type, one swipe, or one back.",
+        },
+    },
+    "required": ["element", "instruction"],
+    "additionalProperties": False,
+}
+
+
 def plan_next_action(
     client: OpenRouter,
     screenshot_b64: str,
@@ -1699,7 +1746,7 @@ def plan_next_action(
     input_status: str = "unknown from screenshot",
     *,
     settings: ModelSettings,
-) -> str:
+) -> tuple[str, int | None]:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
     This separates the "what" (exploration strategy) from the "how" (coordinate grounding).
@@ -1712,7 +1759,8 @@ def plan_next_action(
         input_status: Runtime hint about whether a text field/keyboard is active.
 
     Returns:
-        A plain text instruction string.
+        ``(instruction, element)``, where ``element`` is the number of the listed
+        unexplored element the instruction acts on, or None.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
 
@@ -1735,10 +1783,10 @@ def plan_next_action(
 
     if unexplored_elements:
         elem_lines = []
-        for elem in unexplored_elements:
+        for number, elem in enumerate(unexplored_elements, start=1):
             desc = elem.get("description", "?")
             pos = elem.get("position", "?")
-            elem_lines.append(f"- {desc} ({pos})")
+            elem_lines.append(f"{number}. {desc} ({pos})")
         unexplored_section = (
             "Elements on this screen that have NOT been interacted with yet:\n"
             + "\n".join(elem_lines)
@@ -1764,24 +1812,24 @@ def plan_next_action(
             ],
         }
     ]
-    resp = send_chat(client, call_type="instruction", settings=settings, messages=messages)
+    resp = send_chat(
+        client,
+        call_type="instruction",
+        settings=settings,
+        messages=messages,
+        response_format=_structured_output("next_action_plan", _NEXT_ACTION_PLAN_SCHEMA),
+        plugins=[{"id": "response-healing"}],
+    )
     raw = message_text(resp)
-
-    # The planner now returns plain text; try to extract from JSON if it still outputs one
-    raw_clean = strip_json_fences(raw)
     try:
-        result = json.loads(raw_clean)
-        if isinstance(result, dict):
-            instruction = as_str(result.get("instruction"), raw)
-        else:
-            instruction = str(result)
+        plan = as_object_dict(json.loads(strip_json_fences(raw)))
     except json.JSONDecodeError:
-        instruction = raw
+        plan = {}
 
-    instruction = instruction.strip().strip('"').strip("'")
-
-    logger.info("Planned instruction: %s", instruction)
-    return instruction
+    instruction = _strip_wrapping_quotes(as_str(plan.get("instruction"), raw).strip())
+    element = as_int(plan.get("element"))
+    logger.info("Planned instruction: %s (element: %s)", instruction, element)
+    return instruction, element
 
 
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:

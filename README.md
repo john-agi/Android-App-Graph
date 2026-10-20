@@ -292,8 +292,9 @@ or an exploration plan raises. A reply stopped by the provider's content filter
 handled like any other empty or partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
-edge normalization, both audits and the coverage checkpoint's target choice) ask
-for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
+edge normalization, both audits and the coverage checkpoint's target choice) and
+the exploration planner, which names the unexplored element its instruction acts
+on, ask for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
 a JSON schema with a description of every property, plus OpenRouter's
 [response-healing](https://openrouter.ai/docs/guides/features/plugins/response-healing)
 plugin. The schemas are strict except for screen descriptions and edge templates,
@@ -441,6 +442,16 @@ app is force-stopped (`adb shell am force-stop <package_name>`) and launched aga
 through its `launch_activity` when the config sets one. Whatever the app holds only
 in memory, such as an unsaved form, is lost at each replay; data it has stored
 survives.
+
+### External apps and web pages
+
+A step that opens another app records an edge to an `ext_<package>` node. A step
+that opens web content from outside the app, such as a browser or custom tab
+showing an address bar or URL, records an edge to the single shared `ext_web`
+node. Either way the explorer then presses back. The screen-description model
+decides what counts as external web, so the app's own screens get regular nodes
+even when they run in a web view or mention a privacy policy.
+`app-graph-audit --re-explore` records external web pages the same way.
 
 ## Visualize or Audit a Graph
 
