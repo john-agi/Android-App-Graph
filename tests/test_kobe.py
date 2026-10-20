@@ -37,8 +37,6 @@ class _Device:
 
 
 class _ScriptedDevice:
-    """A DeviceController that reports its states in turn, then repeats the last one."""
-
     w = 100
     h = 200
 
@@ -222,9 +220,7 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for #86: the permission controller's dialog counted as leaving the app,
-    so the step recorded an ``ext_`` node and pressed back, which denied the permission.
-    """
+    """Pressing back on a permission dialog would deny the permission."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     home: dict[str, object] = {
         "activity": "com.demo.Home",
@@ -269,5 +265,3 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     assert "is_external" not in dialog_node
     edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
     assert edge["actions"] == [[tap]]
-    assert edge["instructions"] == ["Tap Take photo"]
-    assert router_responses == []

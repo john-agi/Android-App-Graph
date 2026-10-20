@@ -5,7 +5,6 @@ from __future__ import annotations
 import builtins
 import json
 import logging
-import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -122,94 +121,22 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     monkeypatch.setitem(sys.modules, avd_module.__name__, avd_module)
     monkeypatch.setattr(cli, "Kobe", Explorer)
     monkeypatch.setattr(cli, "check_avd", check_avd)
-    monkeypatch.setattr(cli, "grant_runtime_permissions", lambda *_args: events.append("grant"))
+    grants: list[tuple[str, str]] = []
+
+    def grant(udid: str, package_name: str) -> None:
+        grants.append((udid, package_name))
+        events.append("grant")
+
+    monkeypatch.setattr(cli, "grant_runtime_permissions", grant)
     monkeypatch.setattr(cli, "launch_app", lambda *_args: events.append("launch"))
     monkeypatch.setattr(
         sys, "argv", ["app-graph", "-c", str(config), "--max-steps", "3", "--resume-from", "auto"]
     )
     main()
     assert events == ["avd", "device", *["terminate", "grant", "launch", "explore", "save"] * 2]
+    assert grants == [("emulator-5554", "com.demo"), ("emulator-5554", "com.other")]
     assert opened_clients == clients[:1] == clients[1:]
     assert opened_clients[0].sdk_configuration.client is None
-
-
-@pytest.mark.usefixtures("no_sleep", "opened_clients", "model_environment")
-def test_main_grants_each_requested_permission_before_exploring(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-    dumpsys_package: str,
-    requested_permissions: list[str],
-) -> None:
-    """#86: a permission granted up front never prompts, so exploration cannot deny it by
-    dismissing the prompt. A refused grant is logged and exploration still runs.
-    """
-    config = tmp_path / "explore.yaml"
-    config.write_text(
-        json.dumps(
-            {
-                "device": {"udid": "emulator-5554"},
-                "apps": [{"name": "demo", "package_name": "com.example.app"}],
-                "experiment": {"graph_dir": str(tmp_path / "graphs")},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    events: list[object] = []
-
-    def adb(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        events.append(args)
-        if "dumpsys" in args:
-            return subprocess.CompletedProcess(args, 0, stdout=dumpsys_package, stderr="")
-        if args[-1] == "android.permission.INTERNET":
-            return subprocess.CompletedProcess(args, 255, stdout="", stderr="not changeable")
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
-    class Device:
-        def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
-            pass
-
-        def _terminate_all_apps(self) -> None:
-            pass
-
-    class Explorer:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def explore(self, **_kwargs: object) -> None:
-            events.append("explore")
-
-        def save_graph(self) -> None:
-            pass
-
-    adb_module = ModuleType("aitk.utils.adb_controller")
-    avd_module = ModuleType("aitk.utils.avd_manager")
-    monkeypatch.setattr(adb_module, "ADBController", Device, raising=False)
-    monkeypatch.setattr(avd_module, "AVDManager", lambda _logger: object(), raising=False)
-    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
-    monkeypatch.setitem(sys.modules, avd_module.__name__, avd_module)
-    monkeypatch.setattr(subprocess, "run", adb)
-    monkeypatch.setattr(cli, "setup_logging", lambda **_kwargs: None)
-    monkeypatch.setattr(cli, "check_avd", lambda *_args: None)
-    monkeypatch.setattr(cli, "launch_app", lambda *_args: events.append("launch"))
-    monkeypatch.setattr(cli, "Kobe", Explorer)
-    monkeypatch.setattr(sys, "argv", ["app-graph", "-c", str(config)])
-
-    with caplog.at_level(logging.INFO, logger="android_app_graph.device"):
-        main()
-
-    shell = ["adb", "-s", "emulator-5554", "shell"]
-    assert events == [
-        [*shell, "dumpsys", "package", "com.example.app"],
-        *([*shell, "pm", "grant", "com.example.app", name] for name in requested_permissions),
-        "launch",
-        "explore",
-    ]
-    assert (
-        "Could not grant android.permission.INTERNET to com.example.app: not changeable"
-        in caplog.messages
-    )
 
 
 def test_explorer_reports_all_missing_models_before_importing_device_tools(
@@ -263,7 +190,6 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     if key is not None:
         monkeypatch.setenv("OPENROUTER_API_KEY", key)
     monkeypatch.setattr(cli, "check_avd", touched)
-    monkeypatch.setattr(cli, "grant_runtime_permissions", touched)
     monkeypatch.setattr(cli, "launch_app", touched)
     monkeypatch.setattr(cli, "Kobe", touched)
     for name, attribute in (

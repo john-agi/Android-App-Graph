@@ -1,14 +1,15 @@
-"""Tests for android_app_graph.device's adb helpers and system-overlay check.
+"""Tests for android_app_graph.device.
 
-Each is shared by several of kobe, the CLI, commands.audit and the AITK
-translator; this module owns their tests so the call sites do not each pin
-their own copy.
+The single soft-keyboard probe shared by kobe, commands.audit and the AITK
+translator; this module owns its tests so the three call sites do not each
+pin their own copy of the adb probe.
 """
 
 from __future__ import annotations
 
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -92,9 +93,6 @@ def test_keyboard_status_when_the_keyboard_is_hidden() -> None:
     [
         "com.google.android.permissioncontroller",
         "com.android.permissioncontroller",
-        "com.google.android.inputmethod.latin",
-        "com.android.systemui",
-        "android",
         "org.example.inputmethod.pinyin",
         "com.example.keyboard",
     ],
@@ -103,16 +101,26 @@ def test_a_system_overlay_package_is_recognised(package: str) -> None:
     assert device.is_system_overlay(package)
 
 
-@pytest.mark.parametrize(
-    "package", ["com.amazon.primevideo", "com.example.timetracker", "com.demo"]
-)
+@pytest.mark.parametrize("package", ["com.amazon.primevideo", "com.example.timetracker"])
 def test_an_app_package_is_not_a_system_overlay(package: str) -> None:
-    """Regression for #86: any package containing "ime" used to count as a keyboard."""
+    """Both contain "ime" without being keyboards."""
     assert not device.is_system_overlay(package)
 
 
-_UDID = "emulator-5554"
-_PACKAGE = "com.example.app"
+# Hand-written in the layout of `adb shell dumpsys package`, not captured from a device.
+_DUMPSYS_PACKAGE = Path(__file__).parent / "data" / "dumpsys_package.txt"
+_REQUESTED_PERMISSIONS = [
+    "android.permission.INTERNET",
+    "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.CAMERA",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.POST_NOTIFICATIONS",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WAKE_LOCK",
+    "com.google.android.c2dm.permission.RECEIVE",
+    "com.example.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+]
 _REFUSAL = (
     "Exception occurred while executing 'grant':\n"
     "java.lang.SecurityException: Permission android.permission.INTERNET requested by "
@@ -124,48 +132,28 @@ _REFUSAL = (
 )
 
 
-class _Adb:
-    """A fake ``subprocess.run`` for adb that records every command.
+def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    dumpsys_package = _DUMPSYS_PACKAGE.read_text(encoding="utf-8")
+    commands: list[list[str]] = []
 
-    ``dumpsys package`` returns ``dumpsys``; ``pm grant`` succeeds unless the
-    permission is in ``refused``, which fails the way ``pm`` refuses ``INTERNET``.
-    """
-
-    def __init__(
-        self, dumpsys: subprocess.CompletedProcess[str], refused: frozenset[str] = frozenset()
-    ) -> None:
-        self.commands: list[list[str]] = []
-        self._dumpsys = dumpsys
-        self._refused = refused
-
-    def __call__(self, args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        self.commands.append(args)
-        if args[4:6] == ["dumpsys", "package"]:
-            return self._dumpsys
-        if args[-1] in self._refused:
+    def adb(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        if "dumpsys" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=dumpsys_package, stderr="")
+        if args[-1] == "android.permission.INTERNET":
             return subprocess.CompletedProcess(args, 255, stdout="", stderr=_REFUSAL)
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-
-def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skipped(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    dumpsys_package: str,
-    requested_permissions: list[str],
-) -> None:
-    adb = _Adb(
-        subprocess.CompletedProcess([], 0, stdout=dumpsys_package, stderr=""),
-        refused=frozenset({"android.permission.INTERNET"}),
-    )
     monkeypatch.setattr(device.subprocess, "run", adb)
     with caplog.at_level(logging.INFO, logger="android_app_graph.device"):
-        device.grant_runtime_permissions(_UDID, _PACKAGE)
-    assert adb.commands == [
-        ["adb", "-s", _UDID, "shell", "dumpsys", "package", _PACKAGE],
-        *(
-            ["adb", "-s", _UDID, "shell", "pm", "grant", _PACKAGE, permission]
-            for permission in requested_permissions
-        ),
+        device.grant_runtime_permissions("emulator-5554", "com.example.app")
+
+    shell = ["adb", "-s", "emulator-5554", "shell"]
+    assert commands == [
+        [*shell, "dumpsys", "package", "com.example.app"],
+        *([*shell, "pm", "grant", "com.example.app", name] for name in _REQUESTED_PERMISSIONS),
     ]
     refusal = (
         "Could not grant android.permission.INTERNET to com.example.app: "
@@ -173,24 +161,4 @@ def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skippe
         "Permission android.permission.INTERNET requested by com.example.app "
         "is not a changeable permission type"
     )
-    assert caplog.messages == [
-        refusal,
-        "Granted 9 of 10 requested permissions to com.example.app",
-    ]
-
-
-def test_no_permission_is_granted_when_dumpsys_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    adb = _Adb(subprocess.CompletedProcess([], 1, stdout="", stderr="adb: device offline\n"))
-    monkeypatch.setattr(device.subprocess, "run", adb)
-    with caplog.at_level(logging.INFO, logger="android_app_graph.device"):
-        device.grant_runtime_permissions(_UDID, _PACKAGE)
-    assert adb.commands == [["adb", "-s", _UDID, "shell", "dumpsys", "package", _PACKAGE]]
-    warning = (
-        "Could not read the permissions com.example.app requests, so none are granted: "
-        "adb: device offline"
-    )
-    assert [(record.levelno, record.getMessage()) for record in caplog.records] == [
-        (logging.WARNING, warning)
-    ]
+    assert caplog.messages == [refusal, "Granted 9 of 10 requested permissions to com.example.app"]

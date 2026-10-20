@@ -78,56 +78,47 @@ def keyboard_status(hint: str) -> str:
 
 _SYSTEM_OVERLAY_PACKAGES = frozenset(
     {
-        "com.google.android.inputmethod.latin",  # Gboard
-        "com.android.inputmethod.latin",  # AOSP keyboard
-        "com.samsung.android.honeyboard",  # Samsung keyboard
-        "com.swiftkey.swiftkey",  # SwiftKey
-        "com.touchtype.swiftkey",  # SwiftKey (alt)
-        "com.android.systemui",  # Status bar, notifications
-        "com.android.permissioncontroller",  # Permission dialogs
-        "com.google.android.permissioncontroller",  # Permission dialogs (Google)
-        "com.android.packageinstaller",  # Install prompts
-        "android",  # System dialogs
+        "com.google.android.inputmethod.latin",
+        "com.android.inputmethod.latin",
+        "com.samsung.android.honeyboard",
+        "com.swiftkey.swiftkey",
+        "com.touchtype.swiftkey",
+        "com.android.systemui",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "android",
     }
 )
 
 
 def is_system_overlay(package: str) -> bool:
-    """Return whether ``package`` is a keyboard, permission prompt or system dialog.
+    """Return whether ``package`` is a keyboard, the status bar or a system dialog.
 
     These take focus on top of the app without navigating away from it, so the
-    explorer records their screens as part of the app instead of leaving it.
+    explorer records their screens, such as a permission prompt, as part of the app.
     """
     if package in _SYSTEM_OVERLAY_PACKAGES:
         return True
-    # Input methods missing from the list usually say so in their package name.
     lower = package.lower()
     return "inputmethod" in lower or "keyboard" in lower
 
 
 def grant_runtime_permissions(udid: str, package_name: str) -> None:
-    """Grant ``package_name`` every permission it requests, before it is explored.
+    """Grant ``package_name`` every permission it requests.
 
     A permission prompt that appears during exploration would be dismissed, which
     denies the permission and leaves the feature behind it unexplored. ``pm grant``
-    refuses permissions that are not runtime permissions, such as ``INTERNET``;
-    each refusal is logged and skipped.
+    refuses permissions that are not runtime permissions, such as ``INTERNET``, so
+    a refusal is only logged.
     """
     shell = ["adb", "-s", udid, "shell"]
     dumpsys = subprocess.run(
         [*shell, "dumpsys", "package", package_name],
         capture_output=True,
         text=True,
-        check=False,
+        check=True,
     )
-    if dumpsys.returncode != 0:
-        logger.warning(
-            "Could not read the permissions %s requests, so none are granted: %s",
-            package_name,
-            _adb_error(dumpsys),
-        )
-        return
-
     permissions = _requested_permissions(dumpsys.stdout)
     granted = 0
     for permission in permissions:
@@ -147,10 +138,8 @@ def grant_runtime_permissions(udid: str, package_name: str) -> None:
 
 
 def _requested_permissions(dumpsys_output: str) -> list[str]:
-    """Return the permissions listed under ``requested permissions:`` in ``dumpsys package``.
-
-    Entries are indented below the header and may carry a suffix such as
-    ``: restricted=true``; the first line indented no deeper ends the section.
+    """Return the entries under ``requested permissions:`` in ``dumpsys package`` output,
+    without suffixes such as ``: restricted=true``.
     """
     permissions: list[str] = []
     section_indent: int | None = None
@@ -167,6 +156,6 @@ def _requested_permissions(dumpsys_output: str) -> list[str]:
 
 
 def _adb_error(result: subprocess.CompletedProcess[str]) -> str:
-    """Return adb's error output on one line, without Java stack frames."""
+    """Return adb's error output on one line, without the Java stack frames ``pm`` prints."""
     lines = (line.strip() for line in (result.stderr or result.stdout).splitlines())
     return " ".join(line for line in lines if line and not line.startswith("at "))

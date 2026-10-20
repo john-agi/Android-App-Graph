@@ -421,9 +421,6 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
 def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression for #86: the permission controller's dialog counted as leaving the app,
-    so re-exploration pressed back, which denied the permission.
-    """
     graph, _graph_path = _two_node_graph(tmp_path)
     graph.graph.add_node("s2_camera_permission", page_description="Camera permission dialog")
     reached = iter(["s1_detail", "s2_camera_permission"])
@@ -525,7 +522,6 @@ def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
     adb_module = ModuleType("aitk.utils.adb_controller")
     monkeypatch.setattr(adb_module, "ADBController", touched, raising=False)
     monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
-    monkeypatch.setattr(audit, "grant_runtime_permissions", touched)
     monkeypatch.setattr(audit, "launch_app", touched)
 
 
