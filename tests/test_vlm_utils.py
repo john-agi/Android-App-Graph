@@ -282,7 +282,7 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
                 '{"page_description":"home","state":{"tab":"all"},'
                 '"elements":[{"description":"Search","position":"top"}]}'
             ),
-            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}]),
+            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}], False),
         ),
         ("verify", "node_verify", "openai/gpt-6.1-sol", '{"same":true}', {"same": True}),
         (
@@ -545,6 +545,27 @@ def test_strict_schemas_close_every_object_and_free_form_ones_keep_their_format(
     assert state["additionalProperties"] == {"type": ["string", "number", "boolean", "null"]}
     examples = schemas["edge_template"]["schema"]["properties"]["examples"]
     assert examples["items"]["properties"]["params"]["additionalProperties"] == {"type": "string"}
+
+
+def test_the_page_description_asks_for_and_reads_the_external_web_flag(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(
+        chat_response(content='{"page_description":"news article","is_external_web":true}')
+    )
+    *_, is_external_web = vlm.describe_page_and_state(
+        router_client, png_screenshot, settings=PAGE_DETAIL
+    )
+    assert is_external_web is True
+    body = json.loads(router_requests[0].content)
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["is_external_web"]["type"] == "boolean"
+    assert "is_external_web" in schema["required"]
+    assert '"is_external_web"' in body["messages"][0]["content"][0]["text"]
 
 
 @pytest.mark.parametrize(
@@ -917,6 +938,7 @@ def test_a_wrong_vector_count_is_not_re_asked(
         ('{"page_description":"home","state":[]}', TypeError, "page state"),
         ('{"page_description":"home","elements":{}}', TypeError, "page elements"),
         ('{"page_description":"home","elements":[null]}', TypeError, "element description"),
+        ('{"page_description":"home","is_external_web":"yes"}', TypeError, "is_external_web"),
     ],
 )
 def test_a_malformed_page_description_is_re_asked_once_then_raises(

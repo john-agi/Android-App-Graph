@@ -17,7 +17,7 @@ from openrouter import OpenRouter
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
 from android_app_graph.utils import ModelSettings, open_client
-from android_app_graph.utils.graph_manager import GraphManager
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
 
 PAGE_DETAIL = ModelSettings("gpt-test")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -446,6 +446,46 @@ def test_re_explore_issues_skips_unreachable_nodes(
 
     assert [r["status"] for r in results] == ["skipped", "skipped"]
     assert {r["reason"] for r in results} == {"unreachable"}
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph, graph_path = _two_node_graph(tmp_path)
+    # identify_state is faked below, so add the node it would create.
+    graph.graph.add_node(EXTERNAL_WEB_NODE)
+    identified = iter(["s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(identified))
+    monkeypatch.setattr(
+        audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
+    )
+    controller = FakeController("com.demo")
+
+    (result,) = audit.re_explore_issues(
+        graph,
+        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        controller,
+        "demo",
+        "com.demo",
+        graph_path,
+        client,
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
+        steps_per_issue=2,
+    )
+
+    assert [(step["from"], step["to"]) for step in result["steps"]] == [
+        ("s1_detail", EXTERNAL_WEB_NODE),
+        ("s1_detail", "s0_home"),
+    ]
+    assert graph.graph.has_edge("s1_detail", EXTERNAL_WEB_NODE)
+    assert [action["action"] for action, _save_flag in controller.actions] == [
+        "tap",
+        "tap",
+        "back",
+        "tap",
+    ]
 
 
 @pytest.mark.usefixtures("_fake_device")

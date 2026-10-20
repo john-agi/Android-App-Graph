@@ -27,6 +27,7 @@ from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
+    EXTERNAL_WEB_NODE,
     NORMALIZE_EVERY_N_VISITS,
     GraphManager,
     _merge_elements,
@@ -103,6 +104,7 @@ class FakeVlm:
     descriptions: list[tuple[str, dict[str, Any], list[dict[str, str]]]] = field(
         default_factory=list
     )
+    external_web: set[str] = field(default_factory=set)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
@@ -113,11 +115,12 @@ class FakeVlm:
         existing_nodes: list[str] | None = None,
         existing_keys: list[str] | None = None,
         settings: ModelSettings | None = None,
-    ) -> tuple[str, dict[str, Any], list[dict[str, str]]]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool]:
         call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
         call.update(existing_nodes=existing_nodes, existing_keys=existing_keys)
         self.calls.append(("describe", call))
-        return self.descriptions.pop(0)
+        description, state, elements = self.descriptions.pop(0)
+        return description, state, elements, description in self.external_web
 
     def verify_same_node(
         self,
@@ -291,6 +294,37 @@ def test_identify_state_cache_hit_skips_the_vlm(vlm: FakeVlm) -> None:
 
     assert second == first
     assert vlm.kinds() == ["describe", "embed"]
+
+
+def test_identify_state_reports_external_web_pages_as_one_shared_node(vlm: FakeVlm) -> None:
+    vlm.descriptions.extend([("News article", {"title": "x"}, []), ("Sign-in form", {}, [])])
+    vlm.external_web.update({"News article", "Sign-in form"})
+    gm = make_manager()
+
+    first = gm.identify_state(HOME, SHOT_A)
+    second = gm.identify_state(SETTINGS, SHOT_B)
+
+    assert first == second == EXTERNAL_WEB_NODE
+    assert list(gm.graph) == [EXTERNAL_WEB_NODE]
+    assert gm.get_node(EXTERNAL_WEB_NODE) == {
+        "page_description": "[external web page]",
+        "visit_count": 2,
+    }
+    assert vlm.kinds() == ["describe", "describe"]
+    assert gm.get_start_node() is None
+
+
+def test_identify_state_keeps_the_cached_screen_behind_an_external_web_page(
+    vlm: FakeVlm,
+) -> None:
+    vlm.descriptions.extend([("Home screen", {}, []), ("News article", {}, [])])
+    vlm.external_web.add("News article")
+    gm = make_manager()
+    home = gm.identify_state(HOME, SHOT_A)
+    gm.identify_state(HOME, SHOT_B)
+
+    assert gm.identify_state(HOME, SHOT_A) == home
+    assert vlm.kinds() == ["describe", "embed", "describe"]
 
 
 def test_identify_state_verified_match_merges_into_existing_node(vlm: FakeVlm) -> None:
