@@ -54,6 +54,8 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
+# A redirecting link or a browser's own history can keep an outside page up after one back press.
+EXTERNAL_WEB_BACK_PRESSES = 3
 
 
 class _IdentifyCacheEntry(NamedTuple):
@@ -663,11 +665,19 @@ class GraphManager:
         If an edge with the same action already exists, it is not duplicated.
         Instead, a visit counter is incremented.
 
-        The edge is dropped with a warning when either endpoint is missing.
+        The edge is dropped with a warning when either endpoint is missing, or when the
+        source is an ``ext_`` node: one such node stands for every screen of an outside
+        app or the web, so an edge out of it would let ``find_path`` join screens that
+        no sequence of actions connects.
         """
         # networkx would otherwise create the missing endpoint as a node with no attributes.
         if source not in self.graph or target not in self.graph:
             logger.warning("add_edge: missing node(s) — source=%s, target=%s", source, target)
+            return
+        if source.startswith("ext_"):
+            logger.warning(
+                "add_edge: refusing an edge out of external node %s to %s", source, target
+            )
             return
 
         if num_steps is None:
