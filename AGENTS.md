@@ -116,12 +116,11 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
   commits. Review `git diff main...HEAD` line by line before opening the pull
   request and remove every line that is not worth it, even one the issue asks
   for; name each omission and why in the description.
-- The pull request description reads without opening the issue and has four
-  sections: Problem; Change, at a high level; How to test by hand (the
-  command, app or device and what you should see, or why it cannot be done
-  without a device and which test covers it); What behaves differently,
-  before and after. It also carries the suppression and `depends_on`
-  justifications required above.
+- Write the pull request description from `.github/pull_request_template.md`
+  and fill every section; `gh pr create --body-file` does not apply the
+  template, so start the file from it. It reads on its own, months later:
+  never a bare link to an issue, pull request, Slack thread or ticket without
+  the reasoning it holds, and nothing sensitive. Issues follow the same rule.
 - If the task is wrong, impossible or ambiguous, stop and report instead of
   improvising.
 - `main` is protected by the `main` ruleset in `.github/rulesets/`: a pull
@@ -150,7 +149,8 @@ Each fact has one home. Other places link to it and never restate it.
 | Rules for agents and contributors | This file |
 | Multi-step procedures | One skill each under `.agents/skills/`; Claude Code reads them through the `.claude/skills` symlink |
 | Setup, usage, and the lasting behaviour and values users or operators rely on | `README.md`, updated in the pull request that changes them |
-| Context that matters only for reviewing one change: manual test steps, before and after, what was left out and why | The pull request description, never the docs |
+| Why one change was made: decisions and alternatives, testing, trade-offs, what was left out | The pull request description, never the docs |
+| Structure of a pull request description | `.github/pull_request_template.md` |
 | Why a setting exists | A comment on the setting, only when the reason is not obvious |
 
 Skills: `adopt-tool` (adding a check to `poe check`), `security-triage` (a red
