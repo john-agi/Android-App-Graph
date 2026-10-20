@@ -118,10 +118,10 @@ to the task and NOT already in memory? This includes: numbers, prices, times, \
 names, status messages, confirmation texts, error messages, or answers to \
 questions in the task.
 
-If yes, reply with a short factual statement of what you found.
-If nothing new is relevant, reply with exactly "nothing".
-
-Think easily and briefly, under 10 sentences if needed. Reply with ONLY the information or "nothing". No explanations."""
+Think easily and briefly, under 10 sentences if needed. Reply with ONLY a JSON object:
+{{"information": "<short factual statement of what you found>"}}
+or, when no new information is relevant:
+{{"information": null}}"""
 
 
 DECIDE_PROMPT = """\
@@ -439,50 +439,6 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     return _last_answer_signal(text, valid_letters)
 
 
-def _parse_record_output(raw: str) -> str:
-    text = (raw or "").strip()
-    if not text:
-        return "nothing"
-
-    post_think = _after_last_think_tag(text)
-    if post_think is not None:
-        text = post_think
-
-    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
-    final_matches = list(
-        re.finditer(
-            r"(?im)^\s*(?:final\s+answer|answer|information)\s*:\s*(.+)$",
-            text,
-        )
-    )
-    if final_matches:
-        text = text[final_matches[-1].start(1) :].strip()
-    else:
-        markers = [
-            "Thinking Process:",
-            "Reasoning:",
-            "Thought Process:",
-            "Analysis:",
-        ]
-        for marker in markers:
-            if text.lower().startswith(marker.lower()):
-                paragraphs = [
-                    stripped
-                    for p in re.split(r"\n\s*\n", text)
-                    if (stripped := as_str(p, "").strip())
-                ]
-                if len(paragraphs) > 1:
-                    text = paragraphs[-1]
-                break
-
-    text = text.strip().strip('"')
-    if text.lower().startswith("nothing"):
-        return "nothing"
-    if len(text) > 800 or len(re.findall(r"[.!?]", text)) > 10:
-        return "nothing"
-    return text or "nothing"
-
-
 def _parse_one_step_instruction(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
@@ -502,7 +458,6 @@ def _parse_one_step_instruction(raw: str) -> str:
     if final_matches:
         text = text[final_matches[-1].start(1) :].strip()
 
-    text = text.strip().strip('"')
     if len(text) > 500:
         return ""
     generic_phrases = (
@@ -540,8 +495,8 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _parse_decide_output(raw: str) -> dict[str, Any] | None:
-    """Parse the DECIDE reply's JSON object, preferring anything after ``</think>``.
+def _parse_json_reply(raw: str) -> dict[str, Any] | None:
+    """Parse a RECORD or DECIDE reply's JSON object, preferring anything after ``</think>``.
 
     ``</think>`` is located on the raw text before fences are stripped, never
     after: stripping fences first can eat a fenced JSON draft inside the think
@@ -556,6 +511,35 @@ def _parse_decide_output(raw: str) -> dict[str, Any] | None:
         if parsed is not None:
             return parsed
     return _parse_json_object(strip_json_fences(text))
+
+
+class RecordReplyError(ValueError):
+    """A RECORD reply the runtime cannot use; the run stops rather than guess at a fact."""
+
+
+def _unreadable_record_reply(problem: str, raw: str) -> RecordReplyError:
+    return RecordReplyError(f"[RECORD] {problem} (reply begins {raw[:160]!r})")
+
+
+def _parse_record_output(raw: str) -> str:
+    """Return the fact a RECORD reply states, or ``""`` when it states none.
+
+    Raises instead of returning ``None``: ``_ask_with_screenshot`` asks again on
+    ``None``, and RECORD is asked only once.
+    """
+    reply = _parse_json_reply(raw)
+    if reply is None:
+        raise _unreadable_record_reply("the reply has no JSON object", raw)
+    if "information" not in reply:
+        raise _unreadable_record_reply('the JSON object has no "information" key', raw)
+    information = reply["information"]
+    if information is None:
+        return ""
+    if not isinstance(information, str):
+        raise _unreadable_record_reply('"information" is neither a string nor null', raw)
+    if not information.strip():
+        raise _unreadable_record_reply('"information" is empty', raw)
+    return information
 
 
 def _chat_completion_content(
@@ -583,7 +567,7 @@ class Memory:
         logger.info('[MEMORY] +action: "%s"', action)
 
     def add_info(self, info: str) -> None:
-        if info and info.lower() != "nothing":
+        if info:
             self.info.append(info)
             logger.info('[MEMORY] +info: "%s"', info)
 
@@ -906,20 +890,25 @@ class UIKobeV2Translator(BaseTranslator):
         return chosen_node
 
     def _record_info(self, task: str, screenshot: str) -> None:
-        """Check if the current screen has task-relevant info to remember."""
+        """Store the task-relevant fact the current screen shows, if it shows one.
+
+        Raises ``RecordReplyError`` for a reply it cannot read or one cut off at
+        its token limit, after one request: a fact RECORD guessed at, or one it
+        silently lost, would mislead every later decision and the final answer.
+        """
         prompt = RECORD_PROMPT.format(
             task=task,
             today=datetime.now().strftime("%Y-%m-%d (%A)"),
             memory=self._memory.format(),
         )
 
-        # _parse_record_output never returns None, so this never retries: one completion.
-        result = (
-            self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
-            or "nothing"
-        )
-        logger.info("[RECORD] parsed=%s", result)
-        self._memory.add_info(result)
+        # _parse_record_output never returns None, so None here can only mean
+        # that the reply hit its token limit.
+        info = self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
+        if info is None:
+            raise RecordReplyError("[RECORD] the reply hit its token limit")
+        logger.info("[RECORD] parsed=%r", info)
+        self._memory.add_info(info)
 
     @staticmethod
     def _unpack_template(tmpl: dict[str, Any] | str) -> tuple[str, str]:
@@ -1146,7 +1135,7 @@ class UIKobeV2Translator(BaseTranslator):
             options=options_text,
         )
 
-        result = self._ask_with_screenshot(prompt, screenshot, _parse_decide_output, "[DECIDE]")
+        result = self._ask_with_screenshot(prompt, screenshot, _parse_json_reply, "[DECIDE]")
         if result is None:
             return {
                 "type": "free",

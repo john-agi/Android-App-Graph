@@ -26,6 +26,7 @@ from android_app_graph.utils.graph_manager import GraphManager
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
+_NO_INFORMATION = '{"information": null}'
 
 
 class _Interrupted(BaseException):
@@ -237,49 +238,58 @@ def test_parse_model_choice_never_picks_a_letter_from_lowercase_only_prose(
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("", "nothing"),
-        ("   ", "nothing"),
-        ("nothing", "nothing"),
-        ("Nothing new here", "nothing"),
-        ("The total is $42.50", "The total is $42.50"),
-        ('"The total is $42.50"', "The total is $42.50"),
-        ("<think>hmm</think>The bus leaves at 14:05", "The bus leaves at 14:05"),
-        ("Answer: The bus leaves at 14:05", "The bus leaves at 14:05"),
-        ("Information: seat 12A is free", "seat 12A is free"),
-        ("Reasoning:\n\nfirst pass\n\nthe price is 9 EUR", "the price is 9 EUR"),
+        ('{"information": "The total is $42.50"}', "The total is $42.50"),
+        ('{"information": null}', ""),
+        ('{"information": "Nothing in the cart; total is $0"}', "Nothing in the cart; total is $0"),
+        ('{"information": "The search field shows \\"milk\\""}', 'The search field shows "milk"'),
+        ('{"information": " seat 12A is free "}', " seat 12A is free "),
+        ('The bus is shown.\n{"information": "It leaves at 14:05"}', "It leaves at 14:05"),
+        ('<think>{"information": "draft"}</think>{"information": "final"}', "final"),
+        ('```json\n{"information": null}\n```', ""),
     ],
 )
 def test_parse_record_output(raw: str, expected: str) -> None:
     assert aitk_translator._parse_record_output(raw) == expected
 
 
-def test_parse_record_output_rejects_an_overlong_answer() -> None:
-    assert aitk_translator._parse_record_output("x" * 801) == "nothing"
+_UNREADABLE_RECORD_REPLIES = [
+    "",
+    "nothing",
+    "'nothing'",
+    "The total is 9 EUR",
+    '{"answer": "The total is 9 EUR"}',
+    '{"information": 9}',
+    '{"information": ["9 EUR"]}',
+    '{"information": ""}',
+    '{"information": "  "}',
+]
 
 
-def test_parse_record_output_rejects_a_multi_sentence_ramble() -> None:
-    assert aitk_translator._parse_record_output("a. " * 11) == "nothing"
+@pytest.mark.parametrize("raw", _UNREADABLE_RECORD_REPLIES)
+def test_parse_record_output_rejects_a_reply_without_its_information(raw: str) -> None:
+    with pytest.raises(aitk_translator.RecordReplyError, match=r"^\[RECORD\] "):
+        aitk_translator._parse_record_output(raw)
 
 
-def test_parse_record_output_keeps_a_single_paragraph_after_a_marker() -> None:
-    """A marker with nothing to split on is left alone: there is no last paragraph."""
-    assert aitk_translator._parse_record_output("Analysis: the cart holds 3 items") == (
-        "Analysis: the cart holds 3 items"
+def test_parse_record_output_shows_the_start_of_a_rejected_reply() -> None:
+    raw = "Nothing new is shown. " * 20
+    with pytest.raises(aitk_translator.RecordReplyError) as caught:
+        aitk_translator._parse_record_output(raw)
+    assert str(caught.value) == (
+        f"[RECORD] the reply has no JSON object (reply begins {raw[:160]!r})"
     )
 
 
-@given(st.text(max_size=200))
-def test_parse_record_output_is_never_empty(raw: str) -> None:
-    assert aitk_translator._parse_record_output(raw) != ""
+_fact_without_reply_markup = st.text(
+    alphabet=st.characters(exclude_characters="`<"), min_size=1
+).filter(str.strip)
 
 
-def test_parse_record_output_think_tag_offset_survives_case_folding_length_change() -> None:
-    """``str.lower()`` can change a string's length (U+0130 "İ" lowers to two
-    code points), so the ``</think>`` offset must come from the original text,
-    not the lower-cased copy used only to find the tag.
-    """
-    raw = "<think>İ reasoning</think>The total is 9 EUR"
-    assert aitk_translator._parse_record_output(raw) == "The total is 9 EUR"
+@given(_fact_without_reply_markup)
+def test_parse_record_output_returns_any_fact_as_written(fact: str) -> None:
+    """The alphabet leaves out "`" and "<": a fence or a ``</think>`` inside the fact
+    is read as the reply's own markup, which no JSON round-trip has to survive."""
+    assert aitk_translator._parse_record_output(json.dumps({"information": fact})) == fact
 
 
 @pytest.mark.parametrize(
@@ -288,7 +298,6 @@ def test_parse_record_output_think_tag_offset_survives_case_folding_length_chang
         ("", ""),
         ("   ", ""),
         ("Tap the Search button", "Tap the Search button"),
-        ('"Tap the Search button"', "Tap the Search button"),
         ("<think>hmm</think>Tap the Search button", "Tap the Search button"),
         ("Instruction: Tap the Search button", "Tap the Search button"),
         ("Next action: Scroll down", "Scroll down"),
@@ -297,6 +306,12 @@ def test_parse_record_output_think_tag_offset_survives_case_folding_length_chang
 )
 def test_parse_one_step_instruction(raw: str, expected: str) -> None:
     assert aitk_translator._parse_one_step_instruction(raw) == expected
+
+
+@pytest.mark.parametrize("instruction", ['Tap "Save"', '"Press enter"'])
+def test_parse_one_step_instruction_keeps_every_quote(instruction: str) -> None:
+    """The action model reads an instruction's quotes as written, so none is removed."""
+    assert aitk_translator._parse_one_step_instruction(instruction) == instruction
 
 
 def test_parse_one_step_instruction_drops_everything_before_a_closing_think_tag() -> None:
@@ -362,17 +377,17 @@ def test_parse_json_object_rejects_a_top_level_array() -> None:
         ("", None),
     ],
 )
-def test_parse_decide_output(raw: str, expected: dict[str, Any] | None) -> None:
-    assert aitk_translator._parse_decide_output(raw) == expected
+def test_parse_json_reply(raw: str, expected: dict[str, Any] | None) -> None:
+    assert aitk_translator._parse_json_reply(raw) == expected
 
 
-def test_parse_decide_output_falls_back_to_the_whole_text() -> None:
+def test_parse_json_reply_falls_back_to_the_whole_text() -> None:
     """A </think> tag with no object after it must not hide an object before it."""
     raw = '{"choice": "A"} </think> nothing usable here'
-    assert aitk_translator._parse_decide_output(raw) == {"choice": "A"}
+    assert aitk_translator._parse_json_reply(raw) == {"choice": "A"}
 
 
-def test_parse_decide_output_finds_the_think_tag_before_stripping_fences() -> None:
+def test_parse_json_reply_finds_the_think_tag_before_stripping_fences() -> None:
     """Fence-stripping the whole reply before looking for ``</think>`` would let a
     fenced JSON draft *inside* the think block eat the tag itself -- ``strip_json_fences``
     matches the first fence pair it finds -- so the fenced final answer that follows the
@@ -385,10 +400,10 @@ def test_parse_decide_output_finds_the_think_tag_before_stripping_fences() -> No
         "On reflection C is right.</think>\n"
         '```json\n{"choice": "C", "instruction": "final"}\n```'
     )
-    assert aitk_translator._parse_decide_output(raw) == {"choice": "C", "instruction": "final"}
+    assert aitk_translator._parse_json_reply(raw) == {"choice": "C", "instruction": "final"}
 
 
-def test_parse_decide_output_think_tag_offset_survives_case_folding_length_change() -> None:
+def test_parse_json_reply_think_tag_offset_survives_case_folding_length_change() -> None:
     """``str.lower()`` can change a string's length (U+0130 "İ" lowers to the two
     code points "i̇"), so an offset found on the lower-cased copy and used to
     slice the original text can land in the wrong place.
@@ -400,7 +415,7 @@ def test_parse_decide_output_think_tag_offset_survives_case_folding_length_chang
     top-level object.
     """
     raw = "İ" * 6 + '</think>{"a": {"choice": "WRONG"}, "choice": "B"}'
-    assert aitk_translator._parse_decide_output(raw) == {
+    assert aitk_translator._parse_json_reply(raw) == {
         "a": {"choice": "WRONG"},
         "choice": "B",
     }
@@ -410,13 +425,13 @@ _key_without_backtick = st.text(alphabet=st.characters(exclude_characters="`"), 
 
 
 @given(st.dictionaries(_key_without_backtick, st.integers(), max_size=5))
-def test_parse_decide_output_round_trips_json_objects(payload: dict[str, int]) -> None:
+def test_parse_json_reply_round_trips_json_objects(payload: dict[str, int]) -> None:
     """A key alphabet that excludes the backtick: ``strip_json_fences`` fences on ```.
 
     A key containing two triple-backtick runs makes fence-stripping eat part of
     the serialized JSON, which is not a property of arbitrary JSON round-tripping.
     """
-    assert aitk_translator._parse_decide_output(json.dumps(payload)) == payload
+    assert aitk_translator._parse_json_reply(json.dumps(payload)) == payload
 
 
 def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
@@ -685,11 +700,17 @@ def test_memory_starts_empty() -> None:
     assert memory.format() == "(empty)"
 
 
-@pytest.mark.parametrize("info", ["", "nothing", "Nothing", "NOTHING"])
-def test_memory_ignores_empty_and_nothing_info(info: str) -> None:
+def test_memory_ignores_empty_info() -> None:
+    memory = aitk_translator.Memory()
+    memory.add_info("")
+    assert memory.info == []
+
+
+@pytest.mark.parametrize("info", ["nothing", "Nothing is scheduled on Friday"])
+def test_memory_gives_the_word_nothing_no_special_meaning(info: str) -> None:
     memory = aitk_translator.Memory()
     memory.add_info(info)
-    assert memory.info == []
+    assert memory.info == [info]
 
 
 def test_memory_ignores_an_empty_observation() -> None:
@@ -1501,22 +1522,63 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
     assert len(options) == 2 + expected_self_loop + expected_neighbor
 
 
-def test_record_info_stores_what_the_model_read(
+def test_record_info_stores_what_the_model_read_as_written(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(translator, "The total is 9 EUR")
-    translator._record_info("buy shoes", "screenshot")
-    assert translator._memory.info == ["The total is 9 EUR"]
+    completions = use_model(translator, '{"information": "The search field shows \\"milk\\""}')
+    translator._record_info("buy milk", "screenshot")
+    assert translator._memory.info == ['The search field shows "milk"']
+    assert _NO_INFORMATION in completions.prompt_text()
 
 
-def test_record_info_keeps_nothing_out_of_memory_in_a_single_call(
+def test_record_info_stores_a_fact_that_starts_with_the_word_nothing(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """RECORD takes exactly one completion: a "nothing" reply is never retried."""
-    completions = use_model(translator, "nothing", "nothing")
+    """RECORD once told "no information" from a fact by the word "nothing", so it
+    dropped the answer to a task such as "Do I have anything on Friday?"."""
+    use_model(translator, '{"information": "Nothing is scheduled on Friday"}')
+    translator._record_info("Do I have anything on Friday?", "screenshot")
+    assert translator._memory.info == ["Nothing is scheduled on Friday"]
+
+
+def test_record_info_stores_no_information_in_a_single_call(
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
+) -> None:
+    completions = use_model(translator, _NO_INFORMATION, '{"information": "unread"}')
     translator._record_info("buy shoes", "screenshot")
     assert translator._memory.info == []
     assert len(completions.calls) == 1
+
+
+@pytest.mark.parametrize("raw", _UNREADABLE_RECORD_REPLIES)
+def test_record_info_raises_on_an_unreadable_reply_without_asking_again(
+    raw: str, use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
+) -> None:
+    translator._memory.add_info("The total is 9 EUR")
+    completions = use_model(translator, raw, '{"information": "unread"}')
+    with pytest.raises(aitk_translator.RecordReplyError, match=r"^\[RECORD\] "):
+        translator._record_info("buy shoes", "screenshot")
+    assert translator._memory.info == ["The total is 9 EUR"]
+    assert len(completions.calls) == 1
+
+
+def test_record_info_raises_on_a_reply_cut_off_at_its_token_limit(
+    use_model: _UseModel,
+    translator: aitk_translator.UIKobeV2Translator,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    use_model(translator)
+    router_responses.append(
+        chat_response(content='{"information": "The total', finish_reason="length")
+    )
+    with pytest.raises(
+        aitk_translator.RecordReplyError, match=r"^\[RECORD\] the reply hit its token limit$"
+    ):
+        translator._record_info("buy shoes", "screenshot")
+    assert translator._memory.info == []
+    assert len(router_requests) == 1
 
 
 def test_generate_answer_returns_the_first_non_empty_reply(
@@ -2047,7 +2109,7 @@ def test_to_agent_runs_the_loop(
 ) -> None:
     turn_replies = (
         "A",
-        "The total is 9 EUR",
+        '{"information": "The total is 9 EUR"}',
         '{"choice": "C", "instruction": "tap the shoes result"}',
     )
     use_model(stepping, *turn_replies, *turn_replies)
@@ -2064,10 +2126,23 @@ def test_to_agent_runs_the_loop(
     assert stepping._memory.observations == ["tapped the result"] * 2
 
 
+def test_to_agent_stops_the_run_on_an_unreadable_record_reply(
+    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
+) -> None:
+    completions = use_model(stepping, "A", "nothing", '{"choice": "C"}')
+    stepping._app_opened = True
+    state, history = _step_payload()
+
+    with pytest.raises(aitk_translator.RecordReplyError):
+        stepping.to_agent("buy shoes", state, history)
+    assert len(completions.calls) == 2
+    assert stepping._memory.actions == []
+
+
 def test_step_ends_the_task_on_a_done_decision(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(stepping, "A", "nothing", '{"choice": "A"}', "9 EUR")
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "A"}', "9 EUR")
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2086,7 +2161,7 @@ def test_step_downgrades_an_early_end_to_a_wait(
         "predict_next_action",
         lambda *_a, **_k: ({"action": "end", "answer": "guessed"}, "gave up | on home"),
     )
-    use_model(stepping, "A", "nothing", '{"choice": "C"}')
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2097,7 +2172,7 @@ def test_step_downgrades_an_early_end_to_a_wait(
 def test_step_plans_a_free_action_when_no_node_matches(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(stepping, "none", "nothing", "Tap the cart icon")
+    use_model(stepping, "none", _NO_INFORMATION, "Tap the cart icon")
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2113,7 +2188,7 @@ def test_step_replans_when_decide_produces_no_instruction(
     use_model(
         stepping,
         "A",  # IDENTIFY
-        "nothing",  # RECORD
+        _NO_INFORMATION,  # RECORD
         "not json",  # DECIDE attempt 1: fails to parse
         "still not json",  # DECIDE attempt 2: fails to parse -> type="free", instruction=""
         "Tap the search bar",  # free-action fallback plan
@@ -2136,7 +2211,7 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
     use_model(
         stepping,
         "A",  # IDENTIFY
-        "nothing",  # RECORD
+        _NO_INFORMATION,  # RECORD
         '{"choice": "D"}',  # DECIDE picks FREE, writes no instruction
         "Tap the search bar",  # free-action fallback plan
     )
@@ -2150,7 +2225,7 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
 def test_step_resolves_the_graph_from_the_package(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(stepping, "A", "nothing", '{"choice": "C"}')
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
     stepping._app_opened = True
     stepping._app_name = ""
     stepping._current_graph = None
@@ -2164,7 +2239,7 @@ def test_step_uses_no_graph_while_no_graph_matches_the_foreground_package(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """The app the task named only decides what to open; the foreground decides the graph."""
-    use_model(stepping, "nothing", "Tap the Demo icon")
+    use_model(stepping, _NO_INFORMATION, "Tap the Demo icon")
     stepping._app_opened = True
     state, history = _step_payload()
 
@@ -2204,8 +2279,8 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
     """The graph used to be chosen once per task, so a second app's steps used the first's."""
     use_model(
         two_apps,
-        *("A", "nothing", '{"choice": "D", "instruction": "Open the shop app"}'),
-        *("A", "nothing", '{"choice": "B", "instruction": "Tap checkout"}'),
+        *("A", _NO_INFORMATION, '{"choice": "D", "instruction": "Open the shop app"}'),
+        *("A", _NO_INFORMATION, '{"choice": "B", "instruction": "Tap checkout"}'),
     )
     history = {"actions": ["earlier"]}
 
@@ -2229,7 +2304,7 @@ def test_step_warns_when_the_task_names_no_known_app(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """An unresolvable app falls straight through to the reactive loop."""
-    use_model(stepping, "A", "nothing", '{"choice": "C"}')
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
     state, history = _step_payload()
 
     response = json.loads(stepping._step("do something unrelated", state, history))
@@ -2406,7 +2481,9 @@ def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruc
             "instruction": {"model": "${APP_GRAPH_INSTRUCTION_MODEL}", "temperature": "hot"},
         },
     )
-    router_responses.extend([chat_response(content="nothing"), chat_response(content="Tap Search")])
+    router_responses.extend(
+        [chat_response(content=_NO_INFORMATION), chat_response(content="Tap Search")]
+    )
     translator._record_info("find shoes", png_screenshot)
     assert (
         translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
@@ -2533,7 +2610,7 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     for turn in range(2):
         router_responses.extend(
             [
-                chat_response(content="nothing"),
+                chat_response(content=_NO_INFORMATION),
                 chat_response(content="Tap Search"),
             ]
         )

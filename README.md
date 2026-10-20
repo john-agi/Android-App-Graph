@@ -286,10 +286,11 @@ since the same request would be cut off again. The log names the call and any
 reasoning tokens, and the caller applies its final fallback at once: an action
 waits, node verification treats the screens as different, edge normalization
 keeps the instruction, the audits report no issues, the coverage checkpoint uses
-its top candidate, the v2 runtime's own fallback applies, and a page description
-or an exploration plan raises. A reply stopped by the provider's content filter
-(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
-handled like any other empty or partial reply.
+its top candidate, the v2 runtime's other steps apply their own fallback, and a
+page description, an exploration plan or a v2 RECORD reply raises. A reply
+stopped by the provider's content filter (`finish_reason: "content_filter"`) is
+logged with the call's name and otherwise handled like any other empty or
+partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice) and
@@ -308,6 +309,14 @@ generation is asked again within each completion, and a truncated one ends the
 retry. Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. A broken endpoint
 response cannot become an action's fallback wait.
+
+RECORD, the v2 step that stores task-relevant facts in memory before each
+decision, has no format-correction retry. It replies with a JSON object,
+`{"information": "<short factual statement>"}`, or `{"information": null}` when
+no new information is relevant, optionally after brief reasoning. Any other
+reply, or one cut off at its token limit, raises and stops the AITK or Android
+World run: a fact guessed at or silently lost would mislead every later decision
+and the final answer.
 
 Exploration and `app-graph-audit` log a usage summary when they finish, per call
 type and model: calls, prompt tokens and the cached share of them, completion
