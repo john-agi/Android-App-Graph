@@ -281,6 +281,13 @@ def strip_json_fences(text: str) -> str:
     return text
 
 
+def strip_wrapping_quotes(text: str) -> str:
+    """Unwrap a reply quoted as a whole; a quote at one end belongs to quoted screen text."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
 NORMALIZE_EDGE_PROMPT = """\
 You are helping build a reusable navigation graph for a mobile app. Your job is to \
 normalize action instructions and their resulting observations into TEMPLATES by \
@@ -1711,13 +1718,6 @@ def _tool_call_to_aitk(
     raise ValueError(f"Unknown action: {action}")
 
 
-def _strip_wrapping_quotes(text: str) -> str:
-    """Unwrap a reply quoted as a whole; a quote at one end belongs to quoted screen text."""
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
-    return text
-
-
 _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1826,7 +1826,7 @@ def plan_next_action(
     except json.JSONDecodeError:
         plan = {}
 
-    instruction = _strip_wrapping_quotes(as_str(plan.get("instruction"), raw).strip())
+    instruction = strip_wrapping_quotes(as_str(plan.get("instruction"), raw).strip())
     element = as_int(plan.get("element"))
     logger.info("Planned instruction: %s (element: %s)", instruction, element)
     return instruction, element

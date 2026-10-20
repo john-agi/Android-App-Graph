@@ -44,6 +44,7 @@ from android_app_graph.utils.vlm_utils import (
     score_by_cosine,
     send_chat,
     strip_json_fences,
+    strip_wrapping_quotes,
 )
 
 if TYPE_CHECKING:
@@ -475,7 +476,7 @@ def _parse_record_output(raw: str) -> str:
                     text = paragraphs[-1]
                 break
 
-    text = text.strip().strip('"')
+    text = strip_wrapping_quotes(text.strip())
     if text.lower().startswith("nothing"):
         return "nothing"
     if len(text) > 800 or len(re.findall(r"[.!?]", text)) > 10:
@@ -502,7 +503,7 @@ def _parse_one_step_instruction(raw: str) -> str:
     if final_matches:
         text = text[final_matches[-1].start(1) :].strip()
 
-    text = text.strip().strip('"')
+    text = strip_wrapping_quotes(text.strip())
     if len(text) > 500:
         return ""
     generic_phrases = (
