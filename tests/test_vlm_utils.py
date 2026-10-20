@@ -1167,11 +1167,11 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     [
         ('{"element": null, "instruction": "Type \'stewed beef\'"}', "Type 'stewed beef'"),
         ('{"element": null, "instruction": "Tap \\"Save\\""}', 'Tap "Save"'),
-        ('"Tap Search"', "Tap Search"),
-        ("'Type 'stewed beef''", "Type 'stewed beef'"),
+        ('"Tap Search"', '"Tap Search"'),
+        ("'Type 'stewed beef''", "'Type 'stewed beef''"),
     ],
 )
-def test_the_planner_removes_only_quotes_that_wrap_the_whole_instruction(
+def test_the_planner_keeps_every_quote_in_its_instruction(
     reply: str,
     instruction: str,
     router_client: OpenRouter,
@@ -1188,12 +1188,12 @@ def test_the_planner_removes_only_quotes_that_wrap_the_whole_instruction(
 @pytest.mark.parametrize(
     ("reply", "instruction"),
     [
-        ('{"instruction": "\\"Swipe up on the results list\\""}', "Swipe up on the results list"),
+        ('{"instruction": "\\"Swipe up\\" on the results list"}', '"Swipe up" on the results list'),
         ('{"instruction": " "}', None),
         ('["Swipe up"]', None),
         ("Swipe up on the results list", None),
     ],
-    ids=["quoted", "blank", "not an object", "not JSON"],
+    ids=["quotes kept", "blank", "not an object", "not JSON"],
 )
 def test_an_executed_action_is_described_from_its_screen_or_not_at_all(
     reply: str,
