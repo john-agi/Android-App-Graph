@@ -1711,13 +1711,6 @@ def _tool_call_to_aitk(
     raise ValueError(f"Unknown action: {action}")
 
 
-def _strip_wrapping_quotes(text: str) -> str:
-    """Unwrap a reply quoted as a whole; a quote at one end belongs to quoted screen text."""
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
-    return text
-
-
 _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1826,7 +1819,7 @@ def plan_next_action(
     except json.JSONDecodeError:
         plan = {}
 
-    instruction = _strip_wrapping_quotes(as_str(plan.get("instruction"), raw).strip())
+    instruction = as_str(plan.get("instruction"), raw).strip()
     element = as_int(plan.get("element"))
     logger.info("Planned instruction: %s (element: %s)", instruction, element)
     return instruction, element

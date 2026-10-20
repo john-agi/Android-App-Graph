@@ -1145,11 +1145,11 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     [
         ('{"element": null, "instruction": "Type \'stewed beef\'"}', "Type 'stewed beef'"),
         ('{"element": null, "instruction": "Tap \\"Save\\""}', 'Tap "Save"'),
-        ('"Tap Search"', "Tap Search"),
-        ("'Type 'stewed beef''", "Type 'stewed beef'"),
+        ('"Tap Search"', '"Tap Search"'),
+        ("'Type 'stewed beef''", "'Type 'stewed beef''"),
     ],
 )
-def test_the_planner_removes_only_quotes_that_wrap_the_whole_instruction(
+def test_the_planner_keeps_every_quote_in_its_instruction(
     reply: str,
     instruction: str,
     router_client: OpenRouter,
