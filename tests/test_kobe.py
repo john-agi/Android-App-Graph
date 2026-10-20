@@ -42,7 +42,8 @@ _TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
 def _screen(activity: str, color: str) -> dict[str, object]:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
-    return {"activity": activity, "screenshot": base64.b64encode(buffer.getvalue()).decode("ascii")}
+    screenshot = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return {"activity": activity, "screenshot": screenshot, "package": "com.demo"}
 
 
 HOME_SCREEN = _screen("com.demo.Home", "white")
@@ -111,7 +112,7 @@ def _explorer(device: DeviceController, tmp_path: Path, router_client: OpenRoute
 @pytest.fixture
 def kobe(tmp_path: Path, png_screenshot: str, router_client: OpenRouter) -> Kobe:
     return _explorer(
-        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
+        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot, "package": "com.demo"}),
         tmp_path,
         router_client,
     )
@@ -122,7 +123,10 @@ def replaying_kobe(
     tmp_path: Path, png_screenshot: str, router_client: OpenRouter, device_log: list[object]
 ) -> Kobe:
     return _explorer(
-        _ReplayDevice({"activity": "com.demo.Home", "screenshot": png_screenshot}, device_log),
+        _ReplayDevice(
+            {"activity": "com.demo.Home", "screenshot": png_screenshot, "package": "com.demo"},
+            device_log,
+        ),
         tmp_path,
         router_client,
     )
@@ -198,6 +202,54 @@ def test_exploration_records_the_configured_package_name(
     assert saved["package_name"] == "com.demo"
 
 
+class _Replayed(Exception):
+    """Ends exploration once it has chosen the node to replay to."""
+
+
+@pytest.mark.parametrize("saved_package", [None, "com.whatsapp"])
+def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packages(
+    saved_package: str | None,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A graph whose nodes record no package resumes at a node of ``com.whatsapp``,
+    although no activity's first three dot-segments equal the package."""
+    document: dict[str, object] = {
+        "nodes": [
+            {"id": "s0_home", "activity": "com.whatsapp.home.ui.HomeActivity"},
+            {"id": "s1_conversation", "activity": "com.whatsapp.Conversation"},
+        ],
+        "edges": [{"source": "s0_home", "target": "s1_conversation"}],
+    }
+    if saved_package is not None:
+        document["package_name"] = saved_package
+    graph_path = tmp_path / "whatsapp" / "whatsapp.json"
+    graph_path.parent.mkdir()
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    explorer = Kobe(
+        _Device(AssertionError("the replay must start before the device is read")),
+        "whatsapp",
+        "com.whatsapp",
+        logging.getLogger("test"),
+        graph_dir=tmp_path,
+        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        client=router_client,
+    )
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> str:
+        replayed.append(node_id)
+        raise _Replayed
+
+    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+
+    with pytest.raises(_Replayed):
+        explorer.explore(max_steps=1, resume_from="auto")
+
+    assert replayed == ["s1_conversation"]
+
+
 def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,
@@ -206,7 +258,7 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
 ) -> None:
     router_responses.append(httpx.Response(401, json={"error": {"message": "bad key"}}))
     with pytest.raises(OpenRouterError):
-        kobe.graph.identify_state("com.demo.Home", png_screenshot)
+        kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
     assert len(kobe.graph.graph) == 0
     assert kobe.graph._last_identify_cache is None
     assert no_sleep == []
@@ -229,7 +281,7 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
                 httpx.Response(200, json=embedding_body),
             ]
         )
-    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot)
+    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
     # The cache would skip the model, and a reference screenshot would add a verify request.
     replaying_kobe.graph._last_identify_cache = None
     replaying_kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
@@ -866,7 +918,9 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     graph.graph.add_nodes_from([*nodes.values(), "s2_detail"], page_description="a screen")
     graph.add_edge("s0_home", "s1_list", action=[open_list])
     graph.add_edge("s1_list", "s2_detail", action=[open_item])
-    monkeypatch.setattr(graph, "identify_state", lambda activity, _screenshot: nodes[activity])
+    monkeypatch.setattr(
+        graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
+    )
     router_responses.extend(
         [
             chat_response(content='{"element":null,"instruction":"Open settings"}'),
@@ -914,7 +968,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     monkeypatch.setattr(subprocess, "run", _adb_refusing_once(_PACKAGE_LAUNCH, device_log))
     nodes = {"com.demo.Home": "s0_home"}
     monkeypatch.setattr(
-        explorer.graph, "identify_state", lambda activity, _screenshot: nodes[activity]
+        explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
     )
 
     assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
@@ -948,7 +1002,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
     )
     nodes = {"com.demo.Article": EXTERNAL_WEB_NODE, "com.demo.List": "s1_list"}
     monkeypatch.setattr(
-        explorer.graph, "identify_state", lambda activity, _screenshot: nodes[activity]
+        explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
     )
 
     assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
@@ -995,16 +1049,14 @@ _DIALOG_ACTIVITY = (
 )
 
 
-@pytest.mark.usefixtures("no_sleep")
-def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+def _explore_into_a_permission_dialog(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pressing back on a permission dialog would deny the permission."""
+) -> _ScriptedDevice:
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     home: dict[str, object] = {
         "activity": "com.demo.Home",
@@ -1030,6 +1082,22 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     )
 
     kobe.explore(max_steps=1)
+    return device
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing back on a permission dialog would deny the permission."""
+    device = _explore_into_a_permission_dialog(
+        kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
+    )
 
     tap = {"action": "tap", "x": 50, "y": 100}
     assert device.actions == [tap]
@@ -1041,3 +1109,34 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     assert "is_external" not in dialog_node
     edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
     assert edge["actions"] == [[tap]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay from the start screen cannot land on a dialog. The dialog node's own
+    package keeps it out of both targets although it is the least explored node."""
+    _explore_into_a_permission_dialog(
+        kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
+    )
+
+    graph = kobe.graph
+    nodes = {data["package"]: node for node, data in graph.graph.nodes(data=True)}
+    assert set(nodes) == {"com.demo", "com.google.android.permissioncontroller"}
+    home = nodes["com.demo"]
+    assert graph.get_least_explored_node(package_name="com.demo") == home
+    checkpoint = graph.get_exploration_target_candidates(package_name="com.demo")
+    assert [candidate["node_id"] for candidate in checkpoint] == [home]
+    described_without_known_screens = [
+        request
+        for request in router_requests
+        if b"No screens have been discovered" in request.content
+    ]
+    assert len(described_without_known_screens) == 2

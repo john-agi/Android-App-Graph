@@ -34,9 +34,33 @@ from android_app_graph.utils.graph_manager import (
     _merge_into_schema,
 )
 
+PACKAGE = "com.example.app"
 HOME = "com.example.app.HomeActivity"
 SETTINGS = "com.example.app.SettingsActivity"
+OTHER_PACKAGE = "org.other.tool"
 OTHER_APP = "org.other.tool.MainActivity"
+
+# Activity class names as AITK reports them, for packages of two and five dot-segments.
+# Messages and Gmail share their first three segments but are separate packages.
+WHATSAPP = "com.whatsapp"
+WHATSAPP_HOME = "com.whatsapp.home.ui.HomeActivity"
+WHATSAPP_GROUP_INFO = "com.whatsapp.chatinfo.group.GroupChatInfoActivity"
+MESSAGES = "com.google.android.apps.messaging"
+MESSAGES_LIST = "com.google.android.apps.messaging.ui.ConversationListActivity"
+MESSAGES_CONVERSATION = "com.google.android.apps.messaging.ui.conversation.ConversationActivity"
+GMAIL = "com.google.android.gm"
+GMAIL_LIST = "com.google.android.gm.ConversationListActivityGmail"
+# A library activity runs in the package of the app that declares it.
+GOOGLE_SIGN_IN = "com.google.android.gms.auth.api.signin.internal.SignInHubActivity"
+
+any_package_length = pytest.mark.parametrize(
+    ("package", "activity", "other_activity"),
+    [
+        (WHATSAPP, WHATSAPP_HOME, WHATSAPP_GROUP_INFO),
+        (MESSAGES, MESSAGES_LIST, MESSAGES_CONVERSATION),
+    ],
+    ids=["two-segments", "five-segments"],
+)
 
 # Unit vectors: cosine similarity is exactly 1.0 or 0.0.
 EMBEDDINGS: dict[str, list[float]] = {
@@ -81,6 +105,7 @@ def add_screen(
 ) -> None:
     """Insert a node with the attribute set identify_state would create."""
     attrs: dict[str, Any] = {
+        "package": PACKAGE,
         "activity": activity,
         "activities": [activity],
         "page_description": description,
@@ -241,14 +266,14 @@ def test_construction_defaults() -> None:
 def test_identify_state_without_page_detail_settings_raises() -> None:
     gm = GraphManager(embedding=EMBEDDING)
     with pytest.raises(RuntimeError, match="needs a client and page_detail settings"):
-        gm.identify_state(HOME, SHOT_A)
+        gm.identify_state(HOME, SHOT_A, PACKAGE)
 
 
 def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL)
     with pytest.raises(RuntimeError, match="needs a client and embedding settings"):
-        gm.identify_state(HOME, SHOT_A)
+        gm.identify_state(HOME, SHOT_A, PACKAGE)
 
 
 def test_identify_state_creates_the_first_node(vlm: FakeVlm) -> None:
@@ -257,7 +282,7 @@ def test_identify_state_creates_the_first_node(vlm: FakeVlm) -> None:
     )
     gm = make_manager()
 
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_home_screen"
     assert vlm.kinds() == ["describe", "embed"]
@@ -275,7 +300,7 @@ def test_identify_state_passes_the_configured_models_and_clients(vlm: FakeVlm) -
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
 
-    gm.identify_state(HOME, SHOT_A)
+    gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert vlm.calls[0][1]["settings"] == PAGE_DETAIL
     assert vlm.calls[0][1]["client"] is FAKE_CLIENT
@@ -288,9 +313,9 @@ def test_identify_state_passes_the_configured_models_and_clients(vlm: FakeVlm) -
 def test_identify_state_cache_hit_skips_the_vlm(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A)
+    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(HOME, SHOT_A)
+    second = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert second == first
     assert vlm.kinds() == ["describe", "embed"]
@@ -301,8 +326,8 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(vlm: FakeV
     vlm.external_web.update({"News article", "Sign-in form"})
     gm = make_manager()
 
-    first = gm.identify_state(HOME, SHOT_A)
-    second = gm.identify_state(SETTINGS, SHOT_B)
+    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    second = gm.identify_state(SETTINGS, SHOT_B, PACKAGE)
 
     assert first == second == EXTERNAL_WEB_NODE
     assert list(gm.graph) == [EXTERNAL_WEB_NODE]
@@ -320,10 +345,10 @@ def test_identify_state_keeps_the_cached_screen_behind_an_external_web_page(
     vlm.descriptions.extend([("Home screen", {}, []), ("News article", {}, [])])
     vlm.external_web.add("News article")
     gm = make_manager()
-    home = gm.identify_state(HOME, SHOT_A)
-    gm.identify_state(HOME, SHOT_B)
+    home = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(HOME, SHOT_B, PACKAGE)
 
-    assert gm.identify_state(HOME, SHOT_A) == home
+    assert gm.identify_state(HOME, SHOT_A, PACKAGE) == home
     assert vlm.kinds() == ["describe", "embed", "describe"]
 
 
@@ -333,9 +358,9 @@ def test_identify_state_verified_match_merges_into_existing_node(vlm: FakeVlm) -
     )
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
     gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A)
+    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(SETTINGS, SHOT_B)
+    second = gm.identify_state(SETTINGS, SHOT_B, PACKAGE)
 
     assert second == first
     assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify"]
@@ -353,9 +378,9 @@ def test_identify_state_verified_match_does_not_repeat_a_known_activity(vlm: Fak
     vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
     gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A)
+    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
-    gm.identify_state(HOME, SHOT_B)
+    gm.identify_state(HOME, SHOT_B, PACKAGE)
 
     node = gm.get_node(first)
     assert node is not None
@@ -373,9 +398,9 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(vlm: Fak
         }
     )
     gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A)
+    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(HOME, SHOT_B)
+    second = gm.identify_state(HOME, SHOT_B, PACKAGE)
 
     assert first not in gm.graph
     assert "s0_home_feed" in gm.graph
@@ -397,9 +422,9 @@ def test_identify_state_rejected_match_without_refinements_creates_new(vlm: Fake
         }
     )
     gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A)
+    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(HOME, SHOT_B)
+    second = gm.identify_state(HOME, SHOT_B, PACKAGE)
 
     assert first in gm.graph  # no rename: the verifier repeated the existing description
     assert second == "s1_home_screen_with_banner"
@@ -413,7 +438,7 @@ def test_identify_state_matches_by_embedding_when_the_candidate_has_no_screensho
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
 
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_home"
     assert vlm.kinds() == ["describe", "embed"]
@@ -425,9 +450,9 @@ def test_identify_state_matches_by_embedding_when_the_candidate_has_no_screensho
 def test_identify_state_ignores_nodes_of_another_package(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    add_screen(gm, "s0_other", "Home screen", activity=OTHER_APP)
+    add_screen(gm, "s0_other", "Home screen", activity=OTHER_APP, package=OTHER_PACKAGE)
 
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_home_screen"
     assert vlm.calls[0][1]["existing_nodes"] is None
@@ -439,7 +464,7 @@ def test_identify_state_skips_candidates_without_an_embedding(vlm: FakeVlm) -> N
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", description_embedding=None)
 
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_home_screen"
 
@@ -457,7 +482,7 @@ def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
     add_screen(gm, "s1_home", "Home feed")
 
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(HOME, SHOT_A)
+        node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s1_home"
     assert "stale" not in caplog.text
@@ -478,7 +503,7 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     add_screen(gm, "s1_home", "Home feed")
 
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(HOME, SHOT_A)
+        node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s1_home"
     stale_warnings = [
@@ -494,7 +519,7 @@ def test_identify_state_below_the_threshold_creates_a_new_node(vlm: FakeVlm) -> 
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_B)
 
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_settings_page"
     assert vlm.kinds() == ["describe", "embed"]
@@ -505,7 +530,7 @@ def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm) -> Non
     vlm.descriptions.append((description, {}, []))
     gm = make_manager()
 
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_home___dashboard_screen_showing_every_av"
     assert len(node_id.split("_", 1)[1]) == 40
@@ -577,7 +602,7 @@ def test_rename_node_to_the_same_id_keeps_the_screenshot_dirty(
 def test_rename_node_moves_the_screenshot_to_the_new_id(tmp_path: Path, vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    gm.identify_state(HOME, SHOT_A)
+    gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
@@ -590,11 +615,11 @@ def test_rename_node_moves_the_screenshot_to_the_new_id(tmp_path: Path, vlm: Fak
 def test_rename_node_updates_the_identify_cache(vlm: FakeVlm) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    gm.identify_state(HOME, SHOT_A)
+    gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
-    assert gm.identify_state(HOME, SHOT_A) == new_id
+    assert gm.identify_state(HOME, SHOT_A, PACKAGE) == new_id
     assert vlm.kinds() == ["describe", "embed", "embed"]
 
 
@@ -1723,7 +1748,7 @@ def test_get_least_explored_node_skips_external_nodes() -> None:
 def test_get_least_explored_node_filters_by_package() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    add_screen(gm, "s1_other", "Other app screen", activity=OTHER_APP)
+    add_screen(gm, "s1_other", "Other app screen", activity=OTHER_APP, package=OTHER_PACKAGE)
     add_screen(gm, "s2_results", "Search results")
     gm.add_edge("s0_home", "s1_other", {"action": "a"})
     gm.add_edge("s0_home", "s2_results", {"action": "b"})
@@ -1782,13 +1807,68 @@ def test_get_exploration_target_candidates_skips_external_and_other_packages() -
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "ext_browser", "Browser")
     add_screen(gm, "s1_external", "External page", is_external=True)
-    add_screen(gm, "s2_other", "Other app screen", activity=OTHER_APP)
+    add_screen(gm, "s2_other", "Other app screen", activity=OTHER_APP, package=OTHER_PACKAGE)
     for target in ("ext_browser", "s1_external", "s2_other"):
         gm.add_edge("s0_home", target, {"action": target})
 
     candidates = gm.get_exploration_target_candidates(package_name="com.example.app")
 
     assert [c["node_id"] for c in candidates] == ["s0_home"]
+
+
+def _app_with_a_gmail_screen(package: str, activity: str, other_activity: str) -> GraphManager:
+    gm = make_manager()
+    add_screen(gm, "s0_list", "Home screen", activity=activity, package=package)
+    add_screen(gm, "s1_detail", "Settings page", activity=other_activity, package=package)
+    add_screen(gm, "s2_mail", "Search results", activity=GMAIL_LIST, package=GMAIL)
+    gm.add_edge("s0_list", "s1_detail", {"action": "a"})
+    gm.add_edge("s0_list", "s2_mail", {"action": "b"})
+    gm.add_edge("s1_detail", "s0_list", {"action": "c"})
+    return gm
+
+
+@any_package_length
+def test_get_least_explored_node_finds_the_nodes_of_a_package_of_any_length(
+    package: str, activity: str, other_activity: str
+) -> None:
+    gm = _app_with_a_gmail_screen(package, activity, other_activity)
+
+    assert gm.get_least_explored_node(package_name=package) == "s1_detail"
+
+
+@any_package_length
+def test_get_exploration_target_candidates_are_the_nodes_of_a_package_of_any_length(
+    package: str, activity: str, other_activity: str
+) -> None:
+    gm = _app_with_a_gmail_screen(package, activity, other_activity)
+
+    candidates = gm.get_exploration_target_candidates(package_name=package)
+
+    assert sorted(c["node_id"] for c in candidates) == ["s0_list", "s1_detail"]
+
+
+@any_package_length
+def test_identify_state_matches_a_node_of_the_package_under_another_activity(
+    vlm: FakeVlm, package: str, activity: str, other_activity: str
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", activity=other_activity, package=package)
+
+    assert gm.identify_state(activity, SHOT_A, package) == "s0_home"
+    assert gm.graph.nodes["s0_home"]["activities"] == [other_activity, activity]
+
+
+def test_identify_state_keeps_apart_packages_that_share_three_segments(vlm: FakeVlm) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_mail", "Home screen", activity=GMAIL_LIST, package=GMAIL)
+
+    node_id = gm.identify_state(MESSAGES_LIST, SHOT_A, MESSAGES)
+
+    assert node_id == "s0_home_screen"
+    assert gm.graph.nodes[node_id]["package"] == MESSAGES
+    assert vlm.calls[0][1]["existing_nodes"] is None
 
 
 def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
@@ -1800,7 +1880,7 @@ def test_save_writes_dirty_screenshots_once_and_load_restores_them(
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    node_id = gm.identify_state(HOME, SHOT_A)
+    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
     graph_path = tmp_path / "nested" / "graph.json"
 
     gm.save_graph(graph_path)
@@ -1940,6 +2020,7 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
     path.write_text(
         json.dumps(
             {
+                "package_name": PACKAGE,
                 "nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}],
                 "edges": [],
             }
@@ -1952,7 +2033,7 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
 
     vlm.descriptions.append(("Home screen", {}, []))
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(HOME, SHOT_A)
+        node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
 
     assert node_id == "s0_home_screen"
     assert "stale" not in caplog.text
@@ -1969,6 +2050,63 @@ def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -
 
     assert json.loads(path.read_text(encoding="utf-8"))["package_name"] == "com.example.app"
     assert target.package_name == "com.example.app"
+
+
+def test_save_graph_and_load_graph_round_trip_each_node_package(tmp_path: Path) -> None:
+    source = make_manager()
+    add_screen(source, "s0_list", "Home screen", activity=MESSAGES_LIST, package=MESSAGES)
+    add_screen(source, "s1_mail", "Settings page", activity=GMAIL_LIST, package=GMAIL)
+    path = tmp_path / "graph.json"
+    source.save_graph(path)
+
+    target = make_manager()
+    target.load_graph(path)
+
+    assert dict(target.graph.nodes(data="package")) == {"s0_list": MESSAGES, "s1_mail": GMAIL}
+
+
+@pytest.mark.parametrize(
+    ("saved_package_name", "configured_package_name"),
+    [(WHATSAPP, PACKAGE), (None, WHATSAPP)],
+    ids=["saved", "configured"],
+)
+def test_load_graph_gives_the_app_package_to_each_screen_saved_without_one(
+    tmp_path: Path, saved_package_name: str | None, configured_package_name: str
+) -> None:
+    """Every node saved without a package but the ``ext_`` placeholders gets the app's
+    package, including one whose activity class lives outside the package."""
+    document: dict[str, Any] = {
+        "nodes": [
+            {"id": "s0_home", "activity": WHATSAPP_HOME},
+            {"id": "s1_group_info", "activity": WHATSAPP_GROUP_INFO},
+            {"id": "s2_sign_in", "activity": GOOGLE_SIGN_IN},
+            {"id": "ext_com.google.android.gm", "activity": GMAIL_LIST},
+            {"id": EXTERNAL_WEB_NODE},
+        ],
+        "edges": [
+            *(
+                {"source": "s0_home", "target": target}
+                for target in ("s1_group_info", "s2_sign_in", "ext_com.google.android.gm")
+            ),
+            {"source": "s2_sign_in", "target": "s0_home"},
+        ],
+    }
+    if saved_package_name is not None:
+        document["package_name"] = saved_package_name
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    gm = make_manager()
+
+    gm.load_graph(path, default_package_name=configured_package_name)
+
+    assert dict(gm.graph.nodes(data="package")) == {
+        "s0_home": WHATSAPP,
+        "s1_group_info": WHATSAPP,
+        "s2_sign_in": WHATSAPP,
+        "ext_com.google.android.gm": "",
+        EXTERNAL_WEB_NODE: "",
+    }
+    assert gm.get_least_explored_node(package_name=WHATSAPP) == "s1_group_info"
 
 
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
@@ -2710,6 +2848,7 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
     )
     manager.graph.add_node(
         "old",
+        package="com.other" if other_package else "com.demo",
         activity="com.other.Home" if other_package else "com.demo.Home",
         description_embedding=[0.25, 0.75] if other_package else [],
     )
@@ -2719,7 +2858,7 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    node = manager.identify_state("com.demo.Home", png_screenshot)
+    node = manager.identify_state("com.demo.Home", png_screenshot, "com.demo")
     assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model
     assert len(router_requests) == 2
 
@@ -2745,7 +2884,9 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
     }
     if stored == "inline untagged":
         node["description_embedding"] = [0.25, 0.75]
-    path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"package_name": "com.demo", "nodes": [node], "edges": []}), encoding="utf-8"
+    )
     if stored != "inline untagged":
         entry: object = (
             [0.25, 0.75]
@@ -2772,7 +2913,7 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
         if operation == "find":
             manager.find_node_by_description("home")
         else:
-            manager.identify_state("com.demo.Home", png_screenshot)
+            manager.identify_state("com.demo.Home", png_screenshot, "com.demo")
 
     for _ in range(2):
         with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):

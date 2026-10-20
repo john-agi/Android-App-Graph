@@ -289,6 +289,7 @@ def re_explore_issues(
         actual = graph.identify_state(
             device_state["activity"],
             device_state["screenshot"],
+            device_state["package"],
         )
         if actual != target_node:
             logger.warning(
@@ -309,7 +310,9 @@ def re_explore_issues(
             controller.exe_action({"action": "back"})
             time.sleep(1)
             device_state = controller.get_state()
-            node = graph.identify_state(device_state["activity"], device_state["screenshot"])
+            node = graph.identify_state(
+                device_state["activity"], device_state["screenshot"], device_state["package"]
+            )
             if node != EXTERNAL_WEB_NODE:
                 return node
         logger.warning(
@@ -319,7 +322,9 @@ def re_explore_issues(
         )
         restart_app(controller, app_name, package_name, launch_activity, logger)
         device_state = controller.get_state()
-        return graph.identify_state(device_state["activity"], device_state["screenshot"])
+        return graph.identify_state(
+            device_state["activity"], device_state["screenshot"], device_state["package"]
+        )
 
     def _explore_steps(
         start_from: str,
@@ -392,12 +397,14 @@ def re_explore_issues(
                 current_node = graph.identify_state(
                     device_state["activity"],
                     device_state["screenshot"],
+                    device_state["package"],
                 )
                 continue
 
             new_node = graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
+                device_state["package"],
             )
             current_node = graph.resolve_node_id(current_node)
 
@@ -460,7 +467,7 @@ def re_explore_issues(
         if _left_app(after):
             reached = f"ext_{after['package'].strip()}"
         else:
-            reached = graph.identify_state(after["activity"], after["screenshot"])
+            reached = graph.identify_state(after["activity"], after["screenshot"], after["package"])
         source, target = graph.resolve_node_id(source), graph.resolve_node_id(target)
 
         if reached != target:
@@ -700,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
                 logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
                 continue
 
-            graph.load_graph(graph_path)
+            graph.load_graph(graph_path, default_package_name=package_name)
             logger.info(
                 "Loaded graph for %s: %d nodes, %d edges",
                 app_name,
