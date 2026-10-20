@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any, NoReturn, override
@@ -14,6 +15,7 @@ import pytest
 from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
+from android_app_graph.device import DeviceController
 from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils.graph_manager import GraphManager
 
@@ -444,6 +446,69 @@ def test_re_explore_issues_skips_unreachable_nodes(
 
     assert [r["status"] for r in results] == ["skipped", "skipped"]
     assert {r["reason"] for r in results} == {"unreachable"}
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
+    tmp_path: Path,
+    two_screen_device: DeviceController,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """re_explore_issues used to keep the old ID of the node it acted from, so the
+    step's edge was dropped."""
+    monkeypatch.setattr(
+        audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
+    )
+    graph = GraphManager(
+        client=router_client,
+        page_detail=ModelSettings("provider/page_detail"),
+        embedding=ModelSettings("provider/embedding"),
+    )
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"Chat search page"}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    screen = two_screen_device.get_state()
+    start = graph.identify_state(screen["activity"], screen["screenshot"])
+    verdict = {
+        "same": False,
+        "reason": "a query has been entered",
+        "existing_description": "Chat search page with recent searches",
+        "new_description": "Chat search results page",
+    }
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"Chat search results"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(verdict)),
+            *[httpx.Response(200, json=embedding_body) for _ in range(2)],
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="android_app_graph"):
+        (result,) = audit.re_explore_issues(
+            graph,
+            [{"type": "explore_node", "node": start, "expected_pages": ["Search results"]}],
+            two_screen_device,
+            "demo",
+            "com.demo.app",
+            tmp_path / "demo_audited.json",
+            router_client,
+            ModelSettings("provider/instruction"),
+            ModelSettings("provider/action"),
+            steps_per_issue=1,
+        )
+
+    renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
+    assert [(step["from"], step["to"]) for step in result["steps"]] == [(renamed, results)]
+    assert graph.graph.has_edge(renamed, results)
+    assert "add_edge: missing node(s)" not in caplog.text
 
 
 @pytest.mark.usefixtures("_fake_device")
