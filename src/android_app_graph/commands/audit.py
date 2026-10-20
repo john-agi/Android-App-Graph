@@ -49,7 +49,11 @@ from android_app_graph.utils import (
     resolve_audit_timeout,
     resolve_model_settings,
 )
-from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
+from android_app_graph.utils.graph_manager import (
+    EXTERNAL_WEB_BACK_PRESSES,
+    EXTERNAL_WEB_NODE,
+    GraphManager,
+)
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
     plan_next_action,
@@ -286,6 +290,29 @@ def re_explore_issues(
             )
         return actual
 
+    def _leave_external_web() -> str:
+        """Press back until the screen is no longer an outside web page, restarting the
+        app if a few presses do not leave it, and return the screen's node.
+
+        A step from the shared ``ext_web`` node would act on a page outside the app, and
+        ``add_edge`` would refuse its edge.
+        """
+        for _ in range(EXTERNAL_WEB_BACK_PRESSES):
+            controller.exe_action({"action": "back"})
+            time.sleep(1)
+            device_state = controller.get_state()
+            node = graph.identify_state(device_state["activity"], device_state["screenshot"])
+            if node != EXTERNAL_WEB_NODE:
+                return node
+        logger.warning(
+            "Still on an external web page after %d back presses. Restarting %s.",
+            EXTERNAL_WEB_BACK_PRESSES,
+            package_name,
+        )
+        restart_app(controller, app_name, package_name, launch_activity, logger)
+        device_state = controller.get_state()
+        return graph.identify_state(device_state["activity"], device_state["screenshot"])
+
     def _explore_steps(
         start_from: str,
         num_steps: int,
@@ -406,13 +433,7 @@ def re_explore_issues(
             current_node = new_node
             if current_node == EXTERNAL_WEB_NODE:
                 logger.warning("Opened an external web page during re-explore, pressing back")
-                controller.exe_action({"action": "back"})
-                time.sleep(1)
-                device_state = controller.get_state()
-                current_node = graph.identify_state(
-                    device_state["activity"],
-                    device_state["screenshot"],
-                )
+                current_node = _leave_external_web()
 
         return step_results
 
