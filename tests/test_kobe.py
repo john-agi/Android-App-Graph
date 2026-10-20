@@ -761,16 +761,14 @@ _DIALOG_ACTIVITY = (
 )
 
 
-@pytest.mark.usefixtures("no_sleep")
-def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+def _explore_into_a_permission_dialog(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pressing back on a permission dialog would deny the permission."""
+) -> _ScriptedDevice:
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     home: dict[str, object] = {
         "activity": "com.demo.Home",
@@ -796,6 +794,22 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     )
 
     kobe.explore(max_steps=1)
+    return device
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing back on a permission dialog would deny the permission."""
+    device = _explore_into_a_permission_dialog(
+        kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
+    )
 
     tap = {"action": "tap", "x": 50, "y": 100}
     assert device.actions == [tap]
@@ -807,3 +821,34 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     assert "is_external" not in dialog_node
     edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
     assert edge["actions"] == [[tap]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay from the start screen cannot land on a dialog. The dialog node's own
+    package keeps it out of both targets although it is the least explored node."""
+    _explore_into_a_permission_dialog(
+        kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
+    )
+
+    graph = kobe.graph
+    nodes = {data["package"]: node for node, data in graph.graph.nodes(data=True)}
+    assert set(nodes) == {"com.demo", "com.google.android.permissioncontroller"}
+    home = nodes["com.demo"]
+    assert graph.get_least_explored_node(package_name="com.demo") == home
+    checkpoint = graph.get_exploration_target_candidates(package_name="com.demo")
+    assert [candidate["node_id"] for candidate in checkpoint] == [home]
+    described_without_known_screens = [
+        request
+        for request in router_requests
+        if b"No screens have been discovered" in request.content
+    ]
+    assert len(described_without_known_screens) == 2
