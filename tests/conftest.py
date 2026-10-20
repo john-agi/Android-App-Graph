@@ -26,8 +26,8 @@ from android_app_graph.utils import open_client
 
 # Hypothesis's built-in "ci" profile, its own choice when CI is set, is deterministic,
 # keeps no example database and has no deadline; CI runs it with more examples.
-# Local runs drop the 200 ms default deadline too: under load it only failed examples
-# that ran slowly, and it guarded nothing CI enforces.
+# Local runs have no deadline either: how long one example takes depends on how busy
+# the machine is, not on the code under test.
 settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
 settings.register_profile("dev", settings.get_profile("default"), deadline=None)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "dev"))
