@@ -489,6 +489,10 @@ def re_explore_issues(
         if source not in graph.graph:
             logger.warning("Source node %s not found, skipping", source)
             return {"issue": issue, "status": "skipped", "reason": "source not found"}
+        # An action from an ext_ node runs outside the app, and the graph keeps no edge out of one.
+        if source.startswith("ext_"):
+            logger.warning("Source node %s is external, skipping", source)
+            return {"issue": issue, "status": "skipped", "reason": "external source"}
 
         logger.info("Retrying edge: %s → %s (instruction: '%s')", source, target, instruction)
         reached = _replay_to(source)

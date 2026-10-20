@@ -907,19 +907,35 @@ def test_re_explore_explores_from_the_source_when_the_flagged_instruction_is_not
 
 
 @pytest.mark.parametrize(
-    ("issue", "package", "status", "help_instruction"),
+    ("issue", "package", "status", "instructions"),
     [
-        (_retry("open help", target="ext_com.browser"), "com.browser", "relabelled", "Tap Help"),
-        (_retry(), "com.unknown", "unverified", "open help"),
+        (
+            _retry("open help", target="ext_com.browser"),
+            "com.browser",
+            "relabelled",
+            {"s1_detail": [_FLAGGED], "ext_com.browser": ["Tap Help"]},
+        ),
+        (
+            _retry(),
+            "com.browser",
+            "moved",
+            {"ext_com.browser": ["open help", _FLAGGED]},
+        ),
+        (
+            _retry(),
+            "com.unknown",
+            "unverified",
+            {"s1_detail": [_FLAGGED], "ext_com.browser": ["open help"]},
+        ),
     ],
-    ids=["to the target's app", "to an app the graph has no node for"],
+    ids=["to the target's app", "to another app's node", "to an app the graph has no node for"],
 )
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_node(
     issue: dict[str, Any],
     package: str,
     status: str,
-    help_instruction: str,
+    instructions: dict[str, list[str]],
     client: OpenRouter,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -936,9 +952,57 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
     )
 
     assert result["status"] == status
-    assert graph.graph["s0_home"]["ext_com.browser"]["instructions"] == [help_instruction]
-    assert graph.graph["s0_home"]["s1_detail"]["instructions"] == [_FLAGGED]
+    out_of_home = {
+        target: data["instructions"]
+        for _source, target, data in graph.graph.out_edges("s0_home", data=True)
+    }
+    assert out_of_home == {"s2_settings": ["open settings"], **instructions}
     assert "ext_com.unknown" not in graph.graph
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_moves_a_flagged_action_that_opens_an_outside_web_page_to_the_ext_web_edge(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    """The restart before the next replay leaves the page, so no back press is needed."""
+    graph = _flagged_graph()
+    # identify_state is faked below, so add the node it would create.
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    reached = iter(["s0_home", EXTERNAL_WEB_NODE, "s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+
+    (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
+
+    assert (result["status"], result["moved_to"]) == ("moved", EXTERNAL_WEB_NODE)
+    assert not graph.graph.has_edge("s0_home", "s1_detail")
+    assert graph.graph["s0_home"][EXTERNAL_WEB_NODE]["instructions"] == [_FLAGGED]
+    assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
+    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == [*restart, _DETAIL_TAP, *restart]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_skips_a_flagged_edge_out_of_an_external_node(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    graph.add_edge("s0_home", EXTERNAL_WEB_NODE, [_GEAR_TAP], instruction="open help")
+    # add_edge refuses an edge out of an ext_ node, but a loaded graph file can hold one.
+    graph.graph.add_edge(
+        EXTERNAL_WEB_NODE, "s0_home", actions=[[_BACK]], instructions=["go home"], num_steps=[1]
+    )
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: EXTERNAL_WEB_NODE)
+    before = _edges(graph)
+    issue = _retry("go home", source=EXTERNAL_WEB_NODE, target="s0_home")
+
+    (result,) = _re_explore(
+        graph, [issue], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
+    )
+
+    assert result == {"issue": issue, "status": "skipped", "reason": "external source"}
+    assert _edges(graph) == before
+    assert device_log == []
 
 
 @pytest.mark.usefixtures("_fake_device")

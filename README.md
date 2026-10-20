@@ -527,7 +527,7 @@ Each issue's outcome is saved to `<app_name>_re_explore.json` as its `status`:
 | `relabel_failed` | The action reached the target, but the instruction model gave no usable description | Unchanged |
 | `instruction_not_found` | The edge is gone, or the instruction is not on it word for word, for example because the auditor paraphrased it. Steps 3 and 4 are skipped | Unchanged |
 | `unverified` | The replay missed the source, or the action left for an app with no `ext_<package>` node; `reached` is where it ended. Nothing is explored | Unchanged |
-| `skipped` | The source node is not in the graph | Unchanged |
+| `skipped` | The source node is not in the graph, or is an `ext_` node, which keeps no outgoing edge | Unchanged |
 
 One replay can be misled by content that changes between runs, such as a feed;
 the outcome records what each correction was based on.

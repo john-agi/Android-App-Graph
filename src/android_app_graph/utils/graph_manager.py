@@ -745,10 +745,14 @@ class GraphManager:
         dropped, since they were generalised from the moved instruction too, and the next
         normalization rebuilds them.
 
-        Returns False, changing nothing, when *new_target* is missing.
+        Returns False, changing nothing, when *new_target* is missing or *source* is an
+        ``ext_`` node, which ``add_edge`` gives no outgoing edge either.
         """
         if new_target not in self.graph:
             logger.warning("move_edge_action: missing node %s", new_target)
+            return False
+        if source.startswith("ext_"):
+            logger.warning("move_edge_action: refusing an edge out of external node %s", source)
             return False
 
         edge_data = self.graph[source][target]

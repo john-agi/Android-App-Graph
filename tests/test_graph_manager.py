@@ -1135,6 +1135,31 @@ def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
     assert "move_edge_action: missing node ext_com.other" in caplog.text
 
 
+def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    add_screen(gm, EXTERNAL_WEB_NODE, "Outside page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    # add_edge refuses an edge out of an ext_ node, but a loaded graph file can hold one.
+    gm.graph.add_edge(EXTERNAL_WEB_NODE, "s0_home", actions=[{"action": "back"}])
+
+    assert gm.move_edge_action("s0_home", "s1_settings", 0, EXTERNAL_WEB_NODE) is True
+    with caplog.at_level(logging.WARNING, logger=gm_module.__name__):
+        assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
+
+    assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
+        ({"action": "tap"}, 1, "open settings", "Outside page", None)
+    ]
+    assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
+    assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
+    assert f"move_edge_action: refusing an edge out of external node {EXTERNAL_WEB_NODE}" in (
+        caplog.text
+    )
+
+
 def test_relabel_edge_action_replaces_one_instruction_and_drops_the_edge_templates() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
