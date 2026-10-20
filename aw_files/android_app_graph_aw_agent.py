@@ -15,6 +15,7 @@ from android_world.env import adb_utils, interface, json_action
 from PIL import Image
 
 from android_app_graph.adapters.aitk_translator import UIKobeV2Translator
+from android_app_graph.android_packages import package_from_activity
 
 if TYPE_CHECKING:
     import numpy as np
@@ -26,15 +27,6 @@ def _pixels_to_png_b64(pixels: np.ndarray) -> str:
     buffer = io.BytesIO()
     Image.fromarray(pixels).save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-def _component_package(activity: str) -> str:
-    """Return the package before the ``/`` of an Android World activity component.
-
-    Unlike ``package_from_activity`` it keeps every dot-segment: Android World
-    reports the full ``package/component`` form.
-    """
-    return activity.split("/", 1)[0] if activity else ""
 
 
 def _swipe_direction_from_aitk(action: dict[str, Any]) -> str:
@@ -167,7 +159,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         state = self.get_post_transition_state()
         screenshot_b64 = _pixels_to_png_b64(state.pixels)
         activity = self.env.foreground_activity_name
-        package = _component_package(activity)
+        package = package_from_activity(activity)
 
         response_text = self._runtime.to_agent(
             goal,

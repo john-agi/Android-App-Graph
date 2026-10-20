@@ -566,7 +566,7 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
         ]
     )
     screen = two_screen_device.get_state()
-    start = graph.identify_state(screen["activity"], screen["screenshot"])
+    start = graph.identify_state(screen["activity"], screen["screenshot"], screen["package"])
     verdict = {
         "same": False,
         "reason": "a query has been entered",
@@ -782,6 +782,30 @@ def test_audit_of_one_app_keeps_the_package_name_it_loaded(
 
     audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
     assert audited["package_name"] == "com.demo.app"
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nodes of a graph file without a ``package_name`` get the configured package,
+    so re-exploration matches each screen with the nodes of its package."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    app_dir = graph_dir / "demo"
+    app_dir.mkdir(parents=True)
+    (app_dir / "demo.json").write_text(
+        json.dumps({"nodes": [{"id": "s0_home", "activity": "com.demo.Home"}], "edges": []}),
+        encoding="utf-8",
+    )
+    config = _write_config(tmp_path, str(graph_dir))
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+
+    assert audit.main(["-c", str(config)]) == 0
+
+    audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
+    assert audited["package_name"] == "com.demo"
+    assert [node["package"] for node in audited["nodes"]] == ["com.demo"]
 
 
 def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:

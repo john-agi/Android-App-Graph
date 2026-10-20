@@ -1,7 +1,7 @@
 """Graph manager for Android-App-Graph exploration graphs.
 
 A node represents a unique app state defined by:
-  - Level 1: App package (derived from Android activity name)
+  - Level 1: App package (as the device reports it)
   - Level 2: High-level page description (from VLM)
   - Level 3: State schema — a dict of parameter keys, each mapped to the set of
     observed values across all visits.  E.g. {"sort_order": ["price_low_to_high",
@@ -30,7 +30,7 @@ from typing import Any, NamedTuple
 import networkx as nx
 from openrouter import OpenRouter
 
-from android_app_graph.android_packages import package_from_activity
+from android_app_graph.android_packages import saved_node_package
 from android_app_graph.graph_files import (
     reference_screenshot_b64,
     require_known_edge_endpoints,
@@ -207,7 +207,7 @@ class GraphManager:
             raise ValueError(msg)
         return as_float_list(vector)
 
-    def identify_state(self, activity: str, screenshot_b64: str) -> str:
+    def identify_state(self, activity: str, screenshot_b64: str, package: str) -> str:
         """Identify which node the current screen belongs to, or create a new one.
 
         Process:
@@ -220,8 +220,9 @@ class GraphManager:
         5. If verified → update existing node; if rejected → create new node.
         6. Merge state snapshot into the node's schema.
 
-        Matching uses app package (not exact activity) so that the same visual
-        screen reached via different Android activities is merged into one node.
+        Matching uses the ``package`` the device reports (not exact activity) so that
+        the same visual screen reached via different Android activities is merged
+        into one node.
 
         Returns:
             The node ID (str) for this state, or ``EXTERNAL_WEB_NODE`` for any web
@@ -238,16 +239,15 @@ class GraphManager:
             logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
             return cached.node_id
 
-        current_pkg = package_from_activity(activity)
         same_pkg_candidates = [
             (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
             for node_id, data in self.graph.nodes(data=True)
-            if package_from_activity(data.get("activity", "")) == current_pkg
+            if data.get("package") == package
         ]
         same_pkg_descriptions: list[str] = []
         same_pkg_keys: list[str] = []
         for _, data in self.graph.nodes(data=True):
-            if package_from_activity(data.get("activity", "")) == current_pkg:
+            if data.get("package") == package:
                 desc = data.get("page_description", "")
                 if desc and desc not in same_pkg_descriptions:
                     same_pkg_descriptions.append(desc)
@@ -375,6 +375,7 @@ class GraphManager:
             ]
             self.graph.add_node(
                 node_id,
+                package=package,
                 activity=activity,
                 activities=[activity],
                 page_description=page_description,
@@ -1102,8 +1103,7 @@ class GraphManager:
             if self.graph.nodes[node].get("is_external"):
                 continue
             if package_name:
-                activity = self.graph.nodes[node].get("activity", "")
-                node_pkg = package_from_activity(activity) if activity else ""
+                node_pkg = self.graph.nodes[node].get("package", "")
                 if node_pkg and node_pkg != package_name:
                     continue
             out_degree = self.graph.out_degree(node)
@@ -1137,8 +1137,7 @@ class GraphManager:
                 continue
 
             if package_name:
-                activity = node_data.get("activity", "")
-                node_pkg = package_from_activity(activity) if activity else ""
+                node_pkg = node_data.get("package", "")
                 if node_pkg and node_pkg != package_name:
                     continue
 
@@ -1203,6 +1202,7 @@ class GraphManager:
             activities = attrs.get("activities", [attrs.get("activity", "")])
             node_data = {
                 "id": node_id,
+                "package": attrs.get("package", ""),
                 "activity": activities[0] if activities else "",
                 "activities": activities,
                 "page_description": attrs.get("page_description", ""),
@@ -1257,8 +1257,12 @@ class GraphManager:
             "Graph saved to %s (%d nodes, %d edges)", path, len(data["nodes"]), len(data["edges"])
         )
 
-    def load_graph(self, path: str | Path) -> None:
-        """Load graph from a JSON file (and companion embeddings file)."""
+    def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
+        """Load graph from a JSON file (and companion embeddings file).
+
+        ``default_package_name`` stands in for the ``package_name`` of a file that has
+        none.
+        """
         path = Path(path)
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
@@ -1281,7 +1285,7 @@ class GraphManager:
                     else:
                         embeddings[node_id] = as_float_list(entry)
 
-        self.package_name = as_str(data.get("package_name"), "")
+        self.package_name = as_str(data.get("package_name"), "") or default_package_name
         self._next_id = data.get("next_id", 0)
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
         self.total_steps_completed = data.get("total_steps_completed", 0)
@@ -1296,6 +1300,7 @@ class GraphManager:
             ref_screenshot = reference_screenshot_b64(path, node_id)
             self.graph.add_node(
                 node_id,
+                package=saved_node_package(node_data, self.package_name),
                 activity=activities[0] if activities else "",
                 activities=activities,
                 page_description=node_data.get("page_description", ""),

@@ -467,6 +467,14 @@ regular node and no back press.
 `app-graph-audit --re-explore` records external web pages and these dialogs the
 same way.
 
+Every node other than an `ext_` one records the package the device reported for
+its screen, and the explorer, the audit and the runtime match a screen only with
+nodes of its package. A dialog's node is therefore never a target of
+`--resume-from auto` or the coverage checkpoint, which replay from the app's start
+screen. A node without a recorded package, other than an `ext_` one, takes the
+graph file's `package_name`, or the app's configured `package_name` when the file
+has none, so a graph file whose nodes record no package still loads and resumes.
+
 ## Visualize or Audit a Graph
 
 Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra
