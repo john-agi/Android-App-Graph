@@ -388,6 +388,39 @@ def test_re_explore_issues_retries_explores_and_skips(
 
 
 @pytest.mark.usefixtures("_fake_device")
+def test_re_explore_issues_records_an_action_model_end_as_press_back(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    controller = FakeController("com.demo")
+    caplog.set_level(logging.INFO, logger=audit.logger.name)
+
+    [result] = audit.re_explore_issues(
+        graph,
+        [{"type": "explore_node", "node": "s0_home", "expected_pages": ["Settings"]}],
+        controller,
+        "demo",
+        "com.demo",
+        tmp_path / "demo" / "demo_audited.json",
+        client,
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
+        steps_per_issue=1,
+    )
+
+    assert controller.actions == [({"action": "back"}, True)]
+    edge = graph.graph["s0_home"]["s0_home"]
+    assert edge["actions"] == [[{"action": "back"}]]
+    assert edge["instructions"] == ["Press back"]
+    assert [step["instruction"] for step in result["steps"]] == ["Press back"]
+    assert '"tap the first button"' in caplog.text
+
+
+@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_skips_unreachable_nodes(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

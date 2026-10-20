@@ -331,7 +331,12 @@ def re_explore_issues(
             )
 
             if action.get("action") == "end":
+                logger.info(
+                    '  Action agent said end for: "%s", recording as back',
+                    instruction,
+                )
                 action = {"action": "back"}
+                instruction = "Press back"
                 controller.exe_action(action)
             elif action.get("action") == "wait":
                 time.sleep(1)
