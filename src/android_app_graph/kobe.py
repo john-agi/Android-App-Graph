@@ -10,7 +10,12 @@ from typing import Any
 
 from openrouter import OpenRouter
 
-from android_app_graph.device import DeviceController, keyboard_status, soft_keyboard_hint
+from android_app_graph.device import (
+    DeviceController,
+    keyboard_status,
+    restart_app,
+    soft_keyboard_hint,
+)
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
 from android_app_graph.utils.graph_manager import GraphManager
 from android_app_graph.utils.vlm_utils import (
@@ -65,10 +70,12 @@ class Kobe:
         coverage_checkpoint_top_k: int = 15,
         *,
         client: OpenRouter,
+        launch_activity: str | None = None,
     ) -> None:
         self.controller = controller
         self.app_name = app_name
         self.package_name = package_name
+        self.launch_activity = launch_activity
         logger_name = getattr(logger, "name", "")
         if logger_name.startswith("android_app_graph"):
             self.logger = logging.getLogger("android_app_graph.kobe")
@@ -229,6 +236,10 @@ class Kobe:
         path = self.graph.find_path(start_node, target_node)
         if path is None:
             raise ValueError(f"No path from {start_node} to {target_node} in the graph.")
+
+        restart_app(
+            self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
+        )
 
         if len(path) <= 1:
             self.logger.info("Already at target node %s", target_node)

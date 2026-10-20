@@ -1,4 +1,4 @@
-"""Tests for android_app_graph.device.soft_keyboard_hint.
+"""Tests for android_app_graph.device: soft_keyboard_hint and restart_app.
 
 The single soft-keyboard probe shared by kobe, commands.audit and the AITK
 translator; this module owns its tests so the three call sites do not each
@@ -7,11 +7,69 @@ pin their own copy of the adb probe.
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from typing import Any
 
 import pytest
 
 from android_app_graph import device
+
+_FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
+_PACKAGE_LAUNCH = [
+    "adb",
+    "-s",
+    "test-device",
+    "shell",
+    "monkey",
+    "-p",
+    "com.demo",
+    "-c",
+    "android.intent.category.LAUNCHER",
+    "1",
+]
+
+
+class _Device:
+    w = 100
+    h = 200
+
+    def __init__(self) -> None:
+        self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
+
+    def get_state(self) -> dict[str, Any]:
+        raise AssertionError("restarting the app must not read the screen")
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        raise AssertionError(f"restarting the app must not act on the screen: {action}")
+
+
+def test_restart_app_force_stops_then_launches_and_waits_for_the_screen(
+    device_log: list[object], no_sleep: list[float]
+) -> None:
+    device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert no_sleep == [4]
+
+
+def test_restart_app_launches_nothing_when_the_force_stop_fails(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    commands: list[list[str]] = []
+
+    def offline(
+        command: list[str], *, check: bool = False, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if check:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="device offline")
+
+    monkeypatch.setattr(device.subprocess, "run", offline)
+    with pytest.raises(subprocess.CalledProcessError):
+        device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
+    assert commands == [_FORCE_STOP]
+    assert no_sleep == []
 
 
 class _CompletedProcess:
