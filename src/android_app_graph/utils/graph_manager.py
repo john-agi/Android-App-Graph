@@ -115,6 +115,27 @@ def _merge_elements(node_data: dict[str, Any], new_elements: list[dict[str, str]
     node_data["interactable_elements"] = existing
 
 
+def _default_num_steps(action: object) -> int:
+    return len(action) if isinstance(action, list) else 1
+
+
+def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
+    """Readers pair entry i of every per-action list with actions[i] and skip placeholders."""
+    actions = list(edge_data.get("actions", []))
+    num_steps = list(edge_data.get("num_steps", []))
+    num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
+    aligned: dict[str, list[Any]] = {"actions": actions, "num_steps": num_steps}
+    for key, placeholder in (
+        ("instructions", ""),
+        ("target_observations", ""),
+        ("schema_deltas", None),
+    ):
+        values = list(edge_data.get(key, []))
+        values.extend([placeholder] * (len(actions) - len(values)))
+        aligned[key] = values
+    return aligned
+
+
 class GraphManager:
     """Manages a directed graph of app UI states and transitions."""
 
@@ -591,15 +612,9 @@ class GraphManager:
         """Merge edge data into an existing edge, or create it if absent."""
         if self.graph.has_edge(source, target):
             existing = self.graph[source][target]
-            for key in (
-                "actions",
-                "instructions",
-                "target_observations",
-                "num_steps",
-                "schema_deltas",
-            ):
-                if key in new_data:
-                    existing.setdefault(key, []).extend(new_data[key])
+            incoming = _aligned_lists(new_data)
+            for key, values in _aligned_lists(existing).items():
+                existing[key] = values + incoming[key]
             if new_data.get("instruction_templates"):
                 existing.setdefault("instruction_templates", []).extend(
                     new_data["instruction_templates"]
@@ -645,39 +660,27 @@ class GraphManager:
             return
 
         if num_steps is None:
-            num_steps = len(action) if isinstance(action, list) else 1
+            num_steps = _default_num_steps(action)
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            existing_actions = edge_data.get("actions", [])
-            for a in existing_actions:
+            for a in edge_data.get("actions", []):
                 if a == action:
                     edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
                     return
-            existing_actions.append(action)
-            edge_data["actions"] = existing_actions
-            edge_data.setdefault("num_steps", []).append(num_steps)
-            if instruction:
-                edge_data.setdefault("instructions", []).append(instruction)
-            if target_observation:
-                edge_data.setdefault("target_observations", []).append(target_observation)
-            if schema_delta:
-                edge_data.setdefault("schema_deltas", []).append(schema_delta)
         else:
-            edge_data = {
-                "actions": [action],
-                "num_steps": [num_steps],
-                "visit_count": 1,
-            }
-            if instruction:
-                edge_data["instructions"] = [instruction]
-            if target_observation:
-                edge_data["target_observations"] = [target_observation]
-            if schema_delta:
-                edge_data["schema_deltas"] = [schema_delta]
-            self.graph.add_edge(source, target, **edge_data)
+            self.graph.add_edge(source, target, visit_count=1)
+            edge_data = self.graph[source][target]
+        edge_data.update(_aligned_lists(edge_data))
+        for key, value in (
+            ("actions", action),
+            ("num_steps", num_steps),
+            ("instructions", instruction or ""),
+            ("target_observations", target_observation or ""),
+            ("schema_deltas", schema_delta),
+        ):
+            edge_data[key].append(value)
 
-        edge_data = self.graph[source][target]
         n_actions = len(edge_data.get("actions", []))
         n_templates = len(edge_data.get("instruction_templates", []))
         if source == target:
@@ -706,8 +709,9 @@ class GraphManager:
         edge_data = self.graph[source][target]
         instructions = edge_data.get("instructions", [])
         observations = edge_data.get("target_observations", [])
+        recorded = [instr for instr in instructions if instr]
 
-        if not instructions:
+        if not recorded:
             return False
 
         existing_templates = edge_data.get("instruction_templates", [])
@@ -717,11 +721,11 @@ class GraphManager:
                 if isinstance(existing_templates[0], dict)
                 else []
             )
-            if len(examples) >= len(instructions):
+            if len(examples) >= len(recorded):
                 return False
 
-        if len(instructions) == 1:
-            instr = instructions[0]
+        if len(recorded) == 1:
+            instr = recorded[0]
             # Heuristic: if no quoted values, numbers, or proper nouns, unlikely to be parameterizable
             has_variable = any(c.isdigit() for c in instr) or '"' in instr or "'" in instr
             if not has_variable and len(instr.split()) <= 6:
@@ -731,7 +735,7 @@ class GraphManager:
         result = normalize_edge(
             client,
             instructions,
-            target_observations=observations or None,
+            target_observations=observations if any(observations) else None,
             settings=settings,
         )
 
@@ -833,14 +837,12 @@ class GraphManager:
                 "target": target,
                 "target_description": self.graph.nodes[target].get("page_description", ""),
                 "actions": data.get("actions", []),
-                "instructions": data.get("instructions", []),
+                "instructions": [i for i in data.get("instructions", []) if i],
                 "instruction_templates": data.get("instruction_templates", []),
-                "target_observations": data.get("target_observations", []),
+                "target_observations": [o for o in data.get("target_observations", []) if o],
                 "visit_count": data.get("visit_count", 0),
+                "schema_deltas": [d for d in data.get("schema_deltas", []) if d],
             }
-            schema_deltas = data.get("schema_deltas")
-            if schema_deltas:
-                edge_info["schema_deltas"] = schema_deltas
             edges.append(edge_info)
         return edges
 
@@ -1404,6 +1406,8 @@ class GraphManager:
 
             lines.append(f'  {source} ("{source_desc}") → {target} ("{target_desc}"){is_self}:')
             for i, instr in enumerate(instructions):
+                if not instr:
+                    continue
                 obs = observations[i] if i < len(observations) else ""
                 obs_str = f" → {obs}" if obs else ""
                 lines.append(f'    - "{instr}"{obs_str}')
