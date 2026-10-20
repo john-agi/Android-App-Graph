@@ -234,5 +234,5 @@ cmd = "vulture src tests vulture_allowlist.py --min-confidence 60 --sort-by-size
 [tool.poe.tasks.mutate]
 help = "Mutation testing of src/android_app_graph with tests/ (review queue, never a gate); state in mutants/"
 cmd = "mutmut run"
-# deadline=None, so a slow mutant cannot be killed by a spurious DeadlineExceeded.
+# Derandomized, no example database: a mutant's survival cannot depend on which examples ran.
 env = { HYPOTHESIS_PROFILE = "ci" }
