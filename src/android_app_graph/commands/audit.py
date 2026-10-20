@@ -13,8 +13,8 @@ Usage:
 The auditor finds two types of issues:
 
 1. retry_edge — An edge whose instruction doesn't match its destination.
-   Re-explore: navigate to the source node and re-run the exploration step.
-   The planner is told which instruction to retry.
+   Re-explore: replay the flagged action from the source node, move it to the
+   edge toward the node it reaches or relabel it, then explore from the source.
 
 2. explore_node — A node that's missing expected outgoing edges.
    Re-explore: navigate to the node and explore with hints about what's missing.
@@ -52,6 +52,7 @@ from android_app_graph.utils import (
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
+    describe_executed_action,
     plan_next_action,
     predict_next_action,
     token_tracker,
@@ -241,10 +242,10 @@ def re_explore_issues(
     steps_per_issue: int = 5,
     launch_activity: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Re-explore flagged issues on device.
+    """Re-explore flagged issues on device; README.md#correcting-flagged-edges.
 
-    For retry_edge: navigates to source node, re-runs the exploration step
-    with a hint to retry the specific instruction.
+    For retry_edge: replays the flagged action from the source node, corrects
+    its edge by where it leads, then explores from the source with a hint.
 
     For explore_node: navigates to the node and explores with hints about
     expected missing actions.
@@ -255,23 +256,30 @@ def re_explore_issues(
         logger.warning("Graph is empty — nothing to re-explore")
         return results
 
+    def _left_app(device_state: dict[str, Any]) -> bool:
+        """A keyboard or system dialog on top of the app does not count as leaving it."""
+        package = device_state.get("package", "").strip()
+        return bool(package and package != package_name and not is_system_overlay(package))
+
+    def _execute(action: dict[str, Any] | list[dict[str, Any]]) -> None:
+        if isinstance(action, list):
+            for sub_action in action:
+                controller.exe_action(sub_action)
+                time.sleep(0.5)
+        elif action:
+            controller.exe_action(action)
+        time.sleep(1)
+
     def _navigate_to(target_node: str) -> str | None:
         """Navigate to target node by replaying shortest path. Returns actual node reached."""
-        path = graph.find_path(start_node, target_node)
+        start = graph.resolve_node_id(start_node)
+        path = graph.find_path(start, target_node)
         if path is None:
-            logger.warning("No path from %s to %s", start_node, target_node)
+            logger.warning("No path from %s to %s", start, target_node)
             return None
 
-        for i, (node_id, action) in enumerate(path):
-            if i == 0:
-                continue
-            if isinstance(action, list):
-                for sub_action in action:
-                    controller.exe_action(sub_action)
-                    time.sleep(0.5)
-            elif action:
-                controller.exe_action(action)
-            time.sleep(1)
+        for _node_id, action in path[1:]:
+            _execute(action)
 
         device_state = controller.get_state()
         actual = graph.identify_state(
@@ -349,12 +357,7 @@ def re_explore_issues(
             time.sleep(0.5)
             device_state = controller.get_state()
 
-            current_package = device_state.get("package", "").strip()
-            if (
-                current_package
-                and current_package != package_name
-                and not is_system_overlay(current_package)
-            ):
+            if _left_app(device_state):
                 logger.warning("Left app during re-explore, pressing back")
                 controller.exe_action({"action": "back"})
                 time.sleep(1)
@@ -416,55 +419,95 @@ def re_explore_issues(
 
         return step_results
 
+    def _replay_to(node: str) -> str | None:
+        restart_app(controller, app_name, package_name, launch_activity, logger)
+        return _navigate_to(node)
+
+    def _correct_flagged_edge(source: str, target: str, instruction: str) -> dict[str, Any]:
+        """Execute the flagged action once from *source* and correct its edge by where it
+        leads. Returns the outcome fields of the issue's result.
+        """
+        found = graph.find_edge_action(source, target, instruction)
+        if found is None:
+            logger.warning("Instruction '%s' is not on %s → %s", instruction, source, target)
+            return {"status": "instruction_not_found"}
+        index, action = found
+
+        before = controller.get_state()
+        _execute(action)
+        after = controller.get_state()
+        if _left_app(after):
+            reached = f"ext_{after['package'].strip()}"
+        else:
+            reached = graph.identify_state(after["activity"], after["screenshot"])
+        source, target = graph.resolve_node_id(source), graph.resolve_node_id(target)
+
+        if reached != target:
+            if not graph.move_edge_action(source, target, index, reached):
+                return {"status": "unverified", "reached": reached}
+            return {"status": "moved", "moved_to": reached}
+
+        label = describe_executed_action(
+            client=client,
+            screenshot_b64=before["screenshot"],
+            action=action,
+            screen_w=controller.w,
+            screen_h=controller.h,
+            settings=instruction_settings,
+        )
+        if label is None:
+            return {"status": "relabel_failed"}
+        graph.relabel_edge_action(source, target, index, label)
+        return {"status": "relabelled", "instruction": label}
+
+    def _retry_edge(issue: dict[str, Any]) -> dict[str, Any]:
+        source = graph.resolve_node_id(issue.get("source_node", ""))
+        target = graph.resolve_node_id(issue.get("target_node", ""))
+        instruction = issue.get("instruction", "")
+
+        if source not in graph.graph:
+            logger.warning("Source node %s not found, skipping", source)
+            return {"issue": issue, "status": "skipped", "reason": "source not found"}
+
+        logger.info("Retrying edge: %s → %s (instruction: '%s')", source, target, instruction)
+        reached = _replay_to(source)
+        source, target = graph.resolve_node_id(source), graph.resolve_node_id(target)
+        if reached != source:
+            return {"issue": issue, "status": "unverified", "reached": reached}
+
+        outcome = _correct_flagged_edge(source, target, instruction)
+        logger.info("Flagged edge %s → %s: %s", source, target, outcome)
+        if outcome["status"] == "unverified":
+            return {"issue": issue, **outcome}
+        source = graph.resolve_node_id(source)
+        # Only an executed flagged action has moved the device off the source.
+        executed = outcome["status"] != "instruction_not_found"
+        if executed and _replay_to(source) != graph.resolve_node_id(source):
+            logger.warning("Replay after the correction missed %s; not exploring", source)
+            return {"issue": issue, **outcome, "steps": []}
+
+        target = graph.resolve_node_id(target)
+        target_desc = (
+            graph.graph.nodes[target].get("page_description", target)
+            if target in graph.graph
+            else target
+        )
+        hint = (
+            f"A previous attempt to reach '{target_desc}' from this screen may have "
+            f"gone to the wrong place. Check if any elements on this screen could lead "
+            f"to '{target_desc}'."
+        )
+        steps = _explore_steps(graph.resolve_node_id(source), steps_per_issue, hint=hint)
+        return {"issue": issue, **outcome, "steps": steps}
+
     for issue in issues:
         itype = issue.get("type", "")
 
         if itype == "retry_edge":
-            source = issue.get("source_node", "")
-            target = issue.get("target_node", "")
-            instr = issue.get("instruction", "")
-
-            if not source or source not in graph.graph:
-                logger.warning("Source node %s not found, skipping", source)
-                results.append({"issue": issue, "status": "skipped", "reason": "source not found"})
-                continue
-
-            logger.info(
-                "Retrying edge: %s → %s (instruction: '%s')",
-                source,
-                target,
-                instr,
-            )
-
-            restart_app(controller, app_name, package_name, launch_activity, logger)
-            actual = _navigate_to(source)
-            if actual is None:
-                results.append({"issue": issue, "status": "skipped", "reason": "unreachable"})
-                continue
-
-            target_desc = (
-                graph.graph.nodes[target].get("page_description", target)
-                if target in graph.graph
-                else target
-            )
-            hint = (
-                f"A previous attempt to reach '{target_desc}' from this screen may have "
-                f"gone to the wrong place. Check if any elements on this screen could lead "
-                f"to '{target_desc}'."
-            )
-            step_results = _explore_steps(actual, steps_per_issue, hint=hint)
-
-            results.append(
-                {
-                    "issue": issue,
-                    "status": "retried",
-                    "navigated_to": actual,
-                    "steps": step_results,
-                }
-            )
+            results.append(_retry_edge(issue))
 
         elif itype == "explore_node":
-            node = issue.get("node", "")
+            node = graph.resolve_node_id(issue.get("node", ""))
             expected = issue.get("expected_pages", [])
 
             if not node or node not in graph.graph:
@@ -478,8 +521,7 @@ def re_explore_issues(
                 expected,
             )
 
-            restart_app(controller, app_name, package_name, launch_activity, logger)
-            actual = _navigate_to(node)
+            actual = _replay_to(node)
             if actual is None:
                 results.append({"issue": issue, "status": "skipped", "reason": "unreachable"})
                 continue

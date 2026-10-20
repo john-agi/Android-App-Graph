@@ -204,7 +204,7 @@ physical `.env` file is not required or loaded automatically.
 |---|---|
 | `APP_GRAPH_PAGE_DETAIL_MODEL` | Screen descriptions and graph auditing |
 | `APP_GRAPH_EMBEDDING_MODEL` | Text and screenshot embeddings |
-| `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning |
+| `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning and relabelling flagged edges |
 | `APP_GRAPH_ACTION_MODEL` | Action prediction and v2 runtime decisions |
 
 The template's model selections were approved from OpenRouter's catalog on
@@ -285,16 +285,18 @@ limit. A reply cut off there (`finish_reason: "length"`) is never asked again,
 since the same request would be cut off again. The log names the call and any
 reasoning tokens, and the caller applies its final fallback at once: an action
 waits, node verification treats the screens as different, edge normalization
-keeps the instruction, the audits report no issues, the coverage checkpoint uses
-its top candidate, the v2 runtime's own fallback applies, and a page description
-or an exploration plan raises. A reply stopped by the provider's content filter
-(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
-handled like any other empty or partial reply.
+and relabelling a flagged edge keep the instruction, the audits report no
+issues, the coverage checkpoint uses its top candidate, the v2 runtime's own
+fallback applies, and a page description or an exploration plan raises. A reply
+stopped by the provider's content filter (`finish_reason: "content_filter"`) is
+logged with the call's name and otherwise handled like any other empty or
+partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
-edge normalization, both audits and the coverage checkpoint's target choice) and
+edge normalization, both audits and the coverage checkpoint's target choice),
 the exploration planner, which names the unexplored element its instruction acts
-on, ask for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
+on, and the instruction model's relabelling of a flagged edge ask for
+[structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
 a JSON schema with a description of every property, plus OpenRouter's
 [response-healing](https://openrouter.ai/docs/guides/features/plugins/response-healing)
 plugin. The schemas are strict except for screen descriptions and edge templates,
@@ -470,6 +472,53 @@ Run the graph audit utility:
 ```bash
 uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 ```
+
+### Correcting flagged edges
+
+The audit asks the page-detail model for issues in a text dump of the graph and
+saves them to `graphs/<app_name>/<app_name>_audit.json`. It merges the duplicate
+nodes that a screenshot comparison confirms, normalizes edge templates and saves
+the result to `<app_name>_audited.json`; the explored graph file is never
+changed. Without `--re-explore`, no flagged edge is replayed or corrected.
+
+With `--re-explore`, the audit then works through the other issues on the
+device, following the node IDs each issue names through those merges and through
+renames made while it re-explores. For each `retry_edge` issue, an edge whose
+instruction looks wrong for where it leads, it:
+
+1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
+2. finds the flagged instruction on the edge by exact match, with the action
+   recorded at the same position (see [Graph edges](#graph-edges));
+3. executes that action once and corrects the edge by the screen it reaches:
+   - another node: the action moves, with its entry in every per-action list, to
+     the edge toward that node, which is created if needed, and its observation
+     becomes that node's description. The flagged edge is removed once no action
+     is left on it.
+   - the edge's target: the transition is real and its label is wrong. The
+     instruction model describes the action from the screenshot taken before it
+     ran, and that description replaces the instruction.
+4. replays to the source again, and stops if this replay misses it;
+5. runs `--steps-per-issue` exploration steps from the source, with a hint about
+   the flagged edge.
+
+An edge that lost or changed an instruction drops its instruction templates, and
+the final normalization rebuilds them. An `explore_node` issue replays to its
+node and runs the same exploration steps, with a hint about the pages the
+auditor expected.
+
+Each issue's outcome is saved to `<app_name>_re_explore.json` as its `status`:
+
+| `status` | Meaning | Graph |
+|---|---|---|
+| `moved` | The action reached the node in `moved_to` | Action moved |
+| `relabelled` | The action reached the target | Instruction replaced by `instruction` |
+| `relabel_failed` | The action reached the target, but the instruction model gave no usable description | Unchanged |
+| `instruction_not_found` | The edge is gone, or the instruction is not on it word for word, for example because the auditor paraphrased it. Steps 3 and 4 are skipped | Unchanged |
+| `unverified` | The replay missed the source, or the action left for an app with no `ext_<package>` node; `reached` is where it ended. Nothing is explored | Unchanged |
+| `skipped` | The source node is not in the graph | Unchanged |
+
+One replay can be misled by content that changes between runs, such as a feed;
+the outcome records what each correction was based on.
 
 Precompute OpenRouter image embeddings for a graph:
 
