@@ -962,6 +962,34 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
 
 
 @pytest.mark.usefixtures("_fake_device")
+def test_re_explore_identifies_the_screen_a_flagged_action_reaches_by_the_device_s_package(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    """A system dialog on top of the app is a screen of its own package, not an ext_ node."""
+    graph = _flagged_graph()
+    graph.graph.add_node("s3_camera_permission", page_description="Camera permission dialog")
+    reached = iter(["s0_home", "s3_camera_permission", "s0_home"])
+    identified: list[tuple[object, ...]] = []
+
+    def identify(*args: object) -> str:
+        identified.append(args)
+        return next(reached)
+
+    monkeypatch.setattr(graph, "identify_state", identify)
+    dialog = "com.google.android.permissioncontroller"
+
+    (result,) = _re_explore(
+        graph, [_retry()], _ReplayController(device_log, dialog), client, tmp_path
+    )
+
+    assert (result["status"], result["moved_to"]) == ("moved", "s3_camera_permission")
+    assert identified[:2] == [
+        ("MainActivity", "screen-0", "com.demo"),
+        ("MainActivity", "screen-1", dialog),
+    ]
+
+
+@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_moves_a_flagged_action_that_opens_an_outside_web_page_to_the_ext_web_edge(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
