@@ -517,8 +517,8 @@ def test_load_graph_from_json_rejects_a_malformed_document(tmp_path: Path, paylo
 
 
 def test_load_graph_from_json_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
-    """An absent "edges" key is an empty list, not a rejection -- the same
-    require_graph_shape a missing "nodes" or "edges" key no longer fails.
+    """An absent "edges" key is an empty list, not a rejection, as in
+    require_graph_shape, which does not fail a missing "nodes" or "edges" key.
     """
     path = tmp_path / "demo.json"
     path.write_text(json.dumps({"nodes": [{"id": "n1"}]}), encoding="utf-8")
@@ -592,9 +592,8 @@ def test_load_graph_from_json_rejects_a_node_without_an_id(tmp_path: Path) -> No
 def test_load_graph_from_json_rejects_a_null_nodes_field_naming_the_path(
     tmp_path: Path,
 ) -> None:
-    """Confirmed bug: ``"nodes": null`` used to raise a bare, path-less
-    ``TypeError: 'NoneType' object is not iterable`` before the shared shape
-    check covered this loader's own list check too.
+    """``"nodes": null`` raises a ``TypeError`` naming the path, from the shared
+    shape check that covers this loader's own list check too.
     """
     path = tmp_path / "demo.json"
     path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
@@ -1335,7 +1334,7 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
 def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    """A self-loop action that changed nothing used to show the next action's changes."""
+    """Each self-loop action shows its own changes, and one that changed nothing shows none."""
     gm = GraphManager()
     gm.graph.add_node("s0_list", page_description="shopping list")
     for action, instruction, delta in (
@@ -1534,8 +1533,8 @@ def test_record_info_stores_what_the_model_read_as_written(
 def test_record_info_stores_a_fact_that_starts_with_the_word_nothing(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """RECORD once told "no information" from a fact by the word "nothing", so it
-    dropped the answer to a task such as "Do I have anything on Friday?"."""
+    """RECORD keeps a fact that starts with the word "nothing", such as the answer to a
+    task like "Do I have anything on Friday?"."""
     use_model(translator, '{"information": "Nothing is scheduled on Friday"}')
     translator._record_info("Do I have anything on Friday?", "screenshot")
     assert translator._memory.info == ["Nothing is scheduled on Friday"]
@@ -2276,7 +2275,7 @@ def two_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> aitk_translator
 def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
     use_model: _UseModel, two_apps: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """The graph used to be chosen once per task, so a second app's steps used the first's."""
+    """The graph is chosen on every step, so a second app's steps use its own graph."""
     use_model(
         two_apps,
         *("A", _NO_INFORMATION, '{"choice": "D", "instruction": "Open the shop app"}'),

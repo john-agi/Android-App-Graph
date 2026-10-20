@@ -304,7 +304,7 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A "privacy policy" keyword in a description used to make the app's own page external."""
+    """A "privacy policy" keyword in a description does not make the app's own page external."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     about = _screen("com.demo.SettingsActivity", "gray")
     device = _Screens(HOME_SCREEN, about)
@@ -414,9 +414,9 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A page still showing after one back press used to become the node the next step
-    acted from, and its edge out of the shared ext_web node gave find_path a shortcut
-    between unrelated screens."""
+    """The explorer keeps pressing back while the page still shows, so the next step acts
+    from an app screen and no edge out of the shared ext_web node gives find_path a
+    shortcut between unrelated screens."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     web_page = _screen("com.demo.ArticleActivity", "blue")
     settings = _screen("com.demo.Settings", "gray")
@@ -610,8 +610,8 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The explorer used to keep the old ID of the node it acted from, so the step's
-    edge was dropped and its element was never marked explored."""
+    """The explorer acts from the node's new ID after identify_state renames it, so the
+    step's edge is recorded and its element marked explored."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     agent = Kobe(
         two_screen_device,
@@ -685,7 +685,7 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The replay from the start node used to run on whatever screen was showing."""
+    """The replay from the start node runs on a restarted app, not whatever screen is showing."""
     open_settings = {"action": "tap", "coordinate": [10, 20]}
     open_detail = {"action": "tap", "coordinate": [30, 40]}
     replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])
@@ -720,8 +720,8 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A checkpoint that did not navigate used to hand back the ID its merge audit had
-    just removed, and the next step raised RuntimeError on it."""
+    """A checkpoint that does not navigate hands back the ID its merge audit kept, not the
+    one it removed, so the next step acts from a node still in the graph."""
     graph = replaying_kobe.graph
     for node_id in ("s0_list", "s1_list_dup"):
         graph.graph.add_node(
@@ -761,8 +761,8 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The checkpoint used to leave out the start node instead, so it could replay the
-    device to the screen it was already on."""
+    """The checkpoint leaves the node the device is on out of its candidates, so it never
+    replays the device to the screen it is already on."""
     for node_id in ("s1_list", "s2_list_dup"):
         kobe.graph.graph.add_node(
             node_id, page_description="Item list", reference_screenshot=png_screenshot
