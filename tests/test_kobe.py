@@ -259,6 +259,53 @@ def test_exploration_wait_recovery_respects_step_limit(
     assert no_sleep == [1, 1]
 
 
+@pytest.mark.parametrize(
+    ("element", "explored", "warned"),
+    [(2, ["Compose FAB"], False), (None, [], False), (3, [], True)],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_marks_exactly_the_element_the_planner_names(
+    element: int | None,
+    explored: list[str],
+    warned: bool,
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tap on the FAB never marks the dark mode toggle, whose "on" is inside "button"."""
+    kobe.graph.graph.add_node(
+        "s0_home",
+        page_description="home",
+        interactable_elements=[
+            {"description": "Turn on dark mode toggle", "position": "top", "explored": False},
+            {"description": "Compose FAB", "position": "bottom right", "explored": False},
+        ],
+    )
+    kobe.graph.graph.add_node("s1_compose", page_description="compose")
+    screens = iter(["s0_home", "s1_compose"])
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: next(screens))
+    monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    instruction = "Tap the floating action button in the bottom right"
+    router_responses.extend(
+        [
+            chat_response(content=json.dumps({"element": element, "instruction": instruction})),
+            chat_response(content="", tool_arguments='{"action":"click","coordinate":[900,900]}'),
+            chat_response(content='{"is_template":false}'),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        kobe.explore(max_steps=1)
+
+    elements = kobe.graph.graph.nodes["s0_home"]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == explored
+    assert ("is not among the 2 unexplored element(s) on s0_home" in caplog.text) is warned
+    assert kobe.graph.graph["s0_home"]["s1_compose"]["instructions"] == [instruction]
+
+
 class _ScriptedDevice:
     w = 100
     h = 200
@@ -287,13 +334,17 @@ def _explore_one_step_the_action_model_ends(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     page = {
         "page_description": "home",
-        "elements": [{"description": "Settings icon", "position": "top right"}],
+        "elements": [
+            {"description": "Search box", "position": "top left"},
+            {"description": "Settings icon", "position": "top right"},
+        ],
     }
+    plan = {"element": 2, "instruction": "Tap the Settings icon"}
     router_responses.extend(
         [
             chat_response(content=json.dumps(page)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap the Settings icon"),
+            chat_response(content=json.dumps(plan)),
             chat_response(content='{"action":"end"}'),
         ]
     )
@@ -324,8 +375,8 @@ def test_an_action_model_end_is_recorded_as_the_back_press_it_executes(
     [(source, _target, edge)] = kobe.graph.graph.edges(data=True)
     assert edge["actions"] == [[{"action": "back"}]]
     assert edge["instructions"] == ["Press back"]
-    [element] = kobe.graph.graph.nodes[source]["interactable_elements"]
-    assert element["explored"] is True
+    elements = kobe.graph.graph.nodes[source]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == ["Settings icon"]
     assert '"Tap the Settings icon"' in caplog.text
 
 
@@ -394,7 +445,7 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
         [
             chat_response(content=json.dumps(search_page)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap the Search button"),
+            chat_response(content='{"element":1,"instruction":"Tap the Search button"}'),
             chat_response(content="", tool_arguments='{"action":"click","coordinate":[500,500]}'),
             chat_response(content='{"page_description":"Chat search results"}'),
             httpx.Response(200, json=embedding_body),

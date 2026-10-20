@@ -335,7 +335,7 @@ def _fake_device(
 ) -> None:
     """Silence every side effect re_explore_issues has outside the graph."""
     del no_sleep, device_log  # requested for their side effects on time.sleep and subprocess.run
-    monkeypatch.setattr(audit, "plan_next_action", lambda **_kwargs: "tap the first button")
+    monkeypatch.setattr(audit, "plan_next_action", lambda **_kwargs: ("tap the first button", None))
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "end"}, ""))
 
 
@@ -348,9 +348,9 @@ def test_re_explore_issues_retries_explores_and_skips(
     controller = FakeController("com.demo")
     models: list[tuple[str, str]] = []
 
-    def plan(*, settings: ModelSettings, **_kwargs: object) -> str:
+    def plan(*, settings: ModelSettings, **_kwargs: object) -> tuple[str, None]:
         models.append(("plan", settings.model))
-        return "tap the first button"
+        return "tap the first button", None
 
     def act(*, settings: ModelSettings, **_kwargs: object) -> tuple[dict[str, str], str]:
         models.append(("act", settings.model))

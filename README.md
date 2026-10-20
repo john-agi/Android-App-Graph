@@ -292,8 +292,9 @@ or an exploration plan raises. A reply stopped by the provider's content filter
 handled like any other empty or partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
-edge normalization, both audits and the coverage checkpoint's target choice) ask
-for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
+edge normalization, both audits and the coverage checkpoint's target choice) and
+the exploration planner, which names the unexplored element its instruction acts
+on, ask for [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs):
 a JSON schema with a description of every property, plus OpenRouter's
 [response-healing](https://openrouter.ai/docs/guides/features/plugins/response-healing)
 plugin. The schemas are strict except for screen descriptions and edge templates,

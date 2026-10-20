@@ -387,7 +387,7 @@ class Kobe:
                 input_status = keyboard_status(keyboard_hint)
 
                 unexplored_elements = self.graph.get_unexplored_elements(current_node)
-                instruction = plan_next_action(
+                instruction, planned_element = plan_next_action(
                     client=self.client,
                     screenshot_b64=screenshot,
                     page_description=node_data["page_description"],
@@ -527,7 +527,7 @@ class Kobe:
                     schema_delta=schema_delta,
                     num_steps=len(action_sequence),
                 )
-                self.graph.mark_element_explored(current_node, instruction)
+                self.graph.mark_element_explored(current_node, planned_element)
                 self.graph.maybe_normalize_node_edges(current_node)
                 step += 1
                 self.graph.total_steps_completed = step
