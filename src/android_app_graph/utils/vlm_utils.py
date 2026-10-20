@@ -1832,6 +1832,90 @@ def plan_next_action(
     return instruction, element
 
 
+ACTION_DESCRIPTION_PROMPT = """\
+You are labelling one step of a mobile app exploration graph. The screenshot shows the \
+screen before the step. The step performed this action, with coordinates in pixels on a \
+{screen_w}x{screen_h} screen, measured from the top-left corner:
+{action}
+
+"tap" and "long_press" act on the element at x, y; "swipe" moves from x1, y1 to x2, y2; \
+"type" enters its text into the focused field; "back", "home" and "enter" press that \
+button. A list is a sequence of such actions.
+
+Write the instruction this step carried out, as one atomic action that names the element \
+it acts on. If you refer to text visible on the screenshot, wrap the exact text in quotes, \
+and add an anchor such as the element's screen location, icon shape or container. For a \
+swipe, give its direction and what it scrolls; for typing, give the text typed.
+
+Example instructions:
+- Tap the "Network & internet" menu item near the top of the settings list
+- Swipe up on the search results list
+- Type 'stewed beef'
+- Press back
+
+Example reply:
+{{"instruction": "Tap the rounded search bar at the top of the screen"}}"""
+
+_ACTION_DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "instruction": {
+            "type": "string",
+            "description": "The executed action as one atomic instruction naming its element.",
+        },
+    },
+    "required": ["instruction"],
+    "additionalProperties": False,
+}
+
+
+def describe_executed_action(
+    client: OpenRouter,
+    screenshot_b64: str,
+    action: dict[str, Any] | list[dict[str, Any]],
+    screen_w: int,
+    screen_h: int,
+    *,
+    settings: ModelSettings,
+) -> str | None:
+    """Write the instruction for an AITK action from the screenshot taken before it ran.
+
+    Returns None when the reply is truncated, not a JSON object or has a blank instruction.
+    """
+    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    prompt = ACTION_DESCRIPTION_PROMPT.format(
+        screen_w=screen_w, screen_h=screen_h, action=json.dumps(action)
+    )
+    try:
+        resp = send_chat(
+            client,
+            call_type="action_description",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        build_image_message(screenshot_b64),
+                    ],
+                }
+            ],
+            response_format=_structured_output("action_description", _ACTION_DESCRIPTION_SCHEMA),
+            plugins=[{"id": "response-healing"}],
+        )
+    except TruncatedReplyError:
+        return None
+    raw = strip_json_fences(message_text(resp))
+    try:
+        reply = as_object_dict(json.loads(raw))
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse action description JSON. Raw:\n%s", raw)
+        return None
+    instruction = _strip_wrapping_quotes(as_str(reply.get("instruction"), "").strip())
+    logger.info("Described executed action %s as: %s", action, instruction)
+    return instruction or None
+
+
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
