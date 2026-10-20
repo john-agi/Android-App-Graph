@@ -564,6 +564,30 @@ def test_rename_node_updates_the_identify_cache(vlm: FakeVlm) -> None:
     assert vlm.kinds() == ["describe", "embed", "embed"]
 
 
+@pytest.mark.usefixtures("vlm")
+def test_resolve_node_id_follows_a_chain_of_renames() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    feed = gm.rename_node("s0_home", "Home feed")
+
+    settings = gm.rename_node(feed, "Settings page")
+
+    assert gm.resolve_node_id("s0_home") == settings
+    assert gm.resolve_node_id(settings) == settings
+
+
+@pytest.mark.usefixtures("vlm")
+def test_resolve_node_id_after_renaming_back_to_an_earlier_id() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home_screen", "Home screen")
+    feed = gm.rename_node("s0_home_screen", "Home feed")
+
+    assert gm.rename_node(feed, "Home screen") == "s0_home_screen"
+
+    assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
+    assert gm.resolve_node_id(feed) == "s0_home_screen"
+
+
 def test_get_node_returns_a_copy() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
