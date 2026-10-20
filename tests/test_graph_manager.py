@@ -813,7 +813,7 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
 
 
 def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) -> None:
-    """Regression for #62: a typo'd endpoint used to become an attribute-less node."""
+    """A typo'd endpoint used to become an attribute-less node."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
 
@@ -847,7 +847,7 @@ def test_merge_nodes_returns_false_when_a_node_is_missing() -> None:
 
 
 def test_merge_nodes_is_a_no_op_when_both_ids_name_the_same_node() -> None:
-    """Regression for #48: a self-merge used to double visit_count, then delete."""
+    """A self-merge used to double visit_count, then delete the node."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", visit_count=3, state_schema={"tab": ["home"]})
     add_screen(gm, "s1_search", "Search screen")
@@ -1744,7 +1744,7 @@ def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
 
 
 def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
-    """Regression for #62: such an edge used to grow a phantom node on load."""
+    """Such an edge used to grow a phantom node on load."""
     path = tmp_path / "graph.json"
     path.write_text(
         json.dumps(
@@ -1804,8 +1804,8 @@ def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -
 def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
     """An int id would otherwise sail through ``require_known_edge_endpoints``,
     which compares ``str()``-normalised ids, and let ``add_edge`` grow a
-    phantom node with a different (string) id -- the same bug #62 fixed for a
-    genuinely undefined endpoint.
+    phantom node with a different (string) id -- the same phantom node a
+    genuinely undefined endpoint used to grow.
     """
     path = tmp_path / "graph.json"
     path.write_text(json.dumps({"nodes": [{"id": 5}], "edges": []}), encoding="utf-8")
@@ -2026,7 +2026,7 @@ def test_run_node_merge_audit_skips_a_missing_node(monkeypatch: pytest.MonkeyPat
 def test_run_node_merge_audit_skips_a_self_pair(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
 ) -> None:
-    """Regression for #48: an auditor naming one node twice used to delete it."""
+    """An auditor naming one node twice used to delete it."""
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     gm = make_manager()
