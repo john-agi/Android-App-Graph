@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any, NoReturn, override
@@ -13,6 +15,7 @@ import pytest
 from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
+from android_app_graph.device import DeviceController
 from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils.graph_manager import GraphManager
 
@@ -385,6 +388,39 @@ def test_re_explore_issues_retries_explores_and_skips(
 
 
 @pytest.mark.usefixtures("_fake_device")
+def test_re_explore_issues_records_an_action_model_end_as_press_back(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    controller = FakeController("com.demo")
+    caplog.set_level(logging.INFO, logger=audit.logger.name)
+
+    [result] = audit.re_explore_issues(
+        graph,
+        [{"type": "explore_node", "node": "s0_home", "expected_pages": ["Settings"]}],
+        controller,
+        "demo",
+        "com.demo",
+        tmp_path / "demo" / "demo_audited.json",
+        client,
+        ModelSettings("instruction-model"),
+        ModelSettings("action-model"),
+        steps_per_issue=1,
+    )
+
+    assert controller.actions == [({"action": "back"}, True)]
+    edge = graph.graph["s0_home"]["s0_home"]
+    assert edge["actions"] == [[{"action": "back"}]]
+    assert edge["instructions"] == ["Press back"]
+    assert [step["instruction"] for step in result["steps"]] == ["Press back"]
+    assert '"tap the first button"' in caplog.text
+
+
+@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_skips_unreachable_nodes(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -410,6 +446,69 @@ def test_re_explore_issues_skips_unreachable_nodes(
 
     assert [r["status"] for r in results] == ["skipped", "skipped"]
     assert {r["reason"] for r in results} == {"unreachable"}
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
+    tmp_path: Path,
+    two_screen_device: DeviceController,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """re_explore_issues used to keep the old ID of the node it acted from, so the
+    step's edge was dropped."""
+    monkeypatch.setattr(
+        audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
+    )
+    graph = GraphManager(
+        client=router_client,
+        page_detail=ModelSettings("provider/page_detail"),
+        embedding=ModelSettings("provider/embedding"),
+    )
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"Chat search page"}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    screen = two_screen_device.get_state()
+    start = graph.identify_state(screen["activity"], screen["screenshot"])
+    verdict = {
+        "same": False,
+        "reason": "a query has been entered",
+        "existing_description": "Chat search page with recent searches",
+        "new_description": "Chat search results page",
+    }
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"Chat search results"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(verdict)),
+            *[httpx.Response(200, json=embedding_body) for _ in range(2)],
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="android_app_graph"):
+        (result,) = audit.re_explore_issues(
+            graph,
+            [{"type": "explore_node", "node": start, "expected_pages": ["Search results"]}],
+            two_screen_device,
+            "demo",
+            "com.demo.app",
+            tmp_path / "demo_audited.json",
+            router_client,
+            ModelSettings("provider/instruction"),
+            ModelSettings("provider/action"),
+            steps_per_issue=1,
+        )
+
+    renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
+    assert [(step["from"], step["to"]) for step in result["steps"]] == [(renamed, results)]
+    assert graph.graph.has_edge(renamed, results)
+    assert "add_edge: missing node(s)" not in caplog.text
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -530,6 +629,27 @@ def test_audit_cli_opens_one_client_and_closes_it_on_exit(
         assert audit.main(["-c", str(config)]) == 0
     assert len(opened_clients) == 1
     assert opened_clients[0].sdk_configuration.client is None
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_of_one_app_keeps_the_package_name_it_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--app`` audits without the config's apps, so the package must come from the file."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    app_dir = graph_dir / "demo"
+    app_dir.mkdir(parents=True)
+    (app_dir / "demo.json").write_text(
+        json.dumps({"package_name": "com.demo.app", "nodes": [], "edges": []}), encoding="utf-8"
+    )
+    config = _write_config(tmp_path, str(graph_dir))
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+
+    assert audit.main(["-c", str(config), "--app", "demo"]) == 0
+
+    audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
+    assert audited["package_name"] == "com.demo.app"
 
 
 def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
