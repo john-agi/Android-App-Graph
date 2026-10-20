@@ -67,7 +67,7 @@ def test_restart_app_launches_nothing_when_the_force_stop_fails(
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="device offline")
 
     monkeypatch.setattr(device.subprocess, "run", offline)
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(device.ForceStopRefusedError):
         device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
     assert commands == [_FORCE_STOP]
     assert no_sleep == []
