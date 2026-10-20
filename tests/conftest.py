@@ -24,10 +24,13 @@ from android_app_graph.commands import audit, embed
 from android_app_graph.device import DeviceController
 from android_app_graph.utils import open_client
 
-# The built-in "ci" profile (deterministic, no deadline, no example database) is
-# selected automatically when CI is set; re-registered here with more examples.
+# Hypothesis's built-in "ci" profile, its own choice when CI is set, is deterministic,
+# keeps no example database and has no deadline; CI runs it with more examples.
+# Local runs have no deadline either: how long one example takes depends on how busy
+# the machine is, not on the code under test.
 settings.register_profile("ci", settings.get_profile("ci"), max_examples=500)
-settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "default"))
+settings.register_profile("dev", settings.get_profile("default"), deadline=None)
+settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "ci" if os.getenv("CI") else "dev"))
 
 # The OpenRouter SDK also reads OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPEN_ROUTER_* and
 # OPENROUTER_DEBUG, so the whole prefix is cleared, not only the key.
