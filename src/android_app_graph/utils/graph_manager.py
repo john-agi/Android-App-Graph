@@ -480,8 +480,9 @@ class GraphManager:
         self._node_aliases[old_id] = new_id
 
     def resolve_node_id(self, node_id: str) -> str:
-        """``identify_state`` can rename any node, including one a caller still holds,
-        so a caller that keeps a node ID across that call passes it through here.
+        """``identify_state`` can rename any node and a merge can remove one, including
+        one a caller still holds, so a caller that keeps a node ID across either passes
+        it through here.
         ``add_edge`` deliberately does not, so a stale endpoint is still reported.
         """
         while node_id in self._node_aliases:
@@ -530,7 +531,7 @@ class GraphManager:
         - State schemas are merged (union of keys and values).
         - Visit counts are summed.
         - The kept node retains its description, screenshot, and embedding.
-        - The removed node is deleted from the graph.
+        - The removed node is deleted from the graph, and its ID resolves to *keep_id*.
 
         Returns True if the merge was performed, False if either node is missing
         or if *keep_id* and *remove_id* name the same node.
@@ -597,6 +598,7 @@ class GraphManager:
             self._merge_edge_data(keep_id, keep_id, edge_data)
 
         self.graph.remove_node(remove_id)
+        self._record_alias(remove_id, keep_id)
 
         logger.info(
             "Merged node %s into %s (now %d nodes, %d edges)",

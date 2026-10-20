@@ -512,3 +512,78 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
         == "s1_settings"
     )
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_settings]
+
+
+def _fail_navigation(node: str) -> str:
+    msg = f"replay to {node} failed"
+    raise RuntimeError(msg)
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("navigation_fails", [False, True])
+def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_node(
+    navigation_fails: bool,
+    replaying_kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint that did not navigate used to hand back the ID its merge audit had
+    just removed, and the next step raised RuntimeError on it."""
+    graph = replaying_kobe.graph
+    for node_id in ("s0_list", "s1_list_dup"):
+        graph.graph.add_node(
+            node_id, page_description="Item list", reference_screenshot=png_screenshot
+        )
+    graph.graph.add_node("s2_detail", page_description="Item detail")
+    screens = iter(["s1_list_dup", "s1_list_dup", "s2_detail"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(screens))
+    replaying_kobe.coverage_checkpoint_steps = 1
+    if navigation_fails:
+        graph.graph.add_edge("s1_list_dup", "s2_detail")
+        monkeypatch.setattr(replaying_kobe, "navigate_to_node", _fail_navigation)
+    duplicate = {"type": "merge_nodes", "node_a": "s0_list", "node_b": "s1_list_dup"}
+    target = '{"node_id":"s2_detail","reason":"unexplored"}'
+    click = '{"action":"click","coordinate":[500,500]}'
+    router_responses.extend(
+        [
+            chat_response(content='{"element":null,"instruction":"Tap the first item"}'),
+            chat_response(content="", tool_arguments=click),
+            chat_response(content=json.dumps({"issues": [duplicate], "summary": "duplicate"})),
+            chat_response(content='{"same":true,"reason":"same list"}'),
+            *([chat_response(content=target)] if navigation_fails else []),
+            chat_response(content='{"element":null,"instruction":"Open the first item"}'),
+            chat_response(content="", tool_arguments=click),
+        ]
+    )
+
+    replaying_kobe.explore(max_steps=2)
+
+    assert graph.graph["s0_list"]["s2_detail"]["instructions"] == ["Open the first item"]
+
+
+def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candidates(
+    kobe: Kobe,
+    png_screenshot: str,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The checkpoint used to leave out the start node instead, so it could replay the
+    device to the screen it was already on."""
+    for node_id in ("s1_list", "s2_list_dup"):
+        kobe.graph.graph.add_node(
+            node_id, page_description="Item list", reference_screenshot=png_screenshot
+        )
+    kobe.graph.graph.add_edge("s0_home", "s1_list")
+    duplicate = {"type": "merge_nodes", "node_a": "s1_list", "node_b": "s2_list_dup"}
+    router_responses.extend(
+        [
+            chat_response(content=json.dumps({"issues": [duplicate], "summary": "duplicate"})),
+            chat_response(content='{"same":true,"reason":"same list"}'),
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+        ]
+    )
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
+    assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
