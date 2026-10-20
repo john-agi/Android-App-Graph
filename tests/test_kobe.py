@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import override
@@ -17,7 +18,7 @@ from openrouter.errors import OpenRouterError
 from PIL import Image
 
 from android_app_graph.device import DeviceController
-from android_app_graph.kobe import Kobe
+from android_app_graph.kobe import Kobe, NoPathError
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
@@ -758,8 +759,8 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
 
 
 def _fail_navigation(node: str) -> str:
-    msg = f"replay to {node} failed"
-    raise RuntimeError(msg)
+    msg = f"No path from s0_list to {node} in the graph."
+    raise NoPathError(msg)
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -830,6 +831,216 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
     assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
+
+
+class _ReplayScript:
+    """A DeviceController that shows ``screens`` one state read at a time, logs its
+    actions to the device log and fails ``broken`` as an adb error would."""
+
+    w = 100
+    h = 200
+
+    def __init__(
+        self,
+        log: list[object],
+        *screens: dict[str, object],
+        broken: dict[str, object] | None = None,
+    ) -> None:
+        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
+        self._log = log
+        self._screens = iter(screens)
+        self._broken = broken
+
+    def get_state(self) -> dict[str, object]:
+        return next(self._screens)
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        self._log.append(action)
+        if action == self._broken:
+            msg = f"adb could not run {action}"
+            raise RuntimeError(msg)
+
+
+def _adb_refusing_once(
+    refused: list[str], log: list[object]
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A ``subprocess.run`` that logs each command and fails ``refused`` the first time."""
+
+    def run(
+        command: list[str], *, check: bool = False, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        log.append(command)
+        returncode = 1 if command == refused and log.count(command) == 1 else 0
+        if check and returncode:
+            raise subprocess.CalledProcessError(returncode, command)
+        return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
+
+    return run
+
+
+def _in_app(activity: str, color: str) -> dict[str, object]:
+    return {**_screen(f"com.demo.{activity}", color), "package": "com.demo"}
+
+
+_NO_DUPLICATES = '{"issues":[],"summary":"no duplicates"}'
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is_on(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay that fails after the app restart continues from the screen the device is
+    on: the next step plans from that screen's node and screenshot."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    open_list = {"action": "tap", "coordinate": [10, 20]}
+    open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
+    home, settings = _in_app("Home", "white"), _in_app("Settings", "gray")
+    item_list, sort_menu = _in_app("List", "blue"), _in_app("Sort", "green")
+    # The checkpoint reads the list screen once to identify it and once for the next step.
+    device = _ReplayScript(
+        device_log, home, settings, item_list, item_list, sort_menu, broken=open_item
+    )
+    explorer = _explorer(device, tmp_path, router_client)
+    explorer.coverage_checkpoint_steps = 1
+    graph = explorer.graph
+    nodes = {
+        "com.demo.Home": "s0_home",
+        "com.demo.List": "s1_list",
+        "com.demo.Settings": "s3_settings",
+        "com.demo.Sort": "s4_sort_menu",
+    }
+    graph.graph.add_nodes_from([*nodes.values(), "s2_detail"], page_description="a screen")
+    graph.add_edge("s0_home", "s1_list", action=[open_list])
+    graph.add_edge("s1_list", "s2_detail", action=[open_item])
+    monkeypatch.setattr(
+        graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
+    )
+    router_responses.extend(
+        [
+            chat_response(content='{"element":null,"instruction":"Open settings"}'),
+            chat_response(content=_TAP_REPLY),
+            chat_response(content=_NO_DUPLICATES),
+            chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
+            chat_response(content='{"element":null,"instruction":"Open the sort menu"}'),
+            chat_response(content=_TAP_REPLY),
+        ]
+    )
+
+    explorer.explore(max_steps=2)
+
+    assert list(graph.graph.in_edges("s4_sort_menu")) == [("s1_list", "s4_sort_menu")]
+    list_image = f"data:image/png;base64,{item_list['screenshot']}"
+    assert all(list_image in request.content.decode() for request in router_requests[-2:])
+    tap = {"action": "tap", "x": 50, "y": 100}
+    assert device_log == [tap, _FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, tap]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continues_there(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch that fails after the force-stop leaves the launcher on the screen."""
+    launcher = {
+        **_screen("com.android.launcher3.Launcher", "black"),
+        "package": "com.android.launcher3",
+    }
+    device = _ReplayScript(device_log, launcher, _in_app("Home", "white"))
+    explorer = _explorer(device, tmp_path, router_client)
+    explorer.graph.graph.add_edge("s0_home", "s1_settings")
+    explorer.graph.graph.add_edge("s1_settings", "s2_detail")
+    router_responses.extend(
+        [
+            chat_response(content=_NO_DUPLICATES),
+            chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", _adb_refusing_once(_PACKAGE_LAUNCH, device_log))
+    nodes = {"com.demo.Home": "s0_home"}
+    monkeypatch.setattr(
+        explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
+    )
+
+    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, _FORCE_STOP, _PACKAGE_LAUNCH]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The next step never starts from ``ext_web``, even when the app's own web view
+    shows the outside page."""
+    open_list = {"action": "tap", "coordinate": [10, 20]}
+    open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
+    web_page, item_list = _in_app("Article", "orange"), _in_app("List", "blue")
+    device = _ReplayScript(device_log, web_page, item_list, broken=open_item)
+    explorer = _explorer(device, tmp_path, router_client)
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_list", "s2_detail"])
+    explorer.graph.add_edge("s0_home", "s1_list", action=[open_list])
+    explorer.graph.add_edge("s1_list", "s2_detail", action=[open_item])
+    router_responses.extend(
+        [
+            chat_response(content=_NO_DUPLICATES),
+            chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
+        ]
+    )
+    nodes = {"com.demo.Article": EXTERNAL_WEB_NODE, "com.demo.List": "s1_list"}
+    monkeypatch.setattr(
+        explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
+    )
+
+    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
+    back = {"action": "back"}
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, back]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("force_stop_refused", [False, True], ids=["no path", "force-stop refused"])
+def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_state(
+    force_stop_refused: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither failure changes the screen, so the step's node and state still hold."""
+    explorer = _explorer(_ReplayScript(device_log), tmp_path, router_client)
+    explorer.graph.graph.add_edge("s0_home", "s1_settings")
+    explorer.graph.graph.add_edge("s1_settings", "s2_detail")
+    router_responses.extend(
+        [
+            chat_response(content=_NO_DUPLICATES),
+            chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
+        ]
+    )
+    if force_stop_refused:
+        monkeypatch.setattr(subprocess, "run", _adb_refusing_once(_FORCE_STOP, device_log))
+    else:
+        monkeypatch.setattr(explorer.graph, "find_path", lambda *_args: None)
+
+    assert explorer._apply_coverage_checkpoint_after_step(50, 100, "s2_detail", HOME_SCREEN) == (
+        "s2_detail",
+        HOME_SCREEN,
+    )
+    assert device_log == ([_FORCE_STOP] if force_stop_refused else [])
 
 
 _DIALOG_ACTIVITY = (

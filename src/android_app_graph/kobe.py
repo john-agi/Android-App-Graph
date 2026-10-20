@@ -12,6 +12,7 @@ from openrouter import OpenRouter
 
 from android_app_graph.device import (
     DeviceController,
+    ForceStopRefusedError,
     is_system_overlay,
     keyboard_status,
     restart_app,
@@ -31,6 +32,10 @@ from android_app_graph.utils.vlm_utils import (
 )
 
 EXPLORATION_ROLES = ("page_detail", "embedding", "instruction", "action")
+
+
+class NoPathError(ValueError):
+    """The graph records no path from its start node to the target, so no replay began."""
 
 
 def _compute_schema_delta(
@@ -182,14 +187,45 @@ class Kobe:
         )
         try:
             actual_node = self.navigate_to_node(selected)
-        except Exception as exc:
+        except (NoPathError, ForceStopRefusedError) as exc:
             self.logger.warning(
-                "Coverage checkpoint navigation to %s failed.",
+                "Coverage checkpoint navigation to %s failed before the app restart; "
+                "continuing from %s.",
                 selected,
+                current_node,
                 exc_info=exc,
             )
             return None
+        except Exception as exc:
+            self.logger.warning(
+                "Coverage checkpoint navigation to %s failed after the app restart; "
+                "continuing from the screen the device is on.",
+                selected,
+                exc_info=exc,
+            )
+            return self._identify_screen_after_failed_navigation()
         return actual_node
+
+    def _identify_screen_after_failed_navigation(self) -> str:
+        """Return the node of the screen a navigation left when it failed after the restart.
+
+        A screen of another app, such as the launcher a failed launch leaves, gets
+        one more restart first, and an outside web page is left with back presses,
+        so exploration continues inside the app.
+        """
+        device_state = self.controller.get_state()
+        package = device_state.get("package", "").strip()
+        if package and package != self.package_name and not is_system_overlay(package):
+            restart_app(
+                self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
+            )
+            device_state = self.controller.get_state()
+        node = self.graph.identify_state(
+            device_state["activity"], device_state["screenshot"], device_state["package"]
+        )
+        if node == EXTERNAL_WEB_NODE:
+            node, _ = self._leave_external_web()
+        return node
 
     def _require_node(self, node_id: str) -> dict[str, Any]:
         """Return a node's attributes.
@@ -236,11 +272,11 @@ class Kobe:
         """
         start_node = self.graph.get_start_node()
         if start_node is None:
-            raise ValueError("Graph is empty — cannot navigate.")
+            raise NoPathError("Graph is empty — cannot navigate.")
 
         path = self.graph.find_path(start_node, target_node)
         if path is None:
-            raise ValueError(f"No path from {start_node} to {target_node} in the graph.")
+            raise NoPathError(f"No path from {start_node} to {target_node} in the graph.")
 
         restart_app(
             self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
