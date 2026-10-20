@@ -1291,6 +1291,26 @@ def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
     ]
 
 
+def test_build_options_lists_no_self_loop_action_without_an_instruction(
+    translator: aitk_translator.UIKobeV2Translator,
+) -> None:
+    gm = GraphManager()
+    gm.graph.add_node("s0_list", page_description="shopping list")
+    for action, instruction, delta in (
+        ({"action": "swipe"}, "Scroll down the list", {"top_item": {"before": "A", "after": "K"}}),
+        ({"action": "click"}, "", {"sort": {"before": "name", "after": "price"}}),
+        ({"action": "type"}, "Type 'milk'", {"query": {"before": None, "after": "milk"}}),
+    ):
+        gm.add_edge("s0_list", "s0_list", action, instruction=instruction, schema_delta=delta)
+
+    text, _ = translator._build_options(gm.graph, "s0_list")
+
+    assert text.splitlines()[1:-1] == [
+        'B) Stay here — "Scroll down the list" | changes: top_item: A -> K',
+        "C) Stay here — \"Type 'milk'\" | changes: query: None -> milk",
+    ]
+
+
 def test_build_options_skips_the_self_loop_when_listing_neighbours(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:

@@ -979,6 +979,8 @@ class UIKobeV2Translator(BaseTranslator):
         else:
             for i, raw_instr in enumerate(edge_data.get("instructions", [])):
                 instr = as_str(raw_instr, "")
+                if not instr:
+                    continue
                 effect = self._edge_effect_hint(edge_data, i)
                 option: _Option = {
                     "letter": "",
