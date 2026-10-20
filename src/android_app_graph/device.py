@@ -99,6 +99,10 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
 _LAUNCH_SETTLE_SECONDS = 4
 
 
+class ForceStopRefusedError(subprocess.CalledProcessError):
+    """adb refused to force-stop the app, so the device still shows what it showed."""
+
+
 def restart_app(
     controller: DeviceController,
     app_name: str,
@@ -111,16 +115,16 @@ def restart_app(
     A launch alone does not: launching an app whose task still exists brings that
     task to the foreground as it was
     (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
-    A failed force-stop raises before anything is launched, so no replay starts
-    from an unknown screen.
+    A refused force-stop raises ``ForceStopRefusedError`` before anything is
+    launched, so no replay starts from an unknown screen.
     """
     config = controller.config
-    subprocess.run(
-        ["adb", "-s", config["device"]["udid"], "shell", "am", "force-stop", package_name],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
+    force_stop = ["adb", "-s", config["device"]["udid"], "shell", "am", "force-stop", package_name]
+    stopped = subprocess.run(
+        force_stop, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
     )
+    if stopped.returncode != 0:
+        raise ForceStopRefusedError(stopped.returncode, force_stop)
     app = {"name": app_name, "package_name": package_name, "launch_activity": launch_activity}
     launch_app(config, app, logger)
     time.sleep(_LAUNCH_SETTLE_SECONDS)
