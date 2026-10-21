@@ -952,7 +952,7 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
         ]
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
-    assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_settings"
+    assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_settings"
     assert [json.loads(request.content)["model"] for request in router_requests] == [
         "provider/page_detail"
     ] * 2
@@ -980,7 +980,7 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     )
     monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_settings")
     assert (
-        replaying_kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
+        replaying_kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
         == "s1_settings"
     )
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_settings]
@@ -1058,7 +1058,7 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
         ]
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
-    assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
+    assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
 
 
 class _ReplayScript:
@@ -1199,7 +1199,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
         explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
     )
 
-    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, _FORCE_STOP, _PACKAGE_LAUNCH]
 
 
@@ -1233,7 +1233,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
         explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
     )
 
-    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
     back = {"action": "back"}
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, back]
 
@@ -1264,10 +1264,7 @@ def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_sta
     else:
         monkeypatch.setattr(explorer.graph, "find_path", lambda *_args: None)
 
-    assert explorer._apply_coverage_checkpoint_after_step(50, 100, "s2_detail", HOME_SCREEN) == (
-        "s2_detail",
-        HOME_SCREEN,
-    )
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") is None
     assert device_log == ([_FORCE_STOP] if force_stop_refused else [])
 
 
