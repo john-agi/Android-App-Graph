@@ -331,9 +331,9 @@ vector is dropped with a warning. Nothing is pruned, since observation IDs never
 change.
 
 When exploration resumes a graph and when the audit loads one, every member of an
-in-app node that has no vector is embedded first, as after a model change or for a
-graph explored before screenshot vectors were kept. The log names the count before
-and the cost after. To embed every screenshot again, delete the file.
+in-app node that has no vector is embedded first, as when `image_emb.json` is missing
+or tagged with another model. The log names the count before and the cost after. To
+embed every screenshot again, delete the file.
 
 One 670x1490 WebP screenshot, embedded with `voyageai/voyage-multimodal-3.5`, was
 1,782 prompt tokens and $0.000599 on 2026-10-21; Voyage bills images by pixel, so a
@@ -578,10 +578,9 @@ what each step found.
 5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
    each node's closest member, proposes 3, and `text`, by the cosine of the
    description embeddings, proposes 2. The nodes are taken once each, in the order of
-   their best rank in either source, ties broken by image cosine. No score keeps a
-   node from the verifier, which checks them in that order against each one's
-   closest member and stops at the first confirmation, after 3 calls at most (4 with
-   an expected node).
+   their best rank in either source, ties broken by image cosine. The verifier checks
+   them in that order against each one's closest member and stops at the first
+   confirmation, after 3 calls at most (4 with an expected node).
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later

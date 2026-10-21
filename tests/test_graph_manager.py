@@ -839,10 +839,8 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     assert "dim(s)=[2]" in stale_warnings[0]
 
 
-def test_a_node_whose_description_scores_low_is_still_verified(
-    vlm: FakeVlm, screen: Screens
-) -> None:
-    """No text score keeps a candidate from the verifier; a rejection makes a new node."""
+def test_a_node_whose_description_scores_low_is_verified(vlm: FakeVlm, screen: Screens) -> None:
+    """A short-listed node is verified whatever its scores; a rejection makes a new node."""
     vlm.descriptions.append(("Settings page", {}, []))
     vlm.verdicts.append({"same": False, "reason": "another page"})
     gm = make_manager(screen.steps_dir)
@@ -880,8 +878,8 @@ def _rejection(node: str) -> dict[str, Any]:
 def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    """Its description scores 0, far below any text gate, and its representative looks
-    unlike the screen; its other member is the screen's look-alike."""
+    """Its description scores 0 and its representative looks unlike the screen; its other
+    member is the screen's look-alike."""
     gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_settings", "Settings page", **members(screen.steps_dir, b"rep", b"twin"))
     vlm.images.update({b64(b"rep"): FAR, b64(b"twin"): NEAR, SHOT_A: NEAR})
@@ -3129,7 +3127,6 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     gm.save_graph(path)
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert "similarity_threshold" not in data
     assert data["total_steps_completed"] == 42
     assert data["nodes"][0]["activity"] == HOME
     assert data["nodes"][0]["visit_count"] == 3

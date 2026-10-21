@@ -622,8 +622,8 @@ class GraphManager:
         """Embed the image of every member of an in-app node that has no image vector,
         save the vectors to the step log, and return how many were embedded.
 
-        Members of a graph explored before image vectors were kept, or under another
-        image-embedding model, have none.
+        A member has none when the step log's ``image_emb.json`` is missing, holds no
+        vector for it, or is tagged with another image-embedding model.
         """
         _, image_embedding = self._require_image_embedding()
         steps_dir = self._require_steps_dir()
