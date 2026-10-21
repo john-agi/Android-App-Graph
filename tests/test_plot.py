@@ -386,6 +386,146 @@ def test_load_graph_shows_no_thumbnail_without_a_representative(
     assert graph.nodes["s0_home"]["screenshot_uri"] is None
 
 
+def _write_member_graph(tmp_path: Path, observations: list[str], representative: str) -> Path:
+    """Write a one-node graph whose node lists ``observations`` and names ``representative``."""
+    graph_path = tmp_path / "demo.json"
+    node = {
+        "id": "s0_home",
+        "page_description": "Home",
+        "observations": observations,
+        "representative_observation": representative,
+    }
+    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    return graph_path
+
+
+def _steps(count: int) -> list[str]:
+    return [f"{step:06d}" for step in range(count)]
+
+
+def test_load_graph_loads_the_ten_oldest_member_images_and_counts_every_member(
+    tmp_path: Path,
+) -> None:
+    observations = _steps(12)
+    graph_path = _write_member_graph(tmp_path, observations, observations[0])
+    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
+
+    _data, graph = plot.load_graph(str(graph_path))
+
+    assert graph.nodes["s0_home"]["member_image_uris"] == uris[:10]
+    assert graph.nodes["s0_home"]["member_total"] == 12
+
+
+def test_load_graph_skips_a_member_without_an_image(tmp_path: Path) -> None:
+    """The next member with an image takes its place among the ten, and it still counts."""
+    observations = _steps(12)
+    graph_path = _write_member_graph(tmp_path, observations, observations[0])
+    uris = [
+        _write_step_image(tmp_path, step, f"member {step}".encode())
+        for step in observations
+        if step != "000003"
+    ]
+
+    _data, graph = plot.load_graph(str(graph_path))
+
+    assert graph.nodes["s0_home"]["member_image_uris"] == uris[:10]
+    assert graph.nodes["s0_home"]["member_total"] == 12
+
+
+@pytest.mark.parametrize(
+    ("observations", "total"),
+    [(None, 0), ("000000", 0), ([7, "000000"], 1)],
+    ids=["absent", "not-a-list", "not-a-string"],
+)
+def test_load_graph_counts_only_the_observation_ids_a_node_lists(
+    tmp_path: Path, observations: object, total: int
+) -> None:
+    node: dict[str, object] = {"id": "s0_home", "page_description": "Home"}
+    if observations is not None:
+        node["observations"] = observations
+    graph_path = tmp_path / "demo.json"
+    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    uri = _write_step_image(tmp_path, "000000", b"image")
+
+    _data, graph = plot.load_graph(str(graph_path))
+
+    assert graph.nodes["s0_home"]["member_image_uris"] == [uri] * total
+    assert graph.nodes["s0_home"]["member_total"] == total
+
+
+def _vis_nodes(html: str) -> dict[str, dict[str, Any]]:
+    """Return the nodes pyvis wrote into the view's ``vis.DataSet``, by ID."""
+    opening = "nodes = new vis.DataSet("
+    items, _end = json.JSONDecoder().raw_decode(html, html.index(opening) + len(opening))
+    return {item["id"]: item for item in items}
+
+
+def _plot_member_graph(tmp_path: Path, observations: list[str], representative: str) -> str:
+    """Plot the graph ``_write_member_graph`` writes; return the view's HTML."""
+    graph_path = _write_member_graph(tmp_path, observations, representative)
+    _data, graph = plot.load_graph(str(graph_path))
+    output = tmp_path / "graph.html"
+    plot.plot_pyvis(graph, str(output))
+    return output.read_text(encoding="utf-8")
+
+
+def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
+    tmp_path: Path,
+) -> None:
+    """The representative is embedded twice, in the tooltip and as the panel's first image."""
+    observations = _steps(12)
+    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
+
+    html = _plot_member_graph(tmp_path, observations, observations[0])
+
+    node = _vis_nodes(html)["s0_home"]
+    assert node["memberImages"] == uris[:10]
+    assert node["memberTotal"] == 12
+    assert node["label"] == "Home\n[12 screenshots]"
+    assert [html.count(uri) for uri in uris] == [2] + [1] * 9 + [0, 0]
+
+
+def test_plot_pyvis_tooltip_holds_only_the_representative(tmp_path: Path) -> None:
+    observations = _steps(3)
+    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
+
+    html = _plot_member_graph(tmp_path, observations, observations[1])
+
+    title = _vis_nodes(html)["s0_home"]["title"]
+    assert [uri in title for uri in uris] == [False, True, False]
+
+
+@pytest.mark.parametrize(
+    ("total", "label"),
+    [(0, "Home\n[0 screenshots]"), (1, "Home\n[1 screenshot]"), (2, "Home\n[2 screenshots]")],
+)
+def test_plot_pyvis_labels_each_node_with_its_screenshot_count(
+    tmp_path: Path, total: int, label: str
+) -> None:
+    graph = nx.DiGraph()
+    graph.add_node("s0_home", page_description="Home", member_total=total)
+    output = tmp_path / "graph.html"
+
+    plot.plot_pyvis(graph, str(output))
+
+    assert _vis_nodes(output.read_text(encoding="utf-8"))["s0_home"]["label"] == label
+
+
+def test_plot_pyvis_adds_the_member_panel_after_the_graph_is_drawn(tmp_path: Path) -> None:
+    """The panel's script reads the network that the template's drawGraph() call creates."""
+    graph = nx.DiGraph()
+    graph.add_node("s0_home", page_description="Home")
+    output = tmp_path / "graph.html"
+
+    plot.plot_pyvis(graph, str(output))
+
+    html = output.read_text(encoding="utf-8")
+    body = html[html.index("<body>") : html.index("</body>")]
+    assert body.count('<div id="member-panel" hidden>') == 1
+    assert body.index("drawGraph();") < body.index('network.on("click"')
+    assert body.endswith("})();\n</script>\n")
+
+
 def test_plot_pyvis_writes_fullscreen_html(tmp_path: Path) -> None:
     _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
     output = tmp_path / "graph.html"

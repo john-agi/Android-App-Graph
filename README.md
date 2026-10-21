@@ -525,6 +525,18 @@ uv sync --extra viz
 uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 ```
 
+In the HTML view, each node's label ends with the number of screenshots the node
+holds, such as `[12 screenshots]`. Clicking a node opens a panel with its member
+screenshots, oldest first and at most ten, with Previous and Next buttons and the
+position, such as `3 / 10`. A member whose image is missing from `steps/` is
+skipped. Clicking the background or an edge closes the panel.
+
+The images are embedded in the HTML as data URIs, so the file opens anywhere
+without its step log. Base64 adds a third to each WebP: every member shown adds
+about 100 KB for the Settings screenshots measured in [Step log](#step-log), 235 KB
+at most, and the node's tooltip embeds the representative's image once more. A
+Settings graph of 82 nodes holding 232 screenshots plots to a 30 MB file.
+
 Run the graph audit utility:
 
 ```bash
