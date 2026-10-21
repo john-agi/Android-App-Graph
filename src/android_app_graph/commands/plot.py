@@ -78,13 +78,13 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         base_stem = path.stem.removesuffix("_audited")
         screenshots_dir = path.parent / (base_stem + "_screenshots")
 
-    G = nx.DiGraph()
+    graph = nx.DiGraph()
 
     for node in data["nodes"]:
         screenshot_uri = _load_screenshot_b64(screenshots_dir, node["id"])
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
-        G.add_node(
+        graph.add_node(
             node["id"],
             page_description=node["page_description"],
             activity=node.get("activity", ""),
@@ -124,7 +124,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         weight = min(num_steps_list) if num_steps_list else len(edge["actions"])
         weight_str = f"\n[{weight} step{'s' if weight != 1 else ''}]"
 
-        G.add_edge(
+        graph.add_edge(
             edge["source"],
             edge["target"],
             label=label + delta_str + weight_str,
@@ -134,7 +134,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
             is_self_loop=is_self_loop,
         )
 
-    return data, G
+    return data, graph
 
 
 def _summarize_actions(actions: list[Any]) -> str:
@@ -210,75 +210,79 @@ def _node_category(desc: str) -> str:
     return "other"
 
 
-def _largest_weak_component(G: nx.DiGraph) -> nx.DiGraph:
+def _largest_weak_component(graph: nx.DiGraph) -> nx.DiGraph:
     """Return a copy containing only the largest weakly connected component."""
-    if G.number_of_nodes() == 0:
-        return _as_digraph(G.copy())
-    components = list(nx.weakly_connected_components(G))
+    if graph.number_of_nodes() == 0:
+        return _as_digraph(graph.copy())
+    components = list(nx.weakly_connected_components(graph))
     if not components:
-        return _as_digraph(G.copy())
+        return _as_digraph(graph.copy())
     largest = max(components, key=len)
-    return _as_digraph(G.subgraph(largest).copy())
+    return _as_digraph(graph.subgraph(largest).copy())
 
 
-def _drop_external_nodes(G: nx.DiGraph) -> nx.DiGraph:
+def _drop_external_nodes(graph: nx.DiGraph) -> nx.DiGraph:
     """Remove launcher/permission/external-app nodes that stretch paper layouts."""
     keep = []
-    for node, data in G.nodes(data=True):
+    for node, data in graph.nodes(data=True):
         text = f"{node} {data.get('page_description', '')}".lower()
         if node.startswith("ext_") or "external app" in text:
             continue
         keep.append(node)
-    return _as_digraph(G.subgraph(keep).copy())
+    return _as_digraph(graph.subgraph(keep).copy())
 
 
-def _trim_leaf_rounds(G: nx.DiGraph, rounds: int) -> nx.DiGraph:
+def _trim_leaf_rounds(graph: nx.DiGraph, rounds: int) -> nx.DiGraph:
     """Iteratively remove degree-0/1 leaves from a copy of the graph."""
-    H = _as_digraph(G.copy())
+    trimmed = _as_digraph(graph.copy())
     for _ in range(max(0, rounds)):
-        leaves = [node for node in H.nodes() if H.in_degree(node) + H.out_degree(node) <= 1]
-        if not leaves or len(leaves) == H.number_of_nodes():
+        leaves = [
+            node
+            for node in trimmed.nodes()
+            if trimmed.in_degree(node) + trimmed.out_degree(node) <= 1
+        ]
+        if not leaves or len(leaves) == trimmed.number_of_nodes():
             break
-        H.remove_nodes_from(leaves)
-    return H
+        trimmed.remove_nodes_from(leaves)
+    return trimmed
 
 
 def _prepare_paper_graph(
-    G: nx.DiGraph,
+    graph: nx.DiGraph,
     *,
     keep_disconnected: bool,
     keep_external: bool,
     trim_leaves: int,
 ) -> nx.DiGraph:
     """Apply paper-figure filters and report what changed."""
-    original_nodes = G.number_of_nodes()
-    original_edges = G.number_of_edges()
-    H = _as_digraph(G.copy())
+    original_nodes = graph.number_of_nodes()
+    original_edges = graph.number_of_edges()
+    filtered = _as_digraph(graph.copy())
 
     if not keep_external:
-        H = _drop_external_nodes(H)
+        filtered = _drop_external_nodes(filtered)
     if not keep_disconnected:
-        H = _largest_weak_component(H)
+        filtered = _largest_weak_component(filtered)
     if trim_leaves:
-        H = _trim_leaf_rounds(H, trim_leaves)
+        filtered = _trim_leaf_rounds(filtered, trim_leaves)
         if not keep_disconnected:
-            H = _largest_weak_component(H)
+            filtered = _largest_weak_component(filtered)
 
-    removed_nodes = original_nodes - H.number_of_nodes()
-    removed_edges = original_edges - H.number_of_edges()
+    removed_nodes = original_nodes - filtered.number_of_nodes()
+    removed_edges = original_edges - filtered.number_of_edges()
     if removed_nodes or removed_edges:
         logger.info(
             "Paper view: kept %d nodes, %d edges; removed %d nodes and %d edges.",
-            H.number_of_nodes(),
-            H.number_of_edges(),
+            filtered.number_of_nodes(),
+            filtered.number_of_edges(),
             removed_nodes,
             removed_edges,
         )
-    return H
+    return filtered
 
 
 def plot_paper_graphviz(
-    G: nx.DiGraph,
+    graph: nx.DiGraph,
     output_path: str,
     *,
     max_node_words: int = 5,
@@ -291,7 +295,7 @@ def plot_paper_graphviz(
     if not dot_bin:
         logger.warning("Graphviz 'dot' command not found; using matplotlib paper fallback.")
         plot_paper_matplotlib(
-            G,
+            graph,
             output_path,
             max_node_words=max_node_words,
             max_edge_words=max_edge_words,
@@ -320,7 +324,7 @@ def plot_paper_graphviz(
             '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
             'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
             'fontname="Helvetica", fontsize="18", labelloc="t", '
-            f"label={q(f'Android-App-Graph Runtime Graph\\n{G.number_of_nodes()} states, {G.number_of_edges()} transitions')}];"
+            f"label={q(f'Android-App-Graph Runtime Graph\\n{graph.number_of_nodes()} states, {graph.number_of_edges()} transitions')}];"
         ),
         (
             '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
@@ -332,7 +336,7 @@ def plot_paper_graphviz(
         ),
     ]
 
-    for node_id, data in G.nodes(data=True):
+    for node_id, data in graph.nodes(data=True):
         desc = data.get("page_description", node_id)
         category = _node_category(desc)
         fill, border = palette[category]
@@ -347,8 +351,8 @@ def plot_paper_graphviz(
         lines.append(f"  {q(node_id)} [{attrs(node_attrs)}];")
 
     edge_seen: Counter[tuple[str, str]] = Counter()
-    for src, tgt, data in G.edges(data=True):
-        data = G.edges[src, tgt]
+    for src, tgt, data in graph.edges(data=True):
+        data = graph.edges[src, tgt]
         label = data.get("label", "")
         short = _wrap_label(_shorten_words(label, max_edge_words, 34), width=14)
         visits = data.get("visit_count", 0)
@@ -385,7 +389,7 @@ def plot_paper_graphviz(
 
 
 def plot_paper_matplotlib(
-    G: nx.DiGraph,
+    graph: nx.DiGraph,
     output_path: str,
     *,
     max_node_words: int = 5,
@@ -396,18 +400,18 @@ def plot_paper_matplotlib(
     """Paper-style fallback renderer that does not require Graphviz."""
     import matplotlib.pyplot as plt
 
-    n_nodes = max(G.number_of_nodes(), 1)
+    n_nodes = max(graph.number_of_nodes(), 1)
     fig_w = min(34, max(16, n_nodes * 0.34))
     fig_h = min(24, max(11, n_nodes * 0.24))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=220)
 
     if layout == "circular":
-        pos = nx.circular_layout(G, scale=1.0)
+        pos = nx.circular_layout(graph, scale=1.0)
     elif layout == "kamada":
-        pos = nx.kamada_kawai_layout(G, scale=1.0)
+        pos = nx.kamada_kawai_layout(graph, scale=1.0)
     else:
         pos = nx.spring_layout(
-            G,
+            graph,
             k=5.0 / math.sqrt(n_nodes),
             iterations=500,
             seed=7,
@@ -430,17 +434,17 @@ def plot_paper_matplotlib(
     }
     categories = {
         node: _node_category(data.get("page_description", node))
-        for node, data in G.nodes(data=True)
+        for node, data in graph.nodes(data=True)
     }
 
     for category, node_color in palette.items():
         nodes = [node for node, cat in categories.items() if cat == category]
         if not nodes:
             continue
-        visits = [G.nodes[node].get("visit_count", 0) for node in nodes]
+        visits = [graph.nodes[node].get("visit_count", 0) for node in nodes]
         sizes = [720 + min(v, 8) * 70 for v in visits]
         nx.draw_networkx_nodes(
-            G,
+            graph,
             pos,
             nodelist=nodes,
             node_size=sizes,
@@ -450,14 +454,16 @@ def plot_paper_matplotlib(
             ax=ax,
         )
 
-    non_self_edges = [(s, t) for s, t in G.edges() if s != t]
-    self_edges = [(s, t) for s, t in G.edges() if s == t]
+    non_self_edges = [(s, t) for s, t in graph.edges() if s != t]
+    self_edges = [(s, t) for s, t in graph.edges() if s == t]
     nx.draw_networkx_edges(
-        G,
+        graph,
         pos,
         edgelist=non_self_edges,
         edge_color="#94a3b8",
-        width=[0.8 + math.log1p(G.edges[e].get("visit_count", 0)) * 0.35 for e in non_self_edges],
+        width=[
+            0.8 + math.log1p(graph.edges[e].get("visit_count", 0)) * 0.35 for e in non_self_edges
+        ],
         arrows=True,
         arrowsize=9,
         connectionstyle="arc3,rad=0.10",
@@ -465,7 +471,7 @@ def plot_paper_matplotlib(
     )
     if self_edges:
         nx.draw_networkx_edges(
-            G,
+            graph,
             pos,
             edgelist=self_edges,
             edge_color="#9ca3af",
@@ -478,10 +484,10 @@ def plot_paper_matplotlib(
 
     node_labels = {
         node: f"{node}\n{_shorten_words(data.get('page_description', node), max_node_words, 34)}"
-        for node, data in G.nodes(data=True)
+        for node, data in graph.nodes(data=True)
     }
     nx.draw_networkx_labels(
-        G,
+        graph,
         pos,
         labels=node_labels,
         font_size=5.5,
@@ -498,11 +504,11 @@ def plot_paper_matplotlib(
     if show_edge_labels:
         edge_labels = {
             (s, t): _shorten_words(data.get("label", ""), max_edge_words, 24)
-            for s, t, data in G.edges(data=True)
+            for s, t, data in graph.edges(data=True)
             if data.get("label") and s != t
         }
         nx.draw_networkx_edge_labels(
-            G,
+            graph,
             pos,
             edge_labels=edge_labels,
             font_size=3.7,
@@ -518,7 +524,7 @@ def plot_paper_matplotlib(
         )
 
     ax.set_title(
-        f"Android-App-Graph Runtime Graph: {G.number_of_nodes()} states, {G.number_of_edges()} transitions",
+        f"Android-App-Graph Runtime Graph: {graph.number_of_nodes()} states, {graph.number_of_edges()} transitions",
         fontsize=15,
         fontweight="bold",
         pad=16,
@@ -531,7 +537,7 @@ def plot_paper_matplotlib(
 
 
 def plot_pyvis(
-    G: nx.DiGraph,
+    graph: nx.DiGraph,
     output_path: str,
     *,
     max_node_words: int = 5,
@@ -601,7 +607,7 @@ def plot_pyvis(
         "#f1f8e9",
     ]
 
-    for idx, (node_id, data) in enumerate(G.nodes(data=True)):
+    for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
         desc = data.get("page_description", node_id)
         short_desc = _shorten_words(desc, max_node_words, 40)
         visits = data.get("visit_count", 0)
@@ -648,7 +654,7 @@ def plot_pyvis(
 
     edge_counts: Counter[tuple[str, str]] = Counter()
 
-    for src, tgt, data in G.edges(data=True):
+    for src, tgt, data in graph.edges(data=True):
         label = data.get("label", "")
         visits = data.get("visit_count", 0)
         n_actions = data.get("num_actions", 0)
@@ -690,55 +696,55 @@ def plot_pyvis(
     logger.info("Interactive graph saved to %s", output_path)
 
 
-def plot_graphviz(G: nx.DiGraph, output_path: str) -> None:
+def plot_graphviz(graph: nx.DiGraph, output_path: str) -> None:
     """Create a static graph image using graphviz."""
-    A = nx.nx_agraph.to_agraph(G)
-    A.graph_attr.update(rankdir="TB", fontsize="12", bgcolor="white")
-    A.node_attr.update(
+    agraph = nx.nx_agraph.to_agraph(graph)
+    agraph.graph_attr.update(rankdir="TB", fontsize="12", bgcolor="white")
+    agraph.node_attr.update(
         shape="box",
         style="filled,rounded",
         fillcolor="lightblue",
         fontsize="11",
     )
-    A.edge_attr.update(fontsize="9", fontcolor="gray40")
+    agraph.edge_attr.update(fontsize="9", fontcolor="gray40")
 
-    for node in A.nodes():
-        data = G.nodes[node.name]
+    for node in agraph.nodes():
+        data = graph.nodes[node.name]
         desc = data.get("page_description", node.name)
         visits = data.get("visit_count", 0)
         node.attr["label"] = f"{desc}\\n({visits} visits)"
 
-    for edge in A.edges():
-        data = G.edges[edge[0], edge[1]]
+    for edge in agraph.edges():
+        data = graph.edges[edge[0], edge[1]]
         label = data.get("label", "")
         short = label[:35] + "..." if len(label) > 35 else label
         edge.attr["label"] = f"  {short}  "
 
-    A.draw(output_path, prog="dot")
+    agraph.draw(output_path, prog="dot")
     logger.info("Graph image saved to %s", output_path)
 
 
-def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
+def plot_matplotlib(graph: nx.DiGraph, output_path: str) -> None:
     """Fallback: plot with matplotlib + networkx."""
     import matplotlib.pyplot as plt
 
     _fig, ax = plt.subplots(1, 1, figsize=(14, 10))
 
-    pos = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
+    pos = nx.spring_layout(graph, k=2.5, iterations=50, seed=42)
 
     labels = {
         n: f"{d.get('page_description', n)}\n({d.get('visit_count', 0)} visits)"
-        for n, d in G.nodes(data=True)
+        for n, d in graph.nodes(data=True)
     }
-    visits = [G.nodes[n].get("visit_count", 1) for n in G.nodes()]
+    visits = [graph.nodes[n].get("visit_count", 1) for n in graph.nodes()]
     node_sizes = [800 + v * 200 for v in visits]
 
     nx.draw_networkx_nodes(
-        G, pos, ax=ax, node_size=node_sizes, node_color="skyblue", edgecolors="steelblue"
+        graph, pos, ax=ax, node_size=node_sizes, node_color="skyblue", edgecolors="steelblue"
     )
-    nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=8)
+    nx.draw_networkx_labels(graph, pos, labels=labels, ax=ax, font_size=8)
     nx.draw_networkx_edges(
-        G,
+        graph,
         pos,
         ax=ax,
         edge_color="gray",
@@ -747,11 +753,11 @@ def plot_matplotlib(G: nx.DiGraph, output_path: str) -> None:
         connectionstyle="arc3,rad=0.15",
     )
 
-    edge_labels = {(s, t): d.get("label", "")[:30] for s, t, d in G.edges(data=True)}
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, ax=ax, font_size=7)
+    edge_labels = {(s, t): d.get("label", "")[:30] for s, t, d in graph.edges(data=True)}
+    nx.draw_networkx_edge_labels(graph, pos, edge_labels=edge_labels, ax=ax, font_size=7)
 
     ax.set_title(
-        f"Android-App-Graph Graph ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)"
+        f"Android-App-Graph Graph ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)"
     )
     ax.axis("off")
     plt.tight_layout()
@@ -866,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(level=logging.INFO)
 
-    _data, G = load_graph(str(graph_path))
+    _data, graph = load_graph(str(graph_path))
 
     if args.output:
         output_path = args.output
@@ -875,11 +881,11 @@ def main(argv: list[str] | None = None) -> int:
         output_path = str(graph_path.with_suffix(ext))
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Graph: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
+    logger.info("Graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 
     if args.backend == "paper":
-        G = _prepare_paper_graph(
-            G,
+        graph = _prepare_paper_graph(
+            graph,
             keep_disconnected=args.keep_disconnected,
             keep_external=args.keep_external,
             trim_leaves=args.trim_leaves,
@@ -887,7 +893,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.backend == "pyvis":
         plot_pyvis(
-            G,
+            graph,
             output_path,
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
@@ -897,12 +903,12 @@ def main(argv: list[str] | None = None) -> int:
             edge_width=args.edge_width,
         )
     elif args.backend == "graphviz":
-        plot_graphviz(G, output_path)
+        plot_graphviz(graph, output_path)
     elif args.backend == "matplotlib":
-        plot_matplotlib(G, output_path)
+        plot_matplotlib(graph, output_path)
     elif args.backend == "paper":
         plot_paper_graphviz(
-            G,
+            graph,
             output_path,
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,

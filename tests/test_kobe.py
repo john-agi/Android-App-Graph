@@ -202,7 +202,7 @@ def test_exploration_records_the_configured_package_name(
     assert saved["package_name"] == "com.demo"
 
 
-class _Replayed(Exception):
+class _ReplayedError(Exception):
     """Ends exploration once it has chosen the node to replay to."""
 
 
@@ -240,11 +240,11 @@ def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packag
 
     def replay(node_id: str) -> str:
         replayed.append(node_id)
-        raise _Replayed
+        raise _ReplayedError
 
     monkeypatch.setattr(explorer, "navigate_to_node", replay)
 
-    with pytest.raises(_Replayed):
+    with pytest.raises(_ReplayedError):
         explorer.explore(max_steps=1, resume_from="auto")
 
     assert replayed == ["s1_conversation"]
