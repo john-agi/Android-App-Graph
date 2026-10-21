@@ -255,13 +255,30 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
     no_sleep: list[float],
 ) -> None:
-    router_responses.append(httpx.Response(401, json={"error": {"message": "bad key"}}))
-    with pytest.raises(OpenRouterError):
-        kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
-    assert len(kobe.graph.graph) == 0
-    assert kobe.graph._last_identify_cache is None
+    """Identifying the rejected screen again asks the model again, although the graph
+    already holds a node that a stale cache entry could answer with."""
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            *(httpx.Response(401, json={"error": {"message": "bad key"}}) for _ in range(2)),
+        ]
+    )
+    home = kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
+
+    for _ in range(2):
+        with pytest.raises(OpenRouterError):
+            kobe.graph.identify_state("com.demo.Settings", png_screenshot, "com.demo")
+        assert list(kobe.graph.graph) == [home]
+
+    assert [json.loads(request.content)["model"] for request in router_requests[2:]] == [
+        "provider/page_detail"
+    ] * 2
     assert no_sleep == []
 
 
@@ -282,9 +299,9 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
                 httpx.Response(200, json=embedding_body),
             ]
         )
-    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
-    # The cache would skip the model, and a reference screenshot would add a verify request.
-    replaying_kobe.graph._last_identify_cache = None
+    # The replay device reports com.demo.Home, so identifying its screen misses the cache.
+    node = replaying_kobe.graph.identify_state("com.demo.Splash", png_screenshot, "com.demo")
+    # A reference screenshot would add a verify request.
     replaying_kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
     assert replaying_kobe.navigate_to_node(node) == node
     assert len(router_requests) == 4
