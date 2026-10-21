@@ -582,13 +582,16 @@ order, and names one of them `representative_observation`:
 - a new node's representative is its first observation;
 - a later visit matched to the node joins the list and keeps the representative;
 - a screen the verifier rejects starts a new node with itself as representative;
-- a merge unites both lists in step order and keeps the kept node's representative.
+- a merge unites both lists in step order and keeps the kept node's representative;
+- a node the audit makes for members it splits off or moves takes the earliest of
+  them as representative, and the node they leave keeps its own (see
+  [Member checks](#member-checks)).
 
-Screen matching verifies a screen against a node's member closest to it by image.
-The audit's merge checks compare the two nodes' representative images in `steps/`,
-and `app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
+Screen matching verifies a screen against a node's member closest to it by image, and
+the audit's merge checks verify a pair of nodes on their two closest members.
+`app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
 `ext_<package>` nodes list the screens that reached them as well; neither screen
-matching nor the merge checks compare them.
+matching nor the audit compares them.
 
 #### Screen matching
 
@@ -680,10 +683,91 @@ uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 
 The audit asks the page-detail model for issues in a text dump of the graph and
 saves them to `graphs/<app_name>/<app_name>_audit.json`. It merges the duplicate
-nodes that a comparison of their representatives confirms, normalizes edge
-templates and saves the result to `<app_name>_audited.json`; the explored graph
-file is never changed. Without `--re-explore`, no flagged edge is replayed or
-corrected.
+nodes the verifier confirms (see [Merge proposals](#merge-proposals)), then splits
+off or moves the members the verifier tells apart from the rest of their node (see
+[Member checks](#member-checks)). Both work from the step log, without a device. It
+then normalizes edge templates and saves the result to `<app_name>_audited.json`;
+the explored graph file is never changed. Without `--re-explore`, no flagged edge is
+replayed or corrected.
+
+#### Merge proposals
+
+The audit collects the node pairs that may be one screen in one set, so each pair is
+verified once whatever proposed it. Each pair names its sources:
+
+- `text_audit`: the model's `merge_nodes` issues;
+- `image`: two in-app nodes of one package whose closest members reach a cosine of
+  0.79, the member similarity floor, between their screenshot vectors (see
+  [Embedding caches](#embedding-caches)).
+
+A near-identical image proves nothing on its own: a page and the same page with a
+menu open look alike and are different screens. Each pair is verified on its two
+closest members: the verifier sees the member of the more-visited node, with that
+node's description, beside the member of the other. A confirmed pair is merged into
+its lower-numbered node; a pair whose node an earlier merge removed is verified on
+the node that kept it. The coverage checkpoint's merge audit verifies the model's
+pairs the same way and proposes none from images, since every checkpoint would
+otherwise propose again each pair an earlier one kept apart.
+
+`<app_name>_merge.json` lists every pair: `node_a` and `node_b`, the `sources` and
+what each found in `findings` (the model's `issue`, or the image `members` and their
+`score`), the `members` the verifier was shown by node and their `image_score`, the
+`status` (`merged`, `kept_separate`, or `skipped` with the `reason` the pair cannot be
+verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reused`.
+
+#### Member checks
+
+After the merges, the members of each in-app node are grouped by their screenshot
+vectors: two members with a cosine of at least 0.79 are linked, and the groups are
+the connected components of those links, single-linkage clustering. Only members with
+a vector and a stored describe output (`describe` in their [record](#step-log)) are
+grouped. The group that holds the representative is the node's home.
+
+- A node whose home holds fewer than half of its members is `diffuse` and is left
+  alone, without a verifier call.
+- Every other group is checked against home on the closest pair across them, the
+  strongest evidence that the two are one screen:
+  - a group of two or more members is a split check. When the verifier tells the
+    pair apart, the group becomes a new node.
+  - a lone member is a move check. When the verifier tells it apart from its closest
+    home member, the member goes through the short list of
+    [screen matching](#screen-matching) again, without the node it leaves, with its
+    stored describe output in place of the describe call, and with no description
+    refined. It moves to the first node the verifier confirms, or to a new node.
+- A node gets three checks at most, larger groups first; the rest are `unchecked`.
+  A node of one member is never checked. Since home holds at least half the members,
+  a node of fewer than four is never split: of two or three, only a member can move.
+- Every split check runs before any move check, so a member can move to a node a
+  split made. A verifier answer on a pair of members is reused within the run, so a
+  merge confirmed on members below the floor is not checked again.
+
+A node a split or a move makes takes its description and elements from the stored
+describe output of its earliest member, its representative, and its state schema
+from all its members' states; its description is embedded once. Members carry their
+visits, states and activities; the node they leave keeps its description,
+representative, state schema and elements. No node ID changes, so no alias is
+recorded: a node's `observations` say where each observation belongs.
+
+Edge actions follow the members. An action on an edge of the node is matched to each
+exploration transition (see [Step log](#step-log)) with the same action whose
+screenshots belong to the edge's endpoints: the node that lists each screenshot, or,
+for one no node lists, the node the transition recorded. Once the members have moved,
+the action is kept on every edge its transitions give, so an action taken from both
+groups stays on both edges, and an action no transition matches stays where it is.
+An action that now leads to another node takes that node's description as its
+observation, and an edge that lost an action drops its instruction templates, which
+the final normalization rebuilds.
+
+`<app_name>_members.json` holds the `floor`, `home_share` and `checks_per_node`, and:
+
+- `checks`: each check's `kind` (`split` or `move`), its `node` and `group`, the
+  `members` compared (a home member, then one of the group) and their `image_score`,
+  the verifier's `same` and `reason`, and `reused`. A check the verifier answered
+  "different" adds the `change`: `from`, `to`, `new_node`, the `members` moved, the
+  `edge_actions` moved, each with its `edge`, `action` and the edges it is on `now`,
+  and, for a move, the `short_list`'s `candidates` and `verifications`;
+- `diffuse`: each diffuse node with its groups;
+- `unchecked`: each node with the groups past its three checks.
 
 Last, without a model call or a device, the audit adds `no_path_to_start` to
 `<app_name>_audit.json`: the nodes of the final audited graph from which no
