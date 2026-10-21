@@ -1800,11 +1800,12 @@ def plan_next_action(
             target_desc = edge.get("target_description", "unknown")
             instructions = edge.get("instructions", [])
             if instructions:
-                for instr in instructions:
-                    lines.append(f'- "{instr}" → led to: "{target_desc}"')
+                lines.extend(f'- "{instr}" → led to: "{target_desc}"' for instr in instructions)
             else:
-                for action in edge.get("actions", []):
-                    lines.append(f'- {json.dumps(action)} → led to: "{target_desc}"')
+                lines.extend(
+                    f'- {json.dumps(action)} → led to: "{target_desc}"'
+                    for action in edge.get("actions", [])
+                )
         instructions_str = (
             "\n".join(lines) if lines else "(none — this screen has not been explored yet)"
         )
