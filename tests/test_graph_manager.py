@@ -101,10 +101,10 @@ def add_screen(
     node_id: str,
     description: str,
     activity: str = HOME,
-    **overrides: Any,
+    **overrides: object,
 ) -> None:
     """Insert a node with the attribute set identify_state would create."""
-    attrs: dict[str, Any] = {
+    attrs: dict[str, object] = {
         "package": PACKAGE,
         "activity": activity,
         "activities": [activity],
@@ -457,6 +457,19 @@ def test_identify_state_ignores_nodes_of_another_package(vlm: FakeVlm) -> None:
     assert node_id == "s0_home_screen"
     assert vlm.calls[0][1]["existing_nodes"] is None
     assert vlm.calls[0][1]["existing_keys"] is None
+
+
+def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(vlm: FakeVlm) -> None:
+    vlm.descriptions.append(("Search results", {}, []))
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", state_schema={"tab": ["home"], "sort": ["price"]})
+    add_screen(
+        gm, "s1_settings", "Settings page", state_schema={"tab": ["deals"], "filter": ["new"]}
+    )
+
+    gm.identify_state(HOME, SHOT_A, PACKAGE)
+
+    assert vlm.calls[0][1]["existing_keys"] == ["tab", "sort", "filter"]
 
 
 def test_identify_state_skips_candidates_without_an_embedding(vlm: FakeVlm) -> None:
@@ -1014,6 +1027,18 @@ def test_merge_nodes_unions_activities_schemas_elements_and_visits() -> None:
     assert [e["description"] for e in node["interactable_elements"]] == ["Search box", "Menu"]
     assert node["page_description"] == "Home screen"
     assert "s1_home_two" not in gm.graph
+
+
+def test_merge_nodes_adds_only_the_schema_values_the_kept_node_lacks() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", state_schema={"tab": ["home"]})
+    add_screen(gm, "s1_home_two", "Home screen again", state_schema={"tab": ["home", "deals"]})
+
+    assert gm.merge_nodes("s0_home", "s1_home_two") is True
+
+    node = gm.get_node("s0_home")
+    assert node is not None
+    assert node["state_schema"] == {"tab": ["home", "deals"]}
 
 
 def test_merge_nodes_rewires_incoming_outgoing_and_self_loop_edges() -> None:
@@ -2716,7 +2741,7 @@ operations = st.lists(
 
 
 def fake_get_embedding(
-    _client: OpenRouter | None, text: str, *_args: Any, **_kwargs: Any
+    _client: OpenRouter | None, text: str, *_args: object, **_kwargs: object
 ) -> list[float]:
     """Module-level fake for property tests; the model and timeout arrive through the rest."""
     return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)

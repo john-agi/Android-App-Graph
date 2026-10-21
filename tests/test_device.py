@@ -162,7 +162,7 @@ def test_soft_keyboard_hint_when_the_keyboard_is_hidden(monkeypatch: pytest.Monk
 
 @pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _no_adb(*_args: Any, **_kwargs: Any) -> _CompletedProcess:
+    def _no_adb(*_args: object, **_kwargs: object) -> _CompletedProcess:
         raise FileNotFoundError("adb")
 
     monkeypatch.setattr(device.subprocess, "run", _no_adb)
@@ -189,7 +189,7 @@ def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
     probe that has to stay best-effort.
     """
 
-    def _bad_bytes(*_args: Any, **_kwargs: Any) -> _CompletedProcess:
+    def _bad_bytes(*_args: object, **_kwargs: object) -> _CompletedProcess:
         msg = "invalid start byte"
         raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, msg)
 

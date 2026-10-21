@@ -98,24 +98,20 @@ extend-select = [
     "PGH003",
     "PGH004",
     "INP001",
+    "N",
     "S",
 ]
 # FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
 # they need no `ignore` entry.
 
 [tool.ruff.lint.per-file-ignores]
-# Operator scripts and copy-in adapters are not packages, and printing is their user interface.
-"scripts/**" = ["T201", "T203", "INP001"]
-"aitk_files/**" = ["T201", "T203", "INP001"]
-"aw_files/**" = ["T201", "T203", "INP001"]
-# Tests are not a package, and pytest checks their results with plain `assert`.
-"tests/**" = ["INP001", "S101"]
+# Copy-in adapters are single files copied into other repositories, not packages.
+"aitk_files/**" = ["INP001"]
+"aw_files/**" = ["INP001"]
+# pytest checks results with plain `assert`.
+"tests/**" = ["S101"]
 # Vulture allowlist entries are intentionally bare attribute expressions.
 "vulture_allowlist.py" = ["B018"]
-
-[tool.ruff.lint.flake8-annotations]
-# `**kwargs: Any` is the honest annotation for pass-through keyword arguments.
-allow-star-arg-any = true
 
 [tool.ruff.format]
 docstring-code-format = true

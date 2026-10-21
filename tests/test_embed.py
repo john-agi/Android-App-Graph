@@ -6,7 +6,6 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -369,7 +368,7 @@ def test_precompute_recompute_discards_the_sidecar_even_if_nothing_computes(
         json.dumps({"s0_home": [0.1, 0.2]}), encoding="utf-8"
     )
 
-    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+    def always_failing(*_args: object, **_kwargs: object) -> list[float]:
         msg = "embedding failed"
         raise RuntimeError(msg)
 
@@ -409,7 +408,7 @@ def test_precompute_recompute_discards_through_a_symlinked_sidecar(
     sidecar = image_embeddings_path(graph_path)
     sidecar.symlink_to(target)
 
-    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+    def always_failing(*_args: object, **_kwargs: object) -> list[float]:
         msg = "embedding failed"
         raise RuntimeError(msg)
 
@@ -492,7 +491,7 @@ def test_precompute_keeps_going_when_a_node_fails(
 ) -> None:
     graph_path = _write_graph_tree(tmp_path)
 
-    def always_failing(*_args: Any, **_kwargs: Any) -> list[float]:
+    def always_failing(*_args: object, **_kwargs: object) -> list[float]:
         msg = "embedding failed"
         raise RuntimeError(msg)
 
@@ -668,7 +667,7 @@ def test_precompute_streams_screenshot_reads_lazily(
 
     reads_at_call: list[int] = []
 
-    def fake_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+    def fake_embedding(*_args: object, **_kwargs: object) -> list[float]:
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
@@ -739,7 +738,7 @@ def test_precompute_persists_progress_before_an_interrupt_propagates(
     }
 
     def _interrupted_at_n3(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
