@@ -1,0 +1,20 @@
+  mCurrentFocus=Window{d20e948 u0 com.android.settings/com.android.settings.Settings}
+  mFocusedApp=ActivityRecord{223791334 u0 com.android.settings/.Settings t29}
+  WindowInsetsStateController
+    InsetsState
+      mDisplayFrame=Rect(0, 0 - 1080, 2424)
+        InsetsSource id=3 type=ime frame=[0,0][0,0] visibleFrame=[0,2424][1080,2424] visible=false flags=INVALID sideHint=NONE
+        InsetsSource id=27 type=displayCutout frame=[0,0][1080,142] visible=true flags= sideHint=TOP
+        InsetsSource id=29f40000 type=statusBars frame=[0,0][1080,142] visible=true flags= sideHint=TOP
+        InsetsSource id=29f40005 type=mandatorySystemGestures frame=[0,0][1080,174] visible=true flags= sideHint=TOP
+        InsetsSource id=29f40006 type=tappableElement frame=[0,0][1080,142] visible=true flags= sideHint=TOP
+        InsetsSource id=391f0001 type=navigationBars frame=[0,2361][1080,2424] visible=true flags=SUPPRESS_SCRIM|ANIMATE_RESIZING sideHint=BOTTOM
+        InsetsSource id=391f0004 type=systemGestures frame=[0,0][78,2424] visible=true flags= sideHint=LEFT
+        InsetsSource id=391f0005 type=mandatorySystemGestures frame=[0,2340][1080,2424] visible=true flags= sideHint=BOTTOM
+        InsetsSource id=391f0006 type=tappableElement frame=[0,0][0,0] visible=true flags= sideHint=NONE
+        InsetsSource id=391f0024 type=systemGestures frame=[1002,0][1080,2424] visible=true flags= sideHint=RIGHT
+    InsetsSourceProviders:
+      InsetsSourceProvider
+        mSource=InsetsSource id=391f0024 type=systemGestures frame=[1002,0][1080,2424] visible=true flags= sideHint=RIGHT
+      InsetsSourceProvider
+        mSource=InsetsSource id=29f40000 type=statusBars frame=[0,0][1080,142] visible=true flags= sideHint=TOP

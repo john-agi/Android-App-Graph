@@ -106,6 +106,49 @@ def _adb_stdout_bytes(args: Sequence[str], timeout: float) -> bytes:
     ).stdout
 
 
+def _focused_package_activity(dumpsys_window: str) -> tuple[str, str]:
+    """Read the package and activity from the first ``mCurrentFocus`` or ``mFocusedApp``
+    line of ``dumpsys window`` output that names one, expanding a shorthand ``.Activity``.
+    """
+    for line in dumpsys_window.splitlines():
+        if "mCurrentFocus" not in line and "mFocusedApp" not in line:
+            continue
+        match = re.search(r"[\w.]+/[\w.]+", line)
+        if match:
+            package, _, activity = match.group().partition("/")
+            if activity.startswith("."):
+                activity = package + activity
+            return package, activity
+    return "unknown", "unknown"
+
+
+# AOSP's InsetsSource.dump(): the type is "statusBars" from API 34, "ITYPE_STATUS_BAR" before.
+_STATUS_BAR_SOURCE = re.compile(
+    r"InsetsSource\b.*?\btype=(?:statusBars|ITYPE_STATUS_BAR)\b"
+    r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"
+    r".*?\bvisible=(true|false)\b"
+)
+
+
+def status_bar_frame(dumpsys_window: str) -> list[int] | None:
+    """Return the status bar's frame, ``[left, top, right, bottom]`` in screen pixels,
+    from the first status-bar ``InsetsSource`` line of ``dumpsys window`` output.
+
+    ``None`` when no line reports the bar, or the bar is hidden, as an app in immersive
+    mode hides it, or does not start at the top of the screen. The frame follows the
+    display cutout and the rotation, so it is read at every capture.
+    """
+    for line in dumpsys_window.splitlines():
+        match = _STATUS_BAR_SOURCE.search(line)
+        if match is None:
+            continue
+        left, top, right, bottom = (int(value) for value in match.groups()[:4])
+        if match.group(5) != "true" or top != 0:
+            return None
+        return [left, top, right, bottom]
+    return None
+
+
 # About one adb call in a hundred stalls between the host and the device, sometimes
 # for good, and the next call succeeds. The slowest legitimate read is a dump that
 # gives up waiting for an idle screen, after about 12 s.
@@ -132,19 +175,22 @@ class AdbController:
         self.h = int(match.group(2))
 
     def get_state(self) -> dict[str, Any]:
-        """Return the UI hierarchy XML, a base64 PNG screenshot, and the focused package
-        and activity, both ``"unknown"`` when ``dumpsys window`` names none.
+        """Return the UI hierarchy XML, a base64 PNG screenshot, the focused package and
+        activity, both ``"unknown"`` when ``dumpsys window`` names none, and the
+        ``status_bar`` frame that ``status_bar_frame`` reads from the same dump.
         """
         xml = self._read(
             _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"]
         )
         png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"])
-        package, activity = self._focused_package_activity()
+        dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"])
+        package, activity = _focused_package_activity(dumpsys)
         return {
             "xml": xml,
             "screenshot": base64.b64encode(png).decode("ascii"),
             "package": package,
             "activity": activity,
+            "status_bar": status_bar_frame(dumpsys),
         }
 
     def _read[T](self, read: Callable[[Sequence[str], float], T], args: Sequence[str]) -> T:
@@ -200,22 +246,6 @@ class AdbController:
         time.sleep(1)
         self._tap(int(0.2 * self.w), int(0.48 * self.h))
         time.sleep(1.5)
-
-    def _focused_package_activity(self) -> tuple[str, str]:
-        """Read the package and activity from the first ``mCurrentFocus`` or
-        ``mFocusedApp`` line that names one, expanding a shorthand ``.Activity``.
-        """
-        dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"])
-        for line in dumpsys.splitlines():
-            if "mCurrentFocus" not in line and "mFocusedApp" not in line:
-                continue
-            match = re.search(r"[\w.]+/[\w.]+", line)
-            if match:
-                package, _, activity = match.group().partition("/")
-                if activity.startswith("."):
-                    activity = package + activity
-                return package, activity
-        return "unknown", "unknown"
 
     def _input(self, *args: str, check: bool = False) -> None:
         run_adb([*self._serial, "shell", "input", *args], output="discard", check=check)

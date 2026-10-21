@@ -1,0 +1,2 @@
+        InsetsSource id=bf360000 type=statusBars frame=[0,0][1080,121] visible=true flags= sideHint=TOP
+        mSource=InsetsSource id=bf360000 type=statusBars frame=[0,0][1080,121] visible=true flags= sideHint=TOP
