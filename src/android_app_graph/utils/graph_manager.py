@@ -1308,7 +1308,7 @@ class GraphManager:
         return candidates[:top_k]
 
     @staticmethod
-    def _embeddings_path(graph_path: Path) -> Path:
+    def embeddings_path(graph_path: Path) -> Path:
         """Return the companion embeddings file path for a graph JSON."""
         return graph_path.with_suffix(".emb.json")
 
@@ -1369,7 +1369,7 @@ class GraphManager:
 
         write_json_atomically(path, data, indent=2, ensure_ascii=False)
 
-        emb_path = self._embeddings_path(path)
+        emb_path = self.embeddings_path(path)
         write_json_atomically(emb_path, embeddings, ensure_ascii=False)
 
         if self._dirty_screenshots:
@@ -1402,7 +1402,7 @@ class GraphManager:
         data = require_known_edge_endpoints(raw, path)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
-        emb_path = self._embeddings_path(path)
+        emb_path = self.embeddings_path(path)
         embeddings: dict[str, list[float]] = {}
         embedding_models: dict[str, str] = {}
         if emb_path.exists():

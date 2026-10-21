@@ -1912,7 +1912,7 @@ def test_identify_state_keeps_apart_packages_that_share_three_segments(vlm: Fake
 
 
 def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
-    assert GraphManager._embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
+    assert GraphManager.embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
 
 
 def test_save_writes_dirty_screenshots_once_and_load_restores_them(
