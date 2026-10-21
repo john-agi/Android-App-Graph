@@ -19,6 +19,7 @@ import subprocess
 import webbrowser
 from collections import Counter
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -60,17 +61,41 @@ def as_digraph(graph: object) -> nx.DiGraph:
     raise TypeError(msg)
 
 
+_PANEL_MEMBER_LIMIT = 10
+
+
+def _image_uri(steps_dir: Path, observation_id: str) -> str | None:
+    """Return an observation's image as a data URI, or ``None`` when the step log has
+    no image for it."""
+    image_path = observation_image_path(steps_dir, observation_id)
+    if not image_path.is_file():
+        return None
+    b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{MEDIA_TYPE};base64,{b64}"
+
+
 def _representative_image_uri(steps_dir: Path, node: dict[str, Any]) -> str | None:
     """Return a node's representative image as a data URI, or ``None`` when the node
     names none or the step log has no image for it."""
     representative = node.get("representative_observation")
     if not isinstance(representative, str):
         return None
-    image_path = observation_image_path(steps_dir, representative)
-    if not image_path.is_file():
-        return None
-    b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return f"data:{MEDIA_TYPE};base64,{b64}"
+    return _image_uri(steps_dir, representative)
+
+
+def _member_observations(node: dict[str, Any]) -> list[str]:
+    """Return the observation IDs a node lists, in step order."""
+    observations = node.get("observations")
+    if not isinstance(observations, list):
+        return []
+    return [observation for observation in observations if isinstance(observation, str)]
+
+
+def _oldest_member_image_uris(steps_dir: Path, observations: list[str]) -> list[str]:
+    """Return the images of the oldest members that have one in the step log, at most
+    ``_PANEL_MEMBER_LIMIT`` of them, as data URIs."""
+    uris = (_image_uri(steps_dir, observation) for observation in observations)
+    return list(islice((uri for uri in uris if uri is not None), _PANEL_MEMBER_LIMIT))
 
 
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
@@ -84,6 +109,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
 
     for node in data["nodes"]:
         screenshot_uri = _representative_image_uri(steps_dir, node)
+        observations = _member_observations(node)
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
         graph.add_node(
@@ -97,6 +123,8 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
             elements_explored=n_explored,
             elements_total=len(elements),
             screenshot_uri=screenshot_uri,
+            member_image_uris=_oldest_member_image_uris(steps_dir, observations),
+            member_total=len(observations),
         )
 
     for edge in data["edges"]:
@@ -542,6 +570,84 @@ def plot_paper_matplotlib(
 
 _TOOLTIP_UNEXPLORED_LIMIT = 10
 
+# The script reads the `network` and `nodes` globals of pyvis's template, so it has to
+# run after the template's drawGraph() call.
+_MEMBER_PANEL = """
+<style>
+#member-panel { position: fixed; top: 16px; right: 16px; z-index: 10; width: 320px;
+  max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; padding: 12px;
+  background: #fff; border: 1px solid #c5cae9; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2); font: 14px Arial, sans-serif; }
+#member-panel[hidden], #member-panel [hidden] { display: none; }
+#member-panel-header, #member-panel-controls { display: flex; align-items: center;
+  justify-content: space-between; gap: 8px; }
+#member-panel-image { display: block; max-width: 100%; max-height: calc(100vh - 150px);
+  margin: 8px auto; border: 1px solid #ccc; border-radius: 4px; }
+</style>
+<div id="member-panel" hidden>
+  <div id="member-panel-header">
+    <b id="member-panel-node"></b>
+    <button type="button" id="member-panel-close" aria-label="Close">&times;</button>
+  </div>
+  <img id="member-panel-image" alt="Member screenshot">
+  <div id="member-panel-controls">
+    <button type="button" id="member-panel-previous">Previous</button>
+    <span id="member-panel-position"></span>
+    <button type="button" id="member-panel-next">Next</button>
+  </div>
+  <div id="member-panel-total"></div>
+</div>
+<script>
+(function () {
+  var panel = document.getElementById("member-panel");
+  var heading = document.getElementById("member-panel-node");
+  var image = document.getElementById("member-panel-image");
+  var position = document.getElementById("member-panel-position");
+  var previous = document.getElementById("member-panel-previous");
+  var next = document.getElementById("member-panel-next");
+  var total = document.getElementById("member-panel-total");
+  var images = [];
+  var index = 0;
+
+  function show(newIndex) {
+    index = newIndex;
+    image.hidden = images.length === 0;
+    if (images.length > 0) {
+      image.src = images[index];
+      position.textContent = index + 1 + " / " + images.length;
+    } else {
+      image.removeAttribute("src");
+      position.textContent = "No image";
+    }
+    previous.disabled = index <= 0;
+    next.disabled = index >= images.length - 1;
+  }
+
+  network.on("click", function (params) {
+    if (params.nodes.length === 0) {
+      panel.hidden = true;
+      return;
+    }
+    var node = nodes.get(params.nodes[0]);
+    var count = node.memberTotal || 0;
+    images = node.memberImages || [];
+    heading.textContent = node.id;
+    total.textContent =
+      (images.length < count ? images.length + " of " : "") +
+      count + (count === 1 ? " screenshot" : " screenshots") +
+      (images.length > 1 ? ", oldest first" : "");
+    show(0);
+    panel.hidden = false;
+  });
+  previous.addEventListener("click", function () { show(index - 1); });
+  next.addEventListener("click", function () { show(index + 1); });
+  document.getElementById("member-panel-close").addEventListener("click", function () {
+    panel.hidden = true;
+  });
+})();
+</script>
+"""
+
 
 @dataclass(frozen=True, kw_only=True)
 class PyvisStyle:
@@ -630,6 +736,7 @@ def plot_pyvis(
         visits = data.get("visit_count", 0)
         state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
+        member_total = data.get("member_total", 0)
         bg = palette[idx % len(palette)]
 
         keys_str = ", ".join(state_keys) if state_keys else "none"
@@ -659,8 +766,10 @@ def plot_pyvis(
 
         net.add_node(
             node_id,
-            label=short_desc,
+            label=f"{short_desc}\n[{member_total} screenshot{'s' if member_total != 1 else ''}]",
             title=tooltip,
+            memberImages=data.get("member_image_uris", []),
+            memberTotal=member_total,
             color={
                 "background": bg,
                 "border": "#5c6bc0",
@@ -710,6 +819,7 @@ def plot_pyvis(
         "height: 100vh !important; }</style>"
     )
     html = html.replace("<head>", f"<head>{fullscreen_css}", 1)
+    html = html.replace("</body>", f"{_MEMBER_PANEL}</body>", 1)
     Path(output_path).write_text(html, encoding="utf-8")
 
     logger.info("Interactive graph saved to %s", output_path)
