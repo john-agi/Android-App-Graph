@@ -35,6 +35,7 @@ import yaml
 from openrouter import OpenRouter
 
 from android_app_graph.device import (
+    AdbController,
     DeviceController,
     grant_runtime_permissions,
     is_system_overlay,
@@ -652,7 +653,7 @@ class ReExploreSession(NamedTuple):
     """Device controller, role settings and step budget needed by ``--re-explore``.
 
     Built as a unit so ``re_explore_issues`` takes non-optional arguments: the
-    audit-only path never constructs one and never imports ``aitk``.
+    audit-only path never constructs one and never touches a device.
     """
 
     controller: DeviceController
@@ -662,27 +663,13 @@ class ReExploreSession(NamedTuple):
 
 
 def _open_re_explore_session(
-    parser: argparse.ArgumentParser,
     config: dict[str, Any],
     settings: dict[str, ModelSettings],
     steps_per_issue: int,
 ) -> ReExploreSession:
-    """Build the device session for ``--re-explore``, or exit with guidance.
-
-    The ``aitk`` import stays inside this function so a plain audit runs without
-    the device dependency installed.
-    """
-    try:
-        from aitk.utils.adb_controller import ADBController
-    except ImportError:
-        parser.exit(
-            1,
-            "app-graph-audit --re-explore requires the 'aitk' dependency. "
-            "Install it first, then rerun the command.\n",
-        )
-
+    """Build the device session for ``--re-explore``."""
     return ReExploreSession(
-        controller=ADBController(config, logger),
+        controller=AdbController(config, logger),
         instruction=settings["instruction"],
         action=settings["action"],
         steps_per_issue=steps_per_issue,
@@ -875,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(level=logging.INFO)
 
     session = (
-        _open_re_explore_session(parser, config, settings, args.steps_per_issue)
+        _open_re_explore_session(config, settings, args.steps_per_issue)
         if args.re_explore
         else None
     )

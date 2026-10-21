@@ -1,14 +1,12 @@
-"""app-graph-audit parsing and pure helpers, exercised without AITK, adb or an emulator."""
+"""app-graph-audit parsing and pure helpers, exercised without adb or an emulator."""
 
 from __future__ import annotations
 
 import copy
 import json
 import logging
-import sys
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
 from typing import Any, NoReturn, override
 
 import httpx
@@ -1295,11 +1293,7 @@ def test_re_explore_skips_a_missing_node_and_ignores_an_issue_of_another_type(
 
 
 def _install_fake_adb(monkeypatch: pytest.MonkeyPatch, controller: DeviceController) -> None:
-    adb_module = ModuleType("aitk.utils.adb_controller")
-    monkeypatch.setattr(
-        adb_module, "ADBController", lambda _config, _logger: controller, raising=False
-    )
-    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
+    monkeypatch.setattr(audit, "AdbController", lambda _config, _logger: controller)
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep", "device_log")
@@ -1498,9 +1492,7 @@ def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
         msg = "settings must be validated before any device work"
         raise AssertionError(msg)
 
-    adb_module = ModuleType("aitk.utils.adb_controller")
-    monkeypatch.setattr(adb_module, "ADBController", touched, raising=False)
-    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
+    monkeypatch.setattr(audit, "AdbController", touched)
     monkeypatch.setattr(audit, "launch_app", touched)
 
 
