@@ -1,8 +1,8 @@
 """Tests for android_app_graph.device.
 
-The single soft-keyboard probe shared by kobe, commands.audit and the AITK
-translator; this module owns its tests so the three call sites do not each
-pin their own copy of the adb probe.
+The single soft-keyboard probe shared by kobe and commands.audit; this module
+owns its tests so the two call sites do not each pin their own copy of the adb
+probe.
 """
 
 from __future__ import annotations

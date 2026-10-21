@@ -1,7 +1,7 @@
 """Tests for android_app_graph.graph_files.
 
-Graph-file discovery, per-node reference-screenshot lookup, atomic JSON
-writing, and graph-structure validation shared by every loader.
+Per-node reference-screenshot lookup, atomic JSON writing, and graph-structure
+validation.
 """
 
 from __future__ import annotations
@@ -201,13 +201,13 @@ def test_write_json_atomically_rejects_a_read_only_target_by_os_access(
 
 def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
     """``os.replace`` over a symlink replaces the link itself: with
-    ``demo.image_emb.json -> shared_cache.json``, writing must land in
+    ``demo.emb.json -> shared_cache.json``, writing must land in
     ``shared_cache.json`` and leave the link a link, not silently detach it
     into a plain file that shadows the (unchanged) shared target.
     """
     target = tmp_path / "shared_cache.json"
     target.write_text('{"old": 1}', encoding="utf-8")
-    link = tmp_path / "demo.image_emb.json"
+    link = tmp_path / "demo.emb.json"
     link.symlink_to(target)
 
     graph_files.write_json_atomically(link, {"new": 2})
@@ -396,8 +396,8 @@ def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> Non
 
 
 def test_require_graph_shape_rejects_an_empty_node_id(tmp_path: Path) -> None:
-    """An empty id is rejected here, the one place both loaders trust, so neither
-    loader decides on its own whether to skip it or add it as a node.
+    """An empty id passes the string check, so it is rejected on its own,
+    naming the path, instead of loading as a node.
     """
     path = tmp_path / "demo.json"
     with pytest.raises(TypeError, match="node id must be a non-empty string") as excinfo:
@@ -420,7 +420,7 @@ def test_require_graph_shape_rejects_a_non_string_edge_endpoint(
 
 def test_require_graph_shape_rejects_a_non_object_document(tmp_path: Path) -> None:
     """A file whose top level is a list, null or a string fails here with the
-    path, in every loader alike, not with an AttributeError out of ``.get``.
+    path, not with an AttributeError out of ``.get``.
     """
     path = tmp_path / "graph.json"
     with pytest.raises(TypeError, match="must be an object") as excinfo:

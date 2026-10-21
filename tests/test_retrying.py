@@ -1,9 +1,9 @@
 """Tests for android_app_graph.retrying.call_with_retry.
 
-The single re-ask for unusable output shared by utils.vlm_utils (chat
-completions, page descriptions, text embeddings, action responses) and
-embedding_cache.compute_embedding_with_retry; this module owns its tests,
-including which errors are re-asked, so the callers cannot drift on it.
+The single re-ask for unusable output shared by utils.vlm_utils' chat
+completions, page descriptions, text embeddings and action responses; this
+module owns its tests, including which errors are re-asked, so the callers
+cannot drift on it.
 """
 
 from __future__ import annotations

@@ -2103,10 +2103,8 @@ def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
 ) -> None:
     """A crash partway through json.dump must leave the previous complete graph
     file and its embeddings companion in place, never a truncated mix of the
-    old and new content, and must not leave a stray temp file behind -- the
-    same atomicity save_image_embeddings already had for the sidecar, now
-    shared with the more valuable graph file and its embeddings companion
-    through graph_files.write_json_atomically.
+    old and new content, and must not leave a stray temp file behind: both
+    files are written through graph_files.write_json_atomically.
     """
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -2300,8 +2298,7 @@ def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
 ) -> None:
     """save_graph writes only re-explored nodes into ``<stem>_screenshots``, so an
     audited graph's screenshots are split between that directory and the app
-    directory's own; a node must be found in either, through the same lookup the
-    runtime translator and the offline precompute use.
+    directory's own; a node must be found in either.
     """
     app_dir = tmp_path / "demo"
     app_dir.mkdir()
@@ -2352,11 +2349,11 @@ def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: 
 
 
 def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path) -> None:
-    """A node missing "id" must surface as this loader's own path-bearing error --
-    the same invariant the runtime loader gives, not a bare KeyError('id') from
-    indexing the node dict -- and must be caught before ``self.graph.clear()``
-    or any counter is overwritten, so a bad file leaves the previously loaded
-    graph and its counters untouched rather than wiping them partway through.
+    """A node missing "id" must surface as a path-bearing error, not a bare
+    KeyError('id') from indexing the node dict, and must be caught before
+    ``self.graph.clear()`` or any counter is overwritten, so a bad file leaves
+    the previously loaded graph and its counters untouched rather than wiping
+    them partway through.
     """
     path = tmp_path / "graph.json"
     path.write_text(

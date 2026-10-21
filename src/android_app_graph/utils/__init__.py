@@ -14,7 +14,7 @@ from openrouter import OpenRouter
 from android_app_graph.payloads import as_object_dict
 
 ROLES = ("page_detail", "embedding", "instruction", "action")
-# Earlier releases and AITK controller.yaml files copied from upstream UI-KOBE set these.
+# Earlier releases and operator configs copied from upstream UI-KOBE set these.
 REMOVED_KEYS = ("api_key", "base_url", "native_base_url")
 DEFAULT_REQUEST_TIMEOUT = 60.0
 DEFAULT_AUDIT_TIMEOUT = 300.0

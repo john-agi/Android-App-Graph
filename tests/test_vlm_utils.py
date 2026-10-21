@@ -1,9 +1,9 @@
 """Tests for android_app_graph.utils.vlm_utils.
 
-Its cosine scoring is shared by graph_manager and aitk_translator, whose
-node-retrieval tests exercise it end to end. Its OpenRouter helpers run here over
-the real SDK and an offline transport: request serialization, response parsing,
-action conversion, and the retry budget that HTTP, schema and parse failures share.
+Its cosine scoring is used by graph_manager, whose node-retrieval tests exercise
+it end to end. Its OpenRouter helpers run here over the real SDK and an offline
+transport: request serialization, response parsing, action conversion, and the
+retry budget that HTTP, schema and parse failures share.
 """
 
 from __future__ import annotations
