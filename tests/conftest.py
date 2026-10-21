@@ -9,7 +9,8 @@ import os
 import socket
 import subprocess
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from typing import Any, NoReturn
 
 import httpx
@@ -79,8 +80,9 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
     The OpenRouter SDK's retry back-off and the explorer's settling pauses call
     ``time.sleep`` on the shared stdlib module, so patching it here covers them
-    all. A test must never let the SDK keep failing: its default policy retries
-    5XX responses and timeouts for up to an hour.
+    all. A test must never let the SDK keep failing on a real clock: it retries
+    5XX responses and timeouts until twice the request's timeout has passed on
+    ``time.time``, which no patched sleep moves on.
     """
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
@@ -134,8 +136,9 @@ def router_http(
 
 
 @pytest.fixture
-def router_client(router_http: httpx.Client) -> OpenRouter:
-    return open_client("test-router-key", http_client=router_http)
+def router_client(router_http: httpx.Client) -> Iterator[OpenRouter]:
+    with open_client("test-router-key", http_client=router_http) as client:
+        yield client
 
 
 @pytest.fixture
@@ -143,10 +146,11 @@ def opened_clients(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -
     """Every client a command opens, each over the mock transport."""
     opened: list[OpenRouter] = []
 
-    def open_routed(api_key: str) -> OpenRouter:
-        client = open_client(api_key, http_client=router_http)
-        opened.append(client)
-        return client
+    @contextmanager
+    def open_routed(api_key: str) -> Generator[OpenRouter]:
+        with open_client(api_key, http_client=router_http) as client:
+            opened.append(client)
+            yield client
 
     for module in (cli, audit):
         monkeypatch.setattr(module, "open_client", open_routed)

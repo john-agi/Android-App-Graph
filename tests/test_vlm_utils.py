@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
@@ -24,11 +25,11 @@ from openrouter.components.chatusage import ChatUsage
 from openrouter.embeddings import Embeddings
 from openrouter.errors import OpenRouterError, ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsUsage
-from openrouter.types import UNSET
+from openrouter.utils import RetryConfig
 
 from android_app_graph.payloads import as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UNUSABLE_OUTPUT_ATTEMPTS, UnusableOutputError
-from android_app_graph.utils import ModelSettings, open_client
+from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings, open_client
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 
@@ -858,9 +859,12 @@ def test_the_sdk_retries_a_timeout_or_a_dropped_connection_once_it_recovers(
             raise httpx.ConnectError(msg, request=request)
         return httpx.Response(200, json=chat_body)
 
-    with httpx.Client(transport=httpx.MockTransport(flaky)) as http_client:
+    with (
+        httpx.Client(transport=httpx.MockTransport(flaky)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
         reply = vlm.send_chat(
-            open_client("test-key", http_client=http_client),
+            client,
             call_type="chat",
             settings=OTHER,
             messages=[{"role": "user", "content": "hi"}],
@@ -878,7 +882,7 @@ def _recording[**P, R](calls: list[dict[str, object]], method: Callable[P, R]) -
     return wrapper
 
 
-def test_no_request_overrides_the_sdk_retry_policy(
+def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     png_screenshot: str,
@@ -886,14 +890,17 @@ def test_no_request_overrides_the_sdk_retry_policy(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert router_client.sdk_configuration.retry_config is UNSET
+    """The SDK's own back-off and connection-error rule, with the total time capped
+    per request: 60 s roles and the 300 s audits alike."""
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(Chat, "send", _recording(sent, Chat.send))
     monkeypatch.setattr(Embeddings, "generate", _recording(sent, Embeddings.generate))
+    audit = PAGE_DETAIL._replace(request_timeout=DEFAULT_AUDIT_TIMEOUT)
     router_responses.extend(
         [
             chat_response(content='{"page_description":"home"}'),
             chat_response(content='{"same":true}'),
+            chat_response(content="{}"),
             chat_response(content="{}"),
             chat_response(content="{}"),
             chat_response(content="{}"),
@@ -908,9 +915,12 @@ def test_no_request_overrides_the_sdk_retry_policy(
         router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
     )
     vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
-    vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
+    vlm.audit_merge_nodes(router_client, "home", settings=audit)
     vlm.select_exploration_target(router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL)
-    vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
+    vlm.audit_graph(router_client, "home", settings=audit)
+    vlm.describe_executed_action(
+        router_client, png_screenshot, {"action": "back"}, (1, 1), settings=PAGE_DETAIL
+    )
     vlm.plan_next_action(
         router_client,
         vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
@@ -922,8 +932,20 @@ def test_no_request_overrides_the_sdk_retry_policy(
         settings=ACTION,
     )
     vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    assert len(sent) == 9
-    assert all("retries" not in kwargs and "timeout_ms" in kwargs for kwargs in sent)
+    assert len(sent) == 10
+    assert {kwargs["timeout_ms"] for kwargs in sent} == {60_000, 300_000}
+    for kwargs in sent:
+        timeout_ms, retries = kwargs["timeout_ms"], kwargs["retries"]
+        assert isinstance(timeout_ms, int)
+        assert isinstance(retries, RetryConfig)
+        assert (retries.strategy, retries.retry_connection_errors) == ("backoff", True)
+        backoff = retries.backoff
+        assert (
+            backoff.initial_interval,
+            backoff.max_interval,
+            backoff.exponent,
+            backoff.max_elapsed_time,
+        ) == (500, 60_000, 1.5, 2 * timeout_ms)
 
 
 @pytest.mark.parametrize("operation", ["audit", "planner", "action"])
@@ -1104,6 +1126,36 @@ def test_a_failed_generation_is_re_asked_once_and_never_becomes_a_fallback(
     assert tracked_usage.snapshot()["calls"] == 2
 
 
+def _final_fallback(operation: str, client: OpenRouter, png_screenshot: str) -> object:
+    match operation:
+        case "verify":
+            result: object = vlm.verify_same_node(
+                client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+            )
+        case "normalize":
+            normalized = vlm.normalize_edge(client, ["search milk"], settings=PAGE_DETAIL)
+            result = {key: normalized[key] for key in ("instruction_template", "is_template")}
+        case "merge_audit":
+            result = vlm.audit_merge_nodes(client, "home", settings=PAGE_DETAIL)
+        case "audit":
+            result = vlm.audit_graph(client, "home", settings=PAGE_DETAIL)
+        case "target":
+            result = vlm.select_exploration_target(
+                client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL
+            )
+        case "describe":
+            result = vlm.describe_executed_action(
+                client, png_screenshot, {"action": "back"}, (1, 1), settings=PAGE_DETAIL
+            )
+        case _:
+            result = vlm.predict_next_action(
+                client,
+                vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                settings=ACTION,
+            )[0]
+    return result
+
+
 def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Response:
     response = chat_response(content='{"same": tr', finish_reason="length")
     body = response.json()
@@ -1135,34 +1187,7 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
 ) -> None:
     router_responses.append(_truncated_reply(chat_response))
     with caplog.at_level("WARNING"):
-        match operation:
-            case "verify":
-                result: object = vlm.verify_same_node(
-                    router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-                )
-            case "normalize":
-                normalized = vlm.normalize_edge(
-                    router_client, ["search milk"], settings=PAGE_DETAIL
-                )
-                result = {key: normalized[key] for key in ("instruction_template", "is_template")}
-            case "merge_audit":
-                result = vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
-            case "audit":
-                result = vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
-            case "target":
-                result = vlm.select_exploration_target(
-                    router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL
-                )
-            case "describe":
-                result = vlm.describe_executed_action(
-                    router_client, png_screenshot, {"action": "back"}, (1, 1), settings=PAGE_DETAIL
-                )
-            case _:
-                result = vlm.predict_next_action(
-                    router_client,
-                    vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
-                    settings=ACTION,
-                )[0]
+        result = _final_fallback(operation, router_client, png_screenshot)
     assert result == fallback
     assert len(router_requests) == 1
     assert "finish_reason=length, reasoning_tokens=2950" in caplog.text
@@ -1218,6 +1243,67 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
     with pytest.raises(vlm.TruncatedReplyError, match="token limit"):
         request()
     assert len(router_requests) == 1
+
+
+@pytest.fixture
+def timing_out_client(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> Iterator[OpenRouter]:
+    """A client whose every attempt times out, a second past PAGE_DETAIL's 60 s.
+
+    Time passes only on the clock the SDK's retry loop reads, so it gives up after
+    two attempts instead of retrying without end on a real clock.
+    """
+    del no_sleep  # requested for its side effect on time.sleep
+    attempts: list[httpx.Request] = []
+
+    def time_out(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        msg = "no complete response within 60 s"
+        raise httpx.ReadTimeout(msg, request=request)
+
+    monkeypatch.setattr(time, "time", lambda: 61.0 * len(attempts))
+    with (
+        httpx.Client(transport=httpx.MockTransport(time_out)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        yield client
+
+
+@pytest.mark.parametrize(
+    ("operation", "call_type", "fallback"),
+    [
+        ("verify", "node_verify", {"same": False, "reason": "reply truncated"}),
+        (
+            "normalize",
+            "normalize_edge",
+            {"instruction_template": "search milk", "is_template": False},
+        ),
+        ("merge_audit", "node_merge_audit", {"issues": [], "summary": "reply truncated"}),
+        ("audit", "graph_audit", {"issues": [], "summary": "reply truncated"}),
+        ("target", "exploration_target", None),
+        ("describe", "action_description", None),
+    ],
+)
+def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
+    operation: str,
+    call_type: str,
+    fallback: object,
+    timing_out_client: OpenRouter,
+    png_screenshot: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        result = _final_fallback(operation, timing_out_client, png_screenshot)
+    assert result == fallback
+    assert f"{call_type}: timed out after retries" in caplog.text
+
+
+def test_a_page_description_that_still_times_out_raises(
+    timing_out_client: OpenRouter, png_screenshot: str
+) -> None:
+    with pytest.raises(httpx.ReadTimeout, match="no complete response"):
+        vlm.describe_page_and_state(timing_out_client, png_screenshot, settings=PAGE_DETAIL)
 
 
 def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_content(

@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from openrouter import OpenRouter
 from openrouter.components.chatcontenttext import ChatContentText
 from openrouter.components.chatresult import ChatResult
@@ -26,7 +27,7 @@ from openrouter.types import UNSET
 from PIL import Image
 
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
-from android_app_graph.retrying import UnusableOutputError, call_with_retry
+from android_app_graph.retrying import UnusableOutputError, call_with_retry, capped_retries
 from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
 if TYPE_CHECKING:
@@ -781,15 +782,20 @@ def _send_chat_once(
     A ``response_format`` brings the response-healing plugin with it;
     README.md#requests-and-recovery.
     """
-    response: object = client.chat.send(
-        model=settings.model,
-        messages=messages,
-        response_format=response_format,
-        plugins=None if response_format is None else [{"id": "response-healing"}],
-        temperature=settings.temperature if settings.temperature is not None else UNSET,
-        stream=False,
-        timeout_ms=int(settings.request_timeout * 1000),
-    )
+    try:
+        response: object = client.chat.send(
+            model=settings.model,
+            messages=messages,
+            response_format=response_format,
+            plugins=None if response_format is None else [{"id": "response-healing"}],
+            temperature=settings.temperature if settings.temperature is not None else UNSET,
+            stream=False,
+            retries=capped_retries(settings.request_timeout),
+            timeout_ms=int(settings.request_timeout * 1000),
+        )
+    except httpx.TimeoutException:
+        logger.warning("%s: timed out after retries", call_type)
+        raise
     if not isinstance(response, ChatResult):
         msg = "Expected a non-streaming OpenRouter chat response"
         raise TypeError(msg)
@@ -827,8 +833,9 @@ def send_chat(
 
     Unusable output is a failed generation (``finish_reason: "error"``) or a 2xx
     reply the SDK cannot validate. ``call_type`` names the call in usage records
-    and logs. A truncated reply raises ``TruncatedReplyError`` for the caller's
-    final fallback.
+    and logs. A truncated reply raises ``TruncatedReplyError`` and a request that
+    still times out after the SDK's retries raises ``httpx.TimeoutException``,
+    both for the caller's final fallback.
     """
     return call_with_retry(
         f"[API] {call_type}",
@@ -1040,7 +1047,7 @@ def verify_same_node(
             ],
             response_format=_structured_output("node_verification", _NODE_VERIFICATION_SCHEMA),
         )
-    except TruncatedReplyError:
+    except TruncatedReplyError, httpx.TimeoutException:
         return {"same": False, "reason": "reply truncated"}
     raw = strip_json_fences(message_text(resp))
     try:
@@ -1114,7 +1121,7 @@ def normalize_edge(
                 "edge_template", _EDGE_TEMPLATE_SCHEMA, strict=False
             ),
         )
-    except TruncatedReplyError:
+    except TruncatedReplyError, httpx.TimeoutException:
         return unchanged
     raw = strip_json_fences(message_text(resp))
     try:
@@ -1363,7 +1370,7 @@ def audit_merge_nodes(
             messages=[{"role": "user", "content": prompt}],
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
         )
-    except TruncatedReplyError:
+    except TruncatedReplyError, httpx.TimeoutException:
         return {"issues": [], "summary": "reply truncated"}
     raw = strip_json_fences(message_text(resp))
     try:
@@ -1462,7 +1469,7 @@ def select_exploration_target(
                 "exploration_target", _exploration_target_schema(sorted(valid_ids))
             ),
         )
-    except TruncatedReplyError:
+    except TruncatedReplyError, httpx.TimeoutException:
         return None
 
     raw = strip_json_fences(message_text(resp))
@@ -1509,7 +1516,7 @@ def audit_graph(
             messages=[{"role": "user", "content": prompt}],
             response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
         )
-    except TruncatedReplyError:
+    except TruncatedReplyError, httpx.TimeoutException:
         return {"issues": [], "summary": "reply truncated"}
     finish_reason = resp.choices[0].finish_reason if resp.choices else ""
     raw_original = message_text(resp)
@@ -1558,6 +1565,7 @@ def get_embedding(
             model=model,
             input=text,
             encoding_format="float",
+            retries=capped_retries(request_timeout),
             timeout_ms=int(request_timeout * 1000),
         )
         return _embedding_vector(response, call_type="embedding", model=model)
@@ -1887,7 +1895,8 @@ def describe_executed_action(
 
     ``screen_size`` is the device's ``(width, height)`` in pixels, which the action's
     coordinates are measured in. Returns None when the reply is truncated, not a JSON
-    object or has a blank instruction.
+    object or has a blank instruction, or when the request still times out after the
+    SDK's retries.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
     screen_w, screen_h = screen_size
@@ -1910,7 +1919,7 @@ def describe_executed_action(
             ],
             response_format=_structured_output("action_description", _ACTION_DESCRIPTION_SCHEMA),
         )
-    except TruncatedReplyError:
+    except TruncatedReplyError, httpx.TimeoutException:
         return None
     raw = strip_json_fences(message_text(resp))
     try:

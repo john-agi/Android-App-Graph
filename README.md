@@ -66,8 +66,9 @@ graph TD;
     gm --> pay["android_app_graph.payloads"];
     gm --> vlm;
     utils --> pay;
+    utils --> retry["android_app_graph.retrying"];
     vlm --> pay;
-    vlm --> retry["android_app_graph.retrying"];
+    vlm --> retry;
     vlm --> utils;
 ```
 
@@ -183,17 +184,27 @@ seconds, sent with each request; the default is 60 seconds. The graph audit and
 node-merge audit send the whole graph in one prompt, so they use
 `page_detail.audit_request_timeout` instead, default 300 seconds.
 
-The OpenRouter SDK retries transport failures with its default policy, which the
-application keeps as is. It retries 5XX responses, dropped connections (refused,
-reset or failed reads and writes) and timeouts with exponential backoff (0.5 s,
-then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between tries) for up
-to one hour, waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
-header asks instead. It does not retry 429 or other 4xx responses, which fail at
-once, nor a server that closes the connection without sending a response. The
-application never retries what the SDK has given up on. A request that timed out
-can be sent again within that hour, and OpenRouter bills a non-streaming request
-in full even after the client disconnects, so a timeout shorter than the model
-needs can pay for the same request several times.
+Each attempt ends at that timeout by the wall clock, counted from when the
+request is sent, so connecting and the response headers count too. httpx's own
+read timeout applies to each chunk of data, and OpenRouter keeps a non-streaming
+connection open with whitespace every few seconds while the model works, so that
+timeout alone would never fire. A connection that sends nothing at all still ends
+at httpx's read timeout.
+
+The OpenRouter SDK retries 5XX responses, dropped connections (refused, reset or
+failed reads and writes) and timeouts with its default exponential backoff
+(0.5 s, then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between
+tries), waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
+header asks instead. It stops once twice the request's timeout has passed since
+the first attempt, so a timed-out attempt gets exactly one more, and 5XX
+responses are retried for up to two minutes at the default timeout and ten
+minutes for the audits. It does not retry 429 or other 4xx responses, which fail
+at once, nor a server that closes the connection without sending a response. The
+application never retries what the SDK has given up on: a call that still times
+out takes the fallback listed below for a truncated reply, and a call without
+one raises. OpenRouter bills a non-streaming request in full even after the
+client disconnects, so an attempt cut off at its deadline is still billed, and a
+timeout shorter than the model needs pays for the same request twice.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
@@ -222,9 +233,12 @@ reasoning tokens, and the caller applies its final fallback at once: an action
 waits, node verification treats the screens as different, edge normalization
 and relabelling a flagged edge keep the instruction, the audits report no
 issues, the coverage checkpoint uses its top candidate, and a page description
-or an exploration plan raises. A reply stopped by the provider's content filter
-(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
-handled like any other empty or partial reply.
+or an exploration plan raises. A call that still times out after the SDK's
+retries is logged with its name as timed out after retries and takes the same
+fallback, except an action, whose timeout raises like a page description, an
+exploration plan or an embedding. A reply stopped by the provider's content
+filter (`finish_reason: "content_filter"`) is logged with the call's name and
+otherwise handled like any other empty or partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),

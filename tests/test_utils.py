@@ -14,7 +14,6 @@ from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
 from openrouter.components.security import Security
-from openrouter.types import UNSET
 from rich.console import Console
 
 from android_app_graph.utils import (
@@ -54,22 +53,24 @@ def test_reference_to_unset_variable_is_none() -> None:
     assert resolve_env("${APP_GRAPH_TEST_UNSET}") is None
 
 
-def test_open_client_sends_the_key_and_lets_the_sdk_own_its_http_client() -> None:
-    client = open_client("test-key")
-    assert isinstance(client.sdk_configuration.security, Security)
-    assert client.sdk_configuration.security.api_key == "test-key"
-    assert client.sdk_configuration.server_url is None
-    http_client = client.sdk_configuration.client
-    assert isinstance(http_client, httpx.Client)
-    assert not client.sdk_configuration.client_supplied
-    with client:
+def test_open_client_sends_the_key_and_closes_the_http_client_it_built() -> None:
+    with open_client("test-key") as client:
+        assert isinstance(client.sdk_configuration.security, Security)
+        assert client.sdk_configuration.security.api_key == "test-key"
+        assert client.sdk_configuration.server_url is None
+        http_client = client.sdk_configuration.client
+        assert isinstance(http_client, httpx.Client)
+        assert http_client.follow_redirects
         assert not http_client.is_closed
     assert http_client.is_closed
     assert client.sdk_configuration.client is None
 
 
-def test_open_client_keeps_the_sdk_default_retry_policy() -> None:
-    assert open_client("test-key").sdk_configuration.retry_config is UNSET
+def test_open_client_leaves_an_http_client_it_was_given_open(router_http: httpx.Client) -> None:
+    with open_client("test-key", http_client=router_http) as client:
+        assert client.sdk_configuration.client is router_http
+    assert client.sdk_configuration.client is None
+    assert not router_http.is_closed
 
 
 def test_the_openrouter_key_and_endpoint_are_the_only_ones_on_the_wire(
@@ -82,8 +83,8 @@ def test_the_openrouter_key_and_endpoint_are_the_only_ones_on_the_wire(
     monkeypatch.setenv("OPENROUTER_API_KEY", "shared-key")
     monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-key")
     router_responses.append(httpx.Response(200, json=embedding_body))
-    client = open_client(resolve_api_key(), http_client=router_http)
-    client.embeddings.generate(model="google/gemini-embedding-2", input="hello")
+    with open_client(resolve_api_key(), http_client=router_http) as client:
+        client.embeddings.generate(model="google/gemini-embedding-2", input="hello")
     assert router_requests[0].headers["authorization"] == "Bearer shared-key"
     assert str(router_requests[0].url) == "https://openrouter.ai/api/v1/embeddings"
 

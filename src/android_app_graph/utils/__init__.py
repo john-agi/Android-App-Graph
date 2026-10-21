@@ -5,13 +5,15 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import ExitStack, contextmanager
 from typing import NamedTuple
 
 import httpx
 from openrouter import OpenRouter
 
 from android_app_graph.payloads import as_object_dict
+from android_app_graph.retrying import DeadlineTransport
 
 ROLES = ("page_detail", "embedding", "instruction", "action")
 # Earlier releases and operator configs copied from upstream UI-KOBE set these.
@@ -29,14 +31,25 @@ class ModelSettings(NamedTuple):
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
 
 
-def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> OpenRouter:
-    """Create the run's one OpenRouter client, shared by every role.
+@contextmanager
+def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> Generator[OpenRouter]:
+    """Open the run's one OpenRouter client, shared by every role, and close it on exit.
 
-    Only tests pass ``http_client``; otherwise the SDK creates and owns the HTTP
-    client. The SDK's default retry policy is kept as is:
-    README.md#requests-and-recovery.
+    Its HTTP client ends each attempt at the request's timeout by the wall clock:
+    README.md#requests-and-recovery. The SDK never closes a client it is given,
+    so this closes the one it builds. Only tests pass ``http_client``, which
+    stays theirs to close.
     """
-    return OpenRouter(api_key=api_key, client=http_client)
+    with ExitStack() as opened:
+        if http_client is None:
+            http_client = opened.enter_context(
+                httpx.Client(
+                    follow_redirects=True, transport=DeadlineTransport(httpx.HTTPTransport())
+                )
+            )
+        client = OpenRouter(api_key=api_key, client=http_client)
+        opened.enter_context(client)
+        yield client
 
 
 def removed_key_errors(vlm_config: Mapping[str, object]) -> list[str]:
