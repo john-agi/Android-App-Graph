@@ -570,6 +570,76 @@ def plot_paper_matplotlib(
 
 _TOOLTIP_UNEXPLORED_LIMIT = 10
 
+
+def _tooltip_rows(data: dict[str, Any], description: str) -> list[tuple[str, str]]:
+    """Return the label and text of each line under a node's ID in its hover tooltip."""
+    state_keys = data.get("state_keys", [])
+    rows: list[tuple[str, str]] = [
+        ("Description", description),
+        ("Activity", data.get("activity", "?")),
+        ("Visits", f"{data.get('visit_count', 0)}"),
+        ("State keys", ", ".join(state_keys) if state_keys else "none"),
+        (
+            "Elements",
+            f"{data.get('elements_explored', 0)}/{data.get('elements_total', 0)} explored",
+        ),
+    ]
+    unexplored = [e for e in data.get("elements", []) if not e.get("explored", False)]
+    if unexplored:
+        listed = ", ".join(
+            e.get("description", "?") for e in unexplored[:_TOOLTIP_UNEXPLORED_LIMIT]
+        )
+        if len(unexplored) > _TOOLTIP_UNEXPLORED_LIMIT:
+            listed += f" (+{len(unexplored) - _TOOLTIP_UNEXPLORED_LIMIT} more)"
+        rows.append(("Unexplored", listed))
+    return rows
+
+
+# vis-network 9.1.2 shows a string title as plain text and inserts only an Element, so
+# the script builds each tooltip from the node's plain values. It reads the `nodes`
+# global of pyvis's template, so it has to run after drawGraph().
+_NODE_TOOLTIPS = """
+<style>
+.node-tooltip-image { display: block; max-width: 250px; max-height: 450px; margin-top: 8px;
+  border: 1px solid #ccc; border-radius: 4px; }
+</style>
+<script>
+(function () {
+  function tooltipOf(node) {
+    var tooltip = document.createElement("div");
+    var heading = document.createElement("b");
+    heading.textContent = node.id;
+    tooltip.appendChild(heading);
+    node.tooltipRows.forEach(function (row) {
+      var line = document.createElement("div");
+      var label = document.createElement("b");
+      var value = document.createElement("span");
+      label.textContent = row[0] + ": ";
+      value.textContent = row[1];
+      line.appendChild(label);
+      line.appendChild(value);
+      tooltip.appendChild(line);
+    });
+    var representative = typeof node.representativeMember === "number"
+      ? node.memberImages[node.representativeMember]
+      : node.representativeImage;
+    if (representative) {
+      var image = document.createElement("img");
+      image.className = "node-tooltip-image";
+      image.alt = "Representative screenshot";
+      image.src = representative;
+      tooltip.appendChild(image);
+    }
+    return tooltip;
+  }
+
+  nodes.update(nodes.get().map(function (node) {
+    return { id: node.id, title: tooltipOf(node) };
+  }));
+})();
+</script>
+"""
+
 # The script reads the `network` and `nodes` globals of pyvis's template, so it has to
 # run after the template's drawGraph() call.
 _MEMBER_PANEL = """
@@ -733,42 +803,23 @@ def plot_pyvis(
     for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
         desc = data.get("page_description", node_id)
         short_desc = shorten_words(desc, style.max_node_words, 40)
-        visits = data.get("visit_count", 0)
-        state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
+        member_images = data.get("member_image_uris", [])
         member_total = data.get("member_total", 0)
-        bg = palette[idx % len(palette)]
-
-        keys_str = ", ".join(state_keys) if state_keys else "none"
-        elements = data.get("elements", [])
-        n_explored = data.get("elements_explored", 0)
-        n_total = data.get("elements_total", 0)
-        tooltip = (
-            f"<b>{node_id}</b><br>"
-            f"Activity: {data.get('activity', '?')}<br>"
-            f"Visits: {visits}<br>"
-            f"State keys: {keys_str}<br>"
-            f"Elements: {n_explored}/{n_total} explored"
+        # The tooltip reuses the panel's copy of the representative, so the page embeds
+        # each image once.
+        representative_member = (
+            member_images.index(screenshot_uri) if screenshot_uri in member_images else None
         )
-        unexplored = [e for e in elements if not e.get("explored", False)]
-        if unexplored:
-            tooltip += "<br><b>Unexplored:</b> "
-            tooltip += ", ".join(
-                e.get("description", "?") for e in unexplored[:_TOOLTIP_UNEXPLORED_LIMIT]
-            )
-            if len(unexplored) > _TOOLTIP_UNEXPLORED_LIMIT:
-                tooltip += f" (+{len(unexplored) - _TOOLTIP_UNEXPLORED_LIMIT} more)"
-        if screenshot_uri:
-            tooltip += (
-                f'<br><br><img src="{screenshot_uri}" '
-                f'style="max-width:250px; max-height:450px; border:1px solid #ccc; border-radius:4px;">'
-            )
+        bg = palette[idx % len(palette)]
 
         net.add_node(
             node_id,
             label=f"{short_desc}\n[{member_total} screenshot{'s' if member_total != 1 else ''}]",
-            title=tooltip,
-            memberImages=data.get("member_image_uris", []),
+            tooltipRows=_tooltip_rows(data, desc),
+            representativeMember=representative_member,
+            representativeImage=screenshot_uri if representative_member is None else None,
+            memberImages=member_images,
             memberTotal=member_total,
             color={
                 "background": bg,
@@ -819,7 +870,7 @@ def plot_pyvis(
         "height: 100vh !important; }</style>"
     )
     html = html.replace("<head>", f"<head>{fullscreen_css}", 1)
-    html = html.replace("</body>", f"{_MEMBER_PANEL}</body>", 1)
+    html = html.replace("</body>", f"{_NODE_TOOLTIPS}{_MEMBER_PANEL}</body>", 1)
     Path(output_path).write_text(html, encoding="utf-8")
 
     logger.info("Interactive graph saved to %s", output_path)
