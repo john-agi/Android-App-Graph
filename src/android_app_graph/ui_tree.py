@@ -413,8 +413,19 @@ def hit_test(tree: UiTree, point: tuple[int, int], screen: Bounds) -> Hit:
 
 def part_of(tree: UiTree, index: int, wanted: Locator) -> bool:
     """Return whether node ``index`` of ``tree`` is a node ``wanted`` names, or lies
-    inside one."""
-    return any(wanted.matches(locator(tree, node)) for node in (index, *_ancestors(tree, index)))
+    inside an element ``wanted`` names.
+
+    Only ancestors that are elements count: a layout container takes its label from
+    the first text inside it, so in a screen without resource IDs it can share the
+    locator of the element that holds that text, and every node in the container
+    would otherwise lie inside that element.
+    """
+    if wanted.matches(locator(tree, index)):
+        return True
+    return any(
+        _acts(tree, ancestor) and wanted.matches(locator(tree, ancestor))
+        for ancestor in _ancestors(tree, index)
+    )
 
 
 def focused_text_field(tree: UiTree) -> Anchor | None:

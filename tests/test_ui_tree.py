@@ -1095,3 +1095,16 @@ def test_a_node_is_part_of_the_element_it_is_or_lies_inside() -> None:
     assert not part_of(tree, 1, field)
     assert not part_of(tree, 3, day)
     assert part_of(tree, 3, done)
+
+
+def test_a_button_is_not_part_of_the_layout_that_shares_another_button_s_locator() -> None:
+    """In the Compose dialog the views around both buttons take the label of the first
+    text inside them, "Disable app", so they share that button's locator."""
+    tree = parse_tree(_dump("windows_dialog_compose"))
+    disable = _element_at(tree, "com.android.settings", "Disable app").locator
+    cancel = _element_at(tree, "com.android.settings", "Cancel").locator
+    (cancel_node,) = [i for i in find_nodes(tree, cancel) if tree.nodes[i].clickable]
+
+    assert len(find_nodes(tree, disable)) > 1
+    assert not part_of(tree, cancel_node, disable)
+    assert part_of(tree, cancel_node, cancel)
