@@ -64,22 +64,22 @@ V2_PARSE_RETRY_HINT = (
 
 RUNTIME_ROLES = ("action", "image_embedding")
 
-_OptionType = Literal["done", "self_loop", "neighbor", "free"]
+OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
 
-class _Option(TypedDict):
+class Option(TypedDict):
     """One DECIDE menu entry; the keys present depend on ``type``."""
 
     letter: str
-    type: _OptionType
+    type: OptionType
     instruction: NotRequired[str]
 
 
-class _Decision(TypedDict):
+class Decision(TypedDict):
     """The outcome of ``_decide``, read by ``_step`` for ``type`` and ``instruction``;
     a "free" fallback additionally carries ``reason``."""
 
-    type: _OptionType
+    type: OptionType
     instruction: str
     reason: NotRequired[str]
 
@@ -556,6 +556,211 @@ def chat_completion_content(
     )
 
 
+def unpack_template(tmpl: dict[str, Any] | str) -> tuple[str, str]:
+    """Extract (instruction_text, observation_text) from a template entry."""
+    if isinstance(tmpl, dict):
+        return (
+            as_str(tmpl.get("template", ""), ""),
+            as_str(tmpl.get("observation_template", ""), ""),
+        )
+    return str(tmpl), ""
+
+
+def format_schema_delta(delta: dict[str, Any] | None) -> str:
+    """Format a state transition hint for the small runtime model."""
+    if not isinstance(delta, dict) or not delta:
+        return ""
+
+    parts: list[str] = []
+    for key, change in delta.items():
+        if isinstance(change, dict):
+            before = change.get("before", "?")
+            after = change.get("after", "?")
+            parts.append(f"{key}: {before} -> {after}")
+        else:
+            parts.append(f"{key}: {change}")
+    return ", ".join(parts)
+
+
+def edge_effect_hint(edge_data: dict[str, Any], index: int | None = None) -> str:
+    """Return a concise effect hint from schema deltas, if available."""
+    deltas = edge_data.get("schema_deltas", [])
+    if not deltas:
+        return ""
+
+    if index is not None:
+        return format_schema_delta(deltas[index]) if index < len(deltas) else ""
+
+    merged: dict[str, Any] = {}
+    for delta in deltas:
+        if isinstance(delta, dict):
+            for key, change in delta.items():
+                merged.setdefault(key, change)
+    return format_schema_delta(merged)
+
+
+def _build_self_loop_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[Option, str]]:
+    """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
+    if not graph.has_edge(node_id, node_id):
+        return []
+    edge_data = graph[node_id][node_id]
+    templates = edge_data.get("instruction_templates", [])
+    observations = edge_data.get("target_observations", [])
+    candidates: list[tuple[Option, str]] = []
+
+    if templates:
+        for tmpl in templates:
+            tmpl_text, obs_text = unpack_template(tmpl)
+            effect = edge_effect_hint(edge_data)
+            option: Option = {
+                "letter": "",
+                "type": "self_loop",
+                "instruction": tmpl_text,
+            }
+            hint = f'Stay here — "{tmpl_text}"'
+            if obs_text:
+                hint += f" → {obs_text}"
+            if effect:
+                hint += f" | changes: {effect}"
+            candidates.append((option, hint))
+    else:
+        for i, raw_instr in enumerate(edge_data.get("instructions", [])):
+            instr = as_str(raw_instr, "")
+            if not instr:
+                continue
+            effect = edge_effect_hint(edge_data, i)
+            option: Option = {
+                "letter": "",
+                "type": "self_loop",
+                "instruction": instr,
+            }
+            hint = f'Stay here — "{instr}"'
+            if i < len(observations) and observations[i]:
+                hint += f" → {observations[i]}"
+            if effect:
+                hint += f" | changes: {effect}"
+            candidates.append((option, hint))
+
+    return candidates
+
+
+def _build_neighbor_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[int, Option, str]]:
+    """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
+    candidates: list[tuple[int, Option, str]] = []
+    for _, raw_neighbor, edge_data in graph.out_edges(node_id, data=True):
+        neighbor = str(raw_neighbor)
+        if neighbor == node_id:
+            continue
+        neighbor_desc = graph.nodes[neighbor].get("page_description", neighbor)
+        templates = edge_data.get("instruction_templates", [])
+        observations = edge_data.get("target_observations", [])
+
+        instr = ""
+        obs = ""
+        if templates:
+            instr, obs = unpack_template(templates[0])
+        else:
+            instrs = edge_data.get("instructions", [])
+            if instrs:
+                instr = as_str(instrs[0], "")
+            if observations:
+                obs = as_str(observations[0], "")
+
+        effect = edge_effect_hint(edge_data, 0)
+        option: Option = {
+            "letter": "",
+            "type": "neighbor",
+            "instruction": instr,
+        }
+        edge_hint = f' — "{instr}"' if instr else ""
+        if obs:
+            edge_hint += f" → {obs}"
+        if effect:
+            edge_hint += f" | changes: {effect}"
+        line = f'Go to "{neighbor_desc}"{edge_hint}'
+        visit_count = as_int(edge_data.get("visit_count")) or 0
+        candidates.append((visit_count, option, line))
+    return candidates
+
+
+def build_options(graph: nx.DiGraph, node_id: str) -> tuple[str, list[Option]]:
+    """Build the option list for the DECIDE prompt.
+
+    A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
+    between self-loop instructions and neighbours. Neighbours are the only way
+    to navigate the graph (GraphManager adds one self-loop instruction per
+    distinct self-loop action, e.g. each typed query on a search screen, so
+    self-loop instructions alone can otherwise fill every slot), so when both
+    would overflow the 24 slots, neighbours keep at least half of them
+    (ranked by visit_count, the only usefulness signal) and self-loop
+    instructions take the rest.
+    """
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    max_middle_options = len(letters) - 2  # reserve DONE and FREE
+
+    self_loop_candidates = _build_self_loop_candidates(graph, node_id)
+    neighbor_candidates = _build_neighbor_candidates(graph, node_id)
+
+    kept_self_loop = self_loop_candidates
+    kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
+    total_middle = len(self_loop_candidates) + len(neighbor_candidates)
+
+    if total_middle > max_middle_options:
+        neighbor_reserve = min(len(neighbor_candidates), max_middle_options // 2)
+        self_loop_budget = min(len(self_loop_candidates), max_middle_options - neighbor_reserve)
+        neighbor_budget = max_middle_options - self_loop_budget
+        kept_self_loop = self_loop_candidates[:self_loop_budget]
+        ranked = sorted(
+            range(len(neighbor_candidates)),
+            key=lambda i: (-neighbor_candidates[i][0], i),
+        )
+        keep_indices = sorted(ranked[:neighbor_budget])
+        kept_neighbors = [
+            (neighbor_candidates[i][1], neighbor_candidates[i][2]) for i in keep_indices
+        ]
+        logger.warning(
+            "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
+            "dropped %d least-useful self-loop instruction(s)/neighbour(s), "
+            "keeping neighbours to at least half the menu.",
+            node_id,
+            total_middle,
+            max_middle_options,
+            total_middle - len(kept_self_loop) - len(kept_neighbors),
+        )
+
+    options: list[Option] = []
+    lines: list[str] = []
+    idx = 0
+
+    letter = letters[idx]
+    options.append({"letter": letter, "type": "done"})
+    lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
+    idx += 1
+
+    for option, line in (*kept_self_loop, *kept_neighbors):
+        letter = letters[idx]
+        option["letter"] = letter
+        options.append(option)
+        lines.append(f"{letter}) {line}")
+        idx += 1
+
+    letter = letters[idx]
+    options.append({"letter": letter, "type": "free"})
+    lines.append(f"{letter}) FREE — do something not listed above (describe it)")
+    idx += 1
+
+    return "\n".join(lines), options
+
+
+def make_response(message: str, aitk_action: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "message": f"[Android-App-Graph] {message}",
+            "aitk_action": aitk_action,
+        }
+    )
+
+
 class Memory:
     """Task memory that stores actions taken, observations, and extracted info."""
 
@@ -912,203 +1117,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[RECORD] parsed=%r", info)
         self._memory.add_info(info)
 
-    @staticmethod
-    def _unpack_template(tmpl: dict[str, Any] | str) -> tuple[str, str]:
-        """Extract (instruction_text, observation_text) from a template entry."""
-        if isinstance(tmpl, dict):
-            return (
-                as_str(tmpl.get("template", ""), ""),
-                as_str(tmpl.get("observation_template", ""), ""),
-            )
-        return str(tmpl), ""
-
-    @staticmethod
-    def _format_schema_delta(delta: dict[str, Any] | None) -> str:
-        """Format a state transition hint for the small runtime model."""
-        if not isinstance(delta, dict) or not delta:
-            return ""
-
-        parts: list[str] = []
-        for key, change in delta.items():
-            if isinstance(change, dict):
-                before = change.get("before", "?")
-                after = change.get("after", "?")
-                parts.append(f"{key}: {before} -> {after}")
-            else:
-                parts.append(f"{key}: {change}")
-        return ", ".join(parts)
-
-    def _edge_effect_hint(self, edge_data: dict[str, Any], index: int | None = None) -> str:
-        """Return a concise effect hint from schema deltas, if available."""
-        deltas = edge_data.get("schema_deltas", [])
-        if not deltas:
-            return ""
-
-        if index is not None:
-            return self._format_schema_delta(deltas[index]) if index < len(deltas) else ""
-
-        merged: dict[str, Any] = {}
-        for delta in deltas:
-            if isinstance(delta, dict):
-                for key, change in delta.items():
-                    merged.setdefault(key, change)
-        return self._format_schema_delta(merged)
-
-    def _build_self_loop_candidates(
-        self, graph: nx.DiGraph, node_id: str
-    ) -> list[tuple[_Option, str]]:
-        """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
-        if not graph.has_edge(node_id, node_id):
-            return []
-        edge_data = graph[node_id][node_id]
-        templates = edge_data.get("instruction_templates", [])
-        observations = edge_data.get("target_observations", [])
-        candidates: list[tuple[_Option, str]] = []
-
-        if templates:
-            for tmpl in templates:
-                tmpl_text, obs_text = self._unpack_template(tmpl)
-                effect = self._edge_effect_hint(edge_data)
-                option: _Option = {
-                    "letter": "",
-                    "type": "self_loop",
-                    "instruction": tmpl_text,
-                }
-                hint = f'Stay here — "{tmpl_text}"'
-                if obs_text:
-                    hint += f" → {obs_text}"
-                if effect:
-                    hint += f" | changes: {effect}"
-                candidates.append((option, hint))
-        else:
-            for i, raw_instr in enumerate(edge_data.get("instructions", [])):
-                instr = as_str(raw_instr, "")
-                if not instr:
-                    continue
-                effect = self._edge_effect_hint(edge_data, i)
-                option: _Option = {
-                    "letter": "",
-                    "type": "self_loop",
-                    "instruction": instr,
-                }
-                hint = f'Stay here — "{instr}"'
-                if i < len(observations) and observations[i]:
-                    hint += f" → {observations[i]}"
-                if effect:
-                    hint += f" | changes: {effect}"
-                candidates.append((option, hint))
-
-        return candidates
-
-    def _build_neighbor_candidates(
-        self, graph: nx.DiGraph, node_id: str
-    ) -> list[tuple[int, _Option, str]]:
-        """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
-        candidates: list[tuple[int, _Option, str]] = []
-        for _, raw_neighbor, edge_data in graph.out_edges(node_id, data=True):
-            neighbor = str(raw_neighbor)
-            if neighbor == node_id:
-                continue
-            neighbor_desc = graph.nodes[neighbor].get("page_description", neighbor)
-            templates = edge_data.get("instruction_templates", [])
-            observations = edge_data.get("target_observations", [])
-
-            instr = ""
-            obs = ""
-            if templates:
-                instr, obs = self._unpack_template(templates[0])
-            else:
-                instrs = edge_data.get("instructions", [])
-                if instrs:
-                    instr = as_str(instrs[0], "")
-                if observations:
-                    obs = as_str(observations[0], "")
-
-            effect = self._edge_effect_hint(edge_data, 0)
-            option: _Option = {
-                "letter": "",
-                "type": "neighbor",
-                "instruction": instr,
-            }
-            edge_hint = f' — "{instr}"' if instr else ""
-            if obs:
-                edge_hint += f" → {obs}"
-            if effect:
-                edge_hint += f" | changes: {effect}"
-            line = f'Go to "{neighbor_desc}"{edge_hint}'
-            visit_count = as_int(edge_data.get("visit_count")) or 0
-            candidates.append((visit_count, option, line))
-        return candidates
-
-    def _build_options(self, graph: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
-        """Build the option list for the DECIDE prompt.
-
-        A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
-        between self-loop instructions and neighbours. Neighbours are the only way
-        to navigate the graph (GraphManager adds one self-loop instruction per
-        distinct self-loop action, e.g. each typed query on a search screen, so
-        self-loop instructions alone can otherwise fill every slot), so when both
-        would overflow the 24 slots, neighbours keep at least half of them
-        (ranked by visit_count, the only usefulness signal) and self-loop
-        instructions take the rest.
-        """
-        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        max_middle_options = len(letters) - 2  # reserve DONE and FREE
-
-        self_loop_candidates = self._build_self_loop_candidates(graph, node_id)
-        neighbor_candidates = self._build_neighbor_candidates(graph, node_id)
-
-        kept_self_loop = self_loop_candidates
-        kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
-        total_middle = len(self_loop_candidates) + len(neighbor_candidates)
-
-        if total_middle > max_middle_options:
-            neighbor_reserve = min(len(neighbor_candidates), max_middle_options // 2)
-            self_loop_budget = min(len(self_loop_candidates), max_middle_options - neighbor_reserve)
-            neighbor_budget = max_middle_options - self_loop_budget
-            kept_self_loop = self_loop_candidates[:self_loop_budget]
-            ranked = sorted(
-                range(len(neighbor_candidates)),
-                key=lambda i: (-neighbor_candidates[i][0], i),
-            )
-            keep_indices = sorted(ranked[:neighbor_budget])
-            kept_neighbors = [
-                (neighbor_candidates[i][1], neighbor_candidates[i][2]) for i in keep_indices
-            ]
-            logger.warning(
-                "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
-                "dropped %d least-useful self-loop instruction(s)/neighbour(s), "
-                "keeping neighbours to at least half the menu.",
-                node_id,
-                total_middle,
-                max_middle_options,
-                total_middle - len(kept_self_loop) - len(kept_neighbors),
-            )
-
-        options: list[_Option] = []
-        lines: list[str] = []
-        idx = 0
-
-        letter = letters[idx]
-        options.append({"letter": letter, "type": "done"})
-        lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
-        idx += 1
-
-        for option, line in (*kept_self_loop, *kept_neighbors):
-            letter = letters[idx]
-            option["letter"] = letter
-            options.append(option)
-            lines.append(f"{letter}) {line}")
-            idx += 1
-
-        letter = letters[idx]
-        options.append({"letter": letter, "type": "free"})
-        lines.append(f"{letter}) FREE — do something not listed above (describe it)")
-        idx += 1
-
-        return "\n".join(lines), options
-
-    def _decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
+    def _decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> Decision:
         """Ask the model to pick the next action.
 
         Returns the chosen option's type together with its resolved
@@ -1127,7 +1136,7 @@ class UIKobeV2Translator(BaseTranslator):
         else:
             state_context = ""
 
-        options_text, options_list = self._build_options(graph, node_id)
+        options_text, options_list = build_options(graph, node_id)
 
         prompt = DECIDE_PROMPT.format(
             task=task,
@@ -1249,7 +1258,7 @@ class UIKobeV2Translator(BaseTranslator):
                 logger.info(_SEP_THICK)
                 logger.info("[OPEN] Launching %s", app_name)
                 logger.info(_SEP_THICK)
-                return self._make_response(
+                return make_response(
                     f"Opening app: {app_name}",
                     {"action": "open", "app": app_name},
                 )
@@ -1269,7 +1278,7 @@ class UIKobeV2Translator(BaseTranslator):
         self._record_info(task, screenshot)
         logger.info("[RECORD] Memory: %s", self._memory.format())
 
-        decision: _Decision
+        decision: Decision
         if node_id is not None and graph is not None:
             decision = self._decide(graph, task, node_id, screenshot)
         else:
@@ -1314,7 +1323,7 @@ class UIKobeV2Translator(BaseTranslator):
             logger.info("[DONE] Answer: %s", answer)
             logger.info("[DONE] Memory: %s", self._memory.format())
             logger.info(_SEP_THICK)
-            return self._make_response(
+            return make_response(
                 f"Task complete. Answer: {answer}",
                 {"action": "end", "answer": answer},
             )
@@ -1343,16 +1352,7 @@ class UIKobeV2Translator(BaseTranslator):
             )
             aitk_action = {"action": "wait", "time": 1}
 
-        return self._make_response(f"Action: {history_entry}", aitk_action)
-
-    @staticmethod
-    def _make_response(message: str, aitk_action: dict[str, Any]) -> str:
-        return json.dumps(
-            {
-                "message": f"[Android-App-Graph] {message}",
-                "aitk_action": aitk_action,
-            }
-        )
+        return make_response(f"Action: {history_entry}", aitk_action)
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:

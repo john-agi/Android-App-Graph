@@ -1241,7 +1241,7 @@ def test_reset_task_state_keeps_the_screen_size_aitk_reported(
     ],
 )
 def test_unpack_template(template: dict[str, Any] | str, expected: tuple[str, str]) -> None:
-    assert aitk_translator.UIKobeV2Translator._unpack_template(template) == expected
+    assert aitk_translator.unpack_template(template) == expected
 
 
 @pytest.mark.parametrize(
@@ -1256,41 +1256,35 @@ def test_unpack_template(template: dict[str, Any] | str, expected: tuple[str, st
     ],
 )
 def test_format_schema_delta(delta: dict[str, Any] | None, expected: str) -> None:
-    assert aitk_translator.UIKobeV2Translator._format_schema_delta(delta) == expected
+    assert aitk_translator.format_schema_delta(delta) == expected
 
 
-def test_edge_effect_hint_without_deltas(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator._edge_effect_hint({}) == ""
+def test_edge_effect_hint_without_deltas() -> None:
+    assert aitk_translator.edge_effect_hint({}) == ""
 
 
-def test_edge_effect_hint_uses_the_indexed_delta(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
+def test_edge_effect_hint_uses_the_indexed_delta() -> None:
     edge = {"schema_deltas": [{"a": "one"}, {"b": "two"}]}
-    assert translator._edge_effect_hint(edge, 1) == "b: two"
+    assert aitk_translator.edge_effect_hint(edge, 1) == "b: two"
 
 
 @pytest.mark.parametrize("index", [1, 9])
-def test_edge_effect_hint_is_empty_for_an_action_without_a_delta(
-    translator: aitk_translator.UIKobeV2Translator, index: int
-) -> None:
+def test_edge_effect_hint_is_empty_for_an_action_without_a_delta(index: int) -> None:
     edge = {"schema_deltas": [{"a": "one"}, None]}
-    assert translator._edge_effect_hint(edge, index) == ""
+    assert aitk_translator.edge_effect_hint(edge, index) == ""
 
 
-def test_edge_effect_hint_without_an_index_merges_every_delta(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
+def test_edge_effect_hint_without_an_index_merges_every_delta() -> None:
     """Earlier deltas win: the merge keeps the first value seen for each key."""
     edge = {"schema_deltas": [{"a": "one"}, {"a": "two"}, "not a delta"]}
-    assert translator._edge_effect_hint(edge) == "a: one"
+    assert aitk_translator.edge_effect_hint(edge) == "a: one"
 
 
-def test_build_options_lists_done_self_loops_neighbours_and_free(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
-    graph = translator._graphs["demo"]
-    text, options = translator._build_options(graph, "home")
+def test_build_options_lists_done_self_loops_neighbours_and_free(tmp_path: Path) -> None:
+    graph = aitk_translator.load_graph_from_json(
+        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    )
+    text, options = aitk_translator.build_options(graph, "home")
 
     assert [opt["type"] for opt in options] == ["done", "self_loop", "neighbor", "free"]
     assert [opt["letter"] for opt in options] == ["A", "B", "C", "D"]
@@ -1307,10 +1301,10 @@ def test_build_options_lists_done_self_loops_neighbours_and_free(
     assert lines[3].startswith("D) FREE")
 
 
-def test_build_options_falls_back_to_raw_self_loop_instructions(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
-    graph = translator._graphs["demo"]
+def test_build_options_falls_back_to_raw_self_loop_instructions(tmp_path: Path) -> None:
+    graph = aitk_translator.load_graph_from_json(
+        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    )
     graph.add_edge(
         "results",
         "results",
@@ -1319,7 +1313,7 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
         instruction_templates=[],
         schema_deltas=[{"page": "1 -> 2"}],
     )
-    text, options = translator._build_options(graph, "results")
+    text, options = aitk_translator.build_options(graph, "results")
 
     assert [opt["type"] for opt in options] == ["done", "self_loop", "self_loop", "free"]
     assert options[1]["instruction"] == "scroll down"
@@ -1329,9 +1323,7 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
     assert lines[2] == 'C) Stay here — "scroll up"'
 
 
-def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
+def test_build_options_shows_each_self_loop_action_its_own_schema_delta() -> None:
     """Each self-loop action shows its own changes, and one that changed nothing shows none."""
     gm = GraphManager()
     gm.graph.add_node("s0_list", page_description="shopping list")
@@ -1357,7 +1349,7 @@ def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
             schema_delta=delta,
         )
 
-    text, _ = translator._build_options(gm.graph, "s0_list")
+    text, _ = aitk_translator.build_options(gm.graph, "s0_list")
 
     assert text.splitlines()[1:4] == [
         'B) Stay here — "Scroll down the list" → list | changes: first_visible_item: A -> K',
@@ -1366,9 +1358,7 @@ def test_build_options_shows_each_self_loop_action_its_own_schema_delta(
     ]
 
 
-def test_build_options_lists_no_self_loop_action_without_an_instruction(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
+def test_build_options_lists_no_self_loop_action_without_an_instruction() -> None:
     gm = GraphManager()
     gm.graph.add_node("s0_list", page_description="shopping list")
     for action, instruction, delta in (
@@ -1378,7 +1368,7 @@ def test_build_options_lists_no_self_loop_action_without_an_instruction(
     ):
         gm.add_edge("s0_list", "s0_list", action, instruction=instruction, schema_delta=delta)
 
-    text, _ = translator._build_options(gm.graph, "s0_list")
+    text, _ = aitk_translator.build_options(gm.graph, "s0_list")
 
     assert text.splitlines()[1:-1] == [
         'B) Stay here — "Scroll down the list" | changes: top_item: A -> K',
@@ -1386,11 +1376,11 @@ def test_build_options_lists_no_self_loop_action_without_an_instruction(
     ]
 
 
-def test_build_options_skips_the_self_loop_when_listing_neighbours(
-    translator: aitk_translator.UIKobeV2Translator,
-) -> None:
-    graph = translator._graphs["demo"]
-    _, options = translator._build_options(graph, "home")
+def test_build_options_skips_the_self_loop_when_listing_neighbours(tmp_path: Path) -> None:
+    graph = aitk_translator.load_graph_from_json(
+        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    )
+    _, options = aitk_translator.build_options(graph, "home")
     assert [opt for opt in options if opt["type"] == "neighbor"] == [
         {
             "letter": "C",
@@ -1427,7 +1417,7 @@ def use_model(
 
 
 def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours(
-    translator: aitk_translator.UIKobeV2Translator,
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An oversized menu is trimmed to 26 entries instead of raising IndexError.
@@ -1436,7 +1426,9 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     most-visited neighbours (edge visit_count descending) rather than an
     arbitrary subset.
     """
-    graph = translator._graphs["demo"]
+    graph = aitk_translator.load_graph_from_json(
+        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    )
     for i in range(30):
         neighbor = f"n{i}"
         graph.add_node(neighbor, page_description=f"screen {i}")
@@ -1450,15 +1442,15 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
         )
 
     with caplog.at_level("WARNING"):
-        text, options = translator._build_options(graph, "home")
+        text, options = aitk_translator.build_options(graph, "home")
 
     assert len(options) == 26
     assert options[0]["type"] == "done"
     assert options[-1]["type"] == "free"
-    # _Option carries no node id any more, so the kept neighbours are identified
+    # Option carries no node id any more, so the kept neighbours are identified
     # by their edge instruction ("go to {i}"), unique per n{i} neighbour here.
     kept_instructions = {opt["instruction"] for opt in options if opt["type"] == "neighbor"}
-    # The fixture's self-loop takes one slot, leaving 23 for 31 neighbours; "results"
+    # The demo graph's self-loop takes one slot, leaving 23 for 31 neighbours; "results"
     # ties with n0-n6 at visit_count 0 and is dropped with them.
     assert len(kept_instructions) == 23
     assert kept_instructions == {f"go to {i}" for i in range(7, 30)}
@@ -1476,7 +1468,7 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     ],
 )
 def test_build_options_reserves_half_the_middle_slots_for_neighbours(
-    translator: aitk_translator.UIKobeV2Translator,
+    tmp_path: Path,
     num_self_loops: int,
     num_neighbors: int,
     expected_self_loop: int,
@@ -1487,7 +1479,9 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
     must never be able to evict every "Go to" option: neighbours keep at least
     half of the 24 middle slots, and self-loop instructions take the rest.
     """
-    graph = translator._graphs["demo"]
+    graph = aitk_translator.load_graph_from_json(
+        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
+    )
     graph.remove_edge("home", "results")
     graph.remove_edge("home", "home")
     graph.add_edge(
@@ -1510,7 +1504,7 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
             visit_count=i,
         )
 
-    _text, options = translator._build_options(graph, "home")
+    _text, options = aitk_translator.build_options(graph, "home")
 
     kept_self_loop = [opt for opt in options if opt["type"] == "self_loop"]
     kept_neighbors = [opt for opt in options if opt["type"] == "neighbor"]
@@ -1960,7 +1954,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     translator._current_graph = graph
     translator._app_name = "demo"
 
-    _text, options = translator._build_options(graph, "home")
+    _text, options = aitk_translator.build_options(graph, "home")
     assert [opt["type"] for opt in options] == ["done", "free"]
 
     use_model(translator, "A")
@@ -2021,7 +2015,7 @@ def test_call_action_agent_without_a_keyboard_hint(
 
 
 def test_make_response_wraps_the_action() -> None:
-    raw = aitk_translator.UIKobeV2Translator._make_response("Action: tapped", {"action": "back"})
+    raw = aitk_translator.make_response("Action: tapped", {"action": "back"})
     assert json.loads(raw) == {
         "message": "[Android-App-Graph] Action: tapped",
         "aitk_action": {"action": "back"},
