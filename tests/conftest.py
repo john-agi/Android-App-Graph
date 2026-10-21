@@ -19,8 +19,7 @@ from openrouter import OpenRouter
 from PIL import Image
 
 from android_app_graph import cli, device
-from android_app_graph.adapters import aitk_translator
-from android_app_graph.commands import audit, embed
+from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
 from android_app_graph.utils import open_client
 
@@ -141,7 +140,7 @@ def router_client(router_http: httpx.Client) -> OpenRouter:
 
 @pytest.fixture
 def opened_clients(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> list[OpenRouter]:
-    """Every client a command or the translator opens, each over the mock transport."""
+    """Every client a command opens, each over the mock transport."""
     opened: list[OpenRouter] = []
 
     def open_routed(api_key: str) -> OpenRouter:
@@ -149,7 +148,7 @@ def opened_clients(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -
         opened.append(client)
         return client
 
-    for module in (cli, audit, embed, aitk_translator):
+    for module in (cli, audit):
         monkeypatch.setattr(module, "open_client", open_routed)
     return opened
 

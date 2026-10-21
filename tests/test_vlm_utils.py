@@ -1,9 +1,9 @@
 """Tests for android_app_graph.utils.vlm_utils.
 
-Its cosine scoring is shared by graph_manager and aitk_translator, whose
-node-retrieval tests exercise it end to end. Its OpenRouter helpers run here over
-the real SDK and an offline transport: request serialization, response parsing,
-action conversion, and the retry budget that HTTP, schema and parse failures share.
+Its cosine scoring is used by graph_manager, whose node-retrieval tests exercise
+it end to end. Its OpenRouter helpers run here over the real SDK and an offline
+transport: request serialization, response parsing, action conversion, and the
+retry budget that HTTP, schema and parse failures share.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from openrouter.errors import OpenRouterError, ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsUsage
 from openrouter.types import UNSET
 
-from android_app_graph.payloads import as_list, as_object_dict, as_str, as_str_dict
-from android_app_graph.retrying import UnusableOutputError
+from android_app_graph.payloads import as_object_dict, as_str, as_str_dict
+from android_app_graph.retrying import UNUSABLE_OUTPUT_ATTEMPTS, UnusableOutputError
 from android_app_graph.utils import ModelSettings, open_client
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
@@ -492,7 +492,9 @@ def _strict_violations(schema: object, path: str = "$") -> list[str]:
         properties = as_object_dict(node.get("properties"))
         if node.get("additionalProperties") is not False:
             violations.append(f"{path} is open")
-        if sorted(map(str, as_list(node.get("required")))) != sorted(properties):
+        required = node.get("required")
+        required_names = sorted(map(str, required)) if isinstance(required, list) else []
+        if required_names != sorted(properties):
             violations.append(f"{path} leaves a property optional")
         violations.extend(
             f"{path}.{key} has no description"
@@ -646,9 +648,7 @@ def test_sdk_assistant_content_variants(
     assert vlm.message_text(response) == ("hello \nworld" if isinstance(content, list) else "")
 
 
-@pytest.mark.parametrize("image", [False, True])
-def test_text_and_image_embeddings_use_the_documented_sdk_format(
-    image: bool,
+def test_text_embeddings_use_the_documented_sdk_format(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -657,22 +657,14 @@ def test_text_and_image_embeddings_use_the_documented_sdk_format(
     tracked_usage: vlm.TokenTracker,
 ) -> None:
     router_responses.append(httpx.Response(200, json=embedding_body))
-    vector = (
-        vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
-        if image
-        else vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    )
+    vector = vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     assert vector == [0.25, 0.75]
     body = json.loads(router_requests[0].content)
     assert body["model"] == "google/gemini-embedding-2"
     assert body["encoding_format"] == "float"
-    assert body["input"] == (
-        [{"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,shot"}}]}]
-        if image
-        else "home"
-    )
+    assert body["input"] == "home"
     assert tracked_usage.snapshot() == embedding_usage_totals
-    assert tracked_usage.snapshot_by_type() == {"image_embedding" if image else "embedding": 5}
+    assert tracked_usage.snapshot_by_type() == {"embedding": 5}
 
 
 @pytest.mark.parametrize(
@@ -689,13 +681,14 @@ def test_sdk_embedding_shapes_are_rejected_explicitly(
     embedding_body: dict[str, object],
 ) -> None:
     embedding_body["data"] = data
-    router_responses.append(
+    router_responses.extend(
         httpx.Response(
             200, text=json.dumps(embedding_body), headers={"content-type": "application/json"}
         )
+        for _ in range(UNUSABLE_OUTPUT_ATTEMPTS)
     )
-    with pytest.raises(ValueError, match="embedding"):
-        vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
+    with pytest.raises(UnusableOutputError, match="embedding"):
+        vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
 
 
 def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
@@ -834,7 +827,6 @@ def test_no_request_overrides_the_sdk_retry_policy(
             chat_response(content="Tap Search"),
             chat_response(content='{"action":"wait"}'),
             httpx.Response(200, json=embedding_body),
-            httpx.Response(200, json=embedding_body),
         ]
     )
     vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
@@ -856,8 +848,7 @@ def test_no_request_overrides_the_sdk_retry_policy(
         settings=ACTION,
     )
     vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
-    assert len(sent) == 10
+    assert len(sent) == 9
     assert all("retries" not in kwargs and "timeout_ms" in kwargs for kwargs in sent)
 
 

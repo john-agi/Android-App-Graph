@@ -7,13 +7,12 @@ from importlib.metadata import entry_points
 
 import pytest
 
-from android_app_graph.commands import audit, embed, plot
+from android_app_graph.commands import audit, plot
 
 Main = Callable[[list[str] | None], int]
 
 COMMANDS: dict[str, Main] = {
     "app-graph-audit": audit.main,
-    "app-graph-embed": embed.main,
     "app-graph-plot": plot.main,
 }
 

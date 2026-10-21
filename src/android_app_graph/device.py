@@ -169,7 +169,7 @@ def soft_keyboard_hint() -> str:
     """Return a note that the soft keyboard is visible, or ``""`` otherwise.
 
     Shells out to adb rather than going through ``DeviceController``: aitk's
-    controller exposes no shell method, and the translator holds no controller.
+    controller exposes no shell method.
     """
     try:
         kb_check = run_adb(

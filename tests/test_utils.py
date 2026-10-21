@@ -192,19 +192,10 @@ def test_settings_accept_the_temperature_bounds(temperature: int) -> None:
     assert settings.temperature == temperature
 
 
-@pytest.mark.parametrize(
-    ("role", "value", "variable"),
-    [
-        *(
-            ("action", value, "APP_GRAPH_ACTION_MODEL")
-            for value in (None, "", " \t ", "${APP_GRAPH_UNSET_MODEL}", 123)
-        ),
-        ("image_embedding", None, "APP_GRAPH_EMBEDDING_MODEL"),
-    ],
-)
-def test_settings_reject_a_missing_model(role: str, value: object, variable: str) -> None:
-    with pytest.raises(ValueError, match=rf"{role}\.model is required: set {variable}"):
-        _settings(role, {"model": value})
+@pytest.mark.parametrize("value", [None, "", " \t ", "${APP_GRAPH_UNSET_MODEL}", 123])
+def test_settings_reject_a_missing_model(value: object) -> None:
+    with pytest.raises(ValueError, match=r"action\.model is required: set APP_GRAPH_ACTION_MODEL"):
+        _settings("action", {"model": value})
 
 
 @pytest.mark.parametrize("value", ["", " \t ", "${APP_GRAPH_UNSET_MODEL}"])
@@ -237,16 +228,6 @@ def test_an_invalid_audit_timeout_is_reported_with_the_page_detail_settings(valu
     with pytest.raises(ValueError, match=r"page_detail\.audit_request_timeout must be a positive"):
         resolve_model_settings(config, roles=("page_detail",))
     resolve_model_settings({**config, "embedding": {"model": "e"}}, roles=("embedding",))
-
-
-def test_image_embedding_settings_inherit_the_embedding_model_and_timeout() -> None:
-    config: dict[str, object] = {
-        "embedding": {"model": "google/gemini-embedding-2", "timeout": 9},
-        "image_embedding": {},
-    }
-    assert resolve_model_settings(config, roles=("image_embedding",)) == {
-        "image_embedding": ModelSettings("google/gemini-embedding-2", None, 9.0)
-    }
 
 
 def test_every_invalid_setting_is_reported_on_one_line() -> None:

@@ -79,7 +79,7 @@ class EdgeDetails:
     Attributes:
         instruction: The natural language instruction that produced the action.
         target_observation: Description of the screen state after performing
-            the action. Helps the runtime model predict what will happen.
+            the action. Edge normalization templates it next to the instruction.
         schema_delta: For self-loop edges (source == target), records which
             schema keys changed and their before/after values.
             Format: {"key": {"before": old_val, "after": new_val}, ...}
