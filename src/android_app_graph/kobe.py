@@ -129,33 +129,15 @@ class Kobe:
         current_node: str,
     ) -> str | None:
         """Periodically jump to an under-explored reachable node and continue."""
-        if self.coverage_checkpoint_steps <= 0:
-            return None
-        if step <= 0 or step >= max_steps:
-            return None
-        if step % self.coverage_checkpoint_steps != 0:
+        if not self._is_coverage_checkpoint(step, max_steps):
             return None
 
         self.logger.info(
             "Coverage checkpoint at step %d: evaluating under-explored continuation targets.",
             step,
         )
-        merge_result = self.graph.run_node_merge_audit(app_name=self.app_name)
-        merged_count = merge_result.get("merged_count", 0)
-        if merged_count:
-            self.logger.info(
-                "Coverage checkpoint at step %d: merged %d duplicate node(s).",
-                step,
-                merged_count,
-            )
-            self.save_graph()
-            current_node = self.graph.resolve_node_id(current_node)
-
-        candidates = self.graph.get_exploration_target_candidates(
-            package_name=self.package_name,
-            top_k=self.coverage_checkpoint_top_k,
-        )
-        candidates = [c for c in candidates if c.get("node_id") != current_node]
+        current_node = self._merge_duplicate_nodes(step, current_node)
+        candidates = self._continuation_candidates(current_node)
         if not candidates:
             self.logger.info(
                 "Coverage checkpoint at step %d: no alternate under-explored candidates.",
@@ -185,6 +167,39 @@ class Kobe:
             step,
             selected,
         )
+        return self._navigate_to_continuation(selected, current_node)
+
+    def _is_coverage_checkpoint(self, step: int, max_steps: int) -> bool:
+        return (
+            self.coverage_checkpoint_steps > 0
+            and 0 < step < max_steps
+            and step % self.coverage_checkpoint_steps == 0
+        )
+
+    def _merge_duplicate_nodes(self, step: int, current_node: str) -> str:
+        """Run the checkpoint's merge audit and return the ID ``current_node`` has after it."""
+        merge_result = self.graph.run_node_merge_audit(app_name=self.app_name)
+        merged_count = merge_result.get("merged_count", 0)
+        if merged_count:
+            self.logger.info(
+                "Coverage checkpoint at step %d: merged %d duplicate node(s).",
+                step,
+                merged_count,
+            )
+            self.save_graph()
+            current_node = self.graph.resolve_node_id(current_node)
+        return current_node
+
+    def _continuation_candidates(self, current_node: str) -> list[dict[str, Any]]:
+        candidates = self.graph.get_exploration_target_candidates(
+            package_name=self.package_name,
+            top_k=self.coverage_checkpoint_top_k,
+        )
+        return [c for c in candidates if c.get("node_id") != current_node]
+
+    def _navigate_to_continuation(self, selected: str, current_node: str) -> str | None:
+        """Return the node the checkpoint continues from, or ``None`` when the navigation
+        failed before the app restart and the device is still on ``current_node``."""
         try:
             actual_node = self.navigate_to_node(selected)
         except (NoPathError, ForceStopRefusedError) as exc:
