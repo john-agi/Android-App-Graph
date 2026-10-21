@@ -412,10 +412,11 @@ def test_a_native_tool_call_without_text_content_is_still_read(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.append(chat_response(content="", tool_arguments=_CLICK))
-    action, _ = vlm.predict_next_action(
+    action, history = vlm.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
+    assert history == "{'action': 'click', 'coordinate': [500, 500]}"
 
 
 def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
@@ -444,7 +445,15 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     assert "1080" not in prompt
 
 
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        '{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [752, 170]}}',
+        '{"action": "click", "coordinate": [752, 170]}',
+    ],
+)
 def test_a_tool_call_missing_its_closing_tag_is_still_read(
+    tool_call: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -453,7 +462,7 @@ def test_a_tool_call_missing_its_closing_tag_is_still_read(
 ) -> None:
     content = (
         "Thought: The search icon is at the top.\nAction: Tap the search icon.\n<tool_call>\n"
-        '{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [752, 170]}}'
+        + tool_call
     )
     router_responses.append(chat_response(content=content))
     action, history = vlm.predict_next_action(
@@ -1317,6 +1326,10 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
         ({"action": "click", "coordinate": [float("nan"), 300]}, "two finite numbers"),
         ({"action": "swipe", "coordinate": [500, 300]}, "coordinates or a supported direction"),
         ({"action": "swipe", "coordinate": [500, 300], "coordinate2": [500]}, "two finite numbers"),
+        ({"action": "swipe", "direction": "north", "coordinate": [500]}, "two finite numbers"),
+        ({"action": ["click"]}, "Unknown action"),
+        ({"action": "swipe", "direction": ["up"]}, "Swipe requires a supported direction"),
+        ({"action": "system_button", "button": ["Back"]}, "Back, Home or Enter"),
     ],
 )
 def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message: str) -> None:
@@ -1365,6 +1378,9 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
         ({"action": "system_button", "button": "Enter"}, {"action": "enter"}),
         ({"action": "answer", "text": "9 EUR"}, {"action": "end"}),
         ({"action": "error"}, {"action": "end"}),
+        ({"action": "wait"}, {"action": "wait", "time": 3}),
+        ({"action": "wait", "duration": 2}, {"action": "wait", "time": 2}),
+        ({"action": "wait", "time": "5"}, {"action": "wait", "time": "5"}),
         (
             {"name": "mobile_use", "arguments": {"action": "click", "coordinate": [500, 500]}},
             {"action": "tap", "x": 540, "y": 960},
