@@ -113,8 +113,8 @@ def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
 
     def _bad_bytes(*_args: Any, **_kwargs: Any) -> _CompletedProcess:
         msg = "invalid start byte"
-        msg_0 = "utf-8"
-        raise UnicodeDecodeError(msg_0, b"\xff", 0, 1, msg)
+        encoding = "utf-8"
+        raise UnicodeDecodeError(encoding, b"\xff", 0, 1, msg)
 
     monkeypatch.setattr(device.subprocess, "run", _bad_bytes)
     assert device.soft_keyboard_hint() == ""
