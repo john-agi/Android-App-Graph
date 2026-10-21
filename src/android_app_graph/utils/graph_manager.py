@@ -111,6 +111,8 @@ EXTERNAL_WEB_NODE = "ext_web"
 EXTERNAL_WEB_BACK_PRESSES = 3
 # A longer setup is an excursion, not a recipe for the state an action needs.
 MAX_SETUP_ACTIONS = 8
+# One miss can be a list that loaded differently or a dialog; a second in a row is a pattern.
+REPLAY_MISSES_LEFT_OUT = 2
 
 
 class _SamePackageNodes(NamedTuple):
@@ -1633,6 +1635,7 @@ class GraphManager:
         node_data["state_schema"] = schema
         node_data["last_detail_snapshot"] = detail_snapshot
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+        node_data["replay_misses"] = 0
         # Structural elements accumulate across visits, so merge rather than replace.
         _merge_elements(node_data, elements)
         # A confirmed match keeps the node's representative; a new node, including a
@@ -2630,6 +2633,19 @@ class GraphManager:
             external=[n for n in missing if self._is_external(n)],
         )
 
+    def record_replay_miss(self, node_id: str) -> None:
+        """Count a replay to ``node_id`` that landed on another screen.
+
+        ``REPLAY_MISSES_LEFT_OUT`` misses in a row take the node out of
+        ``get_exploration_target_candidates``; identifying a screen as the node clears
+        them.
+        """
+        node_id = self.resolve_node_id(node_id)
+        node_data = self.graph.nodes[node_id]
+        misses = node_data.get("replay_misses", 0) + 1
+        node_data["replay_misses"] = misses
+        logger.info("Replay missed %s %d time(s) in a row", node_id, misses)
+
     def get_resume_target(self, package_name: str | None = None) -> str | None:
         """Return the node ``get_exploration_target_candidates`` ranks first, or ``None``
         when it ranks none."""
@@ -2648,7 +2664,9 @@ class GraphManager:
         This is a lightweight coverage signal for live exploration checkpoints.
         It favors nodes with many unexplored elements, few outgoing edges, and
         lower visit counts. Each candidate's ``is_start_node`` says whether it is
-        the start node.
+        the start node. A node replay has missed ``REPLAY_MISSES_LEFT_OUT`` times in a
+        row is left out, except the start node, which a replay reaches by launching the
+        app.
 
         With ``always_offer_start``, a start node that ranks below the first
         ``top_k`` but still has unexplored elements takes the last of their places.
@@ -2669,6 +2687,8 @@ class GraphManager:
                 node_pkg = node_data.get("package", "")
                 if node_pkg and node_pkg != package_name:
                     continue
+            if node_id != start and node_data.get("replay_misses", 0) >= REPLAY_MISSES_LEFT_OUT:
+                continue
 
             elements = node_data.get("interactable_elements", [])
             unexplored = [e for e in elements if not e.get("explored", False)]
@@ -2741,6 +2761,7 @@ class GraphManager:
                 "interactable_elements": attrs.get("interactable_elements", []),
                 "last_normalized_visit_milestone": attrs.get("last_normalized_visit_milestone", 0),
                 "visit_count": attrs.get("visit_count", 0),
+                "replay_misses": attrs.get("replay_misses", 0),
                 "observations": attrs.get("observations", []),
                 "representative_observation": attrs.get("representative_observation"),
             }
@@ -2854,6 +2875,7 @@ class GraphManager:
                 interactable_elements=node_data.get("interactable_elements", []),
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
+                replay_misses=node_data.get("replay_misses", 0),
                 observations=node_data["observations"],
                 representative_observation=node_data["representative_observation"],
             )

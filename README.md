@@ -510,6 +510,15 @@ node. In the step log, the replay's records have the `source` `navigation_replay
 the screen read after it `coverage_checkpoint`. When no other node is ranked, Back is
 pressed.
 
+When a replay for `--resume-from`, a checkpoint or a Back where Back leaves the app
+lands on a node other than its target, from whichever screen it starts, it counts a
+miss on the target, saved in the graph file as the node's `replay_misses`. The ranking
+leaves out a node whose replay has missed twice in a row, so `--resume-from auto`, a
+checkpoint and a Back where Back leaves the app pass it over, until a screenshot is
+assigned to that node again (see
+[Screen matching](#screen-matching)), by a replay that reaches it or by exploration.
+The start screen is never left out: its replay is the app's launch.
+
 ### External apps and web pages
 
 A step that opens another app records an edge to an `ext_<package>` node. A step

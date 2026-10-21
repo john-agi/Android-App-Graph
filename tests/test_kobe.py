@@ -205,15 +205,27 @@ class _ReplayedError(Exception):
     """Ends exploration once it has chosen the node to replay to."""
 
 
-def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
+def _replays(explorer: Kobe, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make the explorer's replays end exploration; return the list each replay's target
+    is appended to."""
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> str:
+        replayed.append(node_id)
+        raise _ReplayedError
+
+    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+    return replayed
+
+
+def _write_form_and_dialog_graph(
     tmp_path: Path,
-    router_client: OpenRouter,
-    monkeypatch: pytest.MonkeyPatch,
     write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    """``auto`` resumes at the form with unexplored fields, not at the dialog with no
-    out-edges and nothing left to explore."""
+    """Save the graph of a home screen leading to a form with unexplored fields, which
+    ranks first, and to a dialog with no out-edges and nothing left to explore, which
+    ranks second."""
     fields = [
         {"description": description, "explored": False} for description in ("Name", "APN", "Proxy")
     ]
@@ -237,23 +249,66 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
         [f"{node}-observation" for node in ("s0_home", "s1_form", "s2_dialog")],
         model="provider/embedding",
     )
+
+
+def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    write_graph_file: Callable[..., None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """``auto`` resumes at the form with unexplored fields, not at the dialog with no
+    out-edges and nothing left to explore."""
+    _write_form_and_dialog_graph(tmp_path, write_graph_file, write_image_vectors)
     explorer = _explorer(
         _Device(AssertionError("the replay must start before the device is read")),
         tmp_path,
         router_client,
     )
-    replayed: list[str] = []
-
-    def replay(node_id: str) -> str:
-        replayed.append(node_id)
-        raise _ReplayedError
-
-    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+    replayed = _replays(explorer, monkeypatch)
 
     with pytest.raises(_ReplayedError):
         explorer.explore(max_steps=1, resume_from="auto")
 
     assert replayed == ["s1_form"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_resume_from_auto_passes_over_a_node_two_replays_in_a_row_missed(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    write_graph_file: Callable[..., None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """Both replays to the form land on the home screen. The checkpoint stops offering
+    the form, and a run on the saved graph resumes at the dialog."""
+    _write_form_and_dialog_graph(tmp_path, write_graph_file, write_image_vectors)
+    explorer = _explorer(_ReplayDevice(HOME_SCREEN, device_log), tmp_path, router_client)
+    _identifying(explorer, monkeypatch, "s0_home", "s0_home", "s0_home", "s0_home")
+
+    assert explorer.navigate_to_node("s1_form") == "s0_home"
+    assert explorer.graph.get_resume_target(package_name="com.demo") == "s1_form"
+    assert explorer.navigate_to_node("s1_form") == "s0_home"
+    offered = explorer.graph.get_exploration_target_candidates(
+        package_name="com.demo", always_offer_start=True
+    )
+    assert [candidate["node_id"] for candidate in offered] == ["s2_dialog", "s0_home"]
+    explorer.save_graph()
+
+    resumed = _explorer(
+        _Device(AssertionError("the replay must start before the device is read")),
+        tmp_path,
+        router_client,
+    )
+    replayed = _replays(resumed, monkeypatch)
+
+    with pytest.raises(_ReplayedError):
+        resumed.explore(max_steps=1, resume_from="auto")
+
+    assert replayed == ["s2_dialog"]
 
 
 def test_a_rejected_page_description_leaves_no_node(
