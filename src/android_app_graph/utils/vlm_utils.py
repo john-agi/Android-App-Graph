@@ -2127,6 +2127,6 @@ def predict_next_action(
 
     try:
         return call_with_retry("[API] action response", request_action)
-    except _MalformedActionOutputError, TruncatedReplyError:
+    except _MalformedActionOutputError, TruncatedReplyError, httpx.TimeoutException:
         logger.warning("Action agent gave no usable action, falling back to 'wait'", exc_info=True)
         return {"action": "wait", "time": 1}, "Failed to parse action response -> wait"

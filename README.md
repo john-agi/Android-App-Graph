@@ -235,10 +235,10 @@ and relabelling a flagged edge keep the instruction, the audits report no
 issues, the coverage checkpoint uses its top candidate, and a page description
 or an exploration plan raises. A call that still times out after the SDK's
 retries is logged with its name as timed out after retries and takes the same
-fallback, except an action, whose timeout raises like a page description, an
-exploration plan or an embedding. A reply stopped by the provider's content
-filter (`finish_reason: "content_filter"`) is logged with the call's name and
-otherwise handled like any other empty or partial reply.
+fallback, so an action waits too; a page description, an exploration plan or an
+embedding still raises. A reply stopped by the provider's content filter
+(`finish_reason: "content_filter"`) is logged with the call's name and otherwise
+handled like any other empty or partial reply.
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),

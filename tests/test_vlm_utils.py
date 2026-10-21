@@ -1249,7 +1249,7 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
 def timing_out_client(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
 ) -> Iterator[OpenRouter]:
-    """A client whose every attempt times out, a second past PAGE_DETAIL's 60 s.
+    """A client whose every attempt times out, a second past the default 60 s timeout.
 
     Time passes only on the clock the SDK's retry loop reads, so it gives up after
     two attempts instead of retrying without end on a real clock.
@@ -1283,6 +1283,7 @@ def timing_out_client(
         ("audit", "graph_audit", {"issues": [], "summary": "reply truncated"}),
         ("target", "exploration_target", None),
         ("describe", "action_description", None),
+        ("action", "action", {"action": "wait", "time": 1}),
     ],
 )
 def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
