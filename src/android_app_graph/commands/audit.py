@@ -713,6 +713,127 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@dataclass(frozen=True, slots=True)
+class _AuditRun:
+    """The config, client, model settings and device session every audited app shares."""
+
+    config: dict[str, Any]
+    vlm_config: dict[str, Any]
+    graph_dir: Path
+    client: OpenRouter
+    settings: dict[str, ModelSettings]
+    session: ReExploreSession | None
+    steps_per_issue: int
+
+
+def _app_file(graph_dir: Path, app_name: str, suffix: str = "") -> Path:
+    return graph_dir / app_name / f"{app_name}{suffix}.json"
+
+
+def _write_json(path: Path, payload: object) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _verify_merges(
+    run: _AuditRun, graph: GraphManager, app_name: str, merge_issues: list[dict[str, Any]]
+) -> None:
+    logger.info("Verifying %d merge candidates...", len(merge_issues))
+    merge_results = verify_and_merge_nodes(
+        graph, merge_issues, run.client, run.settings["page_detail"]
+    )
+    merge_path = _app_file(run.graph_dir, app_name, "_merge")
+    _write_json(merge_path, merge_results)
+    logger.info("Merge results saved to %s", merge_path)
+
+    # A separate file, so the pre-audit graph stays intact.
+    merged_count = sum(1 for r in merge_results if r["status"] == "merged")
+    if merged_count:
+        audited_graph_path = _app_file(run.graph_dir, app_name, "_audited")
+        graph.save_graph(audited_graph_path)
+        logger.info("Audited graph saved to %s (%d merge(s))", audited_graph_path, merged_count)
+
+
+def _re_explore_app(
+    run: _AuditRun,
+    session: ReExploreSession,
+    graph: GraphManager,
+    app: dict[str, Any],
+    issues: list[dict[str, Any]],
+) -> None:
+    app_name = app["name"]
+    package_name = app["package_name"]
+    logger.info("Starting re-exploration for %d issues...", len(issues))
+
+    grant_runtime_permissions(run.config["device"]["udid"], package_name)
+    launch_app(run.config, app, logger)
+    time.sleep(4)
+
+    re_results = re_explore_issues(
+        graph,
+        issues,
+        session.controller,
+        app_name,
+        package_name,
+        _app_file(run.graph_dir, app_name, "_audited"),
+        run.client,
+        session.instruction,
+        session.action,
+        steps_per_issue=run.steps_per_issue,
+        launch_activity=app.get("launch_activity"),
+    )
+
+    results_path = _app_file(run.graph_dir, app_name, "_re_explore")
+    _write_json(results_path, re_results)
+    logger.info("Re-exploration results saved to %s", results_path)
+
+
+def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
+    app_name = app["name"]
+    package_name = app["package_name"]
+
+    graph = GraphManager(
+        client=run.client,
+        page_detail=run.settings["page_detail"],
+        embedding=run.settings["embedding"],
+        similarity_threshold=run.vlm_config.get("similarity_threshold", 0.85),
+        audit_timeout=resolve_audit_timeout(run.vlm_config),
+    )
+
+    graph_path = _app_file(run.graph_dir, app_name)
+    if not graph_path.exists():
+        logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
+        return
+
+    graph.load_graph(graph_path, default_package_name=package_name)
+    logger.info(
+        "Loaded graph for %s: %d nodes, %d edges",
+        app_name,
+        graph.graph.number_of_nodes(),
+        graph.graph.number_of_edges(),
+    )
+
+    report_path = _app_file(run.graph_dir, app_name, "_audit")
+    audit_result = run_audit(graph, app_name, report_path)
+
+    issues = audit_result.get("issues", [])
+    if not issues:
+        logger.info("No issues found for %s", app_name)
+    else:
+        logger.info("Found %d issues for %s", len(issues), app_name)
+
+    merge_issues = [i for i in issues if i.get("type") == "merge_nodes"]
+    other_issues = [i for i in issues if i.get("type") != "merge_nodes"]
+
+    if merge_issues:
+        _verify_merges(run, graph, app_name, merge_issues)
+
+    if run.session is not None and other_issues:
+        _re_explore_app(run, run.session, graph, app, other_issues)
+
+    normalize_and_save_audited_graph(graph, _app_file(run.graph_dir, app_name, "_audited"))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -752,89 +873,17 @@ def main(argv: list[str] | None = None) -> int:
     session = _open_re_explore_session(parser, config, settings) if args.re_explore else None
 
     with open_client(api_key) as client:
+        run = _AuditRun(
+            config=config,
+            vlm_config=vlm_config,
+            graph_dir=graph_dir,
+            client=client,
+            settings=settings,
+            session=session,
+            steps_per_issue=args.steps_per_issue,
+        )
         for app in selected_apps:
-            app_name = app["name"]
-            package_name = app["package_name"]
-
-            graph = GraphManager(
-                client=client,
-                page_detail=settings["page_detail"],
-                embedding=settings["embedding"],
-                similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
-                audit_timeout=resolve_audit_timeout(vlm_config),
-            )
-
-            graph_path = graph_dir / app_name / f"{app_name}.json"
-            audited_graph_path = graph_dir / app_name / f"{app_name}_audited.json"
-            if not graph_path.exists():
-                logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
-                continue
-
-            graph.load_graph(graph_path, default_package_name=package_name)
-            logger.info(
-                "Loaded graph for %s: %d nodes, %d edges",
-                app_name,
-                graph.graph.number_of_nodes(),
-                graph.graph.number_of_edges(),
-            )
-
-            report_path = graph_path.parent / f"{app_name}_audit.json"
-            audit_result = run_audit(graph, app_name, report_path)
-
-            issues = audit_result.get("issues", [])
-            if not issues:
-                logger.info("No issues found for %s", app_name)
-            else:
-                logger.info("Found %d issues for %s", len(issues), app_name)
-
-            merge_issues = [i for i in issues if i.get("type") == "merge_nodes"]
-            other_issues = [i for i in issues if i.get("type") != "merge_nodes"]
-
-            if merge_issues:
-                logger.info("Verifying %d merge candidates...", len(merge_issues))
-                merge_results = verify_and_merge_nodes(
-                    graph, merge_issues, client, settings["page_detail"]
-                )
-                merge_path = graph_path.parent / f"{app_name}_merge.json"
-                with merge_path.open("w", encoding="utf-8") as f:
-                    json.dump(merge_results, f, indent=2, ensure_ascii=False)
-                logger.info("Merge results saved to %s", merge_path)
-
-                # A separate file, so the pre-audit graph stays intact.
-                merged_count = sum(1 for r in merge_results if r["status"] == "merged")
-                if merged_count:
-                    graph.save_graph(audited_graph_path)
-                    logger.info(
-                        "Audited graph saved to %s (%d merge(s))", audited_graph_path, merged_count
-                    )
-
-            if session is not None and other_issues:
-                logger.info("Starting re-exploration for %d issues...", len(other_issues))
-
-                grant_runtime_permissions(config["device"]["udid"], package_name)
-                launch_app(config, app, logger)
-                time.sleep(4)
-
-                re_results = re_explore_issues(
-                    graph,
-                    other_issues,
-                    session.controller,
-                    app_name,
-                    package_name,
-                    audited_graph_path,
-                    client,
-                    session.instruction,
-                    session.action,
-                    steps_per_issue=args.steps_per_issue,
-                    launch_activity=app.get("launch_activity"),
-                )
-
-                results_path = graph_path.parent / f"{app_name}_re_explore.json"
-                with results_path.open("w", encoding="utf-8") as f:
-                    json.dump(re_results, f, indent=2, ensure_ascii=False)
-                logger.info("Re-exploration results saved to %s", results_path)
-
-            normalize_and_save_audited_graph(graph, audited_graph_path)
+            _audit_app(run, app)
 
     token_tracker.print_summary()
     logger.info("Audit complete.")
