@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -62,6 +63,20 @@ class _IdentifyCacheEntry(NamedTuple):
     screenshot_hash: int
     activity: str
     node_id: str
+
+
+class _SamePackageNodes(NamedTuple):
+    candidates: list[tuple[str, list[float]]]
+    descriptions: list[str]
+    keys: list[str]
+
+
+@dataclass(frozen=True)
+class _ScreenDescription:
+    page_description: str
+    embedding: list[float]
+    detail_snapshot: dict[str, object]
+    elements: list[dict[str, str]]
 
 
 def _node_id(value: object) -> str:
@@ -229,38 +244,17 @@ class GraphManager:
             content from outside the app.
         """
         screen_hash = hash(screenshot_b64)
-        cached = self._last_identify_cache
-        if (
-            cached is not None
-            and screen_hash == cached.screenshot_hash
-            and activity == cached.activity
-            and cached.node_id in self.graph
-        ):
-            logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
-            return cached.node_id
+        cached_node_id = self._cached_node_id(screen_hash, activity)
+        if cached_node_id is not None:
+            return cached_node_id
 
-        same_pkg_candidates = [
-            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
-            for node_id, data in self.graph.nodes(data=True)
-            if data.get("package") == package
-        ]
-        same_pkg_descriptions: list[str] = []
-        same_pkg_keys: list[str] = []
-        for _, data in self.graph.nodes(data=True):
-            if data.get("package") == package:
-                desc = data.get("page_description", "")
-                if desc and desc not in same_pkg_descriptions:
-                    same_pkg_descriptions.append(desc)
-                for k in data.get("state_schema", {}):
-                    if k not in same_pkg_keys:
-                        same_pkg_keys.append(k)
-
+        same_package = self._same_package_nodes(package)
         client, page_detail = self._require_page_detail()
         page_description, detail_snapshot, elements, is_external_web = describe_page_and_state(
             client,
             screenshot_b64,
-            existing_nodes=same_pkg_descriptions or None,
-            existing_keys=same_pkg_keys or None,
+            existing_nodes=same_package.descriptions or None,
+            existing_keys=same_package.keys or None,
             settings=page_detail,
         )
         logger.info(
@@ -272,139 +266,210 @@ class GraphManager:
         if is_external_web:
             # Returning before the cache update leaves the cache on the screen behind the
             # page, where a back press usually lands.
-            self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
-            node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
-            node_data["visit_count"] = node_data.get("visit_count", 0) + 1
-            return EXTERNAL_WEB_NODE
+            return self._record_external_web_visit()
 
-        description_embedding = self._embed(page_description)
-
-        scored = score_by_cosine(
-            description_embedding,
-            same_pkg_candidates,
-            scope="identify_state description-embedding",
+        screen = _ScreenDescription(
+            page_description, self._embed(page_description), detail_snapshot, elements
         )
-        best_node_id: str | None = None
-        best_similarity = -1.0
-        if scored:
-            # max() returns the first maximal element on a tie, matching the
-            # earlier "sim > best_similarity" strict-greater loop's tie behaviour.
-            best_node_id, best_similarity = max(scored, key=lambda kv: kv[1])
-
-        matched_node_id: str | None = None
-
-        if best_node_id is not None:
-            logger.info(
-                "Best candidate: %s (sim=%.3f, threshold=%.2f) — '%s'",
-                best_node_id,
-                best_similarity,
-                self.similarity_threshold,
-                self.graph.nodes[best_node_id].get("page_description", ""),
-            )
-
-        if best_node_id is not None and best_similarity >= self.similarity_threshold:
-            candidate_data = self.graph.nodes[best_node_id]
-            candidate_screenshot = candidate_data.get("reference_screenshot")
-
-            if candidate_screenshot:
-                verify_result = verify_same_node(
-                    client,
-                    screenshot_new_b64=screenshot_b64,
-                    screenshot_existing_b64=candidate_screenshot,
-                    existing_description=candidate_data.get("page_description", ""),
-                    settings=page_detail,
-                )
-                if verify_result.get("same", False):
-                    matched_node_id = best_node_id
-                    logger.info(
-                        "Verifier confirmed match node %s (sim=%.3f): %s | reason: %s",
-                        best_node_id,
-                        best_similarity,
-                        candidate_data.get("page_description"),
-                        verify_result.get("reason", ""),
-                    )
-                else:
-                    refined_existing = verify_result.get("existing_description", "")
-                    refined_new = verify_result.get("new_description", "")
-
-                    if refined_existing and refined_existing != candidate_data.get(
-                        "page_description"
-                    ):
-                        best_node_id = self.rename_node(best_node_id, refined_existing)
-                        candidate_data = self.graph.nodes[best_node_id]
-
-                    if refined_new:
-                        page_description = refined_new
-                        description_embedding = self._embed(page_description)
-
-                    logger.info(
-                        "Verifier rejected match node %s (sim=%.3f): reason: %s | new: %s",
-                        best_node_id,
-                        best_similarity,
-                        verify_result.get("reason", ""),
-                        page_description,
-                    )
-            else:
-                matched_node_id = best_node_id
-                logger.info(
-                    "Matched node %s by embedding (sim=%.3f, no ref screenshot): %s",
-                    best_node_id,
-                    best_similarity,
-                    candidate_data.get("page_description"),
-                )
-
+        matched_node_id, screen = self._match_screen(
+            screen, same_package.candidates, screenshot_b64
+        )
         if matched_node_id is not None:
             node_id = matched_node_id
-            node_data = self.graph.nodes[node_id]
-            activities = node_data.get("activities", [node_data.get("activity", "")])
-            if activity not in activities:
-                activities.append(activity)
-                logger.info(
-                    "  Node %s: added activity %s (now %d)", node_id, activity, len(activities)
-                )
-            node_data["activities"] = activities
+            self._add_activity(node_id, activity)
         else:
-            node_id = self._make_node_id(page_description)
-            init_elements = [
-                {
-                    "description": e.get("description", ""),
-                    "position": e.get("position", ""),
-                    "explored": False,
-                }
-                for e in elements
-            ]
-            self.graph.add_node(
-                node_id,
-                package=package,
-                activity=activity,
-                activities=[activity],
-                page_description=page_description,
-                state_schema={},
-                interactable_elements=init_elements,
-                description_embedding=description_embedding,
-                description_embedding_model=self.embedding_model,
-                reference_screenshot=screenshot_b64,
-                last_normalized_visit_milestone=0,
-                visit_count=0,
-            )
-            logger.info(
-                "Created new node %s: %s (%d elements)",
-                node_id,
-                page_description,
-                len(init_elements),
-            )
+            node_id = self._add_screen_node(screen, package, activity, screenshot_b64)
 
+        self._record_visit(node_id, screen, screenshot_b64, is_new=matched_node_id is None)
+        self._last_identify_cache = _IdentifyCacheEntry(screen_hash, activity, node_id)
+        return node_id
+
+    def _cached_node_id(self, screen_hash: int, activity: str) -> str | None:
+        cached = self._last_identify_cache
+        if (
+            cached is not None
+            and screen_hash == cached.screenshot_hash
+            and activity == cached.activity
+            and cached.node_id in self.graph
+        ):
+            logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
+            return cached.node_id
+        return None
+
+    def _same_package_nodes(self, package: str) -> _SamePackageNodes:
+        """Collect the embeddings, descriptions and state keys of *package*'s nodes.
+
+        Reading an embedding checks its provenance, so a vector from another embedding
+        model raises here, before any model request.
+        """
+        candidates = [
+            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
+            for node_id, data in self.graph.nodes(data=True)
+            if data.get("package") == package
+        ]
+        descriptions: list[str] = []
+        keys: list[str] = []
+        for _, data in self.graph.nodes(data=True):
+            if data.get("package") == package:
+                desc = data.get("page_description", "")
+                if desc and desc not in descriptions:
+                    descriptions.append(desc)
+                for k in data.get("state_schema", {}):
+                    if k not in keys:
+                        keys.append(k)
+        return _SamePackageNodes(candidates, descriptions, keys)
+
+    def _record_external_web_visit(self) -> str:
+        self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+        node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
+        node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+        return EXTERNAL_WEB_NODE
+
+    def _match_screen(
+        self,
+        screen: _ScreenDescription,
+        candidates: list[tuple[str, list[float]]],
+        screenshot_b64: str,
+    ) -> tuple[str | None, _ScreenDescription]:
+        """Return the node *screen* belongs to, or ``None``, and the screen's description.
+
+        A verifier that rejects the best candidate can refine that description.
+        """
+        scored = score_by_cosine(
+            screen.embedding,
+            candidates,
+            scope="identify_state description-embedding",
+        )
+        if not scored:
+            return None, screen
+        # max() returns the first maximal element on a tie, matching the
+        # earlier "sim > best_similarity" strict-greater loop's tie behaviour.
+        best_node_id, best_similarity = max(scored, key=lambda kv: kv[1])
+        candidate_data = self.graph.nodes[best_node_id]
+        logger.info(
+            "Best candidate: %s (sim=%.3f, threshold=%.2f) — '%s'",
+            best_node_id,
+            best_similarity,
+            self.similarity_threshold,
+            candidate_data.get("page_description", ""),
+        )
+
+        if best_similarity >= self.similarity_threshold:
+            if candidate_data.get("reference_screenshot"):
+                return self._verify_match(screen, best_node_id, best_similarity, screenshot_b64)
+            logger.info(
+                "Matched node %s by embedding (sim=%.3f, no ref screenshot): %s",
+                best_node_id,
+                best_similarity,
+                candidate_data.get("page_description"),
+            )
+            return best_node_id, screen
+        return None, screen
+
+    def _verify_match(
+        self,
+        screen: _ScreenDescription,
+        node_id: str,
+        similarity: float,
+        screenshot_b64: str,
+    ) -> tuple[str | None, _ScreenDescription]:
+        """Return *node_id* if the verifier confirms the match, else ``None``, with *screen*.
+
+        On a rejection the existing node takes its refined description, and is
+        re-embedded, before *screen* takes its own refined description and embedding.
+        """
+        client, page_detail = self._require_page_detail()
+        candidate_data = self.graph.nodes[node_id]
+        verify_result = verify_same_node(
+            client,
+            screenshot_new_b64=screenshot_b64,
+            screenshot_existing_b64=candidate_data.get("reference_screenshot"),
+            existing_description=candidate_data.get("page_description", ""),
+            settings=page_detail,
+        )
+        if verify_result.get("same", False):
+            logger.info(
+                "Verifier confirmed match node %s (sim=%.3f): %s | reason: %s",
+                node_id,
+                similarity,
+                candidate_data.get("page_description"),
+                verify_result.get("reason", ""),
+            )
+            return node_id, screen
+
+        refined_existing = verify_result.get("existing_description", "")
+        refined_new = verify_result.get("new_description", "")
+        if refined_existing and refined_existing != candidate_data.get("page_description"):
+            node_id = self.rename_node(node_id, refined_existing)
+        if refined_new:
+            screen = replace(
+                screen, page_description=refined_new, embedding=self._embed(refined_new)
+            )
+        logger.info(
+            "Verifier rejected match node %s (sim=%.3f): reason: %s | new: %s",
+            node_id,
+            similarity,
+            verify_result.get("reason", ""),
+            screen.page_description,
+        )
+        return None, screen
+
+    def _add_activity(self, node_id: str, activity: str) -> None:
+        node_data = self.graph.nodes[node_id]
+        activities = node_data.get("activities", [node_data.get("activity", "")])
+        if activity not in activities:
+            activities.append(activity)
+            logger.info("  Node %s: added activity %s (now %d)", node_id, activity, len(activities))
+        node_data["activities"] = activities
+
+    def _add_screen_node(
+        self, screen: _ScreenDescription, package: str, activity: str, screenshot_b64: str
+    ) -> str:
+        node_id = self._make_node_id(screen.page_description)
+        init_elements = [
+            {
+                "description": e.get("description", ""),
+                "position": e.get("position", ""),
+                "explored": False,
+            }
+            for e in screen.elements
+        ]
+        self.graph.add_node(
+            node_id,
+            package=package,
+            activity=activity,
+            activities=[activity],
+            page_description=screen.page_description,
+            state_schema={},
+            interactable_elements=init_elements,
+            description_embedding=screen.embedding,
+            description_embedding_model=self.embedding_model,
+            reference_screenshot=screenshot_b64,
+            last_normalized_visit_milestone=0,
+            visit_count=0,
+        )
+        logger.info(
+            "Created new node %s: %s (%d elements)",
+            node_id,
+            screen.page_description,
+            len(init_elements),
+        )
+        return node_id
+
+    def _record_visit(
+        self, node_id: str, screen: _ScreenDescription, screenshot_b64: str, *, is_new: bool
+    ) -> None:
         node_data = self.graph.nodes[node_id]
         schema = node_data.get("state_schema", {})
-        _merge_into_schema(schema, detail_snapshot)
+        _merge_into_schema(schema, screen.detail_snapshot)
         node_data["state_schema"] = schema
-        node_data["last_detail_snapshot"] = detail_snapshot
+        node_data["last_detail_snapshot"] = screen.detail_snapshot
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         # Structural elements accumulate across visits, so merge rather than replace.
-        _merge_elements(node_data, elements)
+        _merge_elements(node_data, screen.elements)
         # Only update reference screenshot for new nodes or verifier-rejected splits;
         # keep the existing screenshot when verifier confirmed a match.
-        if matched_node_id is None:
+        if is_new:
             node_data["reference_screenshot"] = screenshot_b64
             self._dirty_screenshots.add(node_id)
 
@@ -414,8 +479,6 @@ class GraphManager:
             len(schema),
             node_data["visit_count"],
         )
-        self._last_identify_cache = _IdentifyCacheEntry(screen_hash, activity, node_id)
-        return node_id
 
     def _make_node_id(self, page_description: str) -> str:
         """Generate a unique, human-readable node ID."""
