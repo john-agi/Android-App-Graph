@@ -162,7 +162,7 @@ class SetupTrail:
     trail last arrived there from elsewhere.
 
     The trail keeps the nodes it arrived at in order. Arriving at one of them again, such
-    as a form after one of its dropdowns, ends a round trip: the nodes after it are left
+    as a list after one of its rows, ends a round trip: the nodes after it are left
     behind, and the round trip's actions join its setup, as a self-loop's do. Arriving at
     any other node starts its setup empty. Node IDs are compared through
     ``resolve_node_id``, so a node renamed or merged while the trail holds it still matches.
