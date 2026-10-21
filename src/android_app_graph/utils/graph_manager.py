@@ -134,6 +134,44 @@ def _merge_elements(node_data: dict[str, Any], new_elements: list[dict[str, str]
     node_data["interactable_elements"] = existing
 
 
+def _merge_activities(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
+    keep_activities = keep_data.get("activities", [keep_data.get("activity", "")])
+    remove_activities = remove_data.get("activities", [remove_data.get("activity", "")])
+    for act in remove_activities:
+        if act and act not in keep_activities:
+            keep_activities.append(act)
+    keep_data["activities"] = keep_activities
+
+
+def _merge_schema_values(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
+    """Union *remove_data*'s state schema into *keep_data*'s.
+
+    A schema maps each key to a list of observed values, where a detail snapshot maps
+    it to one value, so ``_merge_into_schema`` would append the whole list as one value.
+    """
+    keep_schema = keep_data.get("state_schema", {})
+    remove_schema = remove_data.get("state_schema", {})
+    for key, values in remove_schema.items():
+        if key not in keep_schema:
+            keep_schema[key] = list(values)
+        else:
+            for v in values:
+                if v not in keep_schema[key]:
+                    keep_schema[key].append(v)
+    keep_data["state_schema"] = keep_schema
+
+
+def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
+    """Fold a removed node's visits, activities, state schema and elements into the kept one.
+
+    The kept node's description, screenshot and embedding stay as they are.
+    """
+    keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
+    _merge_activities(keep_data, remove_data)
+    _merge_schema_values(keep_data, remove_data)
+    _merge_elements(keep_data, remove_data.get("interactable_elements", []))
+
+
 def _default_num_steps(action: object) -> int:
     return len(action) if isinstance(action, list) else 1
 
@@ -621,58 +659,8 @@ class GraphManager:
             logger.warning("merge_nodes: refusing to merge node %s into itself", keep_id)
             return False
 
-        keep_data = self.graph.nodes[keep_id]
-        remove_data = self.graph.nodes[remove_id]
-
-        keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get(
-            "visit_count", 0
-        )
-
-        keep_activities = keep_data.get("activities", [keep_data.get("activity", "")])
-        remove_activities = remove_data.get("activities", [remove_data.get("activity", "")])
-        for act in remove_activities:
-            if act and act not in keep_activities:
-                keep_activities.append(act)
-        keep_data["activities"] = keep_activities
-
-        keep_schema = keep_data.get("state_schema", {})
-        remove_schema = remove_data.get("state_schema", {})
-        for key, values in remove_schema.items():
-            if key not in keep_schema:
-                keep_schema[key] = list(values)
-            else:
-                for v in values:
-                    if v not in keep_schema[key]:
-                        keep_schema[key].append(v)
-        keep_data["state_schema"] = keep_schema
-
-        _merge_elements(keep_data, remove_data.get("interactable_elements", []))
-
-        for pred in list(self.graph.predecessors(remove_id)):
-            if pred == remove_id:
-                continue  # handle self-loops separately
-            edge_data = dict(self.graph[pred][remove_id])
-            self.graph.remove_edge(pred, remove_id)
-            if pred == keep_id:
-                self._merge_edge_data(keep_id, keep_id, edge_data)
-            else:
-                self._merge_edge_data(pred, keep_id, edge_data)
-
-        for succ in list(self.graph.successors(remove_id)):
-            if succ == remove_id:
-                continue  # handle self-loops separately
-            edge_data = dict(self.graph[remove_id][succ])
-            self.graph.remove_edge(remove_id, succ)
-            if succ == keep_id:
-                self._merge_edge_data(keep_id, keep_id, edge_data)
-            else:
-                self._merge_edge_data(keep_id, succ, edge_data)
-
-        if self.graph.has_edge(remove_id, remove_id):
-            edge_data = dict(self.graph[remove_id][remove_id])
-            self.graph.remove_edge(remove_id, remove_id)
-            self._merge_edge_data(keep_id, keep_id, edge_data)
-
+        _merge_node_attributes(self.graph.nodes[keep_id], self.graph.nodes[remove_id])
+        self._rewire_edges(keep_id, remove_id)
         self.graph.remove_node(remove_id)
         self._record_alias(remove_id, keep_id)
 
@@ -684,6 +672,26 @@ class GraphManager:
             self.graph.number_of_edges(),
         )
         return True
+
+    def _rewire_edges(self, keep_id: str, remove_id: str) -> None:
+        """Move every edge of *remove_id* onto *keep_id*.
+
+        Incoming edges move first, then outgoing ones, then the self-loop. An edge that
+        lands on an existing one appends its per-action lists in that order.
+        """
+        for pred in list(self.graph.predecessors(remove_id)):
+            if pred != remove_id:
+                self._move_edge(pred, remove_id, pred, keep_id)
+        for succ in list(self.graph.successors(remove_id)):
+            if succ != remove_id:
+                self._move_edge(remove_id, succ, keep_id, succ)
+        if self.graph.has_edge(remove_id, remove_id):
+            self._move_edge(remove_id, remove_id, keep_id, keep_id)
+
+    def _move_edge(self, source: str, target: str, new_source: str, new_target: str) -> None:
+        edge_data = dict(self.graph[source][target])
+        self.graph.remove_edge(source, target)
+        self._merge_edge_data(new_source, new_target, edge_data)
 
     def _merge_edge_data(self, source: str, target: str, new_data: dict[str, Any]) -> None:
         """Merge edge data into an existing edge, or create it if absent."""
