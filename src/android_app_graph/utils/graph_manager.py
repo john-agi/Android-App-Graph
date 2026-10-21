@@ -72,6 +72,14 @@ class _SamePackageNodes(NamedTuple):
     keys: list[str]
 
 
+class PathToStart(NamedTuple):
+    """Nodes from which the start node cannot be reached, split by origin."""
+
+    start_node: str | None
+    in_app: list[str]
+    external: list[str]
+
+
 @dataclass(frozen=True, kw_only=True)
 class EdgeDetails:
     """What one traversal records next to its action in the edge's aligned lists.
@@ -1204,14 +1212,17 @@ class GraphManager:
             "required_schema": required_schema,
         }
 
+    def _is_external(self, node_id: str) -> bool:
+        return node_id.startswith("ext_") or bool(self.graph.nodes[node_id].get("is_external"))
+
     def get_start_node(self) -> str | None:
         """Return the initial node (the app's entry point).
 
         Heuristic: the node with the lowest numeric ID suffix (s0_...).
         """
         candidates: list[tuple[int, str]] = []
-        for node_id, data in self.graph.nodes(data=True):
-            if node_id.startswith("ext_") or data.get("is_external"):
+        for node_id in self.graph:
+            if self._is_external(node_id):
                 continue
             if node_id.startswith("s") and "_" in node_id:
                 num_part = node_id.split("_", 1)[0][1:]
@@ -1221,12 +1232,25 @@ class GraphManager:
         if candidates:
             return min(candidates)[1]
 
-        nodes = sorted(
-            _node_id(n)
-            for n, data in self.graph.nodes(data=True)
-            if not n.startswith("ext_") and not data.get("is_external")
-        )
+        nodes = sorted(_node_id(n) for n in self.graph if not self._is_external(n))
         return nodes[0] if nodes else None
+
+    def nodes_without_path_to_start(self) -> PathToStart:
+        """Return every node from which no recorded edge path leads to the start node.
+
+        External nodes are listed apart: an ``ext_`` node keeps no outgoing edge, so
+        every one of them is listed, and only the app's own screens need a way back.
+        """
+        start = self.get_start_node()
+        if start is None:
+            return PathToStart(None, [], [])
+        can_return = nx.ancestors(self.graph, start) | {start}
+        missing = sorted(_node_id(n) for n in self.graph if n not in can_return)
+        return PathToStart(
+            start,
+            in_app=[n for n in missing if not self._is_external(n)],
+            external=[n for n in missing if self._is_external(n)],
+        )
 
     def get_resume_target(self, package_name: str | None = None) -> str | None:
         """Return the node ``get_exploration_target_candidates`` ranks first, or ``None``
@@ -1259,9 +1283,9 @@ class GraphManager:
         candidates: list[dict[str, Any]] = []
 
         for node_id in reachable:
-            node_data = self.graph.nodes[node_id]
-            if node_id.startswith("ext_") or node_data.get("is_external"):
+            if self._is_external(node_id):
                 continue
+            node_data = self.graph.nodes[node_id]
 
             if package_name:
                 node_pkg = node_data.get("package", "")

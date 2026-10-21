@@ -429,6 +429,21 @@ nodes that a screenshot comparison confirms, normalizes edge templates and saves
 the result to `<app_name>_audited.json`; the explored graph file is never
 changed. Without `--re-explore`, no flagged edge is replayed or corrected.
 
+Last, without a model call or a device, the audit adds `no_path_to_start` to
+`<app_name>_audit.json`: the nodes of the final audited graph from which no
+recorded edges lead back to `start_node`, the screen every
+[replay](#replaying-to-a-node) begins from. It logs how many it found, as a
+warning when `in_app` is not empty, and changes nothing in the graph.
+
+- `in_app` lists the app's own screens whose way back was never recorded.
+- `external` lists the `ext_` nodes. They keep no outgoing edge, so every one of
+  them is listed.
+
+Both lists use the node IDs of the file named in `graph`,
+`<app_name>_audited.json`, not those of the model's issues, which predate the
+merges. When the graph has no start node, `start_node` is `null` and both lists
+are empty.
+
 With `--re-explore`, the audit then works through the other issues on the
 device, following the node IDs each issue names through those merges and through
 renames made while it re-explores. For each `retry_edge` issue, an edge whose
