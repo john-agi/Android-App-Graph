@@ -30,6 +30,13 @@ class ImageEmbeddingSettings(NamedTuple):
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
 
 
+class ImageEmbedder(NamedTuple):
+    """The client and settings every image-embedding request is sent with."""
+
+    client: OpenRouter
+    settings: ImageEmbeddingSettings
+
+
 def resolve_image_embedding_settings(
     vlm_config: Mapping[str, object], *, model_override: str | None = None
 ) -> ImageEmbeddingSettings:
@@ -230,8 +237,7 @@ def compute_missing_image_embeddings(
     embeddings: dict[str, list[float]],
     candidates: Iterable[tuple[str, str]],
     *,
-    client: OpenRouter,
-    settings: ImageEmbeddingSettings,
+    embedder: ImageEmbedder,
     app_name: str,
 ) -> ImageEmbeddingRun:
     """Compute an image embedding for every ``(node_id, screenshot_b64)`` candidate.
@@ -258,9 +264,9 @@ def compute_missing_image_embeddings(
             try:
                 started = time.perf_counter()
                 embeddings[node_id] = compute_embedding_with_retry(
-                    client,
+                    embedder.client,
                     screenshot_b64,
-                    settings=settings,
+                    settings=embedder.settings,
                     app_name=app_name,
                     node_id=node_id,
                 )
@@ -282,7 +288,7 @@ def compute_missing_image_embeddings(
     finally:
         if computed:
             try:
-                save_image_embeddings(graph_path, embeddings, model=settings.model)
+                save_image_embeddings(graph_path, embeddings, model=embedder.settings.model)
             except OSError:
                 logger.exception(
                     "Failed to write image embedding cache for graph %s at %s",

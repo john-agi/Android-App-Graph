@@ -17,6 +17,7 @@ import yaml
 from openrouter import OpenRouter
 
 from android_app_graph.embedding_cache import (
+    ImageEmbedder,
     ImageEmbeddingSettings,
     compute_missing_image_embeddings,
     iter_screenshot_candidates,
@@ -112,8 +113,7 @@ def precompute_graph_image_embeddings(
             graph_path,
             embeddings,
             _pending_candidates(pending, app_name=current_app_name, summary=summary),
-            client=client,
-            settings=settings,
+            embedder=ImageEmbedder(client, settings),
             app_name=current_app_name,
         )
         summary["computed"] += run.computed

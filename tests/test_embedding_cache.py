@@ -430,8 +430,10 @@ def test_image_batches_send_their_own_model_and_timeout(
             tmp_path / f"graph-{index}.json",
             {},
             [("n1", "one"), ("n2", "two")],
-            client=router_client,
-            settings=embedding_cache.ImageEmbeddingSettings(f"model-{index}", index + 1.5),
+            embedder=embedding_cache.ImageEmbedder(
+                router_client,
+                embedding_cache.ImageEmbeddingSettings(f"model-{index}", index + 1.5),
+            ),
             app_name="demo",
         )
         assert result.computed == 2

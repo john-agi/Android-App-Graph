@@ -19,6 +19,7 @@ from openrouter import OpenRouter
 from android_app_graph import device
 from android_app_graph.android_packages import saved_node_package
 from android_app_graph.embedding_cache import (
+    ImageEmbedder,
     compute_embedding_with_retry,
     compute_missing_image_embeddings,
     iter_screenshot_candidates,
@@ -905,8 +906,7 @@ class UIKobeV2Translator(BaseTranslator):
             graph_file,
             embeddings,
             candidates,
-            client=self.client,
-            settings=self.image_embedding,
+            embedder=ImageEmbedder(self.client, self.image_embedding),
             app_name=app_name,
         )
         for node_id, _screenshot_path in pending:
