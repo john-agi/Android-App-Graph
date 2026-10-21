@@ -21,6 +21,7 @@ from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
 from android_app_graph.graph_files import graph_steps_dir
+from android_app_graph.member_groups import MEMBER_SIMILARITY_FLOOR
 from android_app_graph.step_log import read_exploration_transitions
 from android_app_graph.utils import ModelSettings, graph_manager
 from android_app_graph.utils.graph_manager import GraphManager, MemberVerdicts
@@ -30,6 +31,8 @@ PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 EMBEDDING = ModelSettings("google/gemini-embedding-2")
 
 X, Y, Z = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]
+# A cosine halfway between the floor and 1: members this alike are linked.
+ALIKE = (1 + MEMBER_SIMILARITY_FLOOR) / 2
 
 
 def _toward(start: list[float], end: list[float], cosine: float) -> list[float]:
@@ -116,7 +119,7 @@ def _checks(report: audit.MemberReport) -> list[dict[str, Any]]:
 # Two nodes whose representatives look nothing alike, but whose second members do.
 CLOSE_PAIR = {
     "s0_home": [("000001", X), ("000002", Y)],
-    "s1_home": [("000003", Z), ("000004", _toward(Y, Z, 0.95))],
+    "s1_home": [("000003", Z), ("000004", _toward(Y, Z, ALIKE))],
 }
 
 
@@ -137,7 +140,7 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
 
     assert (proposal.node_a, proposal.node_b, proposal.sources) == ("s0_home", "s1_home", ["image"])
     assert proposal.findings == [
-        {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(0.95)}
+        {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(ALIKE)}
     ]
     assert models.shown == [("000002", "000004")]
     assert result["members"] == {"s0_home": "000002", "s1_home": "000004"}
@@ -222,8 +225,8 @@ def test_the_coverage_checkpoint_verifies_the_model_s_pairs_on_closest_members_a
 SPLIT = {
     "s0_home": [
         ("000001", X),
-        ("000002", _toward(X, Y, 0.95)),
-        ("000003", _toward(Y, X, 0.95)),
+        ("000002", _toward(X, Y, ALIKE)),
+        ("000003", _toward(Y, X, ALIKE)),
         ("000004", Y),
     ],
     "s1_list": [("000010", Z)],
@@ -289,7 +292,7 @@ def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions
         ["000003", "000004"],
         ["000002", "000003"],
     )
-    assert check["image_score"] == pytest.approx(2 * 0.95 * math.sqrt(1 - 0.95**2))
+    assert check["image_score"] == pytest.approx(2 * ALIKE * math.sqrt(1 - ALIKE**2))
     assert models.shown == [("000002", "000003")]
     assert graph.graph.nodes["s0_home"]["observations"] == ["000001", "000002"]
     assert graph.graph.nodes[new]["observations"] == ["000003", "000004"]
@@ -357,8 +360,8 @@ def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
 
 # The third member of Home looks like List's member, and nothing like Menu's.
 MOVE = {
-    "s0_home": [("000001", X), ("000002", _toward(X, Y, 0.95)), ("000003", Y)],
-    "s1_list": [("000004", _toward(Y, Z, 0.95))],
+    "s0_home": [("000001", X), ("000002", _toward(X, Y, ALIKE)), ("000003", Y)],
+    "s1_list": [("000004", _toward(Y, Z, ALIKE))],
     "s2_menu": [("000005", Z)],
 }
 MOVE_EDGES = (_edge("s0_home", "s2_menu", TAP_A),)
@@ -446,8 +449,8 @@ def test_a_text_merge_on_a_lower_cosine_is_not_split_again(
     write_member_graph(
         graph_path,
         {
-            "s0_home": [("000001", X), ("000002", _toward(X, Y, 0.95))],
-            "s1_home": [("000003", _toward(Y, X, 0.95)), ("000004", Y)],
+            "s0_home": [("000001", X), ("000002", _toward(X, Y, ALIKE))],
+            "s1_home": [("000003", _toward(Y, X, ALIKE)), ("000004", Y)],
         },
     )
     graph = _load(graph_path)
@@ -484,7 +487,11 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
 
     app_dir = graph_path.parent
     report = json.loads((app_dir / "demo_members.json").read_text(encoding="utf-8"))
-    assert (report["floor"], report["home_share"], report["checks_per_node"]) == (0.9, 0.5, 3)
+    assert (report["floor"], report["home_share"], report["checks_per_node"]) == (
+        MEMBER_SIMILARITY_FLOOR,
+        0.5,
+        3,
+    )
     assert [check["kind"] for check in report["checks"]] == ["split"]
     assert (report["diffuse"], report["unchecked"]) == ([], [])
     audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))

@@ -28,8 +28,8 @@ def _at(degrees: float) -> list[float]:
     return [math.cos(math.radians(degrees)), math.sin(math.radians(degrees))]
 
 
-# 20 degrees apart is a cosine of 0.94, above the floor; 30 degrees is 0.87, below it.
-LINKED, APART = 20.0, 30.0
+# Members this many degrees apart are linked; twice as far apart, they are not.
+LINKED = 0.6 * math.degrees(math.acos(MEMBER_SIMILARITY_FLOOR))
 
 
 def _units(**angles: float) -> dict[str, list[float]]:
@@ -134,7 +134,7 @@ def test_a_lone_member_is_checked_against_its_closest_home_member() -> None:
     (check,) = plan.checks
     assert check.group == ["far"]
     assert (check.pair.first, check.pair.second) == ("h", "far")
-    assert check.pair.score == pytest.approx(cosine(_at(LINKED), _at(70)))
+    assert check.pair.score == pytest.approx(cosine(_at(0), _at(50)))
 
 
 def test_a_three_member_node_is_never_split() -> None:
@@ -146,7 +146,7 @@ def test_a_three_member_node_is_never_split() -> None:
 
 
 def test_a_group_of_two_beside_a_home_of_two_is_a_split_check() -> None:
-    units = _units(r=0, h=10, a=90, b=95)
+    units = _units(r=0, h=LINKED, a=90, b=90 + LINKED)
     plan = plan_member_checks(["r", "a", "h", "b"], "r", units)
     assert plan is not None
     assert not plan.diffuse
@@ -156,7 +156,7 @@ def test_a_group_of_two_beside_a_home_of_two_is_a_split_check() -> None:
 
 
 def test_a_node_whose_home_holds_under_half_its_members_is_diffuse() -> None:
-    units = _units(r=0, a=60, b=120, c=180, h=5)
+    units = _units(r=0, a=60, b=120, c=180, h=LINKED)
     plan = plan_member_checks(["r", "a", "b", "c", "h"], "r", units)
     assert plan is not None
     assert plan.diffuse
@@ -165,9 +165,9 @@ def test_a_node_whose_home_holds_under_half_its_members_is_diffuse() -> None:
 
 
 def test_no_node_gets_more_than_three_checks_and_larger_groups_come_first() -> None:
-    home = {f"h{index}": float(index) for index in range(6)}
-    lone = {"x": 60.0, "y": 120.0, "z": 180.0}
-    pair = {"p": 240.0, "q": 245.0}
+    home = {f"h{index}": index * LINKED for index in range(6)}
+    lone = {"x": 6 * LINKED + 30, "y": 6 * LINKED + 60, "z": 6 * LINKED + 90}
+    pair = {"p": 300.0, "q": 300 + LINKED}
     units = _units(**home, **lone, **pair)
     plan = plan_member_checks([*home, *lone, *pair], "h0", units)
     assert plan is not None
@@ -177,7 +177,9 @@ def test_no_node_gets_more_than_three_checks_and_larger_groups_come_first() -> N
 
 
 def test_a_lower_floor_links_more_members() -> None:
-    units = _units(r=0, a=APART)
-    plan = plan_member_checks(["r", "a"], "r", units, floor=0.85)
-    assert plan is not None
-    assert plan.groups == [["r", "a"]]
+    units = _units(r=0, a=2 * LINKED)
+    default = plan_member_checks(["r", "a"], "r", units)
+    lower = plan_member_checks(["r", "a"], "r", units, floor=cosine(_at(0), _at(2 * LINKED)))
+    assert default is not None
+    assert lower is not None
+    assert (default.groups, lower.groups) == ([["r"], ["a"]], [["r", "a"]])
