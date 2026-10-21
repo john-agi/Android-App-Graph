@@ -16,7 +16,7 @@ import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import NamedTuple
 
-MEMBER_SIMILARITY_FLOOR = 0.90
+MEMBER_SIMILARITY_FLOOR = 0.79
 HOME_SHARE = 0.5
 CHECKS_PER_NODE = 3
 

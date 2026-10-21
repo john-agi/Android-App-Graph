@@ -36,6 +36,11 @@ def _units(**angles: float) -> dict[str, list[float]]:
     return {member: _at(degrees) for member, degrees in angles.items()}
 
 
+def _axis(index: int) -> list[float]:
+    """A unit vector along one of eight axes: two different axes have a cosine of 0."""
+    return [float(index == position) for position in range(8)]
+
+
 def test_a_unit_vector_has_length_one_and_a_zero_vector_none() -> None:
     unit = unit_vector([3.0, 4.0])
     assert unit == pytest.approx([0.6, 0.8])
@@ -156,7 +161,7 @@ def test_a_group_of_two_beside_a_home_of_two_is_a_split_check() -> None:
 
 
 def test_a_node_whose_home_holds_under_half_its_members_is_diffuse() -> None:
-    units = _units(r=0, a=60, b=120, c=180, h=LINKED)
+    units = _units(r=0, a=90, b=180, c=270, h=LINKED)
     plan = plan_member_checks(["r", "a", "b", "c", "h"], "r", units)
     assert plan is not None
     assert plan.diffuse
@@ -165,10 +170,10 @@ def test_a_node_whose_home_holds_under_half_its_members_is_diffuse() -> None:
 
 
 def test_no_node_gets_more_than_three_checks_and_larger_groups_come_first() -> None:
-    home = {f"h{index}": index * LINKED for index in range(6)}
-    lone = {"x": 6 * LINKED + 30, "y": 6 * LINKED + 60, "z": 6 * LINKED + 90}
-    pair = {"p": 300.0, "q": 300 + LINKED}
-    units = _units(**home, **lone, **pair)
+    home = {f"h{index}": _axis(0) for index in range(6)}
+    lone = {"x": _axis(1), "y": _axis(2), "z": _axis(3)}
+    pair = {"p": _axis(4), "q": _axis(4)}
+    units = {**home, **lone, **pair}
     plan = plan_member_checks([*home, *lone, *pair], "h0", units)
     assert plan is not None
     assert [check.group for check in plan.checks] == [["p", "q"], ["x"], ["y"]]

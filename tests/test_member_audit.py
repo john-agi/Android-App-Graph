@@ -31,8 +31,9 @@ PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 EMBEDDING = ModelSettings("google/gemini-embedding-2")
 
 X, Y, Z = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]
-# A cosine halfway between the floor and 1: members this alike are linked.
-ALIKE = (1 + MEMBER_SIMILARITY_FLOOR) / 2
+# A cosine a quarter of the way from 1 to the floor: members this alike are linked,
+# and two turned toward each other's axis are not.
+ALIKE = 1 - (1 - MEMBER_SIMILARITY_FLOOR) / 4
 
 
 def _toward(start: list[float], end: list[float], cosine: float) -> list[float]:
