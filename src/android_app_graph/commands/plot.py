@@ -542,16 +542,26 @@ def plot_paper_matplotlib(
 _TOOLTIP_UNEXPLORED_LIMIT = 10
 
 
+@dataclass(frozen=True, kw_only=True)
+class PyvisStyle:
+    """How the interactive pyvis graph shortens its labels and sizes its nodes and edges."""
+
+    max_node_words: int = 5
+    max_edge_words: int = 6
+    node_size: int = 34
+    node_font_size: int = 20
+    edge_font_size: int = 14
+    edge_width: float = 2.6
+
+
+_DEFAULT_PYVIS_STYLE = PyvisStyle()
+
+
 def plot_pyvis(
     graph: nx.DiGraph,
     output_path: str,
     *,
-    max_node_words: int = 5,
-    max_edge_words: int = 6,
-    node_size: int = 34,
-    node_font_size: int = 20,
-    edge_font_size: int = 14,
-    edge_width: float = 2.6,
+    style: PyvisStyle = _DEFAULT_PYVIS_STYLE,
 ) -> None:
     """Create an interactive HTML graph using pyvis."""
     from pyvis.network import Network
@@ -615,7 +625,7 @@ def plot_pyvis(
 
     for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
         desc = data.get("page_description", node_id)
-        short_desc = _shorten_words(desc, max_node_words, 40)
+        short_desc = _shorten_words(desc, style.max_node_words, 40)
         visits = data.get("visit_count", 0)
         state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
@@ -655,8 +665,8 @@ def plot_pyvis(
                 "border": "#5c6bc0",
                 "highlight": {"background": "#c5cae9", "border": "#1a237e"},
             },
-            size=node_size,
-            font={"size": node_font_size, "face": "Arial"},
+            size=style.node_size,
+            font={"size": style.node_font_size, "face": "Arial"},
             borderWidth=3,
         )
 
@@ -668,7 +678,7 @@ def plot_pyvis(
         n_actions = data.get("num_actions", 0)
 
         tooltip = f"Visits: {visits}<br>Action sequences: {n_actions}<br>{label}"
-        short_label = _shorten_edge_label(label, max_edge_words, 54)
+        short_label = _shorten_edge_label(label, style.max_edge_words, 54)
 
         # Parallel edges get different curvatures so they stay distinguishable.
         pair = (min(src, tgt), max(src, tgt))
@@ -681,9 +691,9 @@ def plot_pyvis(
             label=short_label,
             title=tooltip,
             smooth={"type": "curvedCW", "roundness": roundness},
-            width=edge_width,
+            width=style.edge_width,
             font={
-                "size": edge_font_size,
+                "size": style.edge_font_size,
                 "align": "horizontal",
                 "background": "rgba(255,255,255,0.92)",
             },
@@ -907,9 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.backend == "pyvis":
-        plot_pyvis(
-            graph,
-            output_path,
+        pyvis_style = PyvisStyle(
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
             node_size=args.node_size,
@@ -917,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
             edge_font_size=args.edge_font_size,
             edge_width=args.edge_width,
         )
+        plot_pyvis(graph, output_path, style=pyvis_style)
     elif args.backend == "graphviz":
         plot_graphviz(graph, output_path)
     elif args.backend == "matplotlib":

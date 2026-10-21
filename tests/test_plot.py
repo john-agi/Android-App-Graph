@@ -433,8 +433,8 @@ def test_plot_main_passes_the_pyvis_options_to_the_renderer(
     """The CLI's own defaults arrive too, such as 5 edge words where plot_pyvis defaults to 6."""
     received: list[tuple[str, dict[str, object]]] = []
 
-    def record(_graph: nx.DiGraph, output_path: str, **kwargs: object) -> None:
-        received.append((output_path, kwargs))
+    def record(_graph: nx.DiGraph, output_path: str, *, style: plot.PyvisStyle) -> None:
+        received.append((output_path, dataclasses.asdict(style)))
 
     monkeypatch.setattr(plot, "plot_pyvis", record)
     monkeypatch.setattr(plot, "setup_logging", lambda **_kwargs: None)
