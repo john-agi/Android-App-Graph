@@ -337,6 +337,8 @@ addresses, dates, prices, usernames, etc.). Think of it as the screen's class na
 Good: "search results page", "route planning page", "location search page" \
 Bad: "search results for Big Ben", "route from home to work", "John's profile page" \
 All user-specific data belongs in "state", never in "page_description". \
+The on-screen keyboard, which input field has focus, and how far a list is scrolled \
+never change "page_description"; record them in "state". \
 Always describe what you actually see. \
 {description_hint}
 
@@ -346,6 +348,8 @@ that change through user interaction. This is where ALL user-specific content go
 For the "state" object, focus on:
 - "first_visible_item": the first list/menu item visible on screen (scroll position)
 - "last_visible_item": the last list/menu item visible on screen
+- "focused_field": the input field that has focus, or null when none has
+- "keyboard_visible": whether the on-screen keyboard is shown
 - User-controlled state: active tab, search query, applied filters, sort order, toggle states, \
   selected items, input field contents
 - Navigation state: which sub-section or category is currently shown
@@ -406,12 +410,13 @@ Both screens were given this description: "{existing_description}"
 
 Two screenshots are the SAME screen if they serve the same purpose and a user would consider \
 them the same page — even if the content (list items, search results, text in fields) differs. \
-For example, a search results page showing different queries is still the same screen.
+For example, a search results page showing different queries is still the same screen. \
+They are also the SAME screen when they differ only in whether the on-screen keyboard is shown, \
+which input field has focus, or how far a list is scrolled.
 
 Two screenshots are DIFFERENT screens if they serve different purposes in the app's workflow, \
 even if they look visually similar. Pay close attention to:
 - Screen titles, headers, or labels (e.g. "Choose start location" vs "Choose destination")
-- Which input field is active or being filled
 - The stage in a multi-step flow (e.g. step 1 vs step 2 of a booking)
 - Different form sections or tabs that change the screen's function
 - Any dropdown menu, overflow menu, popup menu, context menu, sort/filter menu, \
@@ -926,10 +931,10 @@ def describe_page_and_state(
         )
         description_hint = (
             "If this screen is clearly the same type as one in the list, output the same "
-            "description. If it is similar but serves a different purpose (e.g. different "
-            "step in a flow, different input field focused), write a description that "
-            "clearly distinguishes it. Pay attention to screen titles, headers, labels, "
-            "which field is active, and what stage of a multi-step flow this is."
+            "description. If it is similar but serves a different purpose (e.g. a different "
+            "step in a flow), write a description that clearly distinguishes it. Pay "
+            "attention to screen titles, headers, labels, and what stage of a multi-step "
+            "flow this is."
         )
     else:
         existing_nodes_section = "No screens have been discovered yet in this app."
@@ -1689,7 +1694,7 @@ _MOBILE_USE_ACTIONS: dict[str, Callable[[dict[str, object], int, int], dict[str,
 }
 
 
-def tool_call_to_aitk(
+def tool_call_to_action(
     args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
 ) -> dict[str, object]:
     """Convert mobile_use arguments using the contract in README.md#action-responses."""
@@ -1873,7 +1878,7 @@ def describe_executed_action(
     *,
     settings: ModelSettings,
 ) -> str | None:
-    """Write the instruction for an AITK action from the screenshot taken before it ran.
+    """Write the instruction for a device action from the screenshot taken before it ran.
 
     ``screen_size`` is the device's ``(width, height)`` in pixels, which the action's
     coordinates are measured in. Returns None when the reply is truncated, not a JSON
@@ -2002,7 +2007,7 @@ def _unparsed_reason(raw: str) -> str:
 
 
 def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[str, object], str]:
-    """Turn an action reply into an AITK action and its history entry."""
+    """Turn an action reply into a device action and its history entry."""
     raw = message_text(resp)
     try:
         tool_args, thought, action_desc = parse_agent_response(resp)
@@ -2011,12 +2016,12 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     if tool_args is None:
         raise _MalformedActionOutputError(_unparsed_reason(raw), raw)
     try:
-        action = tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
+        action = tool_call_to_action(tool_args, screen_w=screen_w, screen_h=screen_h)
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
         reason = f"the mobile_use arguments were invalid: {exc}"
         raise _MalformedActionOutputError(reason, raw) from exc
     history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
-    logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
+    logger.info("  Agent action: %s → device action: %s", tool_args.get("action"), action)
     return as_object_dict(action), history_entry
 
 
@@ -2052,8 +2057,8 @@ def predict_next_action(
     and decides the next action (or "end" if the task is complete).
 
     Returns:
-        (aitk_action, history_entry):
-        - aitk_action: action dict in AITK format (may be {"action": "end"})
+        (device_action, history_entry):
+        - device_action: device action dict (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
     screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)

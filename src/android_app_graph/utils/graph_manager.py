@@ -7,7 +7,7 @@ A node represents a unique app state defined by:
     observed values across all visits.  E.g. {"sort_order": ["price_low_to_high",
     "rating"], "search_query": ["keyboard", null]}
 
-An edge represents an action (in AITK format) that transitions between states.
+An edge represents a device action that transitions between states.
 
 State matching uses embedding similarity on the page description within the same
 app package to decide whether a new screenshot belongs to an existing node or is
@@ -746,7 +746,7 @@ class GraphManager:
         """Add a directed edge (action) from source to target.
 
         Args:
-            action: A single AITK action dict, or a list of action dicts
+            action: A single device action dict, or a list of them
                 (compound action sequence, e.g. [tap, type, enter]).
             details: What this traversal recorded next to its action; none by default.
 
