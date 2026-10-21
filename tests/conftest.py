@@ -113,6 +113,39 @@ def device_log(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> list[objec
     return log
 
 
+class _ScreensByLog:
+    """A DeviceController that shows the next screen after each entry in ``log``.
+
+    Its actions share the log with the adb commands ``device_log`` captures, so an app
+    restart moves the device on too.
+    """
+
+    w = 100
+    h = 200
+
+    def __init__(self, log: list[object], *screens: dict[str, Any]) -> None:
+        self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
+        self._log = log
+        self._screens = screens
+
+    def get_state(self) -> dict[str, Any]:
+        return self._screens[min(len(self._log), len(self._screens) - 1)]
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        self._log.append(action)
+
+
+@pytest.fixture
+def screens_by_log(device_log: list[object]) -> Callable[..., DeviceController]:
+    """Build a DeviceController that shows the given screens in turn, one more for each
+    entry in ``device_log``, and stays on the last."""
+
+    def build(*screens: dict[str, Any]) -> DeviceController:
+        return _ScreensByLog(device_log, *screens)
+
+    return build
+
+
 @pytest.fixture
 def router_requests() -> list[httpx.Request]:
     return []

@@ -538,28 +538,6 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     assert [action["action"] for action in device.actions] == [executed, "back"]
 
 
-class _ScreensByLog:
-    """A DeviceController that shows the next screen after each entry in ``log``.
-
-    Its actions share the log with the adb commands ``device_log`` captures, so an app
-    restart moves the device on too.
-    """
-
-    w = 100
-    h = 200
-
-    def __init__(self, log: list[object], *screens: dict[str, object]) -> None:
-        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
-        self._log = log
-        self._screens = screens
-
-    def get_state(self) -> dict[str, object]:
-        return self._screens[min(len(self._log), len(self._screens) - 1)]
-
-    def exe_action(self, action: dict[str, object]) -> None:
-        self._log.append(action)
-
-
 _BACK = {"action": "back"}
 
 
@@ -577,6 +555,7 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The explorer keeps pressing back while the page still shows, so the next step acts
@@ -585,9 +564,7 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     web_page = _screen("com.demo.ArticleActivity", "blue")
     settings = _screen("com.demo.Settings", "gray")
-    device = _ScreensByLog(
-        device_log, HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings
-    )
+    device = screens_by_log(HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings)
     explorer = _explorer(device, tmp_path, router_client)
     external = '{"page_description":"news article","is_external_web":true}'
     orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
