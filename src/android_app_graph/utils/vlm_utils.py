@@ -32,10 +32,7 @@ from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 if TYPE_CHECKING:
     from openrouter.components.chatcontentimage import ChatContentImageTypedDict
     from openrouter.components.chatmessages import ChatMessagesTypedDict
-    from openrouter.components.chatrequest import (
-        ChatRequestPluginTypedDict,
-        ResponseFormatTypedDict,
-    )
+    from openrouter.components.chatrequest import ResponseFormatTypedDict
     from openrouter.operations.createembeddings import (
         CreateEmbeddingsResponse,
         CreateEmbeddingsUsage,
@@ -773,14 +770,17 @@ def _send_chat_once(
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
-    plugins: list[ChatRequestPluginTypedDict] | None = None,
 ) -> ChatResult:
-    """Send one completion, record its usage and check how it finished."""
+    """Send one completion, record its usage and check how it finished.
+
+    A ``response_format`` brings the response-healing plugin with it;
+    README.md#requests-and-recovery.
+    """
     response: object = client.chat.send(
         model=settings.model,
         messages=messages,
         response_format=response_format,
-        plugins=plugins,
+        plugins=None if response_format is None else [{"id": "response-healing"}],
         temperature=settings.temperature if settings.temperature is not None else UNSET,
         stream=False,
         timeout_ms=int(settings.request_timeout * 1000),
@@ -817,7 +817,6 @@ def send_chat(
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
-    plugins: list[ChatRequestPluginTypedDict] | None = None,
 ) -> ChatResult:
     """Send a non-streaming completion, asking once more for unusable output.
 
@@ -834,7 +833,6 @@ def send_chat(
             settings=settings,
             messages=messages,
             response_format=response_format,
-            plugins=plugins,
         ),
     )
 
@@ -977,7 +975,6 @@ def describe_page_and_state(
             response_format=_structured_output(
                 "page_description", _PAGE_DESCRIPTION_SCHEMA, strict=False
             ),
-            plugins=[{"id": "response-healing"}],
         )
         try:
             return _parse_page_description(message_text(resp))
@@ -1037,7 +1034,6 @@ def verify_same_node(
                 }
             ],
             response_format=_structured_output("node_verification", _NODE_VERIFICATION_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"same": False, "reason": "reply truncated"}
@@ -1112,7 +1108,6 @@ def normalize_edge(
             response_format=_structured_output(
                 "edge_template", _EDGE_TEMPLATE_SCHEMA, strict=False
             ),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return unchanged
@@ -1362,7 +1357,6 @@ def audit_merge_nodes(
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"issues": [], "summary": "reply truncated"}
@@ -1457,7 +1451,6 @@ def select_exploration_target(
             response_format=_structured_output(
                 "exploration_target", _exploration_target_schema(sorted(valid_ids))
             ),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return None
@@ -1505,7 +1498,6 @@ def audit_graph(
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
             response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"issues": [], "summary": "reply truncated"}
@@ -1852,7 +1844,6 @@ def plan_next_action(
         settings=settings,
         messages=messages,
         response_format=_structured_output("next_action_plan", _NEXT_ACTION_PLAN_SCHEMA),
-        plugins=[{"id": "response-healing"}],
     )
     raw = message_text(resp)
     try:
@@ -1937,7 +1928,6 @@ def describe_executed_action(
                 }
             ],
             response_format=_structured_output("action_description", _ACTION_DESCRIPTION_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return None
