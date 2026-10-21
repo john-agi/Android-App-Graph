@@ -123,7 +123,7 @@ class Kobe:
       - Page description (from VLM)
       - Detailed screen contents JSON (from VLM)
 
-    Each edge is an action (in AITK format) that transitions between states.
+    Each edge is a device action that transitions between states.
     """
 
     def __init__(

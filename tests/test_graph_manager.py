@@ -41,7 +41,7 @@ SETTINGS = "com.example.app.SettingsActivity"
 OTHER_PACKAGE = "org.other.tool"
 OTHER_APP = "org.other.tool.MainActivity"
 
-# Activity class names as AITK reports them, for packages of two and five dot-segments.
+# Activity class names as `dumpsys window` reports them, for packages of two and five dot-segments.
 # Messages and Gmail share their first three segments but are separate packages.
 WHATSAPP = "com.whatsapp"
 WHATSAPP_HOME = "com.whatsapp.home.ui.HomeActivity"

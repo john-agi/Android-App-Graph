@@ -1,13 +1,11 @@
-"""app-graph argument parsing, model checks and run order, without AITK, adb or an emulator."""
+"""app-graph argument parsing, model checks and run order, without adb or an emulator."""
 
 from __future__ import annotations
 
-import builtins
 import json
 import logging
 import sys
 from pathlib import Path
-from types import ModuleType
 from typing import NoReturn
 
 import httpx
@@ -22,7 +20,7 @@ from android_app_graph.kobe import ExplorerConfig
 def test_help_exits_zero(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """argparse handles --help inside parse_args() and exits 0 before aitk is imported."""
+    """argparse handles --help inside parse_args() and exits 0 before any device work."""
     monkeypatch.setattr(sys, "argv", ["app-graph", "--help"])
     with pytest.raises(SystemExit) as excinfo:
         main()
@@ -83,7 +81,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
         def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
             events.append("device")
 
-        def set_task_eval(self) -> None:
+        def terminate_all_apps(self) -> None:
             events.append("terminate")
 
     class Explorer:
@@ -116,12 +114,8 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
         assert config["vlm"] == vlm
         events.append("avd")
 
-    adb_module = ModuleType("aitk.utils.adb_controller")
-    avd_module = ModuleType("aitk.utils.avd_manager")
-    monkeypatch.setattr(adb_module, "ADBController", Device, raising=False)
-    monkeypatch.setattr(avd_module, "AVDManager", lambda _logger: object(), raising=False)
-    monkeypatch.setitem(sys.modules, adb_module.__name__, adb_module)
-    monkeypatch.setitem(sys.modules, avd_module.__name__, avd_module)
+    monkeypatch.setattr(cli, "AdbController", Device)
+    monkeypatch.setattr(cli, "EmulatorManager", lambda _logger: object())
     monkeypatch.setattr(cli, "Kobe", Explorer)
     monkeypatch.setattr(cli, "check_avd", check_avd)
     grants: list[tuple[str, str]] = []
@@ -143,25 +137,22 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     assert opened_clients[0].sdk_configuration.client is None
 
 
-def test_explorer_reports_all_missing_models_before_importing_device_tools(
+def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    def touched(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "settings must be validated before any device work"
+        raise AssertionError(msg)
+
+    for name in ("EmulatorManager", "check_avd", "AdbController", "launch_app", "Kobe"):
+        monkeypatch.setattr(cli, name, touched)
+
+
+def test_explorer_reports_all_missing_models_before_any_device_work(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = tmp_path / "explore.yaml"
     config.write_text("vlm: {}\n", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["app-graph", "--config", str(config)])
-    original_import = builtins.__import__
-
-    def guarded_import(
-        name: str,
-        globals_: dict[str, object] | None = None,
-        locals_: dict[str, object] | None = None,
-        fromlist: tuple[str, ...] = (),
-        level: int = 0,
-    ) -> object:
-        assert not name.startswith("aitk"), "configuration must be checked before device setup"
-        return original_import(name, globals_, locals_, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    _deny_device_work(monkeypatch)
     with pytest.raises(SystemExit) as caught:
         main()
     assert caught.value.code == 2
@@ -188,22 +179,9 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def touched(*_args: object, **_kwargs: object) -> NoReturn:
-        msg = "settings must be validated before any device work"
-        raise AssertionError(msg)
-
     if key is not None:
         monkeypatch.setenv("OPENROUTER_API_KEY", key)
-    monkeypatch.setattr(cli, "check_avd", touched)
-    monkeypatch.setattr(cli, "launch_app", touched)
-    monkeypatch.setattr(cli, "Kobe", touched)
-    for name, attribute in (
-        ("aitk.utils.adb_controller", "ADBController"),
-        ("aitk.utils.avd_manager", "AVDManager"),
-    ):
-        module = ModuleType(name)
-        monkeypatch.setattr(module, attribute, touched, raising=False)
-        monkeypatch.setitem(sys.modules, name, module)
+    _deny_device_work(monkeypatch)
     config = tmp_path / "explore.yaml"
     config.write_text(
         json.dumps({"vlm": role_settings, "apps": [{"name": "demo", "package_name": "com.demo"}]}),
