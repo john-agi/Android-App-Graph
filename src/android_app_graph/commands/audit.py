@@ -320,13 +320,115 @@ def _leave_external_web(run: _ReExploreRun) -> str:
     )
 
 
+def _plan_and_act(
+    run: _ReExploreRun, node: str, screenshot: str, page_description: str
+) -> tuple[str, dict[str, Any]] | None:
+    """Plan a step from *node*, execute its action, and return the instruction and the
+    action executed, or ``None`` when the action model waits.
+    """
+    explored_edges = run.graph.get_all_edges_from_node(node)
+
+    # Check before planning so the planner can choose type vs tap.
+    keyboard_hint = soft_keyboard_hint()
+    input_status = keyboard_status(keyboard_hint)
+
+    instruction, _planned_element = plan_next_action(
+        client=run.client,
+        screenshot_b64=screenshot,
+        page_description=page_description,
+        explored_edges=explored_edges,
+        app_name=run.app_name,
+        input_status=input_status,
+        settings=run.instruction_settings,
+    )
+
+    action, _history_entry = predict_next_action(
+        client=run.client,
+        screenshot_b64=screenshot,
+        instruction=instruction + keyboard_hint,
+        screen_w=run.controller.w,
+        screen_h=run.controller.h,
+        action_history=[],
+        settings=run.action_settings,
+    )
+
+    if action.get("action") == "end":
+        logger.info(
+            '  Action agent said end for: "%s", recording as back',
+            instruction,
+        )
+        action = {"action": "back"}
+        instruction = "Press back"
+        run.controller.exe_action(action)
+    elif action.get("action") == "wait":
+        time.sleep(1)
+        return None
+    else:
+        run.controller.exe_action(action)
+    return instruction, action
+
+
+def _record_step(
+    run: _ReExploreRun,
+    source: str,
+    taken: tuple[str, dict[str, Any]],
+    device_state: dict[str, Any],
+    step_number: int,
+) -> tuple[str, dict[str, Any]]:
+    """Record the edge *taken* from *source* to the screen *device_state* shows and save
+    the graph. Returns the node the next step starts from, with the step's result.
+    """
+    instruction, action = taken
+    new_node = run.graph.identify_state(
+        device_state["activity"],
+        device_state["screenshot"],
+        device_state["package"],
+    )
+    source = run.graph.resolve_node_id(source)
+
+    new_node_data = run.graph.get_node(new_node)
+    target_obs = new_node_data.get("page_description", "") if new_node_data else ""
+
+    run.graph.add_edge(
+        source,
+        new_node,
+        action=[action],
+        instruction=instruction,
+        target_observation=target_obs,
+        num_steps=1,
+    )
+
+    step_result: dict[str, Any] = {
+        "step": step_number,
+        "from": source,
+        "to": new_node,
+        "instruction": instruction,
+        "action": action,
+    }
+
+    logger.info(
+        "  Re-explore step %d: %s --[%s]--> %s (instruction: '%s')",
+        step_number,
+        source,
+        action.get("action", "?"),
+        new_node,
+        instruction,
+    )
+
+    run.graph.save_graph(run.graph_path)
+    if new_node == EXTERNAL_WEB_NODE:
+        logger.warning("Opened an external web page during re-explore, pressing back")
+        return _leave_external_web(run), step_result
+    return new_node, step_result
+
+
 def _explore_steps(
     run: _ReExploreRun,
     start_from: str,
     num_steps: int,
-    hint: str = "",
+    hint: str,
 ) -> list[dict[str, Any]]:
-    """Run exploration steps from a node with an optional hint for the planner."""
+    """Run exploration steps from a node with a hint for the planner."""
     current_node = start_from
     step_results: list[dict[str, Any]] = []
 
@@ -337,49 +439,10 @@ def _explore_steps(
         if node_data is None:
             break
 
-        explored_edges = run.graph.get_all_edges_from_node(current_node)
-
-        page_desc = node_data["page_description"]
-        if hint:
-            page_desc = f"{page_desc}\n[AUDIT HINT: {hint}]"
-
-        # Check before planning so the planner can choose type vs tap.
-        keyboard_hint = soft_keyboard_hint()
-        input_status = keyboard_status(keyboard_hint)
-
-        instruction, _planned_element = plan_next_action(
-            client=run.client,
-            screenshot_b64=screenshot,
-            page_description=page_desc,
-            explored_edges=explored_edges,
-            app_name=run.app_name,
-            input_status=input_status,
-            settings=run.instruction_settings,
-        )
-
-        action, _history_entry = predict_next_action(
-            client=run.client,
-            screenshot_b64=screenshot,
-            instruction=instruction + keyboard_hint,
-            screen_w=run.controller.w,
-            screen_h=run.controller.h,
-            action_history=[],
-            settings=run.action_settings,
-        )
-
-        if action.get("action") == "end":
-            logger.info(
-                '  Action agent said end for: "%s", recording as back',
-                instruction,
-            )
-            action = {"action": "back"}
-            instruction = "Press back"
-            run.controller.exe_action(action)
-        elif action.get("action") == "wait":
-            time.sleep(1)
+        page_desc = f"{node_data['page_description']}\n[AUDIT HINT: {hint}]"
+        taken = _plan_and_act(run, current_node, screenshot, page_desc)
+        if taken is None:
             continue
-        else:
-            run.controller.exe_action(action)
 
         time.sleep(0.5)
         device_state = run.controller.get_state()
@@ -396,49 +459,8 @@ def _explore_steps(
             )
             continue
 
-        new_node = run.graph.identify_state(
-            device_state["activity"],
-            device_state["screenshot"],
-            device_state["package"],
-        )
-        current_node = run.graph.resolve_node_id(current_node)
-
-        new_node_data = run.graph.get_node(new_node)
-        target_obs = new_node_data.get("page_description", "") if new_node_data else ""
-
-        run.graph.add_edge(
-            current_node,
-            new_node,
-            action=[action],
-            instruction=instruction,
-            target_observation=target_obs,
-            num_steps=1,
-        )
-
-        step_results.append(
-            {
-                "step": step_i + 1,
-                "from": current_node,
-                "to": new_node,
-                "instruction": instruction,
-                "action": action,
-            }
-        )
-
-        logger.info(
-            "  Re-explore step %d: %s --[%s]--> %s (instruction: '%s')",
-            step_i + 1,
-            current_node,
-            action.get("action", "?"),
-            new_node,
-            instruction,
-        )
-
-        run.graph.save_graph(run.graph_path)
-        current_node = new_node
-        if current_node == EXTERNAL_WEB_NODE:
-            logger.warning("Opened an external web page during re-explore, pressing back")
-            current_node = _leave_external_web(run)
+        current_node, step_result = _record_step(run, current_node, taken, device_state, step_i + 1)
+        step_results.append(step_result)
 
     return step_results
 
