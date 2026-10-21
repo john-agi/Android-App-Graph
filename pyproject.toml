@@ -99,6 +99,8 @@ extend-select = [
     "PGH004",
     "INP001",
     "N",
+    "EM",
+    "TRY",
 ]
 # FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
 # they need no `ignore` entry.

@@ -193,7 +193,8 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def touched(*_args: object, **_kwargs: object) -> NoReturn:
-        raise AssertionError("settings must be validated before any device work")
+        msg = "settings must be validated before any device work"
+        raise AssertionError(msg)
 
     if key is not None:
         monkeypatch.setenv("OPENROUTER_API_KEY", key)

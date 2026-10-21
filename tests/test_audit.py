@@ -1316,7 +1316,8 @@ def test_audit_cli_opens_one_client_and_closes_it_on_exit(
         assert opened_clients == [graph.client]
         assert opened_clients[0].sdk_configuration.client is router_http
         if exceptional:
-            raise RuntimeError("audit failed")
+            msg = "audit failed"
+            raise RuntimeError(msg)
         return {"issues": []}
 
     monkeypatch.setattr(audit, "run_audit", audit_graph)
@@ -1421,7 +1422,8 @@ def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
 
 def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
     def touched(*_args: object, **_kwargs: object) -> NoReturn:
-        raise AssertionError("settings must be validated before any device work")
+        msg = "settings must be validated before any device work"
+        raise AssertionError(msg)
 
     adb_module = ModuleType("aitk.utils.adb_controller")
     monkeypatch.setattr(adb_module, "ADBController", touched, raising=False)

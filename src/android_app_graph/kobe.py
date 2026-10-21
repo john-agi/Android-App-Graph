@@ -329,11 +329,13 @@ class Kobe:
         """
         start_node = self.graph.get_start_node()
         if start_node is None:
-            raise NoPathError("Graph is empty — cannot navigate.")
+            msg = "Graph is empty — cannot navigate."
+            raise NoPathError(msg)
 
         path = self.graph.find_path(start_node, target_node)
         if path is None:
-            raise NoPathError(f"No path from {start_node} to {target_node} in the graph.")
+            msg = f"No path from {start_node} to {target_node} in the graph."
+            raise NoPathError(msg)
 
         restart_app(
             self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
@@ -446,7 +448,7 @@ class Kobe:
             token_tracker.print_summary()
             raise
         except Exception:
-            self.logger.error(
+            self.logger.exception(
                 "Exploration crashed at step %d. Graph saved. Re-run to resume.",
                 self.graph.total_steps_completed,
             )

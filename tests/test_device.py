@@ -39,10 +39,12 @@ class _Device:
         self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
 
     def get_state(self) -> dict[str, Any]:
-        raise AssertionError("restarting the app must not read the screen")
+        msg = "restarting the app must not read the screen"
+        raise AssertionError(msg)
 
     def exe_action(self, action: dict[str, Any]) -> None:
-        raise AssertionError(f"restarting the app must not act on the screen: {action}")
+        msg = f"restarting the app must not act on the screen: {action}"
+        raise AssertionError(msg)
 
 
 def test_restart_app_force_stops_then_launches_and_waits_for_the_screen(
@@ -95,7 +97,8 @@ def test_soft_keyboard_hint_when_the_keyboard_is_hidden(monkeypatch: pytest.Monk
 
 def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPatch) -> None:
     def _no_adb(*_args: object, **_kwargs: object) -> _CompletedProcess:
-        raise FileNotFoundError("adb")
+        msg = "adb"
+        raise FileNotFoundError(msg)
 
     monkeypatch.setattr(device.subprocess, "run", _no_adb)
     assert device.soft_keyboard_hint() == ""
@@ -110,7 +113,8 @@ def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
 
     def _bad_bytes(*_args: object, **_kwargs: object) -> _CompletedProcess:
         msg = "invalid start byte"
-        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, msg)
+        encoding = "utf-8"
+        raise UnicodeDecodeError(encoding, b"\xff", 0, 1, msg)
 
     monkeypatch.setattr(device.subprocess, "run", _bad_bytes)
     assert device.soft_keyboard_hint() == ""
