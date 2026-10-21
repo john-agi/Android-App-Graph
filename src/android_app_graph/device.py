@@ -542,15 +542,16 @@ def _start_failed(started: subprocess.CompletedProcess[str]) -> bool:
     return started.returncode != 0 or any(line.startswith("Error") for line in lines)
 
 
-def soft_keyboard_hint() -> str:
-    """Return a note that the soft keyboard is visible, or ``""`` otherwise.
+def soft_keyboard_hint(udid: str) -> str:
+    """Return a note that the soft keyboard on the device ``udid`` is visible, or ``""``
+    otherwise.
 
     Shells out to adb rather than going through ``DeviceController``, which has no
     shell method.
     """
     try:
         kb_check = run_adb(
-            ["shell", "dumpsys", "input_method"],
+            ["-s", udid, "shell", "dumpsys", "input_method"],
             output="capture",
             # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
             # best-effort probe; replace bad bytes instead of failing to decode them.
@@ -565,7 +566,7 @@ def soft_keyboard_hint() -> str:
 
 
 def keyboard_status(hint: str) -> str:
-    """Return the planner-prompt sentence for ``hint`` from ``soft_keyboard_hint()``."""
+    """Return the planner-prompt sentence for ``hint`` from ``soft_keyboard_hint``."""
     if hint:
         return "Soft keyboard is visible; a text field is focused and ready for typing."
     return (

@@ -296,18 +296,37 @@ class _CompletedProcess:
 
 
 @pytest.mark.usefixtures("adb_on_path")
+def test_soft_keyboard_hint_asks_the_named_device_when_several_are_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With more than one device connected, adb refuses a command that names none, so
+    the probe names the device it asks with ``-s``."""
+    commands: list[list[str]] = []
+
+    def several_devices(command: list[str], **_kwargs: object) -> _CompletedProcess:
+        commands.append(command)
+        names_a_device = command[1:3] == ["-s", "emulator-5558"]
+        return _CompletedProcess("mInputShown=true" if names_a_device else "")
+
+    monkeypatch.setattr(device.subprocess, "run", several_devices)
+    hint = device.soft_keyboard_hint("emulator-5558")
+    assert "soft keyboard is currently visible" in hint
+    assert commands == [["adb", "-s", "emulator-5558", "shell", "dumpsys", "input_method"]]
+
+
+@pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_when_the_keyboard_is_shown(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         device.subprocess, "run", lambda *_a, **_k: _CompletedProcess("mInputShown=true")
     )
-    hint = device.soft_keyboard_hint()
+    hint = device.soft_keyboard_hint("test-device")
     assert "soft keyboard is currently visible" in hint
 
 
 @pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_when_the_keyboard_is_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(device.subprocess, "run", lambda *_a, **_k: _CompletedProcess(""))
-    assert device.soft_keyboard_hint() == ""
+    assert device.soft_keyboard_hint("test-device") == ""
 
 
 @pytest.mark.usefixtures("adb_on_path")
@@ -317,7 +336,7 @@ def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPat
         raise FileNotFoundError(msg)
 
     monkeypatch.setattr(device.subprocess, "run", _no_adb)
-    assert device.soft_keyboard_hint() == ""
+    assert device.soft_keyboard_hint("test-device") == ""
 
 
 def test_soft_keyboard_hint_is_empty_when_adb_is_not_on_path(
@@ -329,7 +348,7 @@ def test_soft_keyboard_hint_is_empty_when_adb_is_not_on_path(
 
     monkeypatch.setattr(device.shutil, "which", lambda _name: None)
     monkeypatch.setattr(device.subprocess, "run", must_not_run)
-    assert device.soft_keyboard_hint() == ""
+    assert device.soft_keyboard_hint("test-device") == ""
 
 
 @pytest.mark.usefixtures("adb_on_path")
@@ -346,7 +365,7 @@ def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
         raise UnicodeDecodeError(encoding, b"\xff", 0, 1, msg)
 
     monkeypatch.setattr(device.subprocess, "run", _bad_bytes)
-    assert device.soft_keyboard_hint() == ""
+    assert device.soft_keyboard_hint("test-device") == ""
 
 
 @pytest.mark.usefixtures("adb_on_path")
@@ -361,7 +380,7 @@ def test_soft_keyboard_hint_reads_past_a_replacement_character(
         "run",
         lambda *_a, **_k: _CompletedProcess("�mInputShown=true"),
     )
-    hint = device.soft_keyboard_hint()
+    hint = device.soft_keyboard_hint("test-device")
     assert "soft keyboard is currently visible" in hint
 
 

@@ -535,7 +535,7 @@ class Kobe:
         explored_edges = self.graph.get_all_edges_from_node(position.node)
 
         # Check before planning so the planner can choose type vs tap.
-        keyboard_hint = soft_keyboard_hint()
+        keyboard_hint = soft_keyboard_hint(self.controller.config["device"]["udid"])
         input_status = keyboard_status(keyboard_hint)
 
         unexplored_elements = self.graph.get_unexplored_elements(position.node)

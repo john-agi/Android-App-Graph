@@ -354,7 +354,7 @@ def _plan_and_act(
     explored_edges = run.graph.get_all_edges_from_node(node)
 
     # Check before planning so the planner can choose type vs tap.
-    keyboard_hint = soft_keyboard_hint()
+    keyboard_hint = soft_keyboard_hint(run.recorder.config["device"]["udid"])
     input_status = keyboard_status(keyboard_hint)
 
     planned_instruction, element = plan_next_action(

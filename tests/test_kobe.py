@@ -72,7 +72,7 @@ class _Screens:
     h = 200
 
     def __init__(self, *screens: dict[str, object]) -> None:
-        self.config: dict[str, object] = {}
+        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
         self._screens = screens
         self.actions: list[dict[str, object]] = []
 
@@ -90,7 +90,7 @@ class _Device:
     h = 200
 
     def __init__(self, state: dict[str, object] | Exception) -> None:
-        self.config: dict[str, object] = {}
+        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
         self._state = state
 
     def get_state(self) -> dict[str, object]:
@@ -106,7 +106,6 @@ class _Device:
 class _ReplayDevice(_Device):
     def __init__(self, state: dict[str, object], log: list[object]) -> None:
         super().__init__(state)
-        self.config = {"device": {"udid": "test-device"}}
         self._log = log
 
     @override
@@ -466,7 +465,7 @@ def test_exploration_wait_recovery_respects_step_limit(
     no_sleep: list[float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
             chat_response(content='{"page_description":"home"}'),
@@ -494,6 +493,26 @@ def test_exploration_wait_recovery_respects_step_limit(
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_an_exploration_step_asks_the_explored_device_whether_its_keyboard_is_up(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+) -> None:
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content="Tap Search"),
+            chat_response(content='{"action":"wait"}'),
+        ]
+    )
+    kobe.explore(max_steps=1)
+    assert device_log == [["adb", "-s", "test-device", "shell", "dumpsys", "input_method"]]
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge(
     tmp_path: Path,
     router_client: OpenRouter,
@@ -503,7 +522,7 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A "privacy policy" keyword in a description does not make the app's own page external."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     about = _screen("com.demo.SettingsActivity", "gray")
     device = _Screens(HOME_SCREEN, about)
     explorer = _explorer(device, tmp_path, router_client)
@@ -546,7 +565,7 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     """Each screen read is a WebP image and an observation record, an action names the
     observation before it, and the step's edge is a transition naming both screens, the
     planner's instruction and element, the action and the nodes the screens became."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     explorer = _explorer(
         _Screens(HOME_SCREEN, _screen("com.demo.SettingsActivity", "gray")),
         tmp_path,
@@ -607,7 +626,7 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
 ) -> None:
     """The page's screen becomes a member of ext_web, the transition leads there, and the
     back press off the page and the screen read after it are external-web recovery."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     browser = _screen("com.demo.ArticleActivity", "blue")
     explorer = _explorer(_Screens(HOME_SCREEN, browser, HOME_SCREEN), tmp_path, router_client)
     router_responses.extend(
@@ -654,7 +673,7 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     browser = _screen("com.demo.ArticleActivity", "blue")
     device = _Screens(HOME_SCREEN, browser, HOME_SCREEN)
     explorer = _explorer(device, tmp_path, router_client)
@@ -699,7 +718,7 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     """The explorer keeps pressing back while the page still shows, so the next step acts
     from an app screen and no edge out of the shared ext_web node gives find_path a
     shortcut between unrelated screens."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     web_page = _screen("com.demo.ArticleActivity", "blue")
     settings = _screen("com.demo.Settings", "gray")
     device = screens_by_log(HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings)
@@ -758,7 +777,7 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     screens = iter(["s0_home", "s1_compose"])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: next(screens))
     monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     instruction = "Tap the floating action button in the bottom right"
     router_responses.extend(
         [
@@ -787,7 +806,7 @@ def test_a_crash_mid_exploration_is_logged_with_its_traceback(
 
     kobe.graph.graph.add_node("s0_home", page_description="home", interactable_elements=[])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _crash)
 
     with caplog.at_level(logging.ERROR, logger="test"), pytest.raises(RuntimeError):
@@ -804,7 +823,7 @@ class _ScriptedDevice:
     h = 200
 
     def __init__(self, *screens: dict[str, object]) -> None:
-        self.config: dict[str, object] = {}
+        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
         self._screens = screens
         self.actions: list[dict[str, object]] = []
 
@@ -829,7 +848,7 @@ def _explore_one_step_the_action_model_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     page = {
         "page_description": "home",
         "elements": [
@@ -981,7 +1000,7 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
 ) -> None:
     """The explorer acts from the node's new ID after identify_state renames it, so the
     step's edge is recorded and its element marked explored."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     agent = Kobe(
         two_screen_device,
         ExplorerConfig(
@@ -1059,7 +1078,7 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
     planned_from: list[object] = []
     monkeypatch.setattr(kobe, "navigate_to_node", replay)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
 
     kobe.explore(max_steps=1, resume_from="s1_settings")
@@ -1080,7 +1099,7 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
     planned_from: list[object] = []
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
 
     kobe.explore(max_steps=1, resume_from="s9_removed")
@@ -1106,7 +1125,7 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
 
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", stop_planning)
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     caplog.set_level(logging.INFO, logger="test")
 
     with pytest.raises(interruption, match="planning stopped"):
@@ -1148,7 +1167,7 @@ def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
 
     monkeypatch.setattr(explorer.graph, "identify_state", identify)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Sort by price", []))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_TAP_REPLY))
 
     explorer.explore(max_steps=1)
@@ -1172,7 +1191,7 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     explorer.coverage_checkpoint_steps = 0
     explorer.graph.graph.add_node("s0_home", page_description="home")
     monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args: "s0_home")
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     for _ in range(2):
         router_responses.extend(
             [
@@ -1423,7 +1442,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     """A replay that fails after the app restart continues from the screen the device is
     on: the next step plans from that screen's node and screenshot. The step log tells
     the replay's actions from the checkpoint's own screen reads."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     open_list = {"action": "tap", "coordinate": [10, 20]}
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
     home, settings = _in_app("Home", "white"), _in_app("Settings", "gray")
@@ -1593,7 +1612,7 @@ def _explore_into_a_permission_dialog(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> _ScriptedDevice:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     home: dict[str, object] = {
         "activity": "com.demo.Home",
         "screenshot": png_screenshot,
@@ -1699,7 +1718,7 @@ def _explore_from_home_into_another_app(
     first step ends on makes. Returns the page description each step planned from."""
     planned_from: list[object] = []
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", planned_from))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
             chat_response(content='{"page_description":"home"}'),
