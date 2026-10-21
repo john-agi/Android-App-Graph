@@ -900,7 +900,7 @@ class UIKobeV2Translator(BaseTranslator):
         """
         prompt = RECORD_PROMPT.format(
             task=task,
-            today=datetime.now().strftime("%Y-%m-%d (%A)"),
+            today=datetime.now().astimezone().strftime("%Y-%m-%d (%A)"),
             memory=self._memory.format(),
         )
 
@@ -1116,7 +1116,7 @@ class UIKobeV2Translator(BaseTranslator):
         option's graph-built one, then to the task text).
         """
         current_desc = graph.nodes[node_id].get("page_description", "")
-        today = datetime.now()
+        today = datetime.now().astimezone()
 
         # Show state keys (from schema) so the model knows what parameters this screen has.
         # Values are omitted — the model can read them from the screenshot directly.

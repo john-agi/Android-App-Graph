@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
-from collections.abc import Callable
+import logging
+import time
+from collections.abc import Callable, Iterator
 
 import httpx
 import pytest
@@ -12,6 +15,7 @@ from hypothesis import strategies as st
 from openrouter import OpenRouter
 from openrouter.components.security import Security
 from openrouter.types import UNSET
+from rich.console import Console
 
 from android_app_graph.utils import (
     REMOVED_KEYS,
@@ -24,6 +28,7 @@ from android_app_graph.utils import (
     resolve_model_settings,
     vlm_utils,
 )
+from android_app_graph.utils import logging as app_logging
 
 
 def _settings(role: str, cfg: dict[str, object]) -> ModelSettings:
@@ -262,3 +267,35 @@ def test_every_invalid_setting_is_reported_on_one_line() -> None:
         "action.request_timeout",
     ):
         assert problem in message
+
+
+@pytest.fixture
+def local_time_east_of_utc() -> Iterator[None]:
+    """Make local time UTC+05:45, so a log time in UTC, or off by whole hours,
+    cannot pass for local wall-clock time on a machine that runs in UTC."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("TZ", "NPT-05:45")
+        time.tzset()
+        try:
+            yield
+        finally:
+            mp.undo()
+            time.tzset()
+
+
+@pytest.mark.usefixtures("local_time_east_of_utc")
+def test_the_log_time_is_local_wall_clock_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators read the log time as local time, so it must not switch to UTC."""
+    created = 1_700_000_000.0
+    local_time = time.strftime("%H:%M:%S", time.localtime(created))
+    assert local_time != time.strftime("%H:%M:%S", time.gmtime(created))
+    output = io.StringIO()
+    monkeypatch.setattr(app_logging, "_console", Console(file=output, color_system=None))
+    record = logging.LogRecord(
+        "android_app_graph.kobe", logging.INFO, __file__, 1, "explored", None, None
+    )
+    record.created = created
+
+    app_logging._ColorHandler().emit(record)
+
+    assert output.getvalue().split(" ", 1)[0] == local_time

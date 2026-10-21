@@ -98,7 +98,7 @@ class _ColorHandler(logging.Handler):
 
             line = Text()
 
-            ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
+            ts = datetime.fromtimestamp(record.created).astimezone().strftime("%H:%M:%S")
             line.append(f"{ts} ", style=self.default_time_style)
 
             level_label = record.levelname[:4].ljust(4)
