@@ -16,7 +16,7 @@ import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
 
@@ -90,14 +90,26 @@ def run_adb(
     )
 
 
-def _adb_stdout_bytes(args: Sequence[str]) -> bytes:
+def _adb_stdout_text(args: Sequence[str], timeout: float) -> str:
+    """Run the adb on ``PATH`` with ``args`` and return its stdout as UTF-8 text. A
+    non-zero exit raises ``CalledProcessError``.
+    """
+    return run_adb(args, output="capture", timeout=timeout, check=True).stdout
+
+
+def _adb_stdout_bytes(args: Sequence[str], timeout: float) -> bytes:
     """Run the adb on ``PATH`` with ``args`` and return its stdout undecoded, for output
     that is not text, such as a PNG. A non-zero exit raises ``CalledProcessError``.
     """
     return subprocess.run(  # noqa: S603  # argv list without a shell; adb arguments come from this package's config and constants
-        [adb_executable(), *args], capture_output=True, check=True
+        [adb_executable(), *args], capture_output=True, timeout=timeout, check=True
     ).stdout
 
+
+# About one adb call in a hundred stalls between the host and the device, sometimes
+# for good, and the next call succeeds. The slowest legitimate read is a dump that
+# gives up waiting for an idle screen, after about 12 s.
+_READ_TIMEOUT_SECONDS = 30
 
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
@@ -123,19 +135,34 @@ class AdbController:
         """Return the UI hierarchy XML, a base64 PNG screenshot, and the focused package
         and activity, both ``"unknown"`` when ``dumpsys window`` names none.
         """
-        xml = run_adb(
-            [*self._serial, "exec-out", "uiautomator dump /dev/stdout"],
-            output="capture",
-            check=True,
+        xml = self._read(
+            _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"]
         )
-        png = _adb_stdout_bytes([*self._serial, "exec-out", "screencap -p"])
+        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"])
         package, activity = self._focused_package_activity()
         return {
-            "xml": xml.stdout,
+            "xml": xml,
             "screenshot": base64.b64encode(png).decode("ascii"),
             "package": package,
             "activity": activity,
         }
+
+    def _read[T](self, read: Callable[[Sequence[str], float], T], args: Sequence[str]) -> T:
+        """Return ``read(args, timeout)``, logging a warning and running it once more
+        when it times out.
+
+        A second timeout raises ``subprocess.TimeoutExpired``, which names the command
+        and the timeout.
+        """
+        try:
+            return read(args, _READ_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            self._logger.warning(
+                "adb %s timed out after %g s; retrying once",
+                shlex.join(args),
+                _READ_TIMEOUT_SECONDS,
+            )
+            return read(args, _READ_TIMEOUT_SECONDS)
 
     def exe_action(self, action: dict[str, Any]) -> None:
         """Send ``action``, a device action from ``tool_call_to_action``, to the device.
@@ -178,10 +205,8 @@ class AdbController:
         """Read the package and activity from the first ``mCurrentFocus`` or
         ``mFocusedApp`` line that names one, expanding a shorthand ``.Activity``.
         """
-        dumpsys = run_adb(
-            [*self._serial, "shell", "dumpsys", "window"], output="capture", check=True
-        )
-        for line in dumpsys.stdout.splitlines():
+        dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"])
+        for line in dumpsys.splitlines():
             if "mCurrentFocus" not in line and "mFocusedApp" not in line:
                 continue
             match = re.search(r"[\w.]+/[\w.]+", line)

@@ -284,6 +284,14 @@ Each command opens one OpenRouter client for the whole run, shares it across eve
 role and closes it when the run ends; each request carries its own role's model,
 temperature and timeout.
 
+Every read of the screen, in exploration and in the audit, runs three adb
+commands: the UI dump, the screenshot and `dumpsys window`. Each one that runs
+longer than 30 seconds is stopped and run once more, with a warning naming the
+command (`adb ... timed out after 30 s; retrying once`). A second timeout raises
+`subprocess.TimeoutExpired`, which names the command and the timeout, and the run
+fails as it does when any other adb command fails. A normal read takes at most
+about 12 seconds, when a dump gives up waiting for an idle screen.
+
 ### Upgrading provider configuration
 
 OpenRouter is the only endpoint and `OPENROUTER_API_KEY` the only credential. A `page_detail`,

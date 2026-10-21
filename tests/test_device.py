@@ -351,16 +351,20 @@ _DUMPSYS_WINDOW = ("-s", _UDID, "shell", "dumpsys", "window")
 class _FakeAdb:
     """Stands in for ``subprocess.run`` and ``time.sleep``.
 
-    ``events`` records each adb argv and each sleep in the order they happened.
-    ``replies`` maps the arguments after ``adb`` to an exit status and raw stdout;
-    any other command exits 0 with no output. Stdout stays bytes unless the caller
-    asks for text, which must name its encoding: the host's locale differs between
-    machines, and Android writes UTF-8.
+    ``events`` records each adb argv and each sleep in the order they happened, and
+    ``timeouts`` the timeout of each adb call. ``replies`` maps the arguments after
+    ``adb`` to an exit status and raw stdout; any other command exits 0 with no
+    output. Stdout stays bytes unless the caller asks for text, which must name its
+    encoding: the host's locale differs between machines, and Android writes UTF-8.
+    ``stalls`` maps the arguments after ``adb`` to how many of their next calls stall
+    until their timeout expires; a stalled call without a timeout would never return.
     """
 
     def __init__(self) -> None:
         self.events: list[list[str] | float] = []
+        self.timeouts: list[float | None] = []
         self.replies: dict[tuple[str, ...], tuple[int, bytes]] = {}
+        self.stalls: dict[tuple[str, ...], int] = {}
 
     def run(
         self,
@@ -369,10 +373,19 @@ class _FakeAdb:
         check: bool = False,
         text: bool = False,
         encoding: str | None = None,
+        timeout: float | None = None,
         **_kwargs: object,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         self.events.append(command)
-        returncode, stdout = self.replies.get(tuple(command[1:]), (0, b""))
+        self.timeouts.append(timeout)
+        args = tuple(command[1:])
+        if self.stalls.get(args, 0) > 0:
+            if timeout is None:
+                msg = f"a stalled call without a timeout never returns: {command}"
+                raise AssertionError(msg)
+            self.stalls[args] -= 1
+            raise subprocess.TimeoutExpired(command, timeout)
+        returncode, stdout = self.replies.get(args, (0, b""))
         if check and returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
         if not text:
@@ -397,6 +410,7 @@ def controller(adb: _FakeAdb) -> device.AdbController:
     adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
     built = device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
     adb.events.clear()
+    adb.timeouts.clear()
     return built
 
 
@@ -476,6 +490,64 @@ def test_get_state_raises_when_a_read_fails(
     adb.replies[failing] = (1, b"")
     with pytest.raises(subprocess.CalledProcessError):
         controller.get_state()
+
+
+_STATE_READS = [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+_EACH_STATE_READ = [
+    pytest.param(_UI_DUMP, "-s emulator-5554 exec-out 'uiautomator dump /dev/stdout'", id="dump"),
+    pytest.param(_SCREENCAP, "-s emulator-5554 exec-out 'screencap -p'", id="screenshot"),
+    pytest.param(_DUMPSYS_WINDOW, "-s emulator-5554 shell dumpsys window", id="dumpsys window"),
+]
+
+
+def test_get_state_gives_each_read_a_30_second_timeout(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    controller.get_state()
+    assert adb.events == _STATE_READS
+    assert adb.timeouts == [30, 30, 30]
+
+
+@pytest.mark.parametrize(("stalled", "command"), _EACH_STATE_READ)
+def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    caplog: pytest.LogCaptureFixture,
+    stalled: tuple[str, ...],
+    command: str,
+) -> None:
+    adb.replies[_UI_DUMP] = (0, b"<hierarchy />")
+    adb.replies[_SCREENCAP] = (0, _PNG)
+    adb.replies[_DUMPSYS_WINDOW] = (0, b"  mCurrentFocus=Window{1 u0 com.demo/.Main}\n")
+    adb.stalls[stalled] = 1
+
+    with caplog.at_level(logging.WARNING, logger="test"):
+        state = controller.get_state()
+
+    assert state == {
+        "xml": "<hierarchy />",
+        "screenshot": base64.b64encode(_PNG).decode("ascii"),
+        "package": "com.demo",
+        "activity": "com.demo.Main",
+    }
+    retried = _STATE_READS.index(["adb", *stalled])
+    assert adb.events == [*_STATE_READS[: retried + 1], *_STATE_READS[retried:]]
+    assert adb.timeouts == [30, 30, 30, 30]
+    assert caplog.messages == [f"adb {command} timed out after 30 s; retrying once"]
+
+
+@pytest.mark.parametrize("stalled", [_UI_DUMP, _SCREENCAP, _DUMPSYS_WINDOW])
+def test_get_state_raises_naming_the_command_when_a_read_times_out_twice(
+    controller: device.AdbController, adb: _FakeAdb, stalled: tuple[str, ...]
+) -> None:
+    adb.stalls[stalled] = 2
+
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        controller.get_state()
+
+    assert (raised.value.cmd, raised.value.timeout) == (["adb", *stalled], 30)
+    stopped = _STATE_READS.index(["adb", *stalled])
+    assert adb.events == [*_STATE_READS[: stopped + 1], ["adb", *stalled]]
 
 
 @pytest.mark.parametrize(
