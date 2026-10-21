@@ -22,8 +22,8 @@ import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import NamedTuple
 
-MERGE_FLOOR = 0.79
-GROUPING_FLOOR = 0.79
+MERGE_FLOOR = 0.67
+GROUPING_FLOOR = 0.95
 HOME_SHARE = 0.5
 CHECKS_PER_NODE = 3
 

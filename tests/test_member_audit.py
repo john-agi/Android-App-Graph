@@ -122,19 +122,8 @@ def _load(path: Path) -> GraphManager:
     return graph
 
 
-def _check_members(
-    graph: GraphManager,
-    path: Path,
-    verdicts: MemberVerdicts,
-    *,
-    grouping_floor: float = GROUPING_FLOOR,
-) -> audit.MemberReport:
-    return audit.check_members(
-        graph,
-        verdicts,
-        read_exploration_transitions(graph_steps_dir(path)),
-        grouping_floor=grouping_floor,
-    )
+def _check_members(graph: GraphManager, path: Path, verdicts: MemberVerdicts) -> audit.MemberReport:
+    return audit.check_members(graph, verdicts, read_exploration_transitions(graph_steps_dir(path)))
 
 
 def _checks(report: audit.MemberReport) -> list[dict[str, Any]]:
@@ -471,16 +460,15 @@ def test_single_member_diffuse_and_vectorless_nodes_get_no_check(
 
 
 @pytest.mark.parametrize(
-    ("issues", "grouping_floor", "across", "sources"),
+    ("issues", "across", "sources"),
     [
-        ([{"node_a": "s0_home", "node_b": "s1_home"}], GROUPING_FLOOR, 0.0, ["text_audit"]),
-        ([], (1 + MERGE_FLOOR) / 2, (3 * MERGE_FLOOR + 1) / 4, ["image"]),
+        ([{"node_a": "s0_home", "node_b": "s1_home"}], 0.0, ["text_audit"]),
+        ([], (MERGE_FLOOR + GROUPING_FLOOR) / 2, ["image"]),
     ],
     ids=["text", "image-between-the-floors"],
 )
 def test_a_merge_below_the_grouping_floor_is_not_split_again(
     issues: list[dict[str, str]],
-    grouping_floor: float,
     across: float,
     sources: list[str],
     graph_path: Path,
@@ -488,11 +476,11 @@ def test_a_merge_below_the_grouping_floor_is_not_split_again(
     write_member_graph: Callable[..., None],
 ) -> None:
     """A merged pair whose closest members fall below the grouping floor, as a pair the
-    model proposes can, or one the images propose between a lower merge floor and the
+    model proposes can, or one the images propose between the merge floor and the
     grouping floor, is two groups of the merged node. Their split check asks about
     the pair the merge was verified on and gets its answer back, with no second
     verifier call."""
-    linked = math.acos(_quarter_of_the_way_to(grouping_floor))
+    linked = math.acos(LINKED)
     apart = math.acos(across)
     write_member_graph(
         graph_path,
@@ -510,13 +498,11 @@ def test_a_merge_below_the_grouping_floor_is_not_split_again(
 
     (proposal,) = graph.merge_proposals(issues)
     (merge,) = graph.verify_merge_proposals([proposal], verdicts)
-    report = _check_members(graph, graph_path, verdicts, grouping_floor=grouping_floor)
-    (check,) = report.checks
+    (check,) = _check_members(graph, graph_path, verdicts).checks
 
     assert proposal.sources == sources
     assert merge["status"] == "merged"
     assert merge["image_score"] == pytest.approx(across)
-    assert report.as_record()["grouping_floor"] == grouping_floor
     assert (check["kind"], check["group"]) == ("split", ["000003", "000004"])
     assert (check["members"], check["same"], check["reused"]) == (["000002", "000003"], True, True)
     assert models.shown == [("000002", "000003")]

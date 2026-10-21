@@ -158,10 +158,9 @@ def select_apps_for_audit(
 
 @dataclass(frozen=True, slots=True)
 class MemberReport:
-    """Every member check the audit made on the groups at ``grouping_floor``, with the
-    change each confirmed, and the diffuse nodes and the groups left unchecked."""
+    """Every member check the audit made, with the change each confirmed, and the
+    diffuse nodes and the groups left unchecked."""
 
-    grouping_floor: float
     checks: list[dict[str, object]]
     diffuse: list[dict[str, object]]
     unchecked: list[dict[str, object]]
@@ -172,7 +171,7 @@ class MemberReport:
 
     def as_record(self) -> dict[str, object]:
         return {
-            "grouping_floor": self.grouping_floor,
+            "grouping_floor": GROUPING_FLOOR,
             "home_share": HOME_SHARE,
             "checks_per_node": CHECKS_PER_NODE,
             "checks": self.checks,
@@ -182,29 +181,24 @@ class MemberReport:
 
 
 def check_members(
-    graph: GraphManager,
-    verdicts: MemberVerdicts,
-    transitions: Sequence[TransitionRecord],
-    *,
-    grouping_floor: float = GROUPING_FLOOR,
+    graph: GraphManager, verdicts: MemberVerdicts, transitions: Sequence[TransitionRecord]
 ) -> MemberReport:
-    """Check the members of every in-app node, grouped at ``grouping_floor``, against
+    """Check the members of every in-app node, grouped at ``GROUPING_FLOOR``, against
     the group that holds its representative; README.md#member-checks.
 
     Every split check of every node runs before any move check, so a moved member can
     go to a node a split made. ``verdicts`` holds the run's verifier answers, which
     the checks reuse and add to: two merged nodes whose closest members fall below
-    ``grouping_floor`` are two groups of the merged node, and their split check is the
+    ``GROUPING_FLOOR`` are two groups of the merged node, and their split check is the
     pair the merge was verified on, so the merged node stays whole without a second
     verifier call. ``transitions`` are the exploration's transition records, by which
     edge actions follow the members that move.
     """
-    plans = graph.member_plans(grouping_floor)
+    plans = graph.member_plans()
     checks = [(node, check) for node, plan in plans for check in plan.checks]
     splits = [(node, check) for node, check in checks if len(check.group) > 1]
     moves = [(node, check) for node, check in checks if len(check.group) == 1]
     return MemberReport(
-        grouping_floor=grouping_floor,
         checks=[
             _check_member_group(graph, node, check, verdicts, transitions)
             for node, check in (*splits, *moves)

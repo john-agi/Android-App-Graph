@@ -697,7 +697,7 @@ verified once whatever proposed it. Each pair names its sources:
 
 - `text_audit`: the model's `merge_nodes` issues;
 - `image`: two in-app nodes of one package whose closest members reach a cosine of
-  0.79, the merge floor, between their screenshot vectors (see
+  0.67, the merge floor, between their screenshot vectors (see
   [Embedding caches](#embedding-caches)). The merge floor and the grouping floor of
   [member checks](#member-checks) are set separately: a lower merge floor proposes
   more pairs, and a higher grouping floor separates more members.
@@ -720,7 +720,7 @@ verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reu
 #### Member checks
 
 After the merges, the members of each in-app node are grouped by their screenshot
-vectors: two members with a cosine of at least 0.79, the grouping floor, are linked,
+vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
 and the groups are the connected components of those links, single-linkage
 clustering. Only members with a vector and a stored describe output (`describe` in
 their [record](#step-log)) are grouped. The group that holds the representative is
