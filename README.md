@@ -148,12 +148,14 @@ set +a
 `.env` is ignored by git. Keep all four model selections from
 [`.env.example`](.env.example), or replace them with exact OpenRouter model IDs.
 The application has no built-in model defaults. Each operation requires explicit,
-nonempty model settings. It validates every setting it uses (models, temperatures,
-timeouts, removed keys and `OPENROUTER_API_KEY`) before any device setup or API
-request: `app-graph` and `app-graph-audit` report every problem in a one-line
-usage error. You may also supply these environment variables directly in your
-shell, CI or container; a physical `.env` file is not required or loaded
-automatically.
+nonempty model settings. Before any device setup or API request, `app-graph` and
+`app-graph-audit` reject every config key that neither command uses, naming each
+by its path, such as `vlm.action.max_tokens` or `apps[0].activity`, and
+validate every setting the operation uses (models, temperatures, timeouts and
+`OPENROUTER_API_KEY`); they report the problems in a one-line usage error.
+`CONFIG_KEYS` in `src/android_app_graph/utils/__init__.py` lists the accepted
+keys. You may also supply these environment variables directly in your shell, CI
+or container; a physical `.env` file is not required or loaded automatically.
 
 | Environment variable | Role |
 |---|---|
@@ -291,15 +293,6 @@ command (`adb ... timed out after 30 s; retrying once`). A second timeout raises
 `subprocess.TimeoutExpired`, which names the command and the timeout, and the run
 fails as it does when any other adb command fails. A normal read takes at most
 about 12 seconds, when a dump gives up waiting for an idle screen.
-
-### Upgrading provider configuration
-
-OpenRouter is the only endpoint and `OPENROUTER_API_KEY` the only credential. A `page_detail`,
-`embedding`, `instruction` or `action` block that still sets `api_key`,
-`base_url` or `native_base_url` is rejected, with an error naming each key, by
-every command, even in a block the operation does not use. Configs copied from
-upstream UI-KOBE still set these keys: delete them and export
-`OPENROUTER_API_KEY` instead.
 
 ### Embedding caches
 

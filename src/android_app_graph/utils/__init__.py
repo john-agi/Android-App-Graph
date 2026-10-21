@@ -1,11 +1,14 @@
-"""Client configuration; required settings: README.md#configure-api-credentials."""
+"""The config keys the commands accept, and each role's client settings.
+
+Required settings: README.md#configure-api-credentials.
+"""
 
 from __future__ import annotations
 
 import math
 import os
 import re
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from typing import NamedTuple
 
@@ -16,8 +19,30 @@ from android_app_graph.payloads import as_object_dict
 from android_app_graph.retrying import DeadlineTransport
 
 ROLES = ("page_detail", "embedding", "instruction", "action")
-# Earlier releases and operator configs copied from upstream UI-KOBE set these.
-REMOVED_KEYS = ("api_key", "base_url", "native_base_url")
+_CHAT_ROLES = ("page_detail", "instruction", "action")
+# Every key app-graph or app-graph-audit uses and no other, by path; "[]" stands for each
+# entry of a list. Both commands accept all of them, since they share one config file.
+CONFIG_KEYS = frozenset(
+    {
+        "device.udid",
+        "device.avd_name",
+        "experiment.graph_dir",
+        "experiment.max_steps",
+        "experiment.resume_from",
+        "experiment.coverage_checkpoint_steps",
+        "experiment.coverage_checkpoint_top_k",
+        "apps[].name",
+        "apps[].package_name",
+        "apps[].launch_activity",
+        "vlm.similarity_threshold",
+        "vlm.page_detail.audit_request_timeout",
+        *(f"vlm.{role}.{key}" for role in ROLES for key in ("model", "request_timeout", "timeout")),
+        *(f"vlm.{role}.temperature" for role in _CHAT_ROLES),
+    }
+)
+_SECTIONS = frozenset(
+    key[: separator.start()] for key in CONFIG_KEYS for separator in re.finditer(r"\.|\[\]", key)
+)
 DEFAULT_REQUEST_TIMEOUT = 60.0
 DEFAULT_AUDIT_TIMEOUT = 300.0
 MAX_TEMPERATURE = 2
@@ -52,15 +77,35 @@ def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> Gen
         yield client
 
 
-def removed_key_errors(vlm_config: Mapping[str, object]) -> list[str]:
-    """Name every removed endpoint or credential key left in a role block."""
-    return [
-        f"{role}.{key} was removed: OpenRouter is the only endpoint and OPENROUTER_API_KEY "
-        "the only credential; delete this key."
-        for role in ROLES
-        for key in REMOVED_KEYS
-        if key in as_object_dict(vlm_config.get(role))
-    ]
+def _child(parent: str, key: object) -> str:
+    return f"{parent}.{key}" if parent else str(key)
+
+
+def _unknown_keys(value: object, pattern: str, path: str) -> Iterator[str]:
+    """Yield the path of each key under ``value`` that is not in ``CONFIG_KEYS``.
+
+    ``pattern`` is ``path`` with ``[]`` for each list index. The value of an
+    accepted key is not searched; a section of the wrong shape names what it holds.
+    """
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _unknown_keys(item, f"{pattern}[]", f"{path}[{index}]")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            key_pattern, key_path = _child(pattern, key), _child(path, key)
+            if key_pattern in _SECTIONS:
+                yield from _unknown_keys(item, key_pattern, key_path)
+            elif key_pattern not in CONFIG_KEYS:
+                yield key_path
+
+
+def check_config_keys(config: object) -> None:
+    """Reject a loaded config holding any key no command uses, naming every such key by
+    its path and never its value, which can be a credential."""
+    unknown = list(_unknown_keys(config, "", ""))
+    if unknown:
+        msg = f"Unknown configuration keys: {', '.join(unknown)}"
+        raise ValueError(msg)
 
 
 def resolve_api_key() -> str:
@@ -167,8 +212,8 @@ def _role_settings(
 def resolve_model_settings(
     vlm_config: Mapping[str, object], *, roles: tuple[str, ...]
 ) -> dict[str, ModelSettings]:
-    """Validate an operation's settings, and removed keys in every role block, all at once."""
-    errors = removed_key_errors(vlm_config)
+    """Validate an operation's settings all at once."""
+    errors: list[str] = []
     settings: dict[str, ModelSettings] = {}
     for role in roles:
         resolved = _role_settings(vlm_config, role, errors)

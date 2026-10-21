@@ -16,7 +16,12 @@ from android_app_graph.device import (
     launch_app,
 )
 from android_app_graph.kobe import EXPLORATION_ROLES, ExplorerConfig, Kobe
-from android_app_graph.utils import open_client, resolve_api_key, resolve_model_settings
+from android_app_graph.utils import (
+    check_config_keys,
+    open_client,
+    resolve_api_key,
+    resolve_model_settings,
+)
 from android_app_graph.utils.logging import setup_logging
 
 
@@ -80,6 +85,7 @@ def main() -> None:
         config = yaml.safe_load(f)
     vlm_config = config.get("vlm", {})
     try:
+        check_config_keys(config)
         resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
         api_key = resolve_api_key()
     except ValueError as exc:

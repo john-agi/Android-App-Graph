@@ -1843,6 +1843,11 @@ def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
     [
         ({"instruction": {"request_timeout": 0}}, "test", "instruction.request_timeout must be"),
         ({"page_detail": {"audit_request_timeout": -5}}, "test", "audit_request_timeout must be"),
+        (
+            {"page_detail": {"temprature": 0}},
+            "test",
+            "Unknown configuration keys: vlm.page_detail.temprature",
+        ),
         ({}, None, "OPENROUTER_API_KEY is required"),
     ],
 )

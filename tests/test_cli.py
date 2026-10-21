@@ -166,6 +166,11 @@ def test_explorer_reports_all_missing_models_before_any_device_work(
     ("role_settings", "key", "message"),
     [
         ({"action": {"temperature": "warm"}}, "test", "action.temperature must be"),
+        (
+            {"instruction": {"max_tokens": 512}},
+            "test",
+            "Unknown configuration keys: vlm.instruction.max_tokens",
+        ),
         ({}, None, "OPENROUTER_API_KEY is required"),
     ],
 )

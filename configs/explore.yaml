@@ -5,7 +5,6 @@ device:
   avd_name: AndroidWorldAvd
 
 experiment:
-  name: demo
   graph_dir: graphs/
   max_steps: 100
   resume_from: auto
