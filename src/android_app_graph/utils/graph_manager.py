@@ -532,10 +532,7 @@ class GraphManager:
 
     def _renamed_node_id(self, node_id: str, page_description: str) -> str:
         """Build a unique node ID that keeps the original numeric prefix."""
-        if "_" in node_id:
-            prefix = node_id.split("_", 1)[0]
-        else:
-            prefix = node_id
+        prefix = node_id.split("_", 1)[0] if "_" in node_id else node_id
         base = f"{prefix}_{self._sanitize_description_for_node_id(page_description)}"
         if base == node_id or base not in self.graph:
             return base
