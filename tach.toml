@@ -47,6 +47,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "android_app_graph.ui_tree"
+depends_on = []
+
+[[modules]]
 path = "android_app_graph.cli"
 depends_on = [
     "android_app_graph.device",
