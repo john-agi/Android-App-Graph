@@ -739,7 +739,9 @@ def test_sdk_assistant_content_variants(
     assert vlm.message_text(response) == ("hello \nworld" if isinstance(content, list) else "")
 
 
-def test_text_embeddings_use_the_documented_sdk_format(
+@pytest.mark.parametrize("image", [False, True])
+def test_text_and_image_embeddings_use_the_documented_sdk_format(
+    image: bool,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -748,14 +750,42 @@ def test_text_embeddings_use_the_documented_sdk_format(
     tracked_usage: vlm.TokenTracker,
 ) -> None:
     router_responses.append(httpx.Response(200, json=embedding_body))
-    vector = vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
+    vector = (
+        vlm.get_image_embedding(router_client, "shot", model="voyageai/voyage-multimodal-3.5")
+        if image
+        else vlm.get_embedding(router_client, "home", model="voyageai/voyage-multimodal-3.5")
+    )
     assert vector == [0.25, 0.75]
     body = json.loads(router_requests[0].content)
-    assert body["model"] == "google/gemini-embedding-2"
+    assert body["model"] == "voyageai/voyage-multimodal-3.5"
     assert body["encoding_format"] == "float"
-    assert body["input"] == "home"
+    assert body["input"] == (
+        [{"content": [{"type": "image_url", "image_url": {"url": "data:image/webp;base64,shot"}}]}]
+        if image
+        else "home"
+    )
     assert tracked_usage.snapshot() == embedding_usage_totals
-    assert tracked_usage.snapshot_by_type() == {"embedding": 5}
+    assert tracked_usage.snapshot_by_type() == {"image_embedding" if image else "embedding": 5}
+
+
+def test_an_unusable_image_embedding_is_asked_for_once_more(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    tracked_usage: vlm.TokenTracker,
+) -> None:
+    router_responses.extend(
+        [
+            httpx.Response(
+                200, json={**embedding_body, "data": [{"object": "embedding", "embedding": []}]}
+            ),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    assert vlm.get_image_embedding(router_client, "shot", model="provider/image") == [0.25, 0.75]
+    assert len(router_requests) == 2
+    assert tracked_usage.summary()["image_embedding:provider/image"]["calls"] == 2
 
 
 @pytest.mark.parametrize(
@@ -794,6 +824,10 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
             return vlm.message_text(reply)
         case "text":
             return vlm.get_embedding(client, "home", model="google/gemini-embedding-2")
+        case "image":
+            return vlm.get_image_embedding(
+                client, png_screenshot, model="google/gemini-embedding-2"
+            )
         case "action":
             return vlm.predict_next_action(
                 client,
@@ -812,12 +846,13 @@ _GOOD_REPLIES: dict[str, str] = {
 _RESULTS: dict[str, object] = {
     "chat": "test reply",
     "text": [0.25, 0.75],
+    "image": [0.25, 0.75],
     "action": {"action": "tap", "x": 540, "y": 960},
     "description": "home",
 }
 
 
-@pytest.mark.parametrize("operation", ["chat", "text", "action", "description"])
+@pytest.mark.parametrize("operation", ["chat", "text", "image", "action", "description"])
 def test_a_429_is_retried_by_neither_the_sdk_nor_the_app(
     operation: str,
     router_client: OpenRouter,
@@ -924,6 +959,7 @@ def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
             chat_response(content="Tap Search"),
             chat_response(content='{"action":"wait"}'),
             httpx.Response(200, json=embedding_body),
+            httpx.Response(200, json=embedding_body),
         ]
     )
     vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
@@ -948,7 +984,8 @@ def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
         settings=ACTION,
     )
     vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    assert len(sent) == 10
+    vlm.get_image_embedding(router_client, png_screenshot, model="google/gemini-embedding-2")
+    assert len(sent) == 11
     assert {kwargs["timeout_ms"] for kwargs in sent} == {60_000, 300_000}
     for kwargs in sent:
         timeout_ms, retries = kwargs["timeout_ms"], kwargs["retries"]
@@ -1004,7 +1041,7 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
     assert len(router_requests) == (2 if operation == "action" else 1)
 
 
-@pytest.mark.parametrize("operation", ["chat", "text", "action"])
+@pytest.mark.parametrize("operation", ["chat", "text", "image", "action"])
 @pytest.mark.parametrize("recover", [False, True])
 def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
     operation: str,
@@ -1018,7 +1055,7 @@ def test_sdk_validation_of_a_2xx_reply_is_re_asked_once(
     no_sleep: list[float],
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    good = embedding_body if operation == "text" else chat_body
+    good = embedding_body if operation in {"text", "image"} else chat_body
     missing = "system_fingerprint" if operation == "chat" else "model"
     bad = {key: value for key, value in good.items() if key != missing}
     router_responses.append(httpx.Response(200, json=bad))

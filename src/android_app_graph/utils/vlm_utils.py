@@ -1532,6 +1532,40 @@ def get_embedding(
     return call_with_retry("[API] text embedding", request_embedding)
 
 
+def get_image_embedding(
+    client: OpenRouter,
+    screenshot_b64: str,
+    model: str,
+    *,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+) -> list[float]:
+    """Embed a screenshot, which ``screen_image`` encoded when it was captured, as
+    OpenRouter's multimodal content array:
+    https://openrouter.ai/docs/api_reference/embeddings.
+    """
+
+    def request_embedding() -> list[float]:
+        response = client.embeddings.generate(
+            model=model,
+            input=[
+                {
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{MEDIA_TYPE};base64,{screenshot_b64}"},
+                        }
+                    ]
+                }
+            ],
+            encoding_format="float",
+            retries=capped_retries(request_timeout),
+            timeout_ms=int(request_timeout * 1000),
+        )
+        return _embedding_vector(response, call_type="image_embedding", model=model)
+
+    return call_with_retry("[API] image embedding", request_embedding)
+
+
 def _parse_tool_call(raw: str) -> dict[str, Any] | None:
     """Extract the JSON arguments from a <tool_call> block, even one missing its </tool_call>."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
