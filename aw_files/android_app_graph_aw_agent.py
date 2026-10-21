@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,49 +38,40 @@ def _swipe_direction_from_aitk(action: dict[str, Any]) -> str:
     return "down" if dy > 0 else "up"
 
 
+_ANDROID_WORLD_ACTIONS: dict[str, Callable[[dict[str, Any]], json_action.JSONAction | None]] = {
+    "tap": lambda aitk_action: json_action.JSONAction(
+        action_type=json_action.CLICK, x=aitk_action["x"], y=aitk_action["y"]
+    ),
+    "long_press": lambda aitk_action: json_action.JSONAction(
+        action_type=json_action.LONG_PRESS, x=aitk_action["x"], y=aitk_action["y"]
+    ),
+    "swipe": lambda aitk_action: json_action.JSONAction(
+        action_type=json_action.SWIPE, direction=_swipe_direction_from_aitk(aitk_action)
+    ),
+    "back": lambda _aitk_action: json_action.JSONAction(action_type=json_action.NAVIGATE_BACK),
+    "home": lambda _aitk_action: json_action.JSONAction(action_type=json_action.NAVIGATE_HOME),
+    "enter": lambda _aitk_action: json_action.JSONAction(action_type=json_action.KEYBOARD_ENTER),
+    "wait": lambda _aitk_action: json_action.JSONAction(action_type=json_action.WAIT),
+    "open": lambda aitk_action: json_action.JSONAction(
+        action_type=json_action.OPEN_APP, app_name=aitk_action["app"]
+    ),
+    "end": lambda _aitk_action: json_action.JSONAction(
+        action_type=json_action.STATUS, goal_status="complete"
+    ),
+    "type": lambda _aitk_action: None,
+}
+
+
 def _aitk_to_android_world_action(
     aitk_action: dict[str, Any],
 ) -> json_action.JSONAction | None:
     action = aitk_action.get("action")
-    if action == "tap":
-        return json_action.JSONAction(
-            action_type=json_action.CLICK,
-            x=aitk_action["x"],
-            y=aitk_action["y"],
-        )
-    if action == "long_press":
-        return json_action.JSONAction(
-            action_type=json_action.LONG_PRESS,
-            x=aitk_action["x"],
-            y=aitk_action["y"],
-        )
-    if action == "swipe":
-        return json_action.JSONAction(
-            action_type=json_action.SWIPE,
-            direction=_swipe_direction_from_aitk(aitk_action),
-        )
-    if action == "back":
-        return json_action.JSONAction(action_type=json_action.NAVIGATE_BACK)
-    if action == "home":
-        return json_action.JSONAction(action_type=json_action.NAVIGATE_HOME)
-    if action == "enter":
-        return json_action.JSONAction(action_type=json_action.KEYBOARD_ENTER)
-    if action == "wait":
-        return json_action.JSONAction(action_type=json_action.WAIT)
-    if action == "open":
-        return json_action.JSONAction(
-            action_type=json_action.OPEN_APP,
-            app_name=aitk_action["app"],
-        )
-    if action == "end":
-        return json_action.JSONAction(
-            action_type=json_action.STATUS,
-            goal_status="complete",
-        )
-    if action == "type":
-        return None
-    msg = f"Unsupported AITK action for Android World: {aitk_action}"
-    raise ValueError(msg)
+    # A JSON list as the action is unhashable, and must stay a ValueError.
+    build = _ANDROID_WORLD_ACTIONS.get(action) if isinstance(action, str) else None
+    if build is None:
+        msg = f"Unsupported AITK action for Android World: {aitk_action}"
+        raise ValueError(msg)
+    return build(aitk_action)
 
 
 def load_agent_settings(config_path: Path) -> tuple[str, dict]:
