@@ -1,12 +1,18 @@
 """How alike the member images of graph nodes are: unit vectors, the closest pair of
 two member sets, and the groups a node's members form.
 
-Two members are linked when the cosine of their image vectors reaches a floor, and
-a node's groups are the connected components of those links: single-linkage
-clustering cut at distance ``1 - floor``. Two groups exist exactly when every pair
-across them falls below the floor, so the pair a check shows the verifier, the
-closest one across the gap, is the strongest evidence that the groups are one
-screen. Each vector is scaled to length 1 once, so a cosine is one ``math.sumprod``.
+Two floors on the cosine of two image vectors decide which checks the verifier gets,
+never their outcome. Two nodes whose closest members reach ``MERGE_FLOOR`` are
+proposed for a merge. Two members of one node are linked when they reach
+``GROUPING_FLOOR``, and the node's groups are the connected components of those
+links: single-linkage clustering cut at distance ``1 - GROUPING_FLOOR``. The floors
+pull in opposite directions, a lower merge floor proposing more pairs and a higher
+grouping floor separating more members, so each is set on its own.
+
+Two groups exist exactly when every pair across them falls below the grouping floor,
+so the pair a check shows the verifier, the closest one across the gap, is the
+strongest evidence that the groups are one screen. Each vector is scaled to length 1
+once, so a cosine is one ``math.sumprod``.
 """
 
 from __future__ import annotations
@@ -16,7 +22,8 @@ import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import NamedTuple
 
-MEMBER_SIMILARITY_FLOOR = 0.79
+MERGE_FLOOR = 0.79
+GROUPING_FLOOR = 0.79
 HOME_SHARE = 0.5
 CHECKS_PER_NODE = 3
 
@@ -127,7 +134,7 @@ def plan_member_checks(
     representative: str,
     units: Mapping[str, Sequence[float]],
     *,
-    floor: float = MEMBER_SIMILARITY_FLOOR,
+    floor: float = GROUPING_FLOOR,
 ) -> MemberPlan | None:
     """Return the groups of the ``members`` of a node that have a vector in ``units``,
     and the checks to make on them, or ``None`` when ``representative`` has no vector.

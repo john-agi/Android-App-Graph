@@ -51,8 +51,8 @@ from android_app_graph.device import (
 from android_app_graph.graph_files import graph_steps_dir
 from android_app_graph.member_groups import (
     CHECKS_PER_NODE,
+    GROUPING_FLOOR,
     HOME_SHARE,
-    MEMBER_SIMILARITY_FLOOR,
     MemberCheck,
 )
 from android_app_graph.step_log import (
@@ -158,9 +158,10 @@ def select_apps_for_audit(
 
 @dataclass(frozen=True, slots=True)
 class MemberReport:
-    """Every member check the audit made, with the change each confirmed, and the
-    diffuse nodes and the groups left unchecked."""
+    """Every member check the audit made on the groups at ``grouping_floor``, with the
+    change each confirmed, and the diffuse nodes and the groups left unchecked."""
 
+    grouping_floor: float
     checks: list[dict[str, object]]
     diffuse: list[dict[str, object]]
     unchecked: list[dict[str, object]]
@@ -171,7 +172,7 @@ class MemberReport:
 
     def as_record(self) -> dict[str, object]:
         return {
-            "floor": MEMBER_SIMILARITY_FLOOR,
+            "grouping_floor": self.grouping_floor,
             "home_share": HOME_SHARE,
             "checks_per_node": CHECKS_PER_NODE,
             "checks": self.checks,
@@ -181,21 +182,29 @@ class MemberReport:
 
 
 def check_members(
-    graph: GraphManager, verdicts: MemberVerdicts, transitions: Sequence[TransitionRecord]
+    graph: GraphManager,
+    verdicts: MemberVerdicts,
+    transitions: Sequence[TransitionRecord],
+    *,
+    grouping_floor: float = GROUPING_FLOOR,
 ) -> MemberReport:
-    """Check the members of every in-app node against the group that holds its
-    representative; README.md#member-checks.
+    """Check the members of every in-app node, grouped at ``grouping_floor``, against
+    the group that holds its representative; README.md#member-checks.
 
     Every split check of every node runs before any move check, so a moved member can
     go to a node a split made. ``verdicts`` holds the run's verifier answers, which
-    the checks reuse and add to, and ``transitions`` the exploration's transition
-    records, by which edge actions follow the members that move.
+    the checks reuse and add to: two merged nodes whose closest members fall below
+    ``grouping_floor`` are two groups of the merged node, and their split check is the
+    pair the merge was verified on, so the merged node stays whole without a second
+    verifier call. ``transitions`` are the exploration's transition records, by which
+    edge actions follow the members that move.
     """
-    plans = graph.member_plans()
+    plans = graph.member_plans(grouping_floor)
     checks = [(node, check) for node, plan in plans for check in plan.checks]
     splits = [(node, check) for node, check in checks if len(check.group) > 1]
     moves = [(node, check) for node, check in checks if len(check.group) == 1]
     return MemberReport(
+        grouping_floor=grouping_floor,
         checks=[
             _check_member_group(graph, node, check, verdicts, transitions)
             for node, check in (*splits, *moves)

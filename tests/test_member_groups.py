@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 
 from android_app_graph.member_groups import (
     CHECKS_PER_NODE,
-    MEMBER_SIMILARITY_FLOOR,
+    GROUPING_FLOOR,
     MemberPair,
     closest_pair,
     cosine,
@@ -29,7 +29,7 @@ def _at(degrees: float) -> list[float]:
 
 
 # Members this many degrees apart are linked; twice as far apart, they are not.
-LINKED = 0.6 * math.degrees(math.acos(MEMBER_SIMILARITY_FLOOR))
+LINKED = 0.6 * math.degrees(math.acos(GROUPING_FLOOR))
 
 
 def _units(**angles: float) -> dict[str, list[float]]:
@@ -73,9 +73,9 @@ def test_a_set_without_vectors_has_no_closest_pair() -> None:
 
 
 def test_single_linkage_joins_a_chain_whose_ends_are_apart() -> None:
-    """``b`` links ``a`` and ``c`` although they are 40 degrees apart: one group."""
-    units = _units(a=0, b=LINKED, c=2 * LINKED, d=90)
-    assert linked_groups(["a", "b", "c", "d"], units, MEMBER_SIMILARITY_FLOOR) == [
+    """``b`` links ``a`` and ``c`` although they are too far apart to link: one group."""
+    units = _units(a=0, b=LINKED, c=2 * LINKED, d=180)
+    assert linked_groups(["a", "b", "c", "d"], units, GROUPING_FLOOR) == [
         ["a", "b", "c"],
         ["d"],
     ]
@@ -83,7 +83,7 @@ def test_single_linkage_joins_a_chain_whose_ends_are_apart() -> None:
 
 def test_groups_keep_the_order_of_their_members() -> None:
     units = _units(a=0, b=90, c=0, d=90)
-    assert linked_groups(["a", "b", "c", "d"], units, MEMBER_SIMILARITY_FLOOR) == [
+    assert linked_groups(["a", "b", "c", "d"], units, GROUPING_FLOOR) == [
         ["a", "c"],
         ["b", "d"],
     ]
@@ -97,9 +97,9 @@ def test_groups_are_the_connected_components_of_the_links(angles: list[float]) -
     units = {member: _at(degrees) for member, degrees in zip(members, angles, strict=True)}
 
     def linked(first: str, second: str) -> bool:
-        return cosine(units[first], units[second]) >= MEMBER_SIMILARITY_FLOOR
+        return cosine(units[first], units[second]) >= GROUPING_FLOOR
 
-    groups = linked_groups(members, units, MEMBER_SIMILARITY_FLOOR)
+    groups = linked_groups(members, units, GROUPING_FLOOR)
 
     assert sorted(itertools.chain.from_iterable(groups)) == sorted(members)
     for first, second in itertools.combinations(groups, 2):

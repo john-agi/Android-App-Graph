@@ -21,7 +21,7 @@ from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
 from android_app_graph.graph_files import graph_steps_dir
-from android_app_graph.member_groups import MEMBER_SIMILARITY_FLOOR
+from android_app_graph.member_groups import GROUPING_FLOOR, MERGE_FLOOR
 from android_app_graph.step_log import read_exploration_transitions
 from android_app_graph.utils import ModelSettings, graph_manager
 from android_app_graph.utils.graph_manager import GraphManager, MemberVerdicts
@@ -31,9 +31,18 @@ PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 EMBEDDING = ModelSettings("google/gemini-embedding-2")
 
 X, Y, Z = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]
-# A cosine a quarter of the way from 1 to the floor: members this alike are linked,
-# and two turned toward each other's axis are not.
-ALIKE = 1 - (1 - MEMBER_SIMILARITY_FLOOR) / 4
+
+
+def _quarter_of_the_way_to(floor: float) -> float:
+    """The cosine a quarter of the way from 1 down to ``floor``."""
+    return 1 - (1 - floor) / 4
+
+
+# Two members of a node this alike are linked, and two turned toward each other's
+# axis are not.
+LINKED = _quarter_of_the_way_to(GROUPING_FLOOR)
+# Two nodes whose closest members are this alike are proposed for a merge.
+PROPOSED = _quarter_of_the_way_to(MERGE_FLOOR)
 
 
 def _toward(start: list[float], end: list[float], cosine: float) -> list[float]:
@@ -41,6 +50,11 @@ def _toward(start: list[float], end: list[float], cosine: float) -> list[float]:
     ``start`` and ``end`` are orthogonal unit vectors."""
     sine = math.sqrt(1 - cosine * cosine)
     return [cosine * a + sine * b for a, b in zip(start, end, strict=True)]
+
+
+def _turned(angle: float) -> list[float]:
+    """The unit vector ``angle`` radians from X toward Y."""
+    return [math.cos(angle), math.sin(angle), 0.0]
 
 
 def _member(image_b64: str) -> str:
@@ -108,8 +122,19 @@ def _load(path: Path) -> GraphManager:
     return graph
 
 
-def _check_members(graph: GraphManager, path: Path, verdicts: MemberVerdicts) -> audit.MemberReport:
-    return audit.check_members(graph, verdicts, read_exploration_transitions(graph_steps_dir(path)))
+def _check_members(
+    graph: GraphManager,
+    path: Path,
+    verdicts: MemberVerdicts,
+    *,
+    grouping_floor: float = GROUPING_FLOOR,
+) -> audit.MemberReport:
+    return audit.check_members(
+        graph,
+        verdicts,
+        read_exploration_transitions(graph_steps_dir(path)),
+        grouping_floor=grouping_floor,
+    )
 
 
 def _checks(report: audit.MemberReport) -> list[dict[str, Any]]:
@@ -120,7 +145,7 @@ def _checks(report: audit.MemberReport) -> list[dict[str, Any]]:
 # Two nodes whose representatives look nothing alike, but whose second members do.
 CLOSE_PAIR = {
     "s0_home": [("000001", X), ("000002", Y)],
-    "s1_home": [("000003", Z), ("000004", _toward(Y, Z, ALIKE))],
+    "s1_home": [("000003", Z), ("000004", _toward(Y, Z, PROPOSED))],
 }
 
 
@@ -144,7 +169,7 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
 
     assert (proposal.node_a, proposal.node_b, proposal.sources) == ("s0_home", "s1_home", ["image"])
     assert proposal.findings == [
-        {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(ALIKE)}
+        {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(PROPOSED)}
     ]
     assert (models.shown, models.descriptions) == ([("000004", "000002")], ["Node s1_home"])
     assert result["members"] == {"s0_home": "000002", "s1_home": "000004"}
@@ -229,8 +254,8 @@ def test_the_coverage_checkpoint_verifies_the_model_s_pairs_on_closest_members_a
 SPLIT = {
     "s0_home": [
         ("000001", X),
-        ("000002", _toward(X, Y, ALIKE)),
-        ("000003", _toward(Y, X, ALIKE)),
+        ("000002", _toward(X, Y, LINKED)),
+        ("000003", _toward(Y, X, LINKED)),
         ("000004", Y),
     ],
     "s1_list": [("000010", Z)],
@@ -296,7 +321,7 @@ def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions
         ["000003", "000004"],
         ["000002", "000003"],
     )
-    assert check["image_score"] == pytest.approx(2 * ALIKE * math.sqrt(1 - ALIKE**2))
+    assert check["image_score"] == pytest.approx(2 * LINKED * math.sqrt(1 - LINKED**2))
     assert models.shown == [("000002", "000003")]
     assert graph.graph.nodes["s0_home"]["observations"] == ["000001", "000002"]
     assert graph.graph.nodes[new]["observations"] == ["000003", "000004"]
@@ -364,8 +389,8 @@ def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
 
 # The third member of Home looks like List's member, and nothing like Menu's.
 MOVE = {
-    "s0_home": [("000001", X), ("000002", _toward(X, Y, ALIKE)), ("000003", Y)],
-    "s1_list": [("000004", _toward(Y, Z, ALIKE))],
+    "s0_home": [("000001", X), ("000002", _toward(X, Y, LINKED)), ("000003", Y)],
+    "s1_list": [("000004", _toward(Y, Z, LINKED))],
     "s2_menu": [("000005", Z)],
 }
 MOVE_EDGES = (_edge("s0_home", "s2_menu", TAP_A),)
@@ -445,28 +470,54 @@ def test_single_member_diffuse_and_vectorless_nodes_get_no_check(
     assert models.shown == []
 
 
-def test_a_text_merge_on_a_lower_cosine_is_not_split_again(
-    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+@pytest.mark.parametrize(
+    ("issues", "grouping_floor", "across", "sources"),
+    [
+        ([{"node_a": "s0_home", "node_b": "s1_home"}], GROUPING_FLOOR, 0.0, ["text_audit"]),
+        ([], (1 + MERGE_FLOOR) / 2, (3 * MERGE_FLOOR + 1) / 4, ["image"]),
+    ],
+    ids=["text", "image-between-the-floors"],
+)
+def test_a_merge_below_the_grouping_floor_is_not_split_again(
+    issues: list[dict[str, str]],
+    grouping_floor: float,
+    across: float,
+    sources: list[str],
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
 ) -> None:
-    """The split check of the merged node asks about the pair the merge was verified
-    on, and gets the merge's answer back."""
+    """A merged pair whose closest members fall below the grouping floor, as a pair the
+    model proposes can, or one the images propose between a lower merge floor and the
+    grouping floor, is two groups of the merged node. Their split check asks about
+    the pair the merge was verified on and gets its answer back, with no second
+    verifier call."""
+    linked = math.acos(_quarter_of_the_way_to(grouping_floor))
+    apart = math.acos(across)
     write_member_graph(
         graph_path,
         {
-            "s0_home": [("000001", X), ("000002", _toward(X, Y, ALIKE))],
-            "s1_home": [("000003", _toward(Y, X, ALIKE)), ("000004", Y)],
+            "s0_home": [("000001", _turned(0)), ("000002", _turned(linked))],
+            "s1_home": [
+                ("000003", _turned(linked + apart)),
+                ("000004", _turned(2 * linked + apart)),
+            ],
         },
     )
     graph = _load(graph_path)
     models.confirm("000002", "000003")
     verdicts: MemberVerdicts = {}
 
-    (proposal,) = graph.merge_proposals([{"node_a": "s0_home", "node_b": "s1_home"}])
+    (proposal,) = graph.merge_proposals(issues)
     (merge,) = graph.verify_merge_proposals([proposal], verdicts)
-    (check,) = _check_members(graph, graph_path, verdicts).checks
+    report = _check_members(graph, graph_path, verdicts, grouping_floor=grouping_floor)
+    (check,) = report.checks
 
-    assert proposal.sources == ["text_audit"]
+    assert proposal.sources == sources
     assert merge["status"] == "merged"
+    assert merge["image_score"] == pytest.approx(across)
+    assert report.as_record()["grouping_floor"] == grouping_floor
+    assert (check["kind"], check["group"]) == ("split", ["000003", "000004"])
     assert (check["members"], check["same"], check["reused"]) == (["000002", "000003"], True, True)
     assert models.shown == [("000002", "000003")]
     assert list(graph.graph) == ["s0_home"]
@@ -491,8 +542,8 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
 
     app_dir = graph_path.parent
     report = json.loads((app_dir / "demo_members.json").read_text(encoding="utf-8"))
-    assert (report["floor"], report["home_share"], report["checks_per_node"]) == (
-        MEMBER_SIMILARITY_FLOOR,
+    assert (report["grouping_floor"], report["home_share"], report["checks_per_node"]) == (
+        GROUPING_FLOOR,
         0.5,
         3,
     )

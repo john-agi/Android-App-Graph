@@ -697,8 +697,10 @@ verified once whatever proposed it. Each pair names its sources:
 
 - `text_audit`: the model's `merge_nodes` issues;
 - `image`: two in-app nodes of one package whose closest members reach a cosine of
-  0.79, the member similarity floor, between their screenshot vectors (see
-  [Embedding caches](#embedding-caches)).
+  0.79, the merge floor, between their screenshot vectors (see
+  [Embedding caches](#embedding-caches)). The merge floor and the grouping floor of
+  [member checks](#member-checks) are set separately: a lower merge floor proposes
+  more pairs, and a higher grouping floor separates more members.
 
 A near-identical image proves nothing on its own: a page and the same page with a
 menu open look alike and are different screens. Each pair is verified on its two
@@ -718,10 +720,11 @@ verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reu
 #### Member checks
 
 After the merges, the members of each in-app node are grouped by their screenshot
-vectors: two members with a cosine of at least 0.79 are linked, and the groups are
-the connected components of those links, single-linkage clustering. Only members with
-a vector and a stored describe output (`describe` in their [record](#step-log)) are
-grouped. The group that holds the representative is the node's home.
+vectors: two members with a cosine of at least 0.79, the grouping floor, are linked,
+and the groups are the connected components of those links, single-linkage
+clustering. Only members with a vector and a stored describe output (`describe` in
+their [record](#step-log)) are grouped. The group that holds the representative is
+the node's home.
 
 - A node whose home holds fewer than half of its members is `diffuse` and is left
   alone, without a verifier call.
@@ -738,8 +741,11 @@ grouped. The group that holds the representative is the node's home.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
 - Every split check runs before any move check, so a member can move to a node a
-  split made. A verifier answer on a pair of members is reused within the run, so a
-  merge confirmed on members below the floor is not checked again.
+  split made. A verifier answer on a pair of members is reused within the run.
+  Two merged nodes whose closest members fall below the grouping floor, a pair from
+  `text_audit` or one the images propose between the merge floor and the grouping
+  floor, are two groups of the merged node: their split check is the pair the merge
+  was verified on, so it reuses that answer and the node stays whole.
 
 A node a split or a move makes takes its description and elements from the stored
 describe output of its earliest member, its representative, and its state schema
@@ -758,7 +764,8 @@ An action that now leads to another node takes that node's description as its
 observation, and an edge that lost an action drops its instruction templates, which
 the final normalization rebuilds.
 
-`<app_name>_members.json` holds the `floor`, `home_share` and `checks_per_node`, and:
+`<app_name>_members.json` holds the `grouping_floor`, `home_share` and
+`checks_per_node`, and:
 
 - `checks`: each check's `kind` (`split` or `move`), its `node` and `group`, the
   `members` compared (a home member, then one of the group) and their `image_score`,

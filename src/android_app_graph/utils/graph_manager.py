@@ -51,7 +51,8 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.member_groups import (
-    MEMBER_SIMILARITY_FLOOR,
+    GROUPING_FLOOR,
+    MERGE_FLOOR,
     MemberPair,
     MemberPlan,
     closest_pair,
@@ -726,9 +727,7 @@ class GraphManager:
                 units[member] = self._unit_vectors[member] = unit
         return units
 
-    def close_member_pairs(
-        self, floor: float = MEMBER_SIMILARITY_FLOOR
-    ) -> list[tuple[str, str, MemberPair]]:
+    def close_member_pairs(self, floor: float = MERGE_FLOOR) -> list[tuple[str, str, MemberPair]]:
         """Return every pair of in-app nodes of one package whose closest members, by
         image, reach the cosine ``floor``, with those members, in node order."""
         by_package: dict[str, list[str]] = {}
@@ -1545,7 +1544,7 @@ class GraphManager:
         edge_data["instructions"][index] = instruction
         edge_data["instruction_templates"] = []
 
-    def member_plans(self, floor: float = MEMBER_SIMILARITY_FLOOR) -> list[tuple[str, MemberPlan]]:
+    def member_plans(self, floor: float = GROUPING_FLOOR) -> list[tuple[str, MemberPlan]]:
         """Return, in node order, the groups of the members of every in-app node at the
         cosine ``floor`` and the checks to make on them.
 
