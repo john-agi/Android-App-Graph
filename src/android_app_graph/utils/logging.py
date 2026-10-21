@@ -63,7 +63,7 @@ _LEVEL_STYLES: dict[int, str] = {
 _console = Console(stderr=True, force_terminal=True)
 
 
-class _ColorHandler(logging.Handler):
+class ColorHandler(logging.Handler):
     """Custom handler that renders compact, color-coded Rich log lines."""
 
     default_time_style = "grey62"
@@ -130,7 +130,7 @@ def setup_logging(level: int = logging.INFO) -> None:
 
     Call this once at the entry point (explore.py / cli.py).
     """
-    handler = _ColorHandler()
+    handler = ColorHandler()
 
     root = logging.getLogger()
     root.setLevel(level)

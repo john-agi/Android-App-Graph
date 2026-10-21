@@ -255,13 +255,30 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
     no_sleep: list[float],
 ) -> None:
-    router_responses.append(httpx.Response(401, json={"error": {"message": "bad key"}}))
-    with pytest.raises(OpenRouterError):
-        kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
-    assert len(kobe.graph.graph) == 0
-    assert kobe.graph._last_identify_cache is None
+    """Identifying the rejected screen again asks the model again, although the graph
+    already holds a node that a stale cache entry could answer with."""
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            *(httpx.Response(401, json={"error": {"message": "bad key"}}) for _ in range(2)),
+        ]
+    )
+    home = kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
+
+    for _ in range(2):
+        with pytest.raises(OpenRouterError):
+            kobe.graph.identify_state("com.demo.Settings", png_screenshot, "com.demo")
+        assert list(kobe.graph.graph) == [home]
+
+    assert [json.loads(request.content)["model"] for request in router_requests[2:]] == [
+        "provider/page_detail"
+    ] * 2
     assert no_sleep == []
 
 
@@ -282,9 +299,9 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
                 httpx.Response(200, json=embedding_body),
             ]
         )
-    node = replaying_kobe.graph.identify_state("com.demo.Home", png_screenshot, "com.demo")
-    # The cache would skip the model, and a reference screenshot would add a verify request.
-    replaying_kobe.graph._last_identify_cache = None
+    # The replay device reports com.demo.Home, so identifying its screen misses the cache.
+    node = replaying_kobe.graph.identify_state("com.demo.Splash", png_screenshot, "com.demo")
+    # A reference screenshot would add a verify request.
     replaying_kobe.graph.graph.nodes[node].pop("reference_screenshot", None)
     assert replaying_kobe.navigate_to_node(node) == node
     assert len(router_requests) == 4
@@ -952,7 +969,7 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
         ]
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
-    assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_settings"
+    assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_settings"
     assert [json.loads(request.content)["model"] for request in router_requests] == [
         "provider/page_detail"
     ] * 2
@@ -980,7 +997,7 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     )
     monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_settings")
     assert (
-        replaying_kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
+        replaying_kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
         == "s1_settings"
     )
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_settings]
@@ -1058,7 +1075,7 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
         ]
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
-    assert kobe._maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
+    assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
 
 
 class _ReplayScript:
@@ -1199,7 +1216,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
         explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
     )
 
-    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, _FORCE_STOP, _PACKAGE_LAUNCH]
 
 
@@ -1233,7 +1250,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
         explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
     )
 
-    assert explorer._maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
     back = {"action": "back"}
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, back]
 
@@ -1264,10 +1281,7 @@ def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_sta
     else:
         monkeypatch.setattr(explorer.graph, "find_path", lambda *_args: None)
 
-    assert explorer._apply_coverage_checkpoint_after_step(50, 100, "s2_detail", HOME_SCREEN) == (
-        "s2_detail",
-        HOME_SCREEN,
-    )
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") is None
     assert device_log == ([_FORCE_STOP] if force_stop_refused else [])
 
 

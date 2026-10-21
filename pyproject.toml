@@ -121,6 +121,7 @@ extend-select = [
     "PYI",
     "ARG",
     "ERA",
+    "SLF",
     "PT",
     "S",
     "T20",

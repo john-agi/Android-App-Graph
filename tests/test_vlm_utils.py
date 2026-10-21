@@ -1330,12 +1330,12 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
 )
 def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        vlm._tool_call_to_aitk(args)
+        vlm.tool_call_to_aitk(args)
 
 
 def test_direction_does_not_hide_invalid_partial_coordinates() -> None:
     with pytest.raises(ValueError, match="coordinates"):
-        vlm._tool_call_to_aitk({"action": "swipe", "direction": "up", "coordinate": [500]})
+        vlm.tool_call_to_aitk({"action": "swipe", "direction": "up", "coordinate": [500]})
 
 
 @pytest.mark.parametrize(
@@ -1353,7 +1353,7 @@ def test_agent_reply_without_an_arguments_object_is_unusable(
     message: dict[str, str], chat_response: Callable[..., httpx.Response]
 ) -> None:
     reply = ChatResult.model_validate(chat_response(**message).json())
-    assert vlm._parse_agent_response(reply) == (None, "", "")
+    assert vlm.parse_agent_response(reply) == (None, "", "")
 
 
 def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
@@ -1362,7 +1362,7 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
     reply = ChatResult.model_validate(
         chat_response(content='{"name":"mobile_use","arguments":{"action":"wait"}}').json()
     )
-    assert vlm._parse_agent_response(reply) == ({"action": "wait"}, "", "")
+    assert vlm.parse_agent_response(reply) == ({"action": "wait"}, "", "")
 
 
 @pytest.mark.parametrize(
@@ -1386,7 +1386,7 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
 def test_tool_arguments_convert_to_aitk_actions(
     args: dict[str, object], expected: dict[str, object]
 ) -> None:
-    assert vlm._tool_call_to_aitk(args) == expected
+    assert vlm.tool_call_to_aitk(args) == expected
 
 
 _XML_CLICK = """\

@@ -109,7 +109,8 @@ def main() -> None:
             package_name = app["package_name"]
 
             logger.info("Terminating all running apps...")
-            controller._terminate_all_apps()
+            # aitk's only public way to terminate all apps; it also starts a fresh aitk history.
+            controller.set_task_eval()
             time.sleep(1)
 
             grant_runtime_permissions(config["device"]["udid"], package_name)

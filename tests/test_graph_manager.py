@@ -1912,7 +1912,7 @@ def test_identify_state_keeps_apart_packages_that_share_three_segments(vlm: Fake
 
 
 def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
-    assert GraphManager._embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
+    assert GraphManager.embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
 
 
 def test_save_writes_dirty_screenshots_once_and_load_restores_them(
@@ -2249,15 +2249,23 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
         json.dumps({"next_id": 99, "nodes": [{"page_description": "x"}], "edges": []}),
         encoding="utf-8",
     )
+    previous = tmp_path / "previous.json"
+    previous.write_text(
+        json.dumps({"next_id": 7, "nodes": [{"id": "s9_stale"}], "edges": []}),
+        encoding="utf-8",
+    )
     gm = make_manager()
-    add_screen(gm, "s9_stale", "Stale screen")
-    gm._next_id = 7
+    gm.load_graph(previous)
 
     with pytest.raises(TypeError, match="node id must be a string") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
-    assert list(gm.graph.nodes) == ["s9_stale"]
-    assert gm._next_id == 7
+
+    kept = tmp_path / "kept.json"
+    gm.save_graph(kept)
+    saved = json.loads(kept.read_text(encoding="utf-8"))
+    assert saved["next_id"] == 7
+    assert [node["id"] for node in saved["nodes"]] == ["s9_stale"]
 
 
 def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
