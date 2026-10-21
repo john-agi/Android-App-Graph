@@ -21,9 +21,8 @@ For each finding:
    `@pytest.mark.usefixtures`.
 3. Add an entry to `vulture_allowlist.py` only when the name is used outside
    `src/` and `tests/`: a parameter passed by keyword, or a function or import
-   consumed by AITK or Android World through `aitk_files/`, `aw_files/` or
-   `scripts/`. Every entry has the form `_.name  # reason` and names the
-   external caller. Remove entries whose reason stops being true.
+   used from `scripts/`. Every entry has the form `_.name  # reason` and names
+   the external caller. Remove entries whose reason stops being true.
 
 Never lower `min_confidence`, add `exclude`, `ignore_names` or
 `ignore_decorators` to `[tool.vulture]`, or silence Vulture with `# noqa`. The

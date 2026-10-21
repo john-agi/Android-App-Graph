@@ -331,7 +331,7 @@ def plot_paper_graphviz(
             '  graph [rankdir="LR", bgcolor="white", pad="0.35", nodesep="0.55", '
             'ranksep="0.85", splines="spline", overlap="false", outputorder="edgesfirst", '
             'fontname="Helvetica", fontsize="18", labelloc="t", '
-            f"label={q(f'Android-App-Graph Runtime Graph\\n{graph.number_of_nodes()} states, {graph.number_of_edges()} transitions')}];"
+            f"label={q(f'Android-App-Graph State Graph\\n{graph.number_of_nodes()} states, {graph.number_of_edges()} transitions')}];"
         ),
         (
             '  node [shape="box", style="rounded,filled", fontname="Helvetica", fontsize="10", '
@@ -527,7 +527,7 @@ def plot_paper_matplotlib(
         )
 
     ax.set_title(
-        f"Android-App-Graph Runtime Graph: {graph.number_of_nodes()} states, {graph.number_of_edges()} transitions",
+        f"Android-App-Graph State Graph: {graph.number_of_nodes()} states, {graph.number_of_edges()} transitions",
         fontsize=15,
         fontweight="bold",
         pad=16,

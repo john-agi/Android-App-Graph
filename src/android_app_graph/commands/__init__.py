@@ -1,1 +1,1 @@
-"""Console-script commands: app-graph-audit, app-graph-plot, app-graph-embed."""
+"""Console-script commands: app-graph-audit, app-graph-plot."""

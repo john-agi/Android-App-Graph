@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "android-app-graph"
 version = "0.1.0"
-description = "Android-App-Graph: graph-based Android app exploration and runtime for mobile GUI agents, a fork of YuxiangChai/UI-KOBE by Yuxiang Chai"
+description = "Android-App-Graph: explores Android apps into UI state-transition graphs, a fork of YuxiangChai/UI-KOBE by Yuxiang Chai"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -33,7 +33,6 @@ maintainers = [
 app-graph = "android_app_graph.cli:main"
 app-graph-audit = "android_app_graph.commands.audit:main"
 app-graph-plot = "android_app_graph.commands.plot:main"
-app-graph-embed = "android_app_graph.commands.embed:main"
 
 [project.urls]
 Homepage = "https://github.com/john-agi/Android-App-Graph"
@@ -142,9 +141,6 @@ extend-select = [
 # they need no `ignore` entry.
 
 [tool.ruff.lint.per-file-ignores]
-# Copy-in adapters are single files copied into other repositories, not packages.
-"aitk_files/**" = ["INP001"]
-"aw_files/**" = ["INP001"]
 # pytest checks results with plain `assert`. Pytest passes fixtures and parametrize values by
 # name, so a test's parameters declare dependencies rather than a call signature (FBT001,
 # FBT002, PLR0913, PLR0917), and a literal in a test is the value under test or the expected
@@ -161,9 +157,6 @@ docstring-code-format = true
 known_first_party = ["android_app_graph"]
 
 [tool.deptry.per_rule_ignores]
-# aw_files/android_app_graph_aw_agent.py is a copy-in adapter; android_world is not declared here.
-# It is not on PyPI and not installable on Python 3.14, so it cannot be declared.
-DEP001 = ["android_world"]
 # Nothing here imports dill; aitk/utils/adb_controller.py:9 does, and aitk declares no deps.
 DEP002 = ["dill"]
 
@@ -174,9 +167,7 @@ paths = ["src", "tests", "vulture_allowlist.py"]
 min_confidence = 90
 
 [tool.ty.src]
-# The copy-in adapters and operator scripts are not package code, and aw_files/ imports
-# android_world, which does not install on Python 3.14. aitk_files/android_app_graph_v2.py
-# is a shim over android_app_graph.adapters.aitk_translator, which is checked.
+# scripts/ and configs/ are operator scripts, not package code.
 include = ["src", "tests"]
 
 [tool.ty.rules]
@@ -222,7 +213,7 @@ skip_empty = true
 fail_under = 97
 
 [tool.mutmut]
-# scripts/, aitk_files/ and aw_files/ are copy-in adapters, not package code.
+# scripts/ and configs/ are operator scripts, not package code.
 source_paths = ["src/android_app_graph/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Guards the clean stats run should --cov ever move into addopts, where

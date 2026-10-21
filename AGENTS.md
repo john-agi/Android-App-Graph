@@ -74,9 +74,6 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - Delete dead code instead of commenting it out.
 - A pull request that edits `depends_on` in `tach.toml` states the
   architectural justification in its body.
-- `aitk_files/*.py` and `aw_files/*.py` are copied into other repositories:
-  keep them self-contained, importing only `android_app_graph` and their host
-  framework.
 
 ## Tests
 
@@ -138,9 +135,8 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
   final; the former names survive only in `LICENSE`, `NOTICE` and the README
   attribution. This is a fork of YuxiangChai/UI-KOBE that diverges freely.
 - Python 3.14 only.
-- `scripts/`, `aitk_files/`, `aw_files/` and `configs/` are operator scripts
-  and copy-in adapters: Ruff lints them, nothing else checks them, and they are
-  not in the wheel.
+- `scripts/` and `configs/` are operator scripts: Ruff lints them, nothing else
+  checks them, and they are not in the wheel.
 
 ## Where everything else lives
 
