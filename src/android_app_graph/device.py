@@ -9,8 +9,10 @@ lets tests pass a fake without adb or an emulator.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,43 @@ class AvdManager(Protocol):
     def duplicate_avd(self, avd_name: str) -> None: ...
 
 
+def adb_executable() -> str:
+    """Return the path of the adb found on ``PATH``.
+
+    A missing adb raises ``FileNotFoundError``, the error ``subprocess`` raises for a
+    missing program, so callers that tolerate a missing adb by catching ``OSError``
+    still do.
+    """
+    path = shutil.which("adb")
+    if path is None:
+        msg = "adb was not found on PATH"
+        raise FileNotFoundError(msg)
+    return path
+
+
+def run_adb(
+    args: Sequence[str],
+    *,
+    capture_output: bool = False,
+    stdout: int | None = None,
+    stderr: int | None = None,
+    errors: str | None = None,
+    timeout: float | None = None,
+    check: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run the adb on ``PATH`` with ``args``, decoding captured output as text."""
+    return subprocess.run(
+        [adb_executable(), *args],
+        capture_output=capture_output,
+        stdout=stdout,
+        stderr=stderr,
+        text=True,
+        errors=errors,
+        timeout=timeout,
+        check=check,
+    )
+
+
 def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> None:
     """Launch an app using an explicit activity when configured."""
     udid = config["device"]["udid"]
@@ -53,9 +92,8 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
 
     if launch_activity:
         logger.info("Launching app %s via activity %s ...", app_name, launch_activity)
-        result = subprocess.run(
+        result = run_adb(
             [
-                "adb",
                 "-s",
                 udid,
                 "shell",
@@ -65,7 +103,6 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
                 launch_activity,
             ],
             capture_output=True,
-            text=True,
             check=False,
         )
         if result.returncode == 0:
@@ -77,9 +114,8 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
         )
 
     logger.info("Launching app %s (%s) ...", app_name, package_name)
-    subprocess.run(
+    run_adb(
         [
-            "adb",
             "-s",
             udid,
             "shell",
@@ -119,12 +155,10 @@ def restart_app(
     launched, so no replay starts from an unknown screen.
     """
     config = controller.config
-    force_stop = ["adb", "-s", config["device"]["udid"], "shell", "am", "force-stop", package_name]
-    stopped = subprocess.run(
-        force_stop, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
-    )
+    force_stop = ["-s", config["device"]["udid"], "shell", "am", "force-stop", package_name]
+    stopped = run_adb(force_stop, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     if stopped.returncode != 0:
-        raise ForceStopRefusedError(stopped.returncode, force_stop)
+        raise ForceStopRefusedError(stopped.returncode, stopped.args)
     app = {"name": app_name, "package_name": package_name, "launch_activity": launch_activity}
     launch_app(config, app, logger)
     time.sleep(_LAUNCH_SETTLE_SECONDS)
@@ -137,10 +171,9 @@ def soft_keyboard_hint() -> str:
     controller exposes no shell method, and the translator holds no controller.
     """
     try:
-        kb_check = subprocess.run(
-            ["adb", "shell", "dumpsys", "input_method"],
+        kb_check = run_adb(
+            ["shell", "dumpsys", "input_method"],
             capture_output=True,
-            text=True,
             # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
             # best-effort probe; replace bad bytes instead of failing to decode them.
             errors="replace",
@@ -199,21 +232,13 @@ def grant_runtime_permissions(udid: str, package_name: str) -> None:
     refuses permissions that are not runtime permissions, such as ``INTERNET``, so
     a refusal is only logged.
     """
-    shell = ["adb", "-s", udid, "shell"]
-    dumpsys = subprocess.run(
-        [*shell, "dumpsys", "package", package_name],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    shell = ["-s", udid, "shell"]
+    dumpsys = run_adb([*shell, "dumpsys", "package", package_name], capture_output=True, check=True)
     permissions = _requested_permissions(dumpsys.stdout)
     granted = 0
     for permission in permissions:
-        grant = subprocess.run(
-            [*shell, "pm", "grant", package_name, permission],
-            capture_output=True,
-            text=True,
-            check=False,
+        grant = run_adb(
+            [*shell, "pm", "grant", package_name, permission], capture_output=True, check=False
         )
         if grant.returncode == 0:
             granted += 1

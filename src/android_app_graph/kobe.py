@@ -16,6 +16,7 @@ from android_app_graph.device import (
     is_system_overlay,
     keyboard_status,
     restart_app,
+    run_adb,
     soft_keyboard_hint,
 )
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
@@ -759,9 +760,8 @@ class Kobe:
             )
             ctrl_config = self.controller.config
             udid = ctrl_config.get("device", ctrl_config).get("udid", "emulator-5554")
-            relaunch = subprocess.run(
+            relaunch = run_adb(
                 [
-                    "adb",
                     "-s",
                     udid,
                     "shell",
