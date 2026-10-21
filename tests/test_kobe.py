@@ -1850,6 +1850,64 @@ def test_a_step_into_another_app_returns_to_the_app_before_the_next_step(
     assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
 
 
+@pytest.mark.parametrize(
+    ("after_the_tap", "reached"),
+    [
+        pytest.param(_SEARCH_SCREEN, f"ext_{_SEARCH}", id="another app"),
+        pytest.param(
+            _screen("com.demo.ArticleActivity", "blue"), EXTERNAL_WEB_NODE, id="outside web page"
+        ),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_that_leaves_the_app_marks_the_element_the_planner_names(
+    after_the_tap: dict[str, object],
+    reached: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The element is explored as after a step that stays in the app, so the planner is
+    not offered it again and the coverage ranking no longer counts it."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    explorer = _explorer(
+        screens_by_log(HOME_SCREEN, after_the_tap, HOME_SCREEN), tmp_path, router_client
+    )
+    home = {
+        "page_description": "home",
+        "elements": [
+            {"description": "Dark mode toggle", "position": "top"},
+            {"description": "Search button", "position": "top right"},
+        ],
+    }
+    identifying_the_web_page = [
+        httpx.Response(200, json=embedding_body),
+        chat_response(content='{"page_description":"news article","is_external_web":true}'),
+    ]
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(home)),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":2,"instruction":"Tap the Search button"}'),
+            chat_response(content=_TAP_REPLY),
+            *(identifying_the_web_page if reached == EXTERNAL_WEB_NODE else []),
+            # Back shows home again: an exact match.
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert list(explorer.graph.graph.edges) == [("s0_home", reached)]
+    elements = explorer.graph.graph.nodes["s0_home"]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == ["Search button"]
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
     tmp_path: Path,
