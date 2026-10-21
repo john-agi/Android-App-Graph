@@ -1185,9 +1185,9 @@ class UIKobeV2Translator(BaseTranslator):
         for opt in options_list:
             if opt["letter"] == choice_letter:
                 if opt["type"] == "free":
-                    # An empty instruction is what makes _step re-plan a FREE pick; the
-                    # task-text fallback would hide that. Graph-built options may be empty
-                    # by construction, so they keep it.
+                    # An empty instruction is what makes _choose_action re-plan a FREE pick;
+                    # the task-text fallback would hide that. Graph-built options may be
+                    # empty by construction, so they keep it.
                     resolved_instruction = instruction
                 else:
                     resolved_instruction = instruction or opt.get("instruction") or task
@@ -1263,38 +1263,30 @@ class UIKobeV2Translator(BaseTranslator):
         answer = self._ask_with_screenshot(prompt, None, lambda raw: raw.strip() or None, "[DONE]")
         return answer or ""
 
-    def _step(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
-        screenshot = as_str(state.get("screenshot", ""), "")
-        activity = as_str(state.get("activity", ""), "")
-        package = as_str(state.get("package", ""), "")
+    def _open_named_app(self, task: str) -> str | None:
+        """Return the response that opens the app ``task`` names, or ``None`` when it names none."""
+        app_name = self._resolve_app_from_task(task)
+        if app_name:
+            logger.info(_SEP_THICK)
+            logger.info("[OPEN] Launching %s", app_name)
+            logger.info(_SEP_THICK)
+            return make_response(
+                f"Opening app: {app_name}",
+                {"action": "open", "app": app_name},
+            )
+        logger.warning("[OPEN] Could not resolve app from task: %s", task)
+        return None
 
-        if not self._app_opened:
-            self._app_opened = True
-            app_name = self._resolve_app_from_task(task)
-            if app_name:
-                logger.info(_SEP_THICK)
-                logger.info("[OPEN] Launching %s", app_name)
-                logger.info(_SEP_THICK)
-                return make_response(
-                    f"Opening app: {app_name}",
-                    {"action": "open", "app": app_name},
-                )
-            logger.warning("[OPEN] Could not resolve app from task: %s", task)
-
-        selected = self._graph_for_package(package)
-        graph = None if selected is None else selected[1]
-
-        self._step_count += 1
-        logger.info(_SEP_THICK)
-        logger.info("[LOOP] Step %d", self._step_count)
-        logger.info(_SEP_THICK)
-
-        node_id = self.identify_node(activity, screenshot, package)
-        logger.info("[IDENTIFY] Node: %s", node_id)
-
-        self.record_info(task, screenshot)
-        logger.info("[RECORD] Memory: %s", self._memory.format())
-
+    def _choose_action(
+        self,
+        task: str,
+        graph: nx.DiGraph | None,
+        node_id: str | None,
+        screenshot: str,
+        action_history: list[Any],
+    ) -> Decision:
+        """Run DECIDE on a matched node or plan a free action, then plan again for a
+        FREE pick that has no instruction."""
         decision: Decision
         if node_id is not None and graph is not None:
             decision = self.decide(graph, task, node_id, screenshot)
@@ -1309,7 +1301,7 @@ class UIKobeV2Translator(BaseTranslator):
                 task,
                 screenshot,
                 reason,
-                history.get("actions", []),
+                action_history,
             )
             decision = {"type": "free", "instruction": fallback_instruction}
 
@@ -1323,28 +1315,23 @@ class UIKobeV2Translator(BaseTranslator):
                 task,
                 screenshot,
                 reason,
-                history.get("actions", []),
+                action_history,
             )
             decision["instruction"] = instruction
+        return decision
 
-        logger.info(
-            '[DECIDE] type=%s node=%s instruction="%s"',
-            decision_type,
-            node_id,
-            instruction,
+    def _finish(self, task: str) -> str:
+        answer = self.generate_answer(task)
+        logger.info(_SEP_THICK)
+        logger.info("[DONE] Answer: %s", answer)
+        logger.info("[DONE] Memory: %s", self._memory.format())
+        logger.info(_SEP_THICK)
+        return make_response(
+            f"Task complete. Answer: {answer}",
+            {"action": "end", "answer": answer},
         )
 
-        if decision_type == "done":
-            answer = self.generate_answer(task)
-            logger.info(_SEP_THICK)
-            logger.info("[DONE] Answer: %s", answer)
-            logger.info("[DONE] Memory: %s", self._memory.format())
-            logger.info(_SEP_THICK)
-            return make_response(
-                f"Task complete. Answer: {answer}",
-                {"action": "end", "answer": answer},
-            )
-
+    def _act(self, task: str, instruction: str, screenshot: str) -> str:
         logger.info(_SEP)
         logger.info('ACTION AGENT one-step instruction: "%s"', instruction)
         logger.info(_SEP)
@@ -1370,6 +1357,43 @@ class UIKobeV2Translator(BaseTranslator):
             aitk_action = {"action": "wait", "time": 1}
 
         return make_response(f"Action: {history_entry}", aitk_action)
+
+    def _step(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
+        screenshot = as_str(state.get("screenshot", ""), "")
+        activity = as_str(state.get("activity", ""), "")
+        package = as_str(state.get("package", ""), "")
+
+        if not self._app_opened:
+            self._app_opened = True
+            opening = self._open_named_app(task)
+            if opening is not None:
+                return opening
+
+        selected = self._graph_for_package(package)
+        graph = None if selected is None else selected[1]
+
+        self._step_count += 1
+        logger.info(_SEP_THICK)
+        logger.info("[LOOP] Step %d", self._step_count)
+        logger.info(_SEP_THICK)
+
+        node_id = self.identify_node(activity, screenshot, package)
+        logger.info("[IDENTIFY] Node: %s", node_id)
+
+        self.record_info(task, screenshot)
+        logger.info("[RECORD] Memory: %s", self._memory.format())
+
+        decision = self._choose_action(task, graph, node_id, screenshot, history.get("actions", []))
+        logger.info(
+            '[DECIDE] type=%s node=%s instruction="%s"',
+            decision["type"],
+            node_id,
+            decision["instruction"],
+        )
+
+        if decision["type"] == "done":
+            return self._finish(task)
+        return self._act(task, decision["instruction"], screenshot)
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
