@@ -34,6 +34,7 @@ from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     LAYOUT_MERGE_FLOOR,
+    LAYOUT_SHORT_LIST_FLOOR,
     NORMALIZE_EVERY_N_VISITS,
     SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
@@ -1196,7 +1197,11 @@ def test_a_screen_without_a_layout_builds_the_short_list_from_image_and_text(
 
 
 @pytest.mark.usefixtures("vlm")
-def test_a_node_below_the_layout_floor_is_no_layout_candidate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("floor", [LAYOUT_SHORT_LIST_FLOOR, 1.0])
+def test_a_node_whose_layout_reaches_the_floor_is_a_layout_candidate_and_one_below_is_not(
+    floor: float, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gm_module, "LAYOUT_SHORT_LIST_FLOOR", floor)
     steps_dir = tmp_path / "steps"
     gm = make_manager(steps_dir)
     add_screen(gm, "s0_dialog", "Promo overlay", **members(steps_dir, tree=DIALOG_TREE))
