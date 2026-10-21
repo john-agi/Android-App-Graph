@@ -131,8 +131,11 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
     models: FakeModels,
     write_member_graph: Callable[..., None],
 ) -> None:
+    """The more-visited node's member is the existing screen, with that node's
+    description; the lower-numbered node is kept."""
     write_member_graph(graph_path, CLOSE_PAIR)
     graph = _load(graph_path)
+    graph.graph.nodes["s1_home"]["visit_count"] = 5
     if same:
         models.confirm("000002", "000004")
 
@@ -143,7 +146,7 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
     assert proposal.findings == [
         {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(ALIKE)}
     ]
-    assert models.shown == [("000002", "000004")]
+    assert (models.shown, models.descriptions) == ([("000004", "000002")], ["Node s1_home"])
     assert result["members"] == {"s0_home": "000002", "s1_home": "000004"}
     if same:
         assert (result["status"], result["kept"], result["removed"]) == (
