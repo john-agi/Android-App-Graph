@@ -296,7 +296,7 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
         settings=PAGE_DETAIL,
     ),
     "describe": lambda client, screenshot: vlm.describe_executed_action(
-        client, screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+        client, screenshot, {"action": "back"}, (1080, 1920), settings=PAGE_DETAIL
     ),
     "action": lambda client, screenshot: vlm.predict_next_action(
         client, vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait"), settings=ACTION
@@ -534,7 +534,7 @@ def _sent_schemas(
         router_client, "demo", [{"node_id": "b"}, {"node_id": "a"}], settings=PAGE_DETAIL
     )
     vlm.describe_executed_action(
-        router_client, png_screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+        router_client, png_screenshot, {"action": "back"}, (1080, 1920), settings=PAGE_DETAIL
     )
     schemas = [
         json.loads(request.content)["response_format"]["json_schema"] for request in router_requests
@@ -1090,7 +1090,7 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
                 )
             case "describe":
                 result = vlm.describe_executed_action(
-                    router_client, png_screenshot, {"action": "back"}, 1, 1, settings=PAGE_DETAIL
+                    router_client, png_screenshot, {"action": "back"}, (1, 1), settings=PAGE_DETAIL
                 )
             case _:
                 result = vlm.predict_next_action(
@@ -1252,7 +1252,7 @@ def test_an_executed_action_is_described_from_its_screen_or_not_at_all(
     router_responses.append(chat_response(content=reply))
 
     described = vlm.describe_executed_action(
-        router_client, png_screenshot, swipe, 1080, 1920, settings=PAGE_DETAIL
+        router_client, png_screenshot, swipe, (1080, 1920), settings=PAGE_DETAIL
     )
 
     assert described == instruction

@@ -881,7 +881,7 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
     (call,) = described
     assert call["screenshot_b64"] == "screen-0"
     assert call["action"] == [_DETAIL_TAP]
-    assert (call["screen_w"], call["screen_h"]) == (1080, 1920)
+    assert call["screen_size"] == (1080, 1920)
     assert call["settings"] == ModelSettings("instruction-model")
 
 

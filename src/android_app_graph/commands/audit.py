@@ -523,8 +523,7 @@ def _correct_flagged_edge(
         client=run.client,
         screenshot_b64=before["screenshot"],
         action=action,
-        screen_w=run.session.controller.w,
-        screen_h=run.session.controller.h,
+        screen_size=(run.session.controller.w, run.session.controller.h),
         settings=run.session.instruction,
     )
     if label is None:

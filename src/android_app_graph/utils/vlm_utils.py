@@ -1907,16 +1907,18 @@ def describe_executed_action(
     client: OpenRouter,
     screenshot_b64: str,
     action: dict[str, Any] | list[dict[str, Any]],
-    screen_w: int,
-    screen_h: int,
+    screen_size: tuple[int, int],
     *,
     settings: ModelSettings,
 ) -> str | None:
     """Write the instruction for an AITK action from the screenshot taken before it ran.
 
-    Returns None when the reply is truncated, not a JSON object or has a blank instruction.
+    ``screen_size`` is the device's ``(width, height)`` in pixels, which the action's
+    coordinates are measured in. Returns None when the reply is truncated, not a JSON
+    object or has a blank instruction.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    screen_w, screen_h = screen_size
     prompt = ACTION_DESCRIPTION_PROMPT.format(
         screen_w=screen_w, screen_h=screen_h, action=json.dumps(action)
     )
