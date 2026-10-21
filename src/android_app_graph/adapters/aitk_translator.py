@@ -851,8 +851,6 @@ class UIKobeV2Translator(BaseTranslator):
         return self._memory
 
     def reset_task_state(self) -> None:
-        self._current_graph: nx.DiGraph | None = None
-        self._app_name: str = ""
         self._app_opened = False
         self._memory = Memory()
         self._step_count = 0
@@ -953,9 +951,12 @@ class UIKobeV2Translator(BaseTranslator):
                 return app_name
         return None
 
-    def _select_graph(self, package: str) -> None:
-        self._app_name = self._app_by_package.get(package, "")
-        self._current_graph = self._graphs.get(self._app_name)
+    def _graph_for_package(self, package: str) -> tuple[str, nx.DiGraph] | None:
+        """Return the app name and graph whose ``package_name`` is ``package``, if any."""
+        app_name = self._app_by_package.get(package)
+        if app_name is None:
+            return None
+        return app_name, self._graphs[app_name]
 
     def _ask_with_screenshot[T](
         self,
@@ -1011,16 +1012,17 @@ class UIKobeV2Translator(BaseTranslator):
         No page description is generated: the paper's runtime identifies nodes by
         screenshot, and upstream UI-KOBE's describe call here never fed a decision.
         """
-        graph = self._current_graph
-        if graph is None:
+        selected = self._graph_for_package(package)
+        if selected is None:
             logger.warning("[IDENTIFY] No current graph is loaded")
             return None
+        app_name, graph = selected
 
         logger.info(
             "[IDENTIFY] activity=%s package=%s graph_app=%s graph_package=%s",
             activity,
             package,
-            self._app_name or "(unknown)",
+            app_name,
             _graph_package(graph),
         )
 
@@ -1033,7 +1035,7 @@ class UIKobeV2Translator(BaseTranslator):
             started = time.perf_counter()
             query_image_emb = self._compute_runtime_image_embedding_with_retry(
                 screenshot,
-                self._app_name or "(current)",
+                app_name,
                 "(current screenshot)",
             )
             logger.info(
@@ -1070,7 +1072,7 @@ class UIKobeV2Translator(BaseTranslator):
                 logger.warning(
                     "[IDENTIFY] no candidates: current package %s has no nodes in selected graph %s",
                     package,
-                    self._app_name or "(unknown)",
+                    app_name,
                 )
             else:
                 logger.warning(
@@ -1270,7 +1272,6 @@ class UIKobeV2Translator(BaseTranslator):
             self._app_opened = True
             app_name = self._resolve_app_from_task(task)
             if app_name:
-                self._app_name = app_name
                 logger.info(_SEP_THICK)
                 logger.info("[OPEN] Launching %s", app_name)
                 logger.info(_SEP_THICK)
@@ -1280,8 +1281,8 @@ class UIKobeV2Translator(BaseTranslator):
                 )
             logger.warning("[OPEN] Could not resolve app from task: %s", task)
 
-        self._select_graph(package)
-        graph = self._current_graph
+        selected = self._graph_for_package(package)
+        graph = None if selected is None else selected[1]
 
         self._step_count += 1
         logger.info(_SEP_THICK)

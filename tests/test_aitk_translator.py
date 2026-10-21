@@ -1201,14 +1201,13 @@ def test_resolve_app_from_task(
     "package",
     ["com.demo.app.free", "com.demo", "com.demo.app/.HomeActivity", "org.other.thing", ""],
 )
-def test_select_graph_matches_no_graph_for_another_package(
-    translator: aitk_translator.UIKobeV2Translator, package: str
+def test_identify_node_matches_no_graph_for_another_package(
+    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator, package: str
 ) -> None:
     """Only the exact package selects a graph; sharing a prefix with it is not enough."""
-    translator._select_graph("com.demo.app")
-    translator._select_graph(package)
-    assert translator._current_graph is None
-    assert translator._app_name == ""
+    completions = use_model(translator)
+    assert translator.identify_node("com.demo.app/.HomeActivity", "shot", package) is None
+    assert completions.calls == []
 
 
 def test_reset_task_state_clears_the_previous_task(
@@ -1221,7 +1220,6 @@ def test_reset_task_state_clears_the_previous_task(
     translator.reset_task_state()
 
     assert translator._app_opened is False
-    assert translator._current_graph is None
     assert translator._step_count == 0
     assert translator._memory.actions == []
 
@@ -1774,7 +1772,7 @@ def test_runtime_image_embedding_propagates_an_error_without_asking_again(
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _fails)
     with pytest.raises(RuntimeError, match="embedding failed"):
-        translator._compute_runtime_image_embedding_with_retry("shot", "demo", "home")
+        translator.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
     assert calls == ["shot"]
 
 
@@ -1798,10 +1796,7 @@ def _identifiable_translator(
     _write_graph(
         tmp_path, app="demo", nodes=nodes, edges=_DEMO_EDGES, image_embeddings=image_embeddings
     )
-    translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    translator._current_graph = translator.graphs["demo"]
-    translator._app_name = "demo"
-    return translator
+    return aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
 
 
 @pytest.fixture
@@ -1815,7 +1810,7 @@ def identifiable(
 
 
 def test_identify_node_without_a_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
+    assert translator.identify_node("org.other.thing/.Main", "shot", "org.other.thing") is None
 
 
 def test_identify_node_picks_the_model_choice(
@@ -1940,9 +1935,15 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
 
 
 def test_identify_node_without_candidates_in_the_current_package(
-    identifiable: aitk_translator.UIKobeV2Translator,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert identifiable.identify_node("org.other.thing/.Main", "shot", "org.other.thing") is None
+    identifiable = _identifiable_translator(
+        tmp_path,
+        monkeypatch,
+        nodes=[{**node, "package": "org.other.thing"} for node in _DEMO_NODES],
+        image_embeddings=_DEMO_IMAGE_EMBEDDINGS,
+    )
+    assert identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_without_cached_embeddings(
@@ -1987,11 +1988,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     )
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    graph = translator.graphs["demo"]
-    translator._current_graph = graph
-    translator._app_name = "demo"
-
-    _text, options = aitk_translator.build_options(graph, "home")
+    _text, options = aitk_translator.build_options(translator.graphs["demo"], "home")
     assert [opt["type"] for opt in options] == ["done", "free"]
 
     use_model(translator, "A")
@@ -2146,7 +2143,6 @@ def test_to_agent_opens_the_app_on_the_first_turn(
     state, _ = _step_payload()
     response = json.loads(translator.to_agent("Open demo and buy shoes", state, {"actions": []}))
     assert response["aitk_action"] == {"action": "open", "app": "demo"}
-    assert translator._app_name == "demo"
 
 
 def test_to_agent_without_an_actions_key_resets_state(
@@ -2159,7 +2155,6 @@ def test_to_agent_without_an_actions_key_resets_state(
     state, _ = _step_payload()
     response = json.loads(translator.to_agent("Open demo and buy shoes", state, {}))
     assert response["aitk_action"] == {"action": "open", "app": "demo"}
-    assert translator._app_name == "demo"
 
 
 def test_to_agent_runs_the_loop(
@@ -2283,27 +2278,25 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
 def test_step_resolves_the_graph_from_the_package(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
+    completions = use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
     stepping._app_opened = True
-    stepping._app_name = ""
-    stepping._current_graph = None
     state, history = _step_payload()
 
     json.loads(stepping._step("buy shoes", state, history))
-    assert stepping._app_name == "demo"
+    assert "Node: home" in completions.prompt_text(2)
 
 
 def test_step_uses_no_graph_while_no_graph_matches_the_foreground_package(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """The app the task named only decides what to open; the foreground decides the graph."""
-    use_model(stepping, _NO_INFORMATION, "Tap the Demo icon")
+    completions = use_model(stepping, _NO_INFORMATION, "Tap the Demo icon")
     stepping._app_opened = True
     state, history = _step_payload()
 
     stepping._step("Open demo", {**state, "package": "com.launcher"}, history)
 
-    assert stepping._current_graph is None
+    assert "no graph is loaded" in completions.prompt_text(1)
     assert stepping.memory.actions == ["Tap the Demo icon"]
 
 
@@ -2338,7 +2331,7 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
     use_model: _UseModel, two_apps: aitk_translator.UIKobeV2Translator
 ) -> None:
     """The graph is chosen on every step, so a second app's steps use its own graph."""
-    use_model(
+    completions = use_model(
         two_apps,
         *("A", _NO_INFORMATION, '{"choice": "D", "instruction": "Open the shop app"}'),
         *("A", _NO_INFORMATION, '{"choice": "B", "instruction": "Tap checkout"}'),
@@ -2350,14 +2343,14 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
         {"screenshot": "shot", "activity": "com.demo.app/.HomeActivity", "package": "com.demo.app"},
         history,
     )
-    assert two_apps._current_graph is two_apps.graphs["demo"]
+    assert "Node: home" in completions.prompt_text(2)
 
     two_apps._step(
         "buy shoes in shop",
         {"screenshot": "shot", "activity": "com.shop.app/.CartActivity", "package": "com.shop.app"},
         history,
     )
-    assert two_apps._current_graph is two_apps.graphs["shop"]
+    assert "Node: cart" in completions.prompt_text(5)
     assert two_apps.memory.actions == ["Open the shop app", "Tap checkout"]
 
 
@@ -2576,6 +2569,7 @@ def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_scre
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
+    chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "shared-router-key")
@@ -2589,16 +2583,16 @@ def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_scre
         encoding="utf-8",
     )
     router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
+    router_responses.append(chat_response(content="A"))
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
     assert built.graphs["demo"].nodes["n1"]["image_embedding"] == [0.25, 0.75]
     assert json.loads(sidecar.read_text())["model"] == "google/gemini-embedding-2"
-    assert built._compute_runtime_image_embedding_with_retry("live-shot", "demo", "current") == [
-        0.25,
-        0.75,
-    ]
-    assert len(router_requests) == 2
+    assert built.identify_node("com.a.b/.Main", "live-shot", "com.demo.app") == "n1"
+    assert 'A) similarity=1.000 node=n1: ""' in _RecordedCompletions(router_requests).prompt_text(2)
+    assert len(router_requests) == 3
     for request in router_requests:
         assert request.headers["authorization"] == "Bearer shared-router-key"
+    for request in router_requests[:2]:
         assert str(request.url) == "https://openrouter.ai/api/v1/embeddings"
     assert (
         json.loads(router_requests[1].content)["input"][0]["content"][0]["image_url"]["url"]
@@ -2719,14 +2713,13 @@ def test_v2_runtime_image_requests_use_the_image_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    _write_graph(tmp_path)
     router_responses.append(httpx.Response(200, json=embedding_body))
     runtime = aitk_translator.UIKobeV2Translator(
         graph_dir=str(tmp_path), vlm_config={"image_embedding": {"request_timeout": 2.25}}
     )
-    assert runtime._compute_runtime_image_embedding_with_retry(png_screenshot, "demo", "home") == [
-        0.25,
-        0.75,
-    ]
+    assert runtime.identify_node("com.a.b/.Main", png_screenshot, "com.demo.app") is None
+    assert len(router_requests) == 1
     assert router_requests[0].extensions["timeout"] == dict.fromkeys(
         ("connect", "read", "write", "pool"), 2.25
     )
