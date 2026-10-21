@@ -1,5 +1,6 @@
 import argparse
 import logging
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -25,8 +26,12 @@ def check_avd(avd_manager: AvdManager, config: dict[str, Any], logger: logging.L
 
     logger.info("No running AVD found. Starting a new AVD duplicate...")
     avd_manager.duplicate_avd(avd_name)
+    emulator = shutil.which("emulator")
+    if emulator is None:
+        msg = "emulator was not found on PATH"
+        raise FileNotFoundError(msg)
     cmd = [
-        "emulator",
+        emulator,
         "-avd",
         dup_name,
         "-no-snapshot",
