@@ -102,17 +102,30 @@ def adb_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(device, "adb_executable", lambda: "adb")
 
 
+def _fake_adb_stdout(command: list[str]) -> str:
+    """Name ``<package>/.Home`` as the launcher activity ``pm resolve-activity`` finds, in
+    the layout of its ``--brief`` output; every other command prints nothing."""
+    if "resolve-activity" not in command:
+        return ""
+    return (
+        "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+        f"{command[-1]}/.Home\n"
+    )
+
+
 @pytest.fixture
 def device_log(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> list[object]:
     """Fake controllers append their actions here too, so a test sees adb commands
     and device actions in the order the device would have received them.
+
+    Every adb command succeeds; the app's launcher activity is its ``.Home``.
     """
     del adb_on_path  # requested for its side effect on device.adb_executable
     log: list[object] = []
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         log.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=_fake_adb_stdout(command), stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
     return log

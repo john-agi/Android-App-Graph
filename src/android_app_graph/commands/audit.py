@@ -36,6 +36,7 @@ from openrouter import OpenRouter
 
 from android_app_graph.device import (
     AdbController,
+    AppLaunch,
     DeviceController,
     grant_runtime_permissions,
     is_outside_app,
@@ -254,10 +255,11 @@ class ReExploreTarget:
 @dataclass(frozen=True, slots=True)
 class _ReExploreRun:
     """The graph, app, device session and client that one ``re_explore_issues`` call works
-    with, and the recorder every device call goes through."""
+    with, the recorder every device call goes through and the launch every restart reuses."""
 
     graph: GraphManager
     target: ReExploreTarget
+    app_launch: AppLaunch
     session: ReExploreSession
     recorder: StepRecorder
     client: OpenRouter
@@ -338,13 +340,7 @@ def _leave_external_web(run: _ReExploreRun) -> str:
             EXTERNAL_WEB_BACK_PRESSES,
             run.target.package_name,
         )
-        restart_app(
-            run.recorder,
-            run.target.app_name,
-            run.target.package_name,
-            run.target.launch_activity,
-            logger,
-        )
+        restart_app(run.recorder, run.app_launch, logger)
         return _identify(run, run.recorder.get_state())
 
 
@@ -495,13 +491,7 @@ def _explore_steps(
         if _left_app(run, device_state):
             logger.warning("Left app during re-explore, pressing back")
             with run.recorder.source("external_app_recovery"):
-                device_state = return_to_app(
-                    run.recorder,
-                    run.target.app_name,
-                    run.target.package_name,
-                    run.target.launch_activity,
-                    logger,
-                )
+                device_state = return_to_app(run.recorder, run.app_launch, logger)
             current_node = _identify(run, device_state)
             continue
 
@@ -513,13 +503,7 @@ def _explore_steps(
 
 def _replay_to(run: _ReExploreRun, node: str) -> str | None:
     with run.recorder.source("navigation_replay"):
-        restart_app(
-            run.recorder,
-            run.target.app_name,
-            run.target.package_name,
-            run.target.launch_activity,
-            logger,
-        )
+        restart_app(run.recorder, run.app_launch, logger)
         return _navigate_to(run, node)
 
 
@@ -684,6 +668,7 @@ def re_explore_issues(
     run = _ReExploreRun(
         graph=graph,
         target=target,
+        app_launch=AppLaunch(target.app_name, target.package_name, target.launch_activity),
         session=session,
         recorder=recorder,
         client=client,

@@ -404,35 +404,117 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
 
 
 _LAUNCH_SETTLE_SECONDS = 4
+_LAUNCHER_INTENT = ("-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER")
+# FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK; the clear flag works only together
+# with the new-task flag.
+_CLEAR_TASK_FLAGS = "0x10008000"
 
 
 class ForceStopRefusedError(subprocess.CalledProcessError):
     """adb refused to force-stop the app, so the device still shows what it showed."""
 
 
-def restart_app(
-    controller: DeviceController,
-    app_name: str,
-    package_name: str,
-    launch_activity: str | None,
-    logger: logging.Logger,
-) -> None:
+class NoLauncherActivityError(RuntimeError):
+    """The package has no launcher activity, so restarting it needs a configured
+    ``launch_activity``."""
+
+
+class AppLaunch:
+    """An app that ``restart_app`` restarts, and the one component every restart starts.
+
+    Every replay begins at the graph's start node, so every restart has to land on the
+    same screen. The component is the configured ``launch_activity``, or else the
+    package's launcher activity, resolved on the first restart and reused; ``monkey``
+    would pick one of several launcher activities at random.
+    """
+
+    def __init__(self, name: str, package_name: str, launch_activity: str | None = None) -> None:
+        self.name = name
+        self.package_name = package_name
+        self._component = launch_activity
+
+    def component(self, udid: str, logger: logging.Logger) -> str:
+        """Return the component to start, asking ``udid`` for the launcher activity on the
+        first call when no ``launch_activity`` is configured."""
+        if self._component is None:
+            self._component = _launcher_activity(udid, self.package_name, logger)
+        return self._component
+
+
+def _launcher_activity(udid: str, package_name: str, logger: logging.Logger) -> str:
+    """Return the activity ``pm resolve-activity`` resolves the package's launcher intent
+    to, or else the first that ``pm query-activities`` lists for it.
+
+    ``pm resolve-activity`` prints ``No activity found`` for a package with none, and the
+    system chooser for one with several. Raises ``NoLauncherActivityError`` when the
+    package has none.
+    """
+    pm = ["-s", udid, "shell", "pm"]
+    intent = [*_LAUNCHER_INTENT, package_name]
+    resolved = run_adb([*pm, "resolve-activity", "--brief", *intent], output="capture", check=True)
+    if components := _package_components(resolved.stdout, package_name):
+        return components[0]
+    listed = run_adb([*pm, "query-activities", "--brief", *intent], output="capture", check=True)
+    components = _package_components(listed.stdout, package_name)
+    if not components:
+        msg = f"{package_name} has no launcher activity; set launch_activity for it in the config"
+        raise NoLauncherActivityError(msg)
+    first, *others = components
+    if others:
+        logger.warning(
+            "%s has several launcher activities; restarting it through %s, not %s. "
+            "Set launch_activity to choose another.",
+            package_name,
+            first,
+            ", ".join(others),
+        )
+    return first
+
+
+def _package_components(pm_output: str, package_name: str) -> list[str]:
+    """Return the components of ``package_name`` that ``pm ... --brief`` output names."""
+    lines = (line.strip() for line in pm_output.splitlines())
+    return [line for line in lines if line.startswith(f"{package_name}/")]
+
+
+def restart_app(controller: DeviceController, app: AppLaunch, logger: logging.Logger) -> None:
     """Put the app on its start screen, where every replay from the start node begins.
 
-    A launch alone does not: launching an app whose task still exists brings that
-    task to the foreground as it was
-    (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
-    A refused force-stop raises ``ForceStopRefusedError`` before anything is
-    launched, so no replay starts from an unknown screen.
+    The force-stop discards what the app holds in memory. It leaves another package's
+    activity in the app's task, such as a search screen the app opened, and launching an
+    app whose task still exists brings that task to the foreground as it was
+    (https://developer.android.com/guide/components/activities/tasks-and-back-stack),
+    so the launch clears the task. A refused force-stop raises ``ForceStopRefusedError``
+    before anything is launched, so no replay starts from an unknown screen. When
+    ``am start`` cannot start the component, the package's launcher intent is sent instead.
     """
     config = controller.config
-    force_stop = ["-s", config["device"]["udid"], "shell", "am", "force-stop", package_name]
+    udid = config["device"]["udid"]
+    force_stop = ["-s", udid, "shell", "am", "force-stop", app.package_name]
     stopped = run_adb(force_stop, output="discard", check=False)
     if stopped.returncode != 0:
         raise ForceStopRefusedError(stopped.returncode, stopped.args)
-    app = {"name": app_name, "package_name": package_name, "launch_activity": launch_activity}
-    launch_app(config, app, logger)
+    component = app.component(udid, logger)
+    start = ["-s", udid, "shell", "am", "start", "-n", component, "-f", _CLEAR_TASK_FLAGS]
+    started = run_adb(start, output="capture", check=False)
+    if _start_failed(started):
+        logger.warning(
+            "Activity launch failed for %s; falling back to package launch. error=%s",
+            app.name,
+            _adb_error(started),
+        )
+        launch_app(config, {"name": app.name, "package_name": app.package_name}, logger)
     time.sleep(_LAUNCH_SETTLE_SECONDS)
+
+
+def _start_failed(started: subprocess.CompletedProcess[str]) -> bool:
+    """Return whether ``am start`` reported that it could not start the activity.
+
+    Its ``Error`` lines count as well as its exit status: on a device without adb's shell
+    protocol, ``adb shell`` exits 0 whatever the command returned.
+    """
+    lines = f"{started.stdout}\n{started.stderr}".splitlines()
+    return started.returncode != 0 or any(line.startswith("Error") for line in lines)
 
 
 def soft_keyboard_hint() -> str:
@@ -511,48 +593,42 @@ class StillOutsideAppError(RuntimeError):
 
 
 def restart_into_app(
-    controller: DeviceController,
-    app_name: str,
-    package_name: str,
-    launch_activity: str | None,
-    logger: logging.Logger,
+    controller: DeviceController, app: AppLaunch, logger: logging.Logger
 ) -> dict[str, Any]:
     """Restart the app with ``restart_app`` and return the state of the screen it shows.
 
     Raises ``StillOutsideAppError`` naming the package in front when it still belongs
     to another app.
     """
-    restart_app(controller, app_name, package_name, launch_activity, logger)
+    restart_app(controller, app, logger)
     state = controller.get_state()
     package = state.get("package", "")
-    if is_outside_app(package, package_name):
-        msg = f"{package} is still in front after restarting {package_name}"
+    if is_outside_app(package, app.package_name):
+        msg = f"{package} is still in front after restarting {app.package_name}"
         raise StillOutsideAppError(msg)
     return state
 
 
 def return_to_app(
-    controller: DeviceController,
-    app_name: str,
-    package_name: str,
-    launch_activity: str | None,
-    logger: logging.Logger,
+    controller: DeviceController, app: AppLaunch, logger: logging.Logger
 ) -> dict[str, Any]:
     """Press Back after a step opened another app and return the state of the app's
     screen, restarting the app with ``restart_into_app`` when Back does not return to it.
 
     Back pops only the top activity, so the other app can stay in front, for example
     when Back only closed its keyboard. A launch would then resume the app's task with
-    the other app's activity still on top, which the force-stop in the restart avoids.
+    the other app's activity still on top, which the restart avoids by clearing the task.
     """
     controller.exe_action({"action": "back"})
     time.sleep(1)
     state = controller.get_state()
     package = state.get("package", "")
-    if not is_outside_app(package, package_name):
+    if not is_outside_app(package, app.package_name):
         return state
-    logger.warning("Back left %s in front of %s. Restarting %s.", package, package_name, app_name)
-    return restart_into_app(controller, app_name, package_name, launch_activity, logger)
+    logger.warning(
+        "Back left %s in front of %s. Restarting %s.", package, app.package_name, app.name
+    )
+    return restart_into_app(controller, app, logger)
 
 
 def grant_runtime_permissions(udid: str, package_name: str) -> None:

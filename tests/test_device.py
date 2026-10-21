@@ -15,6 +15,10 @@ import pytest
 from android_app_graph import device
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
+_PM = ["adb", "-s", "test-device", "shell", "pm"]
+_LAUNCHER_INTENT = ["-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER"]
+_RESOLVE_LAUNCHER = [*_PM, "resolve-activity", "--brief", *_LAUNCHER_INTENT, "com.demo"]
+_QUERY_LAUNCHERS = [*_PM, "query-activities", "--brief", *_LAUNCHER_INTENT, "com.demo"]
 _PACKAGE_LAUNCH = [
     "adb",
     "-s",
@@ -45,12 +49,135 @@ class _Device:
         raise AssertionError(msg)
 
 
-def test_restart_app_force_stops_then_launches_and_waits_for_the_screen(
+def _clear_task_start(component: str) -> list[str]:
+    return ["adb", "-s", "test-device", "shell", "am", "start", "-n", component, "-f", "0x10008000"]
+
+
+def test_restart_app_resolves_the_launcher_activity_once_and_starts_it_in_a_cleared_task(
     device_log: list[object], no_sleep: list[float]
 ) -> None:
-    device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    """Every restart of the run starts the same component, so each lands on the same screen."""
+    app = device.AppLaunch("demo", "com.demo")
+    for _ in range(2):
+        device.restart_app(_Device(), app, logging.getLogger("test"))
+    home = _clear_task_start("com.demo/.Home")
+    assert device_log == [_FORCE_STOP, _RESOLVE_LAUNCHER, home, _FORCE_STOP, home]
+    assert no_sleep == [4, 4]
+
+
+def test_restart_app_starts_the_configured_launch_activity_in_a_cleared_task(
+    device_log: list[object], no_sleep: list[float]
+) -> None:
+    app = device.AppLaunch("demo", "com.demo", "com.demo/.Main")
+    device.restart_app(_Device(), app, logging.getLogger("test"))
+    assert device_log == [_FORCE_STOP, _clear_task_start("com.demo/.Main")]
     assert no_sleep == [4]
+
+
+# Both in the layout of the Pixel 9 emulator's `pm ... --brief` output.
+_SYSTEM_CHOOSER = (
+    "priority=0 preferredOrder=0 match=0x0 specificIndex=-1 isDefault=false\n"
+    "android/com.android.internal.app.ResolverActivity\n"
+)
+_TWO_LAUNCHER_ACTIVITIES = (
+    "2 activities found:\n"
+    "  Activity #0:\n"
+    "    priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+    "    com.demo/.Home\n"
+    "  Activity #1:\n"
+    "    priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+    "    com.demo/.Widgets\n"
+)
+
+
+def _answer_pm(
+    monkeypatch: pytest.MonkeyPatch, device_log: list[object], *, resolved: str, listed: str
+) -> None:
+    """Answer ``pm resolve-activity`` with ``resolved`` and ``pm query-activities`` with
+    ``listed``; every other adb command succeeds without output."""
+    outputs = {"resolve-activity": resolved, "query-activities": listed}
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        device_log.append(command)
+        stdout = outputs.get(command[5], "")
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(device.subprocess, "run", run)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_restart_app_starts_the_first_of_several_launcher_activities_and_names_the_others(
+    monkeypatch: pytest.MonkeyPatch, device_log: list[object], caplog: pytest.LogCaptureFixture
+) -> None:
+    _answer_pm(monkeypatch, device_log, resolved=_SYSTEM_CHOOSER, listed=_TWO_LAUNCHER_ACTIVITIES)
+    app = device.AppLaunch("demo", "com.demo")
+    with caplog.at_level(logging.WARNING, logger="test"):
+        device.restart_app(_Device(), app, logging.getLogger("test"))
+    start = _clear_task_start("com.demo/.Home")
+    assert device_log == [_FORCE_STOP, _RESOLVE_LAUNCHER, _QUERY_LAUNCHERS, start]
+    warning = (
+        "com.demo has several launcher activities; restarting it through com.demo/.Home, "
+        "not com.demo/.Widgets. Set launch_activity to choose another."
+    )
+    assert caplog.messages == [warning]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_restart_app_without_a_launcher_activity_asks_for_a_launch_activity_and_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    _answer_pm(
+        monkeypatch, device_log, resolved="No activity found\n", listed="No activities found\n"
+    )
+    app = device.AppLaunch("demo", "com.demo")
+    with pytest.raises(
+        device.NoLauncherActivityError,
+        match=r"^com\.demo has no launcher activity; set launch_activity for it in the config$",
+    ):
+        device.restart_app(_Device(), app, logging.getLogger("test"))
+    assert device_log == [_FORCE_STOP, _RESOLVE_LAUNCHER, _QUERY_LAUNCHERS]
+
+
+_STARTING_GONE = "Starting: Intent { flg=0x10008000 cmp=com.demo/.Gone }\n"
+_GONE = "Error type 3\nError: Activity class {com.demo/com.demo.Gone} does not exist.\n"
+_GONE_ON_ONE_LINE = "Error type 3 Error: Activity class {com.demo/com.demo.Gone} does not exist."
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "error"),
+    [
+        (1, _STARTING_GONE, _GONE, _GONE_ON_ONE_LINE),
+        # An adb that reports no exit status prints both streams to stdout.
+        (0, _STARTING_GONE + _GONE, "", f"{_STARTING_GONE.strip()} {_GONE_ON_ONE_LINE}"),
+    ],
+    ids=["exit status", "error line"],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_restart_app_launches_the_package_when_am_start_cannot_start_the_activity(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    error: str,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    start = _clear_task_start("com.demo/.Gone")
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        device_log.append(command)
+        if command == start:
+            return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(device.subprocess, "run", run)
+    app = device.AppLaunch("demo", "com.demo", "com.demo/.Gone")
+    with caplog.at_level(logging.WARNING, logger="test"):
+        device.restart_app(_Device(), app, logging.getLogger("test"))
+    assert device_log == [_FORCE_STOP, start, _PACKAGE_LAUNCH]
+    assert caplog.messages == [
+        f"Activity launch failed for demo; falling back to package launch. error={error}"
+    ]
 
 
 @pytest.mark.usefixtures("adb_on_path")
@@ -68,10 +195,36 @@ def test_restart_app_launches_nothing_when_the_force_stop_fails(
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="device offline")
 
     monkeypatch.setattr(device.subprocess, "run", offline)
+    app = device.AppLaunch("demo", "com.demo")
     with pytest.raises(device.ForceStopRefusedError):
-        device.restart_app(_Device(), "demo", "com.demo", None, logging.getLogger("test"))
+        device.restart_app(_Device(), app, logging.getLogger("test"))
     assert commands == [_FORCE_STOP]
     assert no_sleep == []
+
+
+_ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "launches"),
+    [(0, [_ACTIVITY_LAUNCH]), (1, [_ACTIVITY_LAUNCH, _PACKAGE_LAUNCH])],
+    ids=["started", "refused"],
+)
+def test_launch_app_starts_the_launch_activity_or_else_the_package_without_clearing_the_task(
+    returncode: int,
+    launches: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        device_log.append(command)
+        refused = command == _ACTIVITY_LAUNCH and returncode
+        return subprocess.CompletedProcess(command, returncode if refused else 0, "", "")
+
+    monkeypatch.setattr(device.subprocess, "run", run)
+    app = {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Main"}
+    device.launch_app({"device": {"udid": "test-device"}}, app, logging.getLogger("test"))
+    assert device_log == launches
 
 
 def test_adb_executable_raises_file_not_found_naming_adb_when_adb_is_not_on_path(
@@ -277,7 +430,9 @@ def test_return_to_app_lets_a_refused_force_stop_through(
 
     monkeypatch.setattr(device.subprocess, "run", refuse)
     with pytest.raises(device.ForceStopRefusedError):
-        device.return_to_app(controller, "demo", "com.demo", None, logging.getLogger("test"))
+        device.return_to_app(
+            controller, device.AppLaunch("demo", "com.demo"), logging.getLogger("test")
+        )
     assert device_log == [{"action": "back"}, _FORCE_STOP]
 
 

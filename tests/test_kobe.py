@@ -38,7 +38,20 @@ _PACKAGE_LAUNCH = [
     "android.intent.category.LAUNCHER",
     "1",
 ]
-_ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
+_RESOLVE_LAUNCHER = [
+    *("adb", "-s", "test-device", "shell", "pm", "resolve-activity", "--brief"),
+    *("-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "com.demo"),
+]
+
+
+def _clear_task_start(component: str) -> list[str]:
+    return ["adb", "-s", "test-device", "shell", "am", "start", "-n", component, "-f", "0x10008000"]
+
+
+_HOME_START = _clear_task_start("com.demo/.Home")
+# The run's first restart asks the device for the launcher activity; later ones reuse it.
+_FIRST_RESTART = [_FORCE_STOP, _RESOLVE_LAUNCHER, _HOME_START]
+_RESTART = [_FORCE_STOP, _HOME_START]
 _TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
 
 
@@ -101,7 +114,13 @@ class _ReplayDevice(_Device):
         self._log.append(action)
 
 
-def _explorer(device: DeviceController, tmp_path: Path, router_client: OpenRouter) -> Kobe:
+def _explorer(
+    device: DeviceController,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    *,
+    launch_activity: str | None = None,
+) -> Kobe:
     return Kobe(
         device,
         ExplorerConfig(
@@ -109,6 +128,7 @@ def _explorer(device: DeviceController, tmp_path: Path, router_client: OpenRoute
             package_name="com.demo",
             graph_dir=tmp_path,
             vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+            launch_activity=launch_activity,
         ),
         client=router_client,
         logger=logging.getLogger("test"),
@@ -366,18 +386,22 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
     replaying_kobe.graph.graph.nodes[node].pop("representative_observation")
     assert replaying_kobe.navigate_to_node(node) == node
     assert len(router_requests) == 4
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == _FIRST_RESTART
 
 
 @pytest.mark.usefixtures("no_sleep")
 def test_navigation_restarts_the_app_through_its_launch_activity(
-    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    replaying_kobe.launch_activity = "com.demo/.Main"
-    replaying_kobe.graph.graph.add_node("s0_home")
-    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s0_home")
-    assert replaying_kobe.navigate_to_node("s0_home") == "s0_home"
-    assert device_log == [_FORCE_STOP, _ACTIVITY_LAUNCH]
+    device = _ReplayDevice(HOME_SCREEN, device_log)
+    explorer = _explorer(device, tmp_path, router_client, launch_activity="com.demo/.Main")
+    explorer.graph.graph.add_node("s0_home")
+    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args: "s0_home")
+    assert explorer.navigate_to_node("s0_home") == "s0_home"
+    assert device_log == [_FORCE_STOP, _clear_task_start("com.demo/.Main")]
 
 
 def test_navigation_without_a_recorded_path_leaves_the_app_running(
@@ -414,7 +438,7 @@ def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_re
     monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s2_detail")
 
     assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_detail]
+    assert device_log == [*_FIRST_RESTART, open_detail]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -428,7 +452,7 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_detail")
 
     assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_detail]
+    assert device_log == [*_FIRST_RESTART, open_detail]
 
 
 @pytest.mark.parametrize("malformed", [False, True])
@@ -657,7 +681,7 @@ _BACK = {"action": "back"}
 
 @pytest.mark.parametrize(
     ("back_presses_on_the_page", "leaving"),
-    [(1, [_BACK, _BACK]), (3, [_BACK, _BACK, _BACK, _FORCE_STOP, _PACKAGE_LAUNCH])],
+    [(1, [_BACK, _BACK]), (3, [_BACK, _BACK, _BACK, *_FIRST_RESTART])],
 )
 @pytest.mark.usefixtures("no_sleep")
 def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
@@ -940,7 +964,7 @@ def test_a_step_that_leaves_the_app_records_its_screen_on_the_app_s_node(
     ]
     assert (records[3]["after"], records[3]["to_node"]) == ("000002", "ext_com.android.launcher3")
     assert kobe.graph.graph.nodes["ext_com.android.launcher3"]["observations"] == ["000002"]
-    restart = [_FORCE_STOP, _PACKAGE_LAUNCH] if relaunched else []
+    restart = _FIRST_RESTART if relaunched else []
     assert device_log == [_BACK, _BACK, *restart]
 
 
@@ -1257,7 +1281,7 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
         replaying_kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
         == "s1_settings"
     )
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_settings]
+    assert device_log == [*_FIRST_RESTART, open_settings]
 
 
 def _fail_navigation(node: str) -> str:
@@ -1362,15 +1386,15 @@ class _ReplayScript:
 
 
 def _adb_refusing_once(
-    refused: list[str], log: list[object]
+    log: list[object], *refused: list[str]
 ) -> Callable[..., subprocess.CompletedProcess[str]]:
-    """A ``subprocess.run`` that logs each command and fails ``refused`` the first time."""
+    """A ``subprocess.run`` that logs each command and fails each of ``refused`` once."""
 
     def run(
         command: list[str], *, check: bool = False, **_kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         log.append(command)
-        returncode = 1 if command == refused and log.count(command) == 1 else 0
+        returncode = 1 if command in refused and log.count(command) == 1 else 0
         if check and returncode:
             raise subprocess.CalledProcessError(returncode, command)
         return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
@@ -1439,7 +1463,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     list_image = f"data:image/webp;base64,{list_webp}"
     assert all(list_image in request.content.decode() for request in router_requests[-2:])
     tap = {"action": "tap", "x": 50, "y": 100}
-    assert device_log == [tap, _FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, tap]
+    assert device_log == [tap, *_FIRST_RESTART, open_list, open_item, tap]
     step = [("action", "main_loop"), ("observation", "main_loop"), ("transition", "main_loop")]
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
@@ -1461,13 +1485,14 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launch that fails after the force-stop leaves the launcher on the screen."""
+    """A launch that fails after the force-stop, through the launcher intent too, leaves
+    the launcher on the screen."""
     launcher = {
         **_screen("com.android.launcher3.Launcher", "black"),
         "package": "com.android.launcher3",
     }
     device = _ReplayScript(device_log, launcher, _in_app("Home", "white"))
-    explorer = _explorer(device, tmp_path, router_client)
+    explorer = _explorer(device, tmp_path, router_client, launch_activity="com.demo/.Main")
     explorer.graph.graph.add_edge("s0_home", "s1_settings")
     explorer.graph.graph.add_edge("s1_settings", "s2_detail")
     router_responses.extend(
@@ -1476,14 +1501,17 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
-    monkeypatch.setattr(subprocess, "run", _adb_refusing_once(_PACKAGE_LAUNCH, device_log))
+    main_start = _clear_task_start("com.demo/.Main")
+    monkeypatch.setattr(
+        subprocess, "run", _adb_refusing_once(device_log, main_start, _PACKAGE_LAUNCH)
+    )
     nodes = {"com.demo.Home": "s0_home"}
     monkeypatch.setattr(
         explorer.graph, "identify_state", lambda observation: nodes[observation.activity]
     )
 
     assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, _FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == [_FORCE_STOP, main_start, _PACKAGE_LAUNCH, _FORCE_STOP, main_start]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1518,7 +1546,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
 
     assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
     back = {"action": "back"}
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_list, open_item, back]
+    assert device_log == [*_FIRST_RESTART, open_list, open_item, back]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1543,7 +1571,7 @@ def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_sta
         ]
     )
     if force_stop_refused:
-        monkeypatch.setattr(subprocess, "run", _adb_refusing_once(_FORCE_STOP, device_log))
+        monkeypatch.setattr(subprocess, "run", _adb_refusing_once(device_log, _FORCE_STOP))
     else:
         monkeypatch.setattr(explorer.graph, "find_path", lambda *_args: None)
 
@@ -1694,8 +1722,8 @@ def _node_packages(explorer: Kobe) -> dict[str, object]:
     [
         ([_SEARCH_SCREEN, HOME_SCREEN], [_BACK]),
         (
-            [_SEARCH_SCREEN, _SEARCH_SCREEN, _SEARCH_SCREEN, HOME_SCREEN],
-            [_BACK, _FORCE_STOP, _PACKAGE_LAUNCH],
+            [*[_SEARCH_SCREEN] * 4, HOME_SCREEN],
+            [_BACK, *_FIRST_RESTART],
         ),
     ],
     ids=["back returns", "back leaves the other app in front"],
@@ -1716,7 +1744,7 @@ def test_a_step_into_another_app_returns_to_the_app_before_the_next_step(
 ) -> None:
     """Back can close only the keyboard and leave the other app's screen up. Launching
     the app would then resume its task with that screen still on top, so the explorer
-    force-stops the app before launching it, and gives the other app's screen no node."""
+    restarts the app with its task cleared, and gives the other app's screen no node."""
     explorer = _explorer(screens_by_log(HOME_SCREEN, *after_the_tap), tmp_path, router_client)
 
     planned_from = _explore_from_home_into_another_app(
@@ -1783,7 +1811,7 @@ def test_another_app_still_in_front_after_the_restart_stops_exploration_naming_i
             explorer, router_responses, chat_response, embedding_body, monkeypatch
         )
 
-    assert device_log == [_TAP, _BACK, _FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == [_TAP, _BACK, *_FIRST_RESTART]
     assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
 
 
@@ -1797,7 +1825,7 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
 ) -> None:
     open_detail = {"action": "tap", "coordinate": [30, 40]}
     after_the_replay = [_SEARCH_SCREEN, _SEARCH_SCREEN, HOME_SCREEN]
-    device = screens_by_log(*[HOME_SCREEN] * 3, *after_the_replay)
+    device = screens_by_log(*[HOME_SCREEN] * 4, *after_the_replay)
     explorer = _explorer(device, tmp_path, router_client)
     explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
     explorer.graph.add_edge("s0_home", "s1_detail", action=[open_detail])
@@ -1807,8 +1835,7 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
     )
 
     assert explorer.navigate_to_node("s1_detail") == "s0_home"
-    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
-    assert device_log == [*restart, open_detail, *restart]
+    assert device_log == [*_FIRST_RESTART, open_detail, *_RESTART]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1823,5 +1850,5 @@ def test_exploration_that_starts_in_another_app_restarts_the_app_and_stops_if_it
     with pytest.raises(StillOutsideAppError, match=_SEARCH):
         explorer.explore(max_steps=1)
 
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == _FIRST_RESTART
     assert list(explorer.graph.graph) == []
