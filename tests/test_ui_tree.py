@@ -42,7 +42,10 @@ from android_app_graph.ui_tree import (
 # emulator (API 37, 1344x2992): every window is kept, and in each hierarchy only a few
 # labelled nodes and their ancestors. Each file is the command's stdout, trailing line
 # included; never_idle is a running stopwatch's, popup_menu Clock's overflow menu.
-# web_view is written by hand: one web view filling an app's window.
+# floating_keyboard is Clock's time picker under Gboard floating as a toolbar, on a
+# Pixel 9 emulator (1080x2424), with the keyboard's window kept whole; number_keyboard
+# is Settings' usage cycle dialog above the docked number keyboard, on a Pixel 8a
+# emulator (1080x2400). web_view is written by hand: one web view filling an app's window.
 _DATA = Path(__file__).parent / "data"
 _TRAILER = "UI hierchary dumped to: /dev/stdout"
 
@@ -398,6 +401,8 @@ def test_a_change_in_the_window_list_shows_another_screen(name: str, value: str)
 _APP = "com.example.app"
 _SCREEN = Bounds(0, 0, 1000, 2000)
 _FIXTURE_SCREEN = Bounds(0, 0, 1344, 2992)
+_FLOATING_KEYBOARD_SCREEN = Bounds(0, 0, 1080, 2424)
+_NUMBER_KEYBOARD_SCREEN = Bounds(0, 0, 1080, 2400)
 
 
 def _node(attributes: dict[str, str] | None = None, *children: str) -> str:
@@ -910,6 +915,57 @@ def test_a_tap_on_the_keyboard_resolves_to_the_keyboard_not_an_app_element() -> 
     assert _hit("windows_keyboard", (672, 2500)) == Hit("keyboard")
 
 
+def _cancel_of_the_time_picker(tree: UiTree) -> int:
+    (cancel,) = [index for index, node in enumerate(tree.nodes) if node.text == "Cancel"]
+    return cancel
+
+
+def test_a_tap_beside_a_floating_keyboard_reaches_the_dialog_under_its_window() -> None:
+    """Gboard floats as a toolbar at the left edge, [21,915][169,1605], while its window
+    spans the lower screen, the time picker's Cancel button included. The recorded tap
+    at this point closed the picker."""
+    tree = parse_tree(_dump("windows_floating_keyboard"))
+    cancel = _cancel_of_the_time_picker(tree)
+
+    hit = hit_test(tree, (664, 1473), _FLOATING_KEYBOARD_SCREEN)
+
+    assert hit == Hit(
+        "element", Anchor(locator(tree, cancel), Bounds(572, 1417, 761, 1543)), cancel
+    )
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        pytest.param((95, 988), id="a key"),
+        pytest.param((26, 1300), id="the toolbar's edge beside its keys"),
+    ],
+)
+def test_a_tap_on_a_floating_keyboard_s_toolbar_resolves_to_the_keyboard(
+    point: tuple[int, int],
+) -> None:
+    tree = parse_tree(_dump("windows_floating_keyboard"))
+
+    assert hit_test(tree, point, _FLOATING_KEYBOARD_SCREEN) == Hit("keyboard")
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        pytest.param((140, 1718), id="the 1 key, where a recorded tap landed"),
+        pytest.param((60, 1575), id="the features menu above the keys"),
+        pytest.param((941, 2196), id="the action key"),
+        pytest.param((112, 2337), id="Back below the keys"),
+    ],
+)
+def test_a_tap_on_a_docked_keyboard_s_key_resolves_to_the_keyboard(
+    point: tuple[int, int],
+) -> None:
+    tree = parse_tree(_dump("windows_number_keyboard"))
+
+    assert hit_test(tree, point, _NUMBER_KEYBOARD_SCREEN) == Hit("keyboard")
+
+
 def test_a_tap_on_the_status_bar_resolves_to_a_system_window() -> None:
     assert _hit("windows_plain_list", (600, 50)) == Hit("system")
 
@@ -1208,6 +1264,16 @@ def test_an_element_under_the_keyboard_is_covered() -> None:
     found = resolve_anchor(tree, Anchor(locator(tree, button), Bounds(0, 0, 1, 1)), _APP, _SCREEN)
 
     assert found == "covered"
+
+
+def test_an_element_beside_a_floating_keyboard_is_not_covered() -> None:
+    tree = parse_tree(_dump("windows_floating_keyboard"))
+    cancel = _cancel_of_the_time_picker(tree)
+    anchor = Anchor(locator(tree, cancel), Bounds(572, 1417, 761, 1543))
+
+    found = resolve_anchor(tree, anchor, "com.google.android.deskclock", _FLOATING_KEYBOARD_SCREEN)
+
+    assert found == (666, 1480)
 
 
 def test_an_element_whose_centre_another_element_is_drawn_over_is_covered() -> None:
