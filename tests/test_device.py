@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -55,6 +55,7 @@ def test_restart_app_force_stops_then_launches_and_waits_for_the_screen(
     assert no_sleep == [4]
 
 
+@pytest.mark.usefixtures("adb_on_path")
 def test_restart_app_launches_nothing_when_the_force_stop_fails(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
 ) -> None:
@@ -75,6 +76,70 @@ def test_restart_app_launches_nothing_when_the_force_stop_fails(
     assert no_sleep == []
 
 
+def test_adb_executable_raises_file_not_found_naming_adb_when_adb_is_not_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``FileNotFoundError`` is what ``subprocess`` raises for a missing program, so
+    callers that tolerate a missing adb by catching ``OSError`` still do."""
+    monkeypatch.setattr(device.shutil, "which", lambda _name: None)
+    with pytest.raises(FileNotFoundError, match=r"^adb was not found on PATH$"):
+        device.adb_executable()
+
+
+def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(device.shutil, "which", lambda name: f"/opt/platform-tools/{name}")
+    monkeypatch.setattr(device.subprocess, "run", run)
+    device.run_adb(
+        ["shell", "dumpsys", "input_method"],
+        capture_output=True,
+        errors="replace",
+        timeout=3,
+        check=True,
+    )
+    device.run_adb(
+        ["shell", "am", "force-stop", "com.demo"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+    adb = "/opt/platform-tools/adb"
+    assert calls == [
+        (
+            [adb, "shell", "dumpsys", "input_method"],
+            {
+                "capture_output": True,
+                "stdout": None,
+                "stderr": None,
+                "text": True,
+                "errors": "replace",
+                "timeout": 3,
+                "check": True,
+            },
+        ),
+        (
+            [adb, "shell", "am", "force-stop", "com.demo"],
+            {
+                "capture_output": False,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "text": True,
+                "errors": None,
+                "timeout": None,
+                "check": False,
+            },
+        ),
+    ]
+
+
 class _CompletedProcess:
     """The subset of subprocess.CompletedProcess the probe reads."""
 
@@ -82,6 +147,7 @@ class _CompletedProcess:
         self.stdout = stdout
 
 
+@pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_when_the_keyboard_is_shown(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         device.subprocess, "run", lambda *_a, **_k: _CompletedProcess("mInputShown=true")
@@ -90,11 +156,13 @@ def test_soft_keyboard_hint_when_the_keyboard_is_shown(monkeypatch: pytest.Monke
     assert "soft keyboard is currently visible" in hint
 
 
+@pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_when_the_keyboard_is_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(device.subprocess, "run", lambda *_a, **_k: _CompletedProcess(""))
     assert device.soft_keyboard_hint() == ""
 
 
+@pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPatch) -> None:
     def _no_adb(*_args: object, **_kwargs: object) -> _CompletedProcess:
         msg = "adb"
@@ -104,6 +172,19 @@ def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPat
     assert device.soft_keyboard_hint() == ""
 
 
+def test_soft_keyboard_hint_is_empty_when_adb_is_not_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "adb ran although it is not on PATH"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(device.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(device.subprocess, "run", must_not_run)
+    assert device.soft_keyboard_hint() == ""
+
+
+@pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -120,6 +201,7 @@ def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
     assert device.soft_keyboard_hint() == ""
 
 
+@pytest.mark.usefixtures("adb_on_path")
 def test_soft_keyboard_hint_reads_past_a_replacement_character(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -192,6 +274,7 @@ _REFUSAL = (
 )
 
 
+@pytest.mark.usefixtures("adb_on_path")
 def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skipped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

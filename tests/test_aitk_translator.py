@@ -2654,7 +2654,7 @@ def test_v2_runtime_without_an_openrouter_key_creates_no_client(
 def test_v2_runtime_rejects_upstream_endpoint_and_credential_keys(
     tmp_path: Path, opened_clients: list[OpenRouter], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    secret = "dummy-google-secret-never-log"
+    secret = "dummy-google-secret-never-log"  # noqa: S105  # fake credential; the test proves it is never logged
     monkeypatch.setenv("GEMINI_API_KEY", secret)
     upstream = {
         "action": {"api_key": "${GEMINI_API_KEY}", "base_url": "https://provider.example/v1"},
