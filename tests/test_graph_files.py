@@ -217,35 +217,6 @@ def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
     assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
 
 
-def test_iter_graph_files_without_a_graph_dir(tmp_path: Path) -> None:
-    assert graph_files.iter_graph_files(tmp_path / "absent") == []
-
-
-def test_iter_graph_files_prefers_the_audited_graph(tmp_path: Path) -> None:
-    app_dir = tmp_path / "eboox"
-    app_dir.mkdir()
-    (app_dir / "eboox.json").write_text("{}", encoding="utf-8")
-    audited = app_dir / "eboox_audited.json"
-    audited.write_text("{}", encoding="utf-8")
-    assert graph_files.iter_graph_files(tmp_path) == [("eboox", audited)]
-
-
-def test_iter_graph_files_sorts_apps_and_skips_side_files(tmp_path: Path) -> None:
-    for app in ("zebra", "alpha"):
-        app_dir = tmp_path / app
-        app_dir.mkdir()
-        (app_dir / f"{app}.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "alpha" / "alpha_audit_report.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "alpha" / "alpha.image_emb.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "loose.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "empty").mkdir()
-
-    assert graph_files.iter_graph_files(tmp_path) == [
-        ("alpha", tmp_path / "alpha" / "alpha.json"),
-        ("zebra", tmp_path / "zebra" / "zebra.json"),
-    ]
-
-
 def test_reference_screenshot_path_finds_the_node_in_the_app_directory(tmp_path: Path) -> None:
     """Only the app directory exists (a plain, never-audited graph)."""
     app_dir = tmp_path / "demo"
@@ -445,20 +416,6 @@ def test_require_graph_shape_rejects_a_non_string_edge_endpoint(
     with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
         graph_files.require_graph_shape({"nodes": [], "edges": [edge]}, path)
     assert str(path) in str(excinfo.value)
-
-
-def test_iter_graph_files_can_select_one_app(tmp_path: Path) -> None:
-    for app in ("demo", "other"):
-        app_dir = tmp_path / app
-        app_dir.mkdir()
-        (app_dir / f"{app}.json").write_text("{}", encoding="utf-8")
-    assert graph_files.iter_graph_files(tmp_path, "demo") == [
-        ("demo", tmp_path / "demo" / "demo.json")
-    ]
-
-
-def test_iter_graph_files_skips_an_unknown_app(tmp_path: Path) -> None:
-    assert graph_files.iter_graph_files(tmp_path, "absent") == []
 
 
 def test_require_graph_shape_rejects_a_non_object_document(tmp_path: Path) -> None:

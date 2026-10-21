@@ -1,5 +1,5 @@
-"""Graph-file discovery, per-node reference-screenshot lookup, atomic JSON
-writing, and graph-structure validation shared by every loader.
+"""Per-node reference-screenshot lookup, atomic JSON writing, and
+graph-structure validation shared by every loader.
 """
 
 from __future__ import annotations
@@ -117,23 +117,12 @@ def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
     return None
 
 
-def encode_screenshot_b64(screenshot_path: Path) -> str:
-    """Read one screenshot file and return its bytes as base64 ascii.
-
-    Split out of ``reference_screenshot_b64`` so a caller that already has a
-    node's screenshot path -- offline precomputation streaming one candidate
-    at a time instead of reading every uncached screenshot up front -- reads
-    and encodes through the same path as runtime graph loading.
-    """
-    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
-
-
 def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
     """Return one node's reference screenshot as base64, or ``None`` when it has none."""
     screenshot_path = reference_screenshot_path(graph_path, node_id)
     if screenshot_path is None:
         return None
-    return encode_screenshot_b64(screenshot_path)
+    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
 
 
 def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
@@ -214,31 +203,3 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
         msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
         raise ValueError(msg)
     return graph
-
-
-def iter_graph_files(graph_dir: Path, app_name: str | None = None) -> list[tuple[str, Path]]:
-    """Return one graph JSON per app, preferring the audited graph.
-
-    Neither runtime graph loading nor offline embedding precomputation should
-    pick up audit reports, merge reports, or embedding sidecars: the app name
-    comes from the graph directory name, so ``eboox_audited.json`` still loads
-    as app ``eboox``. When ``app_name`` is given, only that app's directory is
-    considered.
-    """
-    selected: list[tuple[str, Path]] = []
-    if not graph_dir.exists():
-        return selected
-    app_dirs = (
-        [graph_dir / app_name] if app_name else sorted(p for p in graph_dir.iterdir() if p.is_dir())
-    )
-    for app_dir in app_dirs:
-        if not app_dir.is_dir():
-            continue
-        name = app_dir.name
-        audited = app_dir / f"{name}_audited.json"
-        plain = app_dir / f"{name}.json"
-        if audited.exists():
-            selected.append((name, audited))
-        elif plain.exists():
-            selected.append((name, plain))
-    return selected
