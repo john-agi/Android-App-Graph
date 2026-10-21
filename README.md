@@ -78,8 +78,12 @@ graph TD;
 - [uv](https://docs.astral.sh/uv/) 0.12.9 or a newer 0.12.x release.
   `pyproject.toml` enforces the range `>=0.12.9,<0.13` with `required-version`;
   run `uv self update 0.12.9` if yours is outside it.
-- Android SDK with `adb` and `emulator` on `PATH`
-- An Android Virtual Device with the target app installed
+- Android SDK with `adb` on `PATH`
+- A running emulator or a USB-debugging device on `adb devices`, with the target
+  app installed. `device.udid` in the config is its serial. `device.avd_name`
+  is read only when `adb devices` lists nothing: exploration then copies that
+  AVD to `<avd_name>_dup` and starts the copy with `emulator`, which must be on
+  `PATH`.
 - VLM provider credentials exported as environment variables
 
 ## Install
@@ -90,27 +94,11 @@ cd Android-App-Graph
 uv sync
 ```
 
-No sibling checkout of AITK is needed. `pyproject.toml` declares
-[AITK](https://github.com/YuxiangChai/AITK) as a git dependency pinned to a
-specific commit under `[tool.uv.sources]`, so `uv sync` clones and installs
-that commit automatically.
-
 Run commands through `uv`:
 
 ```bash
 uv run app-graph --help
 ```
-
-To move to a newer AITK commit, change the `rev` value under
-`[tool.uv.sources]` in `pyproject.toml`, then refresh the lockfile and the
-environment:
-
-```bash
-uv lock --upgrade-package aitk
-uv sync --locked
-```
-
-Commit `pyproject.toml` and `uv.lock` together.
 
 ## Configure API Credentials
 
@@ -544,5 +532,7 @@ Android-App-Graph is a fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE)
 by [Yuxiang Chai](https://github.com/YuxiangChai), released under the
 [Apache License 2.0](LICENSE). Files from the original work have been modified
 in this repository; the attribution notice is in [NOTICE](NOTICE).
-[AITK](https://github.com/YuxiangChai/AITK), the device toolkit exploration uses
-to drive the emulator, is by the same author.
+The adb device controller and AVD manager in `src/android_app_graph/device.py`
+are adapted from [AITK](https://github.com/YuxiangChai/AITK), a device toolkit
+by the same author under the same licence; [NOTICE](NOTICE) names the files
+they come from.

@@ -1694,7 +1694,7 @@ _MOBILE_USE_ACTIONS: dict[str, Callable[[dict[str, object], int, int], dict[str,
 }
 
 
-def tool_call_to_aitk(
+def tool_call_to_action(
     args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
 ) -> dict[str, object]:
     """Convert mobile_use arguments using the contract in README.md#action-responses."""
@@ -1878,7 +1878,7 @@ def describe_executed_action(
     *,
     settings: ModelSettings,
 ) -> str | None:
-    """Write the instruction for an AITK action from the screenshot taken before it ran.
+    """Write the instruction for a device action from the screenshot taken before it ran.
 
     ``screen_size`` is the device's ``(width, height)`` in pixels, which the action's
     coordinates are measured in. Returns None when the reply is truncated, not a JSON
@@ -2007,7 +2007,7 @@ def _unparsed_reason(raw: str) -> str:
 
 
 def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[str, object], str]:
-    """Turn an action reply into an AITK action and its history entry."""
+    """Turn an action reply into a device action and its history entry."""
     raw = message_text(resp)
     try:
         tool_args, thought, action_desc = parse_agent_response(resp)
@@ -2016,12 +2016,12 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     if tool_args is None:
         raise _MalformedActionOutputError(_unparsed_reason(raw), raw)
     try:
-        action = tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
+        action = tool_call_to_action(tool_args, screen_w=screen_w, screen_h=screen_h)
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
         reason = f"the mobile_use arguments were invalid: {exc}"
         raise _MalformedActionOutputError(reason, raw) from exc
     history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
-    logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
+    logger.info("  Agent action: %s → device action: %s", tool_args.get("action"), action)
     return as_object_dict(action), history_entry
 
 
@@ -2057,8 +2057,8 @@ def predict_next_action(
     and decides the next action (or "end" if the task is complete).
 
     Returns:
-        (aitk_action, history_entry):
-        - aitk_action: action dict in AITK format (may be {"action": "end"})
+        (device_action, history_entry):
+        - device_action: device action dict (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
     screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)

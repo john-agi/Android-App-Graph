@@ -1415,12 +1415,12 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
 )
 def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        vlm.tool_call_to_aitk(args)
+        vlm.tool_call_to_action(args)
 
 
 def test_direction_does_not_hide_invalid_partial_coordinates() -> None:
     with pytest.raises(ValueError, match="coordinates"):
-        vlm.tool_call_to_aitk({"action": "swipe", "direction": "up", "coordinate": [500]})
+        vlm.tool_call_to_action({"action": "swipe", "direction": "up", "coordinate": [500]})
 
 
 @pytest.mark.parametrize(
@@ -1468,10 +1468,10 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
         ),
     ],
 )
-def test_tool_arguments_convert_to_aitk_actions(
+def test_tool_arguments_convert_to_device_actions(
     args: dict[str, object], expected: dict[str, object]
 ) -> None:
-    assert vlm.tool_call_to_aitk(args) == expected
+    assert vlm.tool_call_to_action(args) == expected
 
 
 _XML_CLICK = """\

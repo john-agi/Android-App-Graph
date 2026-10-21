@@ -8,7 +8,13 @@ from typing import Any
 
 import yaml
 
-from android_app_graph.device import AvdManager, grant_runtime_permissions, launch_app
+from android_app_graph.device import (
+    AdbController,
+    AvdManager,
+    EmulatorManager,
+    grant_runtime_permissions,
+    launch_app,
+)
 from android_app_graph.kobe import EXPLORATION_ROLES, ExplorerConfig, Kobe
 from android_app_graph.utils import open_client, resolve_api_key, resolve_model_settings
 from android_app_graph.utils.logging import setup_logging
@@ -79,21 +85,11 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    try:
-        from aitk.utils.adb_controller import ADBController
-        from aitk.utils.avd_manager import AVDManager
-    except ImportError:
-        parser.exit(
-            1,
-            "app-graph requires the 'aitk' dependency. Install it first, then rerun the command.\n",
-        )
-
     setup_logging(level=logging.INFO)
     logger = logging.getLogger("android_app_graph.explorer")
 
-    avd_manager = AVDManager(logger)
-    check_avd(avd_manager, config, logger)
-    controller = ADBController(config, logger)
+    check_avd(EmulatorManager(logger), config, logger)
+    controller = AdbController(config, logger)
 
     exp_config = config.get("experiment", {})
     graph_dir = exp_config.get("graph_dir", "graphs")
@@ -109,8 +105,7 @@ def main() -> None:
             package_name = app["package_name"]
 
             logger.info("Terminating all running apps...")
-            # aitk's only public way to terminate all apps; it also starts a fresh aitk history.
-            controller.set_task_eval()
+            controller.terminate_all_apps()
             time.sleep(1)
 
             grant_runtime_permissions(config["device"]["udid"], package_name)
