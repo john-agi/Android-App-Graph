@@ -2018,6 +2018,150 @@ def test_a_replay_expects_the_node_it_replays_to(
     assert identified == ["s1_list", "s0_home"]
 
 
+_BACK_REPLY = '{"action":"system_button","button":"Back"}'
+_OPEN_LIST = {"action": "tap", "coordinate": [10, 20]}
+
+
+def _planning_back(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Make the planner choose Back on every screen; return the list the page description
+    of each screen it plans from is appended to."""
+    planned_from: list[object] = []
+    monkeypatch.setattr(
+        "android_app_graph.kobe.plan_next_action", _planner("Go back", planned_from)
+    )
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    return planned_from
+
+
+def _requested_models(router_requests: list[httpx.Request]) -> list[str]:
+    return [json.loads(request.content)["model"] for request in router_requests]
+
+
+@pytest.mark.parametrize("action_reply", [_BACK_REPLY, '{"action":"end"}'], ids=["back", "end"])
+@pytest.mark.usefixtures("no_sleep")
+def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
+    action_reply: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """Back on the start screen would leave the app, which then restarts onto the same
+    screen. The Back is not sent: the coverage checkpoint's target choice runs at once,
+    without its merge audit, its replay reaches the target, and the next step plans from
+    there. The step counts, so two planned steps end a two-step run."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    expected = _identifying(explorer, monkeypatch, "s0_home", "s1_list")
+    planned_from = _planning_back(monkeypatch)
+    router_responses.extend(
+        [
+            chat_response(content=action_reply),
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=2)
+
+    assert device_log == [*_FIRST_RESTART, _OPEN_LIST]
+    assert expected == [None, "s1_list"]
+    assert planned_from == ["s0_home", "s1_list"]
+    assert _requested_models(router_requests) == [
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+    ]
+    target_choice = json.loads(router_requests[1].content)
+    assert target_choice["response_format"]["json_schema"]["name"] == "exploration_target"
+    assert "node_id=s0_home" not in target_choice["messages"][0]["content"]
+    assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list")]
+    assert (
+        "Step 1/2: Back on s0_home leaves the app; continuing from ranked target s1_list "
+        "instead." in caplog.text
+    )
+    assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
+        ("observation", "main_loop"),
+        ("action", "navigation_replay"),
+        ("observation", "navigation_replay"),
+        ("observation", "coverage_checkpoint"),
+        ("observation", "main_loop"),
+    ]
+
+
+@pytest.mark.parametrize("screen", ["s0_home", "s1_list"], ids=["start screen", "other screen"])
+@pytest.mark.usefixtures("no_sleep")
+def test_back_is_pressed_on_other_screens_and_when_no_other_node_is_ranked(
+    screen: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recorded edge leads from the start screen to the list, so on the start screen no
+    other node is ranked. On the list the start screen is ranked, and Back is pressed all
+    the same, as on any screen other than the start screen. Either way the Back is
+    recorded and no target is chosen."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    _identifying(explorer, monkeypatch, screen, "s0_home")
+    _planning_back(monkeypatch)
+    router_responses.append(chat_response(content=_BACK_REPLY))
+
+    explorer.explore(max_steps=1)
+
+    assert device_log == [_BACK]
+    assert _requested_models(router_requests) == ["provider/action"]
+    assert explorer.graph.graph.edges[screen, "s0_home"]["actions"] == [[_BACK]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_back_on_the_start_screen_whose_replay_cannot_restart_the_app_stays_there(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused force-stop leaves the start screen showing, as at a coverage checkpoint:
+    Back is still not pressed, the step counts, and the next step plans from the start
+    screen."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    expected = _identifying(explorer, monkeypatch, "s0_home", "s0_home")
+    monkeypatch.setattr(subprocess, "run", _adb_refusing_once(device_log, _FORCE_STOP))
+    planned_from = _planning_back(monkeypatch)
+    router_responses.extend(
+        [
+            chat_response(content=_BACK_REPLY),
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+
+    explorer.explore(max_steps=2)
+
+    assert device_log == [_FORCE_STOP]
+    assert expected == [None]
+    assert planned_from == ["s0_home", "s0_home"]
+    assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list")]
+
+
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     tmp_path: Path,
     router_client: OpenRouter,
