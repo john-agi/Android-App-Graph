@@ -477,6 +477,71 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     assert device_log == [*_FIRST_RESTART, open_detail]
 
 
+def _explore_sending(
+    explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *actions: dict[str, Any]
+) -> None:
+    """Explore one step per action, the action model sending ``actions`` in turn."""
+    sent = iter(actions)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Act", []))
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (next(sent), "")
+    )
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    explorer.explore(max_steps=len(actions))
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_scrolls_a_list_as_exploration_did_before_tapping_a_row_on_it(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tap exploration sent after a swipe that kept the list's node is replayed after
+    that swipe, so it lands on the row it was sent to."""
+    open_list = {"action": "tap", "x": 50, "y": 20}
+    scroll_down = {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40}
+    open_row = {"action": "tap", "x": 50, "y": 190}
+    _list_reached_from_home(replaying_kobe, "s2_detail")
+    _identifying(
+        replaying_kobe, monkeypatch, "s0_home", "s1_list", "s1_list", "s2_detail", "s2_detail"
+    )
+    _explore_sending(replaying_kobe, monkeypatch, open_list, scroll_down, open_row)
+    device_log.clear()
+
+    assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
+    assert device_log == [*_FIRST_RESTART, open_list, scroll_down, open_row]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_fills_a_form_through_its_dropdown_before_tapping_the_field_it_revealed(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tap exploration sent on a form after a round trip through one of its dropdowns
+    is replayed after that round trip, so the field the chosen option revealed is there."""
+    open_form = {"action": "tap", "x": 50, "y": 20}
+    open_security = {"action": "tap", "x": 50, "y": 60}
+    choose_enterprise = {"action": "tap", "x": 50, "y": 110}
+    open_certificates = {"action": "tap", "x": 50, "y": 90}
+    form, security, certificates = "s1_add_network", "s2_security_menu", "s3_certificate_menu"
+    for node in ("s0_home", form, security, certificates):
+        replaying_kobe.graph.graph.add_node(node, page_description=node, package="com.demo")
+    _identifying(
+        replaying_kobe,
+        monkeypatch,
+        *("s0_home", form, security, form, certificates, certificates),
+    )
+    _explore_sending(
+        replaying_kobe,
+        monkeypatch,
+        *(open_form, open_security, choose_enterprise, open_certificates),
+    )
+    device_log.clear()
+
+    assert replaying_kobe.navigate_to_node(certificates) == certificates
+    assert device_log == [
+        *_FIRST_RESTART,
+        *(open_form, open_security, choose_enterprise, open_certificates),
+    ]
+
+
 @pytest.mark.parametrize("malformed", [False, True])
 def test_exploration_wait_recovery_respects_step_limit(
     malformed: bool,
