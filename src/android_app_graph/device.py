@@ -1,19 +1,23 @@
-"""Structural types for the aitk device surface that android_app_graph depends on.
+"""The device: what exploration and the audit need from it, and adb behind that.
 
-``aitk`` is an unannotated dependency, so everything read back from its
-``ADBController`` and ``AVDManager`` is ``Unknown``. These Protocols pin down
-the subset android_app_graph actually uses, which keeps the device boundary explicit and
-lets tests pass a fake without adb or an emulator.
+``DeviceController`` and ``AvdManager`` state what the explorer, the audit and
+``check_avd`` read from a device and do to it. ``AdbController`` and
+``EmulatorManager`` provide them over adb and the emulator's AVD files; tests pass
+fakes instead, so they need neither adb nor an emulator.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
+import platform
+import re
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
-from typing import Any, Literal, Protocol
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Literal, NamedTuple, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +28,7 @@ _SOFT_KEYBOARD_HINT = (
 
 
 class DeviceController(Protocol):
-    """The subset of aitk's ADBController that android_app_graph depends on.
-
-    Arguments android_app_graph never passes (``exe_action``'s ``save_flag``) are omitted.
-    """
+    """The screen size, the run's config, the current screen and a way to act on it."""
 
     w: int
     h: int
@@ -39,7 +40,7 @@ class DeviceController(Protocol):
 
 
 class AvdManager(Protocol):
-    """The subset of aitk's AVDManager that the CLI depends on."""
+    """What ``check_avd`` needs to find a running device or start an emulator."""
 
     def get_running_avd_list(self) -> list[dict[str, Any]] | None: ...
 
@@ -70,6 +71,8 @@ def run_adb(
 ) -> subprocess.CompletedProcess[str]:
     """Run the adb on ``PATH`` with ``args``, capturing its stdout and stderr as text or
     discarding both.
+
+    Text is decoded as UTF-8 whatever the host's locale, because Android writes UTF-8.
     """
     capture = output == "capture"
     sink = None if capture else subprocess.DEVNULL
@@ -79,10 +82,361 @@ def run_adb(
         stdout=sink,
         stderr=sink,
         text=True,
+        encoding="utf-8",
         errors=errors,
         timeout=timeout,
         check=check,
     )
+
+
+def _adb_stdout_bytes(args: Sequence[str]) -> bytes:
+    """Run the adb on ``PATH`` with ``args`` and return its stdout undecoded, for output
+    that is not text, such as a PNG. A non-zero exit raises ``CalledProcessError``.
+    """
+    return subprocess.run(  # noqa: S603  # argv list without a shell; adb arguments come from this package's config and constants
+        [adb_executable(), *args], capture_output=True, check=True
+    ).stdout
+
+
+_KEYCODE: dict[str, int] = {
+    "A": 29,
+    "B": 30,
+    "C": 31,
+    "D": 32,
+    "E": 33,
+    "F": 34,
+    "G": 35,
+    "H": 36,
+    "I": 37,
+    "J": 38,
+    "K": 39,
+    "L": 40,
+    "M": 41,
+    "N": 42,
+    "O": 43,
+    "P": 44,
+    "Q": 45,
+    "R": 46,
+    "S": 47,
+    "T": 48,
+    "U": 49,
+    "V": 50,
+    "W": 51,
+    "X": 52,
+    "Y": 53,
+    "Z": 54,
+    "ENTER": 66,
+    "BACK": 4,
+    "HOME": 3,
+    "ALL_APPS": 187,
+    "SPACE": 62,
+    " ": 62,
+    "1": 8,
+    "2": 9,
+    "3": 10,
+    "4": 11,
+    "5": 12,
+    "6": 13,
+    "7": 14,
+    "8": 15,
+    "9": 16,
+    "0": 7,
+    "@": 77,
+    ".": 56,
+    ",": 55,
+    "/": 76,
+    "-": 69,
+    "+": 81,
+    "*": 17,
+    "#": 18,
+    "(": 162,
+    ")": 163,
+    "!": 161,
+    "?": 166,
+    ":": 74,
+    ";": 186,
+    "=": 70,
+    "'": 75,
+    '"': 140,
+    "&": 150,
+    "%": 129,
+    "$": 128,
+    "<": 153,
+    ">": 154,
+    "{": 145,
+    "}": 146,
+    # Known defect, copied unchanged: 47 and 48 are KEYCODE_S and KEYCODE_T.
+    "[": 47,
+    "]": 48,
+    "|": 124,
+    "\\": 73,
+    "`": 68,
+    "~": 152,
+    "^": 161,
+    "_": 69,
+    "TAB": 61,
+    "DEL": 67,
+}
+
+# Typed with `input text`; any other character is sent as a key event from _KEYCODE.
+_INPUT_TEXT_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+_GESTURE_MS = 1000
+_DEFAULT_WAIT_SECONDS = 3
+_CLEAR_KEY_PRESSES = 20
+
+
+class AdbController:
+    """Reads the screen of the device ``config["device"]["udid"]`` and acts on it over adb."""
+
+    def __init__(self, config: dict[str, Any], logger: logging.Logger) -> None:
+        self.config = config
+        self._logger = logger
+        self._serial = ["-s", config["device"]["udid"]]
+        size = run_adb([*self._serial, "shell", "wm", "size"], output="capture", check=True)
+        match = re.search(r"(\d+)x(\d+)", size.stdout)
+        if match is None:
+            msg = "Failed to get screen size"
+            raise ValueError(msg)
+        self.w = int(match.group(1))
+        self.h = int(match.group(2))
+
+    def get_state(self) -> dict[str, Any]:
+        """Return the UI hierarchy XML, a base64 PNG screenshot, and the focused package
+        and activity, both ``"unknown"`` when ``dumpsys window`` names none.
+        """
+        xml = run_adb(
+            [*self._serial, "exec-out", "uiautomator dump /dev/stdout"],
+            output="capture",
+            check=True,
+        )
+        png = _adb_stdout_bytes([*self._serial, "exec-out", "screencap -p"])
+        package, activity = self._focused_package_activity()
+        return {
+            "xml": xml.stdout,
+            "screenshot": base64.b64encode(png).decode("ascii"),
+            "package": package,
+            "activity": activity,
+        }
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        """Send ``action``, a device action from ``tool_call_to_action``, to the device.
+
+        A ``long_press`` is held for ``_GESTURE_MS`` whatever its ``duration`` says.
+        """
+        match action["action"]:
+            case "tap":
+                self._tap(action["x"], action["y"])
+            case "long_press":
+                x, y = action["x"], action["y"]
+                self._swipe(x, y, x, y, _GESTURE_MS)
+            case "swipe":
+                duration = action.get("duration", action.get("time", _GESTURE_MS))
+                self._swipe(action["x1"], action["y1"], action["x2"], action["y2"], duration)
+            case "type":
+                self._clear()
+                self._type(action["text"])
+            case "enter" | "back" | "home" as key:
+                self._press(key.upper())
+            case "wait":
+                time.sleep(action.get("duration", action.get("time", _DEFAULT_WAIT_SECONDS)))
+            case "end":
+                self._logger.info("Task Finished.")
+            case unknown:
+                msg = f"Unknown device action: {unknown!r}"
+                raise ValueError(msg)
+
+    def terminate_all_apps(self) -> None:
+        """Open recent apps, swipe the list to its left end and tap where the launcher
+        shows Clear all.
+        """
+        self._press("ALL_APPS")
+        self._swipe(int(0.1 * self.w), int(0.5 * self.h), int(0.9 * self.w), int(0.5 * self.h), 100)
+        time.sleep(1)
+        self._tap(int(0.2 * self.w), int(0.48 * self.h))
+        time.sleep(1.5)
+
+    def _focused_package_activity(self) -> tuple[str, str]:
+        """Read the package and activity from the first ``mCurrentFocus`` or
+        ``mFocusedApp`` line that names one, expanding a shorthand ``.Activity``.
+        """
+        dumpsys = run_adb(
+            [*self._serial, "shell", "dumpsys", "window"], output="capture", check=True
+        )
+        for line in dumpsys.stdout.splitlines():
+            if "mCurrentFocus" not in line and "mFocusedApp" not in line:
+                continue
+            match = re.search(r"[\w.]+/[\w.]+", line)
+            if match:
+                package, _, activity = match.group().partition("/")
+                if activity.startswith("."):
+                    activity = package + activity
+                return package, activity
+        return "unknown", "unknown"
+
+    def _input(self, *args: str) -> None:
+        run_adb([*self._serial, "shell", "input", *args], output="discard", check=False)
+
+    def _tap(self, x: int, y: int) -> None:
+        self._input("tap", str(x), str(y))
+
+    def _swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int) -> None:
+        self._input("swipe", str(x1), str(y1), str(x2), str(y2), str(duration))
+
+    def _keyevent(self, key: str) -> None:
+        self._input("keyevent", str(_KEYCODE[key]))
+
+    def _press(self, key: str) -> None:
+        self._keyevent(key)
+        time.sleep(1)
+
+    def _clear(self) -> None:
+        for _ in range(_CLEAR_KEY_PRESSES):
+            self._keyevent("DEL")
+            time.sleep(0.2)
+
+    def _type(self, text: str) -> None:
+        start = 0
+        while start < len(text):
+            end = start
+            while end < len(text) and text[end].upper() in _INPUT_TEXT_CHARACTERS:
+                end += 1
+            if end == start:
+                self._keyevent(text[start])
+                end += 1
+            else:
+                self._input("text", text[start:end])
+            start = end
+            time.sleep(1)
+
+
+class _AvdHost(NamedTuple):
+    """Where this machine keeps AVDs and the SDK, and the emulator's CPU architecture."""
+
+    avd_root_dir: Path
+    sdk_dir: Path
+    abi: str
+    cpu_arch: str
+
+
+def _avd_host() -> _AvdHost:
+    home = Path.home()
+    avd_root_dir = home / ".android" / "avd"
+    if not avd_root_dir.exists():
+        msg = f"AVD root directory '{avd_root_dir}' not found."
+        raise FileNotFoundError(msg)
+    match platform.system():
+        case "Darwin":
+            sdk_dir = home / "Library" / "Android" / "sdk"
+            return _AvdHost(avd_root_dir, sdk_dir, abi="arm64-v8a", cpu_arch="arm64")
+        case "Linux":
+            sdk_dir = home / "Android" / "Sdk"
+            return _AvdHost(avd_root_dir, sdk_dir, abi="x86_64", cpu_arch="x86_64")
+        case "Windows":
+            sdk_dir = home / "AppData" / "Local" / "Android" / "Sdk"
+            return _AvdHost(avd_root_dir, sdk_dir, abi="x86_64", cpu_arch="x86_64")
+        case system:
+            msg = f"Unsupported OS: {system}"
+            raise ValueError(msg)
+
+
+def _rewrite_lines(path: Path, new_lines: Mapping[str, str]) -> None:
+    """Replace each line of ``path`` that starts with a key of ``new_lines`` by its value."""
+    with path.open(encoding="utf-8") as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        for prefix, new_line in new_lines.items():
+            if line.startswith(prefix):
+                lines[i] = f"{new_line}\n"
+                break
+    with path.open("w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+class EmulatorManager:
+    """Lists the devices adb sees and duplicates an AVD for ``check_avd`` to start."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+
+    def get_running_avd_list(self) -> list[dict[str, Any]] | None:
+        """Return each device on ``adb devices`` with its AVD name, ``None`` for a phone,
+        or ``None`` instead of a list when adb fails.
+        """
+        devices = run_adb(["devices"], output="capture", check=False)
+        if devices.returncode != 0:
+            self._logger.error("Failed to get running AVD list: %s", devices.stderr)
+            return None
+        running: list[dict[str, Any]] = []
+        for line in devices.stdout.splitlines()[1:]:
+            if not line:
+                continue
+            udid, status = line.split()
+            avd = run_adb(["-s", udid, "emu", "avd", "name"], output="capture", check=False)
+            name = avd.stdout.strip() if avd.returncode == 0 else None
+            running.append({"udid": udid, "status": status, "name": name})
+        return running
+
+    def duplicate_avd(self, avd_name: str) -> None:
+        """Copy the AVD ``avd_name`` to ``<avd_name>_dup`` and point the copy's files at
+        itself and at this machine's SDK.
+        """
+        host = _avd_host()
+        dup_name = f"{avd_name}_dup"
+        shutil.copytree(
+            host.avd_root_dir / f"{avd_name}.avd",
+            host.avd_root_dir / f"{dup_name}.avd",
+            dirs_exist_ok=True,
+        )
+        shutil.copy(host.avd_root_dir / f"{avd_name}.ini", host.avd_root_dir / f"{dup_name}.ini")
+        self._rewrite_avd_ini(host, dup_name)
+        self._rewrite_config_ini(host, dup_name)
+        self._rewrite_hardware_qemu_ini(host, dup_name)
+
+    def _rewrite_avd_ini(self, host: _AvdHost, avd_name: str) -> None:
+        avd_ini = host.avd_root_dir / f"{avd_name}.ini"
+        with avd_ini.open(encoding="utf-8") as f:
+            target = next(
+                (line.removeprefix("target=").strip() for line in f if line.startswith("target=")),
+                "android-35",
+            )
+        avd_ini.write_text(
+            f"avd.ini.encoding=UTF-8\npath={host.avd_root_dir / f'{avd_name}.avd'}\n"
+            f"path.rel=avd/{avd_name}.avd\ntarget={target}",
+            encoding="utf-8",
+        )
+        self._logger.info("AVD init file '%s' modified.", avd_ini)
+
+    def _rewrite_config_ini(self, host: _AvdHost, avd_name: str) -> None:
+        config_ini = host.avd_root_dir / f"{avd_name}.avd" / "config.ini"
+        _rewrite_lines(
+            config_ini,
+            {
+                "AvdId=": f"AvdId={avd_name}",
+                "avd.ini.displayname=": f"avd.ini.displayname={avd_name}",
+                "abi.type=": f"abi.type={host.abi}",
+                "hw.cpu.arch=": f"hw.cpu.arch={host.cpu_arch}",
+                "skin.path=": f"skin.path={host.sdk_dir / 'skins' / 'pixel_7'}",
+            },
+        )
+        self._logger.info("AVD config file '%s' modified.", config_ini)
+
+    def _rewrite_hardware_qemu_ini(self, host: _AvdHost, avd_name: str) -> None:
+        avd_dir = host.avd_root_dir / ".." / "avd" / f"{avd_name}.avd"
+        hardware_ini = host.avd_root_dir / f"{avd_name}.avd" / "hardware-qemu.ini"
+        _rewrite_lines(
+            hardware_ini,
+            {
+                "hw.cpu.arch=": f"hw.cpu.arch={host.abi}",
+                "disk.cachePartition.path=": f"disk.cachePartition.path={avd_dir / 'cache.img'}",
+                # Known defect, copied unchanged: the next four lines lose their keys.
+                "disk.dataPartition.path=": f"{avd_dir / 'userdata-qemu.img'}",
+                "disk.encryptionKeyPartition.path=": f"{avd_dir / 'encryptionkey.img'}",
+                "android.sdk.root=": f"{host.sdk_dir}",
+                "android.avd.home=": f"{host.avd_root_dir}",
+            },
+        )
+        self._logger.info("AVD hardware file '%s' modified.", hardware_ini)
 
 
 def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> None:
@@ -168,8 +522,8 @@ def restart_app(
 def soft_keyboard_hint() -> str:
     """Return a note that the soft keyboard is visible, or ``""`` otherwise.
 
-    Shells out to adb rather than going through ``DeviceController``: aitk's
-    controller exposes no shell method.
+    Shells out to adb rather than going through ``DeviceController``, which has no
+    shell method.
     """
     try:
         kb_check = run_adb(

@@ -1,13 +1,10 @@
-"""Tests for android_app_graph.device.
-
-The single soft-keyboard probe shared by kobe and commands.audit; this module
-owns its tests so the two call sites do not each pin their own copy of the adb
-probe.
-"""
+"""Tests for android_app_graph.device, with adb, sleeps and the home directory faked."""
 
 from __future__ import annotations
 
+import base64
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, NoReturn
@@ -115,6 +112,7 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
                 "stdout": None,
                 "stderr": None,
                 "text": True,
+                "encoding": "utf-8",
                 "errors": "replace",
                 "timeout": 3,
                 "check": True,
@@ -127,6 +125,7 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
                 "text": True,
+                "encoding": "utf-8",
                 "errors": None,
                 "timeout": None,
                 "check": False,
@@ -300,3 +299,388 @@ def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skippe
         "is not a changeable permission type"
     )
     assert caplog.messages == [refusal, "Granted 9 of 10 requested permissions to com.example.app"]
+
+
+_UDID = "emulator-5554"
+_ADB = ["adb", "-s", _UDID]
+_INPUT = [*_ADB, "shell", "input"]
+_WM_SIZE = ("-s", _UDID, "shell", "wm", "size")
+_UI_DUMP = ("-s", _UDID, "exec-out", "uiautomator dump /dev/stdout")
+_SCREENCAP = ("-s", _UDID, "exec-out", "screencap -p")
+_DUMPSYS_WINDOW = ("-s", _UDID, "shell", "dumpsys", "window")
+
+
+class _FakeAdb:
+    """Stands in for ``subprocess.run`` and ``time.sleep``.
+
+    ``events`` records each adb argv and each sleep in the order they happened.
+    ``replies`` maps the arguments after ``adb`` to an exit status and raw stdout;
+    any other command exits 0 with no output. Stdout is decoded only when the caller
+    asks for text with an explicit encoding, as ``subprocess.run`` would.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[list[str] | float] = []
+        self.replies: dict[tuple[str, ...], tuple[int, bytes]] = {}
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        check: bool = False,
+        text: bool = False,
+        encoding: str | None = None,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        self.events.append(command)
+        returncode, stdout = self.replies.get(tuple(command[1:]), (0, b""))
+        if check and returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        if not text:
+            return subprocess.CompletedProcess(command, returncode, stdout, b"")
+        if encoding is None:
+            msg = f"text output without an encoding depends on the locale: {command}"
+            raise AssertionError(msg)
+        return subprocess.CompletedProcess(command, returncode, stdout.decode(encoding), "")
+
+
+@pytest.fixture
+def adb(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> _FakeAdb:
+    del adb_on_path  # requested for its side effect on device.adb_executable
+    fake = _FakeAdb()
+    monkeypatch.setattr(device.subprocess, "run", fake.run)
+    monkeypatch.setattr(device.time, "sleep", fake.events.append)
+    return fake
+
+
+@pytest.fixture
+def controller(adb: _FakeAdb) -> device.AdbController:
+    adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
+    built = device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
+    adb.events.clear()
+    return built
+
+
+def test_adb_controller_reads_the_screen_size_of_the_configured_device(adb: _FakeAdb) -> None:
+    adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
+    config = {"device": {"udid": _UDID}}
+
+    controller = device.AdbController(config, logging.getLogger("test"))
+
+    assert (controller.w, controller.h) == (1080, 2400)
+    assert controller.config is config
+    assert adb.events == [["adb", *_WM_SIZE]]
+
+
+def test_adb_controller_raises_when_wm_size_reports_no_size(adb: _FakeAdb) -> None:
+    adb.replies[_WM_SIZE] = (0, b"Physical size: unknown\n")
+    with pytest.raises(ValueError, match=r"^Failed to get screen size$"):
+        device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
+
+
+# PNG's signature contains CR LF, so any newline translation would change the base64.
+_PNG = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.parametrize(
+    ("dumpsys_window", "package", "activity"),
+    [
+        pytest.param(
+            "  mCurrentFocus=Window{3553291 u0 com.supercook.app/com.supercook.app.MainActivity}\n"
+            "  mFocusedApp=ActivityRecord{5baa84e u0 com.other.app/.Other t9}\n",
+            "com.supercook.app",
+            "com.supercook.app.MainActivity",
+            id="mCurrentFocus",
+        ),
+        pytest.param(
+            "  mCurrentFocus=null\n"
+            "  mFocusedApp=ActivityRecord{5baa84e u0 "
+            "com.supercook.app/com.supercook.app.Main t9}\n",
+            "com.supercook.app",
+            "com.supercook.app.Main",
+            id="mFocusedApp",
+        ),
+        pytest.param(
+            "  mCurrentFocus=Window{3553291 u0 com.supercook.app/.Main}\n",
+            "com.supercook.app",
+            "com.supercook.app.Main",
+            id="shorthand activity",
+        ),
+        pytest.param("WINDOW MANAGER WINDOWS (dumpsys window windows)\n", "unknown", "unknown"),
+    ],
+)
+def test_get_state_returns_the_xml_screenshot_package_and_activity(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    dumpsys_window: str,
+    package: str,
+    activity: str,
+) -> None:
+    xml = '<hierarchy><node text="Café" /></hierarchy>'
+    adb.replies[_UI_DUMP] = (0, xml.encode())
+    adb.replies[_SCREENCAP] = (0, _PNG)
+    adb.replies[_DUMPSYS_WINDOW] = (0, dumpsys_window.encode())
+
+    assert controller.get_state() == {
+        "xml": xml,
+        "screenshot": base64.b64encode(_PNG).decode("ascii"),
+        "package": package,
+        "activity": activity,
+    }
+    assert adb.events == [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+
+
+@pytest.mark.parametrize("failing", [_UI_DUMP, _SCREENCAP, _DUMPSYS_WINDOW])
+def test_get_state_raises_when_a_read_fails(
+    controller: device.AdbController, adb: _FakeAdb, failing: tuple[str, ...]
+) -> None:
+    adb.replies[failing] = (1, b"")
+    with pytest.raises(subprocess.CalledProcessError):
+        controller.get_state()
+
+
+@pytest.mark.parametrize(
+    ("action", "events"),
+    [
+        ({"action": "tap", "x": 10, "y": 20}, [[*_INPUT, "tap", "10", "20"]]),
+        (
+            {"action": "long_press", "x": 10, "y": 20, "duration": 3000},
+            [[*_INPUT, "swipe", "10", "20", "10", "20", "1000"]],
+        ),
+        (
+            {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4, "duration": 500},
+            [[*_INPUT, "swipe", "1", "2", "3", "4", "500"]],
+        ),
+        (
+            {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4, "time": 700},
+            [[*_INPUT, "swipe", "1", "2", "3", "4", "700"]],
+        ),
+        (
+            {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4},
+            [[*_INPUT, "swipe", "1", "2", "3", "4", "1000"]],
+        ),
+        ({"action": "enter"}, [[*_INPUT, "keyevent", "66"], 1]),
+        ({"action": "back"}, [[*_INPUT, "keyevent", "4"], 1]),
+        ({"action": "home"}, [[*_INPUT, "keyevent", "3"], 1]),
+        ({"action": "wait", "duration": 2}, [2]),
+        ({"action": "wait", "time": 5}, [5]),
+        ({"action": "wait"}, [3]),
+        ({"action": "end"}, []),
+    ],
+)
+def test_each_action_sends_its_adb_command_and_pause(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    action: dict[str, Any],
+    events: list[list[str] | float],
+) -> None:
+    controller.exe_action(action)
+    assert adb.events == events
+
+
+def test_type_clears_the_field_then_types_runs_of_letters_and_presses_other_keys(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    controller.exe_action({"action": "type", "text": "Hi there!"})
+
+    delete = [[*_INPUT, "keyevent", "67"], 0.2] * 20
+    assert adb.events == [
+        *delete,
+        [*_INPUT, "text", "Hi"],
+        1,
+        [*_INPUT, "keyevent", "62"],
+        1,
+        [*_INPUT, "text", "there"],
+        1,
+        [*_INPUT, "keyevent", "161"],
+        1,
+    ]
+
+
+def test_end_logs_that_the_task_finished(
+    controller: device.AdbController, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="test"):
+        controller.exe_action({"action": "end"})
+    assert caplog.messages == ["Task Finished."]
+
+
+@pytest.mark.parametrize("name", ["double_tap", "open"])
+def test_an_unknown_action_raises_value_error_naming_it(
+    controller: device.AdbController, adb: _FakeAdb, name: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"^Unknown device action: '{name}'$"):
+        controller.exe_action({"action": name, "x": 1, "y": 2})
+    assert adb.events == []
+
+
+def test_terminate_all_apps_opens_recents_swipes_and_taps_at_scaled_coordinates(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    controller.terminate_all_apps()
+    assert adb.events == [
+        [*_INPUT, "keyevent", "187"],
+        1,
+        [*_INPUT, "swipe", "108", "1200", "972", "1200", "100"],
+        1,
+        [*_INPUT, "tap", "216", "1152"],
+        1.5,
+    ]
+
+
+_DEVICES = ("devices",)
+
+
+def _avd_name(udid: str) -> tuple[str, ...]:
+    return ("-s", udid, "emu", "avd", "name")
+
+
+def test_running_devices_name_an_emulator_by_its_avd_and_a_phone_by_none(adb: _FakeAdb) -> None:
+    adb.replies[_DEVICES] = (
+        0,
+        b"List of devices attached\nemulator-5554\tdevice\nR58M123\tunauthorized\n\n",
+    )
+    adb.replies[_avd_name("emulator-5554")] = (0, b"Pixel_dup\n")
+    adb.replies[_avd_name("R58M123")] = (1, b"")
+
+    running = device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
+
+    assert running == [
+        {"udid": "emulator-5554", "status": "device", "name": "Pixel_dup"},
+        {"udid": "R58M123", "status": "unauthorized", "name": None},
+    ]
+    assert adb.events == [
+        ["adb", *_DEVICES],
+        ["adb", *_avd_name("emulator-5554")],
+        ["adb", *_avd_name("R58M123")],
+    ]
+
+
+def test_no_running_devices_is_an_empty_list(adb: _FakeAdb) -> None:
+    adb.replies[_DEVICES] = (0, b"List of devices attached\n\n")
+    assert device.EmulatorManager(logging.getLogger("test")).get_running_avd_list() == []
+    assert adb.events == [["adb", *_DEVICES]]
+
+
+def test_running_devices_are_none_when_adb_devices_fails(
+    adb: _FakeAdb, caplog: pytest.LogCaptureFixture
+) -> None:
+    adb.replies[_DEVICES] = (1, b"")
+    with caplog.at_level(logging.ERROR, logger="test"):
+        running = device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
+    assert running is None
+    assert caplog.messages == ["Failed to get running AVD list: "]
+
+
+def _write_avd(avd_root_dir: Path, *, avd_ini: str) -> None:
+    avd_dir = avd_root_dir / "Pixel.avd"
+    avd_dir.mkdir(parents=True)
+    (avd_root_dir / "Pixel.ini").write_text(avd_ini, encoding="utf-8")
+    (avd_dir / "config.ini").write_text(
+        "AvdId=Pixel\n"
+        "avd.ini.displayname=Pixel\n"
+        "abi.type=armeabi-v7a\n"
+        "hw.cpu.arch=arm\n"
+        "hw.ramSize=2048\n"
+        "skin.path=/elsewhere/skins/pixel_7\n",
+        encoding="utf-8",
+    )
+    (avd_dir / "hardware-qemu.ini").write_text(
+        "hw.cpu.arch=arm\n"
+        "disk.cachePartition.path=/elsewhere/cache.img\n"
+        "disk.dataPartition.path=/elsewhere/userdata-qemu.img\n"
+        "disk.encryptionKeyPartition.path=/elsewhere/encryptionkey.img\n"
+        "android.sdk.root=/elsewhere/sdk\n"
+        "android.avd.home=/elsewhere/avd\n"
+        "hw.lcd.width=1080\n",
+        encoding="utf-8",
+    )
+    (avd_dir / "userdata-qemu.img").write_bytes(b"\x00data")
+
+
+@pytest.mark.parametrize(
+    ("system", "sdk_parts", "abi", "cpu_arch"),
+    [
+        ("Darwin", ("Library", "Android", "sdk"), "arm64-v8a", "arm64"),
+        ("Linux", ("Android", "Sdk"), "x86_64", "x86_64"),
+        ("Windows", ("AppData", "Local", "Android", "Sdk"), "x86_64", "x86_64"),
+    ],
+)
+def test_duplicate_avd_copies_the_avd_and_points_its_files_at_the_copy_and_the_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    system: str,
+    sdk_parts: tuple[str, ...],
+    abi: str,
+    cpu_arch: str,
+) -> None:
+    monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(device.platform, "system", lambda: system)
+    root = tmp_path / ".android" / "avd"
+    avd_ini = "avd.ini.encoding=UTF-8\npath=/elsewhere/Pixel.avd\ntarget=android-34\n"
+    _write_avd(root, avd_ini=avd_ini)
+    original_config = (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8")
+
+    device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
+
+    sdk = tmp_path.joinpath(*sdk_parts)
+    dup = root / "Pixel_dup.avd"
+    via_parent = root / ".." / "avd" / "Pixel_dup.avd"
+    assert (root / "Pixel_dup.ini").read_text(encoding="utf-8") == (
+        f"avd.ini.encoding=UTF-8\npath={dup}\npath.rel=avd/Pixel_dup.avd\ntarget=android-34"
+    )
+    assert (dup / "config.ini").read_text(encoding="utf-8") == (
+        "AvdId=Pixel_dup\n"
+        "avd.ini.displayname=Pixel_dup\n"
+        f"abi.type={abi}\n"
+        f"hw.cpu.arch={cpu_arch}\n"
+        "hw.ramSize=2048\n"
+        f"skin.path={sdk / 'skins' / 'pixel_7'}\n"
+    )
+    assert (dup / "hardware-qemu.ini").read_text(encoding="utf-8") == (
+        f"hw.cpu.arch={abi}\n"
+        f"disk.cachePartition.path={via_parent / 'cache.img'}\n"
+        f"{via_parent / 'userdata-qemu.img'}\n"
+        f"{via_parent / 'encryptionkey.img'}\n"
+        f"{sdk}\n"
+        f"{root}\n"
+        "hw.lcd.width=1080\n"
+    )
+    assert (dup / "userdata-qemu.img").read_bytes() == b"\x00data"
+    assert (root / "Pixel.ini").read_text(encoding="utf-8") == avd_ini
+    assert (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8") == original_config
+
+
+def test_duplicate_avd_targets_android_35_when_the_avd_names_no_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(device.platform, "system", lambda: "Linux")
+    root = tmp_path / ".android" / "avd"
+    _write_avd(root, avd_ini="avd.ini.encoding=UTF-8\n")
+
+    device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
+
+    assert (root / "Pixel_dup.ini").read_text(encoding="utf-8").endswith("\ntarget=android-35")
+
+
+def test_emulator_manager_needs_the_avd_directory_only_to_duplicate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
+    manager = device.EmulatorManager(logging.getLogger("test"))
+    missing = re.escape(f"AVD root directory '{tmp_path / '.android' / 'avd'}' not found.")
+    with pytest.raises(FileNotFoundError, match=rf"^{missing}$"):
+        manager.duplicate_avd("Pixel")
+
+
+def test_duplicate_avd_raises_value_error_on_an_unsupported_os(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(device.platform, "system", lambda: "FreeBSD")
+    root = tmp_path / ".android" / "avd"
+    _write_avd(root, avd_ini="target=android-34\n")
+    with pytest.raises(ValueError, match=r"^Unsupported OS: FreeBSD$"):
+        device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
+    assert not (root / "Pixel_dup.avd").exists()
