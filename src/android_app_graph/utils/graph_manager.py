@@ -800,7 +800,11 @@ class GraphManager:
         if not instruction or not self.graph.has_edge(source, target):
             return None
         edge_data = self.graph[source][target]
-        recorded = zip(edge_data.get("actions", []), edge_data.get("instructions", []))
+        # A graph loaded from JSON can hold more actions than instructions; an action
+        # without an instruction matches nothing, so a shorter list is not an error.
+        recorded = zip(
+            edge_data.get("actions", []), edge_data.get("instructions", []), strict=False
+        )
         for index, (action, recorded_instruction) in enumerate(recorded):
             if recorded_instruction == instruction:
                 return index, action
