@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NoReturn, override
 
@@ -36,9 +36,10 @@ _ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "c
 
 
 @pytest.fixture
-def client() -> OpenRouter:
+def client() -> Iterator[OpenRouter]:
     """An OpenRouter client that is never called: every VLM helper is monkeypatched."""
-    return open_client("not-a-real-key")
+    with open_client("not-a-real-key") as opened:
+        yield opened
 
 
 def _unreachable_verifier(**_kwargs: object) -> dict[str, Any]:

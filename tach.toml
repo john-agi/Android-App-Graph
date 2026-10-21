@@ -51,7 +51,7 @@ depends_on = [
 
 [[modules]]
 path = "android_app_graph.utils"
-depends_on = ["android_app_graph.payloads"]
+depends_on = ["android_app_graph.payloads", "android_app_graph.retrying"]
 
 [[modules]]
 path = "android_app_graph.utils.graph_manager"
