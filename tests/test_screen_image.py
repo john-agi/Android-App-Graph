@@ -1,14 +1,22 @@
 """Tests for android_app_graph.screen_image: every screenshot is encoded once, at
-capture, as lossless WebP of at most 1,000,000 pixels."""
+capture, as lossless WebP of at most 1,000,000 pixels, and its pixels below the status
+bar are hashed."""
 
 from __future__ import annotations
 
 import base64
 import io
 
-from PIL import Image
+import pytest
+from PIL import Image, ImageDraw
 
-from android_app_graph.screen_image import MAX_PIXELS, MEDIA_TYPE, encode_screenshot
+from android_app_graph.screen_image import (
+    MAX_PIXELS,
+    MEDIA_TYPE,
+    encode_screenshot,
+    pixel_hash,
+    status_bar_rows,
+)
 
 
 def _noisy_image(size: tuple[int, int], mode: str = "RGB") -> Image.Image:
@@ -76,3 +84,64 @@ def test_base64_and_raw_bytes_encode_to_the_same_webp() -> None:
 
 def test_the_media_type_is_webp() -> None:
     assert MEDIA_TYPE == "image/webp"
+
+
+@pytest.mark.parametrize(
+    ("status_bar", "image_height", "rows"),
+    [
+        # ceil(121 * 1490 / 2400) = 76 rows, and 3 that LANCZOS blended with them.
+        pytest.param([0, 0, 1080, 121], 1490, 79, id="shrunk"),
+        pytest.param([0, 0, 1080, 121], 2400, 121, id="unshrunk"),
+        pytest.param([0, 0, 1080, 2400], 1490, 1490, id="never past the image"),
+        pytest.param(None, 1490, 0, id="no status bar"),
+    ],
+)
+def test_the_status_bar_rows_of_an_encoded_image(
+    status_bar: list[int] | None, image_height: int, rows: int
+) -> None:
+    assert status_bar_rows(status_bar, screenshot_height=2400, image_height=image_height) == rows
+
+
+def _webp(image: Image.Image) -> bytes:
+    return encode_screenshot(_png(image))
+
+
+def _with_clock(image: Image.Image, minute: int, *, top: int = 2) -> Image.Image:
+    """``image`` with a small "clock" of ``minute`` pixels drawn ``top`` rows down."""
+    clocked = image.copy()
+    ImageDraw.Draw(clocked).rectangle((4, top, 4 + minute, top + 3), fill=(255, 0, 0))
+    return clocked
+
+
+def test_a_screen_that_differs_only_inside_the_band_hashes_alike() -> None:
+    screen = _noisy_image((64, 48))
+    before, after = _webp(_with_clock(screen, 1)), _webp(_with_clock(screen, 9))
+
+    assert before != after
+    assert pixel_hash(before, 8) == pixel_hash(after, 8)
+    assert pixel_hash(before, 0) != pixel_hash(after, 0)
+
+
+def test_one_pixel_outside_the_band_changes_the_hash() -> None:
+    screen = _noisy_image((64, 48))
+    changed = screen.copy()
+    changed.putpixel((30, 8), (0, 0, 0) if screen.getpixel((30, 8)) != (0, 0, 0) else (1, 1, 1))
+
+    assert pixel_hash(_webp(screen), 8) != pixel_hash(_webp(changed), 8)
+
+
+def test_the_hash_covers_the_size_of_the_pixels() -> None:
+    """Two white images of 12 pixels have the same bytes in either shape."""
+    wide, tall = Image.new("RGB", (6, 2), "white"), Image.new("RGB", (3, 4), "white")
+    assert wide.tobytes() == tall.tobytes()
+
+    assert pixel_hash(_png(wide), 0) != pixel_hash(_png(tall), 0)
+
+
+def test_the_hash_covers_the_mode_of_the_pixels() -> None:
+    """A gray image and a palette image whose pixels are all 0 have the same bytes."""
+    gray = Image.new("L", (4, 4), 0)
+    palette = Image.new("P", (4, 4), 0)
+    assert gray.tobytes() == palette.tobytes()
+
+    assert pixel_hash(_png(gray), 0) != pixel_hash(_png(palette), 0)
