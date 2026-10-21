@@ -271,6 +271,34 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
     "describe": ("action_description", True),
 }
 
+_ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
+    "page": lambda client, screenshot: vlm.describe_page_and_state(
+        client, screenshot, settings=PAGE_DETAIL
+    ),
+    "verify": lambda client, screenshot: vlm.verify_same_node(
+        client, screenshot, screenshot, "home", settings=PAGE_DETAIL
+    ),
+    "normalize": lambda client, _screenshot: vlm.normalize_edge(
+        client, ["search milk"], settings=PAGE_DETAIL
+    ),
+    "merge": lambda client, _screenshot: vlm.audit_merge_nodes(
+        client, "home", settings=PAGE_DETAIL
+    ),
+    "audit": lambda client, _screenshot: vlm.audit_graph(client, "home", settings=PAGE_DETAIL),
+    "target": lambda client, _screenshot: vlm.select_exploration_target(
+        client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
+    ),
+    "planner": lambda client, screenshot: vlm.plan_next_action(
+        client, screenshot, "home", [], app_name="demo", settings=PAGE_DETAIL
+    ),
+    "describe": lambda client, screenshot: vlm.describe_executed_action(
+        client, screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+    ),
+    "action": lambda client, screenshot: vlm.predict_next_action(
+        client, screenshot, "wait", settings=ACTION
+    ),
+}
+
 
 @pytest.mark.parametrize(
     ("operation", "call_type", "model", "content", "expected"),
@@ -346,41 +374,7 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     chat_usage_totals: dict[str, float],
 ) -> None:
     router_responses.append(chat_response(content=content))
-    result: object
-    match operation:
-        case "page":
-            result = vlm.describe_page_and_state(
-                router_client, png_screenshot, settings=PAGE_DETAIL
-            )
-        case "verify":
-            result = vlm.verify_same_node(
-                router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-            )
-        case "normalize":
-            result = vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
-        case "merge":
-            result = vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
-        case "audit":
-            result = vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
-        case "target":
-            result = vlm.select_exploration_target(
-                router_client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
-            )
-        case "planner":
-            result = vlm.plan_next_action(
-                router_client,
-                png_screenshot,
-                "home",
-                [],
-                app_name="demo",
-                settings=PAGE_DETAIL,
-            )
-        case "describe":
-            result = vlm.describe_executed_action(
-                router_client, png_screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
-            )
-        case _:
-            result = vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
+    result = _ROLE_HELPERS[operation](router_client, png_screenshot)
     assert result == expected
     body = json.loads(router_requests[0].content)
     assert body["model"] == model
