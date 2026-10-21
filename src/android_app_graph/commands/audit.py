@@ -58,6 +58,7 @@ from android_app_graph.utils.graph_manager import (
 )
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
+    PlanRequest,
     describe_executed_action,
     plan_next_action,
     predict_next_action,
@@ -347,11 +348,13 @@ def _plan_and_act(
 
     instruction, _planned_element = plan_next_action(
         client=run.client,
-        screenshot_b64=screenshot,
-        page_description=page_description,
-        explored_edges=explored_edges,
-        app_name=run.target.app_name,
-        input_status=input_status,
+        request=PlanRequest(
+            screenshot_b64=screenshot,
+            page_description=page_description,
+            explored_edges=explored_edges,
+            app_name=run.target.app_name,
+            input_status=input_status,
+        ),
         settings=run.session.instruction,
     )
 

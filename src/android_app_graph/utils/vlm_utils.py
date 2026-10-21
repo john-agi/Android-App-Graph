@@ -9,6 +9,7 @@ import logging
 import math
 import re
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from openrouter import OpenRouter
@@ -1760,14 +1761,28 @@ _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True, kw_only=True)
+class PlanRequest:
+    """The screen ``plan_next_action`` plans the next instruction for.
+
+    Attributes:
+        explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
+            each with "target_description", "instructions", "actions", "visit_count".
+        unexplored_elements: List of element dicts not yet interacted with.
+        input_status: Runtime hint about whether a text field/keyboard is active.
+    """
+
+    screenshot_b64: str
+    page_description: str
+    explored_edges: list[dict[str, Any]]
+    app_name: str = ""
+    unexplored_elements: list[dict[str, Any]] | None = None
+    input_status: str = "unknown from screenshot"
+
+
 def plan_next_action(
     client: OpenRouter,
-    screenshot_b64: str,
-    page_description: str,
-    explored_edges: list[dict[str, Any]],
-    app_name: str = "",
-    unexplored_elements: list[dict[str, Any]] | None = None,
-    input_status: str = "unknown from screenshot",
+    request: PlanRequest,
     *,
     settings: ModelSettings,
 ) -> tuple[str, int | None]:
@@ -1776,21 +1791,15 @@ def plan_next_action(
     This separates the "what" (exploration strategy) from the "how" (coordinate grounding).
     Each instruction is ONE atomic action (one tap, one type, one swipe, or one back).
 
-    Args:
-        explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
-            each with "target_description", "instructions", "actions", "visit_count".
-        unexplored_elements: List of element dicts not yet interacted with.
-        input_status: Runtime hint about whether a text field/keyboard is active.
-
     Returns:
         ``(instruction, element)``, where ``element`` is the number of the listed
         unexplored element the instruction acts on, or None.
     """
-    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)
 
-    if explored_edges:
+    if request.explored_edges:
         lines = []
-        for edge in explored_edges:
+        for edge in request.explored_edges:
             target_desc = edge.get("target_description", "unknown")
             instructions = edge.get("instructions", [])
             if instructions:
@@ -1806,9 +1815,9 @@ def plan_next_action(
     else:
         instructions_str = "(none — this screen has not been explored yet)"
 
-    if unexplored_elements:
+    if request.unexplored_elements:
         elem_lines = []
-        for number, elem in enumerate(unexplored_elements, start=1):
+        for number, elem in enumerate(request.unexplored_elements, start=1):
             desc = elem.get("description", "?")
             pos = elem.get("position", "?")
             elem_lines.append(f"{number}. {desc} ({pos})")
@@ -1821,9 +1830,9 @@ def plan_next_action(
         unexplored_section = ""
 
     prompt = NEXT_ACTION_PLAN_PROMPT.format(
-        app_name=app_name,
-        page_description=page_description,
-        input_status=input_status,
+        app_name=request.app_name,
+        page_description=request.page_description,
+        input_status=request.input_status,
         explored_instructions=instructions_str,
         unexplored_elements_section=unexplored_section,
     )

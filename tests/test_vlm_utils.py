@@ -289,7 +289,11 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
         client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
     ),
     "planner": lambda client, screenshot: vlm.plan_next_action(
-        client, screenshot, "home", [], app_name="demo", settings=PAGE_DETAIL
+        client,
+        vlm.PlanRequest(
+            screenshot_b64=screenshot, page_description="home", explored_edges=[], app_name="demo"
+        ),
+        settings=PAGE_DETAIL,
     ),
     "describe": lambda client, screenshot: vlm.describe_executed_action(
         client, screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
@@ -835,7 +839,11 @@ def test_no_request_overrides_the_sdk_retry_policy(
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     vlm.select_exploration_target(router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL)
     vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
-    vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
+        settings=PAGE_DETAIL,
+    )
     vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
     vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
@@ -864,7 +872,11 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
         }
     elif operation == "planner":
         assert vlm.plan_next_action(
-            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
         ) == ("", None)
     else:
         assert vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION) == (
@@ -1114,7 +1126,13 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
     def request() -> object:
         if operation == "description":
             return vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-        return vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
+        return vlm.plan_next_action(
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
+        )
 
     with pytest.raises(vlm.TruncatedReplyError, match="token limit"):
         request()
@@ -1132,7 +1150,11 @@ def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_conte
     router_responses.append(chat_response(content="Tap", finish_reason="content_filter"))
     with caplog.at_level("WARNING"):
         assert vlm.plan_next_action(
-            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
         ) == ("Tap", None)
     assert "instruction: the provider's content filter stopped the reply" in caplog.text
     assert len(router_requests) == 1
@@ -1151,13 +1173,15 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     )
     assert vlm.plan_next_action(
         router_client,
-        png_screenshot,
-        "home",
-        [],
-        unexplored_elements=[
-            {"description": "Turn on dark mode toggle", "position": "top"},
-            {"description": "Compose FAB", "position": "bottom right"},
-        ],
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot,
+            page_description="home",
+            explored_edges=[],
+            unexplored_elements=[
+                {"description": "Turn on dark mode toggle", "position": "top"},
+                {"description": "Compose FAB", "position": "bottom right"},
+            ],
+        ),
         settings=PAGE_DETAIL,
     ) == (instruction, 2)
     prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
@@ -1183,7 +1207,9 @@ def test_the_planner_keeps_every_quote_in_its_instruction(
 ) -> None:
     router_responses.append(chat_response(content=reply))
     assert vlm.plan_next_action(
-        router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+        router_client,
+        vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
+        settings=PAGE_DETAIL,
     ) == (instruction, None)
 
 

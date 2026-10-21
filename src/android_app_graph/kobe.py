@@ -28,6 +28,7 @@ from android_app_graph.utils.graph_manager import (
     GraphManager,
 )
 from android_app_graph.utils.vlm_utils import (
+    PlanRequest,
     plan_next_action,
     predict_next_action,
     select_exploration_target,
@@ -544,12 +545,14 @@ class Kobe:
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(
             client=self.client,
-            screenshot_b64=screenshot,
-            page_description=node_data["page_description"],
-            explored_edges=explored_edges,
-            app_name=self.app_name,
-            unexplored_elements=unexplored_elements,
-            input_status=input_status,
+            request=PlanRequest(
+                screenshot_b64=screenshot,
+                page_description=node_data["page_description"],
+                explored_edges=explored_edges,
+                app_name=self.app_name,
+                unexplored_elements=unexplored_elements,
+                input_status=input_status,
+            ),
             settings=self.instruction,
         )
 

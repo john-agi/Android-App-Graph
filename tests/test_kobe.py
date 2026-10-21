@@ -20,6 +20,7 @@ from PIL import Image
 from android_app_graph.device import DeviceController
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
+from android_app_graph.utils.vlm_utils import PlanRequest
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -793,8 +794,8 @@ _WAIT_REPLY = '{"action":"wait"}'
 def _planner(instruction: str, planned_from: list[object]) -> Callable[..., tuple[str, int | None]]:
     """A ``plan_next_action`` that records the page description of each screen it plans from."""
 
-    def plan(**kwargs: object) -> tuple[str, int | None]:
-        planned_from.append(kwargs["page_description"])
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int | None]:
+        planned_from.append(request.page_description)
         return instruction, None
 
     return plan
