@@ -1628,7 +1628,7 @@ def _scale(coord: object, screen_w: int, screen_h: int) -> tuple[int, int]:
 
 
 def _duration(args: dict[str, object]) -> int:
-    """Read a swipe's or long press's duration: an integer time, then duration, then 1000."""
+    """Read a swipe's or long press's duration: a numeric time, else duration, else 1000."""
     for key in ("time", "duration"):
         duration = as_int(args.get(key))
         if duration is not None:
@@ -1691,7 +1691,7 @@ def _type(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, 
     raise ValueError(msg)
 
 
-_SYSTEM_BUTTONS = {"Back": "back", "Home": "home", "Enter": "enter"}
+_SYSTEM_BUTTONS: dict[str, str] = {"Back": "back", "Home": "home", "Enter": "enter"}
 
 
 def _system_button(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, object]:
