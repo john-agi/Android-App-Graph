@@ -215,6 +215,36 @@ def opened_clients(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.fixture
+def timed_out_requests() -> list[httpx.Request]:
+    return []
+
+
+@pytest.fixture
+def timing_out_client(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float], timed_out_requests: list[httpx.Request]
+) -> Iterator[OpenRouter]:
+    """A client whose every attempt times out, a second past the default 60 s timeout, and
+    lands in ``timed_out_requests``.
+
+    Time passes only on the clock the SDK's retry loop reads, so it gives up after
+    two attempts instead of retrying without end on a real clock.
+    """
+    del no_sleep  # requested for its side effect on time.sleep
+
+    def time_out(request: httpx.Request) -> httpx.Response:
+        timed_out_requests.append(request)
+        msg = "no complete response within 60 s"
+        raise httpx.ReadTimeout(msg, request=request)
+
+    monkeypatch.setattr(time, "time", lambda: 61.0 * len(timed_out_requests))
+    with (
+        httpx.Client(transport=httpx.MockTransport(time_out)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        yield client
+
+
+@pytest.fixture
 def chat_body() -> dict[str, object]:
     return {
         "id": "chat-test",

@@ -14,8 +14,7 @@ import logging
 import math
 import re
 import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, override
 
@@ -1505,31 +1504,6 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
     with pytest.raises(vlm.TruncatedReplyError, match="token limit"):
         request()
     assert len(router_requests) == 1
-
-
-@pytest.fixture
-def timing_out_client(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
-) -> Iterator[OpenRouter]:
-    """A client whose every attempt times out, a second past the default 60 s timeout.
-
-    Time passes only on the clock the SDK's retry loop reads, so it gives up after
-    two attempts instead of retrying without end on a real clock.
-    """
-    del no_sleep  # requested for its side effect on time.sleep
-    attempts: list[httpx.Request] = []
-
-    def time_out(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        msg = "no complete response within 60 s"
-        raise httpx.ReadTimeout(msg, request=request)
-
-    monkeypatch.setattr(time, "time", lambda: 61.0 * len(attempts))
-    with (
-        httpx.Client(transport=httpx.MockTransport(time_out)) as http_client,
-        open_client("test-key", http_client=http_client) as client,
-    ):
-        yield client
 
 
 @pytest.mark.parametrize(
