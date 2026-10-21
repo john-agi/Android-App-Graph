@@ -653,15 +653,17 @@ def _fixture_screen(xml: str) -> dict[str, object]:
     }
 
 
+# What the description model calls the elements of Settings' home fixture, in order.
+_SETTINGS_HOME_ELEMENTS = ["search bar", "settings list", "Network & internet", "Apps"]
+
+
 def _settings_home_described() -> str:
     return json.dumps(
         {
             "page_description": "home",
             "element_descriptions": [
                 {"number": number, "description": description}
-                for number, description in enumerate(
-                    ["search bar", "settings list", "Network & internet", "Apps"], start=1
-                )
+                for number, description in enumerate(_SETTINGS_HOME_ELEMENTS, start=1)
             ],
         }
     )
@@ -689,7 +691,7 @@ def _tap_the_network_row(
         tmp_path,
         router_client,
     )
-    number = ["search bar", "settings list", "Network & internet", "Apps"].index(planned) + 1
+    number = _SETTINGS_HOME_ELEMENTS.index(planned) + 1
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
