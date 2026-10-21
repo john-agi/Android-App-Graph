@@ -1394,7 +1394,7 @@ class GraphManager:
         none.
         """
         path = Path(path)
-        with Path(path).open(encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             raw = json.load(f)
         # Run before any attribute below is assigned or the graph is cleared: a
         # corrupt file must leave the previously loaded graph and counters
@@ -1406,7 +1406,7 @@ class GraphManager:
         embeddings: dict[str, list[float]] = {}
         embedding_models: dict[str, str] = {}
         if emb_path.exists():
-            with Path(emb_path).open(encoding="utf-8") as f:
+            with emb_path.open(encoding="utf-8") as f:
                 for node_id, entry in as_str_dict(json.load(f)).items():
                     if isinstance(entry, dict):
                         tagged = as_str_dict(entry)
