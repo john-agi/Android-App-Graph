@@ -1,15 +1,7 @@
 # Android-App-Graph
 
-Android-App-Graph is a graph-based exploration and runtime framework for mobile
-GUI agents, forked from [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE) by
-Yuxiang Chai. It explores Android apps, builds state-transition graphs, and lets
-downstream agents use those graphs to navigate apps more reliably.
-
-The repository has two main uses:
-
-1. Build a UI knowledge graph for an Android app.
-2. Use the graph inside [AITK](https://github.com/YuxiangChai/AITK) or
-   [Android World](https://github.com/google-research/android_world) agents.
+Android-App-Graph explores Android apps into UI state-transition graphs. It is a
+fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE) by Yuxiang Chai.
 
 ## How It Works
 
@@ -17,9 +9,9 @@ The repository has two main uses:
    current screen, chooses an exploration action, and records the result.
 2. **Build a graph.** Each app state becomes a graph node. Actions that move the
    app between states become graph edges.
-3. **Run graph-guided agents.** The Android-App-Graph v2 runtime loads the graph, matches
-   the current screen to a node, and chooses the next action from nearby graph
-   edges or a free-form fallback action.
+3. **Audit and plot the graph.** `app-graph-audit` finds duplicate nodes and
+   mislabelled edges and can correct them on the device; `app-graph-plot` draws
+   the graph.
 
 ## Repository Layout
 
@@ -27,34 +19,24 @@ The repository has two main uses:
 Android-App-Graph/
 ├── src/
 │   └── android_app_graph/             # The installable package; the only directory in the wheel
-│       ├── adapters/                  # AITK translator, imported by the copy-in shim
 │       ├── cli.py                     # app-graph command
-│       ├── commands/                  # app-graph-audit, app-graph-plot, app-graph-embed
+│       ├── commands/                  # app-graph-audit, app-graph-plot
 │       ├── kobe.py                    # Core app explorer
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
-├── aitk_files/                        # Copy-in shim for AITK, not packaged
-│   └── android_app_graph_v2.py        # 5-line shim to copy into AITK
-├── aw_files/                          # Copy-in adapter for Android World, not packaged
-│   └── android_app_graph_aw_agent.py  # Android World agent adapter
 └── configs/
     └── explore.yaml                   # Sanitized exploration demo config
 ```
 
 `src/android_app_graph/` is the installable Python package: `uv build` produces a wheel
-that contains the `android_app_graph` import package and nothing else. Keep it installed
-in the same environment as AITK.
+that contains the `android_app_graph` import package and nothing else.
 
-`scripts/`, `aitk_files/`, `aw_files/` and `configs/` deliberately stay at the
-repository root and are not part of the wheel. `scripts/` holds only
-`run_explore.sh`, a shell wrapper around the `app-graph` console script; the
-`app-graph-audit`, `app-graph-plot` and `app-graph-embed` commands live in
-`src/android_app_graph/commands/` and ship with the wheel. `aitk_files/` and `aw_files/`
-are copy-in adapters that you copy into an AITK or Android World checkout (see
-the sections below). `aitk_files/android_app_graph_v2.py` is only a shim: the
-AITK translator itself lives in `src/android_app_graph/adapters/aitk_translator.py`
-and ships with the wheel. `configs/` holds example configuration.
+`scripts/` and `configs/` deliberately stay at the repository root and are not
+part of the wheel. `scripts/` holds only `run_explore.sh`, a shell wrapper
+around the `app-graph` console script; the `app-graph-audit` and
+`app-graph-plot` commands live in `src/android_app_graph/commands/` and ship
+with the wheel. `configs/` holds example configuration.
 
 Generated graphs, logs, and outputs are intentionally ignored by git.
 
@@ -67,39 +49,25 @@ Arrows point from importer to imported module; anything not drawn is forbidden.
 ```mermaid
 graph TD;
     pkg["android_app_graph"] --> kobe["android_app_graph.kobe"];
-    adapters["android_app_graph.adapters"] --> pkgs["android_app_graph.android_packages"];
-    adapters --> dev["android_app_graph.device"];
-    adapters --> ec["android_app_graph.embedding_cache"];
-    adapters --> gf["android_app_graph.graph_files"];
-    adapters --> pay["android_app_graph.payloads"];
-    adapters --> utils["android_app_graph.utils"];
-    adapters --> vlm["android_app_graph.utils.vlm_utils"];
-    cmd["android_app_graph.commands"] --> dev;
-    cmd --> ec;
-    cmd --> gf;
-    cmd --> utils;
+    cmd["android_app_graph.commands"] --> dev["android_app_graph.device"];
+    cmd --> utils["android_app_graph.utils"];
     cmd --> gm["android_app_graph.utils.graph_manager"];
     cmd --> logging["android_app_graph.utils.logging"];
-    cmd --> vlm;
+    cmd --> vlm["android_app_graph.utils.vlm_utils"];
     cli["android_app_graph.cli"] --> dev;
     cli --> kobe;
     cli --> logging;
-    ec --> gf;
-    ec --> pay;
-    ec --> retry["android_app_graph.retrying"];
-    ec --> utils;
-    ec --> vlm;
     kobe --> dev;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
-    gm --> pkgs;
-    gm --> gf;
-    gm --> pay;
+    gm --> pkgs["android_app_graph.android_packages"];
+    gm --> gf["android_app_graph.graph_files"];
+    gm --> pay["android_app_graph.payloads"];
     gm --> vlm;
     utils --> pay;
     vlm --> pay;
-    vlm --> retry;
+    vlm --> retry["android_app_graph.retrying"];
     vlm --> utils;
 ```
 
@@ -126,20 +94,6 @@ No sibling checkout of AITK is needed. `pyproject.toml` declares
 [AITK](https://github.com/YuxiangChai/AITK) as a git dependency pinned to a
 specific commit under `[tool.uv.sources]`, so `uv sync` clones and installs
 that commit automatically.
-
-Because there is no AITK checkout, the copy-in step under
-[Use Android-App-Graph with AITK](#use-android-app-graph-with-aitk) targets the `aitk` package
-installed in `.venv`. Print its `translators/` directory, which is the
-`/path/to/AITK/aitk/translators/` of that section, with:
-
-```bash
-uv run python -c "import aitk, pathlib; print(pathlib.Path(aitk.__file__).parent / 'translators')"
-```
-
-uv does not track a file copied there. Recreating `.venv` (for example
-`rm -rf .venv && uv sync`) removes it; `uv sync --reinstall` and a changed
-`rev` reinstall `aitk` around it and leave it in place. After any change to
-`aitk`, check that the file is still present before running AITK.
 
 Run commands through `uv`:
 
@@ -168,8 +122,8 @@ cp .env.example .env
 
 The official [OpenRouter Python SDK](https://openrouter.ai/docs/client-sdks/python/overview)
 is installed by `uv sync --locked`. OpenRouter is the only endpoint and
-`OPENROUTER_API_KEY` is the only credential: one key covers chat, text embeddings
-and screenshot embeddings, and a missing or empty key is an error:
+`OPENROUTER_API_KEY` is the only credential: one key covers chat and text
+embeddings, and a missing or empty key is an error:
 
 ```bash
 OPENROUTER_API_KEY=your-key
@@ -195,17 +149,17 @@ set +a
 The application has no built-in model defaults. Each operation requires explicit,
 nonempty model settings. It validates every setting it uses (models, temperatures,
 timeouts, removed keys and `OPENROUTER_API_KEY`) before any device setup or API
-request: `app-graph`, `app-graph-audit` and `app-graph-embed` report every problem
-in a one-line usage error, and the v2 runtime raises from its constructor. You may
-also supply these environment variables directly in your shell, CI or container; a
-physical `.env` file is not required or loaded automatically.
+request: `app-graph` and `app-graph-audit` report every problem in a one-line
+usage error. You may also supply these environment variables directly in your
+shell, CI or container; a physical `.env` file is not required or loaded
+automatically.
 
 | Environment variable | Role |
 |---|---|
 | `APP_GRAPH_PAGE_DETAIL_MODEL` | Screen descriptions and graph auditing |
-| `APP_GRAPH_EMBEDDING_MODEL` | Text and screenshot embeddings |
+| `APP_GRAPH_EMBEDDING_MODEL` | Text embeddings |
 | `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning and relabelling flagged edges |
-| `APP_GRAPH_ACTION_MODEL` | Action prediction and v2 runtime decisions |
+| `APP_GRAPH_ACTION_MODEL` | Action prediction |
 
 The template's model selections were approved from OpenRouter's catalog based on
 documented capabilities, the chat models on 2026-10-12 and the embedding model on
@@ -215,16 +169,13 @@ Check a replacement model's supported input modalities and parameters in the
 [embedding catalog](https://openrouter.ai/api/v1/embeddings/models).
 
 The sample YAML uses `${APP_GRAPH_*_MODEL}` references. An omitted `model` field
-reads the corresponding environment variable; an explicit model ID in YAML or
-the embedding command's `--model` argument takes precedence. An empty value or
-unresolved reference is an error, including an explicit image-model override.
+reads the corresponding environment variable; an explicit model ID in YAML takes
+precedence. An empty value or unresolved reference is an error.
 To compare models, edit `.env`, export it again and restart the command.
 
-Exploration requires all four roles. The v2 runtime requires action and embedding
-models; it never reads a `page_detail` or `instruction` block. A basic audit requires
-page-detail and embedding models; `--re-explore` also requires instruction and
-action models. `app-graph-embed` requires only an embedding model. Help and plotting
-existing graphs need no model configuration or credentials.
+Exploration requires all four roles. A basic audit requires page-detail and
+embedding models; `--re-explore` also requires instruction and action models.
+Help and plotting existing graphs need no model configuration or credentials.
 
 Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
 `temperature` in its YAML block: a finite number from 0 to 2, inclusive, or an
@@ -235,18 +186,14 @@ support it; check the model's supported parameters and
 The sample `configs/explore.yaml` sets `temperature: 0.0` on `action` only:
 `qwen/qwen3.8-flash` supports it and upstream UI-KOBE used it, while Sol, the
 sample's page-detail and instruction model, rejects temperature, so those blocks
-leave it out. The [AITK `controller.yaml` example](#use-android-app-graph-with-aitk)
-sets it on `action` too, since upstream's v2 runtime sent every call at
-temperature 0. Zero temperature does not guarantee deterministic output.
+leave it out. Zero temperature does not guarantee deterministic output.
 
 ### Requests and recovery
 
 All model roles accept a positive, finite `request_timeout` (or `timeout`) in
-seconds, sent with each request; the default is 60 seconds. Image embeddings
-inherit the text embedding timeout unless overridden, in both runtime retrieval
-and `app-graph-embed`. The graph audit and node-merge audit send the whole graph in
-one prompt, so they use `page_detail.audit_request_timeout` instead, default 300
-seconds.
+seconds, sent with each request; the default is 60 seconds. The graph audit and
+node-merge audit send the whole graph in one prompt, so they use
+`page_detail.audit_request_timeout` instead, default 300 seconds.
 
 The OpenRouter SDK retries transport failures with its default policy, which the
 application keeps as is. It retries 5XX responses, dropped connections (refused,
@@ -286,9 +233,8 @@ since the same request would be cut off again. The log names the call and any
 reasoning tokens, and the caller applies its final fallback at once: an action
 waits, node verification treats the screens as different, edge normalization
 and relabelling a flagged edge keep the instruction, the audits report no
-issues, the coverage checkpoint uses its top candidate, the v2 runtime's other
-steps apply their own fallback, and a page description, an exploration plan or a
-v2 RECORD reply raises. A reply stopped by the provider's content filter
+issues, the coverage checkpoint uses its top candidate, and a page description
+or an exploration plan raises. A reply stopped by the provider's content filter
 (`finish_reason: "content_filter"`) is logged with the call's name and otherwise
 handled like any other empty or partial reply.
 
@@ -303,21 +249,11 @@ plugin. The schemas are strict except for screen descriptions and edge templates
 whose `state` and `params` objects have free-form keys that strict mode cannot
 express. OpenRouter routes a `response_format` only to providers that support it,
 and not every provider enforces strict schemas, so every reply is still validated
-as before. The action model and the v2 runtime's decisions keep their text formats.
+as before. The action model keeps its text format.
 
-V2 planning permits one format-correction retry with a prompt reminder; a failed
-generation is asked again within each completion, and a truncated one ends the
-retry. Chat responses must include every field the SDK requires, including
+Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. A broken endpoint
 response cannot become an action's fallback wait.
-
-RECORD, the v2 step that stores task-relevant facts in memory before each
-decision, has no format-correction retry. It replies with a JSON object,
-`{"information": "<short factual statement>"}`, or `{"information": null}` when
-no new information is relevant, optionally after brief reasoning. Any other
-reply, or one cut off at its token limit, raises and stops the AITK or Android
-World run: a fact guessed at or silently lost would mislead every later decision
-and the final answer.
 
 Exploration and `app-graph-audit` log a usage summary when they finish, per call
 type and model: calls, prompt tokens and the cached share of them, completion
@@ -332,36 +268,18 @@ reasoning tokens.
 
 Each command opens one OpenRouter client for the whole run, shares it across every
 role and closes it when the run ends; each request carries its own role's model,
-temperature and timeout. The v2 runtime creates its client when AITK constructs the
-translator and keeps it for the translator's lifetime, because AITK's translator
-interface has no teardown callback; the SDK closes it when the translator is garbage
-collected or the process exits.
+temperature and timeout.
 
 ### Upgrading provider configuration
 
 OpenRouter is the only endpoint and `OPENROUTER_API_KEY` the only credential. A `page_detail`,
-`embedding`, `image_embedding`, `instruction` or `action` block that still sets
-`api_key`, `base_url` or `native_base_url` is rejected, with an error naming each
-key, by every command and by the v2 runtime, even in a block the operation does
-not use. AITK `controller.yaml` files copied from upstream UI-KOBE still set
-these keys: delete them and export `OPENROUTER_API_KEY` instead.
-`app-graph-embed` has no `--api-key` or `--base-url` option either.
-
-The v2 runtime and `app-graph-embed` both use OpenRouter's
-[multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings).
-`vlm.image_embedding` inherits the `embedding` model and timeout when omitted;
-set its `model` or `request_timeout` to override screenshots separately.
-Image embeddings require an image-capable embedding model.
+`embedding`, `instruction` or `action` block that still sets `api_key`,
+`base_url` or `native_base_url` is rejected, with an error naming each key, by
+every command, even in a block the operation does not use. Configs copied from
+upstream UI-KOBE still set these keys: delete them and export
+`OPENROUTER_API_KEY` instead.
 
 ### Embedding caches
-
-Screenshot sidecars (`*.image_emb.json`) carry the exact embedding model ID.
-Old native Gemini tags (including `gemini-embedding-2`) differ from the new
-`google/gemini-embedding-2` ID and are discarded automatically, as are
-untagged caches. Runtime loading recomputes missing vectors. To precompute them,
-see [Visualize or Audit a Graph](#visualize-or-audit-a-graph). `--recompute`
-discards every cached vector, including those under the same model ID, for a
-deliberate refresh or a hand-edited sidecar.
 
 Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
 as `{node_id: {"model": model_id, "embedding": vector}}`. Legacy bare vectors
@@ -370,9 +288,12 @@ can still be loaded for inspection, but text comparisons reject unknown or
 mismatched models even when dimensions match. These checks run before description
 or embedding requests, so a rejected graph does not spend on model calls.
 Rebuild or re-explore into a new graph directory with the configured embedding
-model before resuming text matching; do not relabel old vectors. The screenshot-only
-`app-graph-embed` command does not migrate text vectors. Newly generated or
-renamed descriptions carry their model metadata through save/load.
+model before resuming text matching; do not relabel old vectors. Newly generated
+or renamed descriptions carry their model metadata through save/load.
+
+Exploration and the audit match screens by these text vectors and by comparing
+screenshots, never by screenshot embeddings. A screenshot-embedding sidecar left
+in a graph directory is not read; it can be deleted.
 
 ### Action responses
 
@@ -398,7 +319,8 @@ one valid coordinate pair. Supplied malformed coordinates still trigger
 numeric `time` takes precedence over `duration`; the default is 1000 milliseconds.
 Unsupported swipe directions, unknown actions or system buttons, and type
 actions without a text string trigger the same bounded action recovery.
-Explicit `end` and `terminate` remain end signals for the calling runtime to handle.
+Explicit `end` and `terminate` become an `end` action, which exploration and the
+audit record as a back press.
 
 ## Explore an App
 
@@ -469,12 +391,21 @@ regular node and no back press.
 same way.
 
 Every node other than an `ext_` one records the package the device reported for
-its screen, and the explorer, the audit and the runtime match a screen only with
-nodes of its package. A dialog's node is therefore never a target of
+its screen, and the explorer and the audit match a screen only with nodes of its
+package. A dialog's node is therefore never a target of
 `--resume-from auto` or the coverage checkpoint, which replay from the app's start
 screen. A node without a recorded package, other than an `ext_` one, takes the
 graph file's `package_name`, or the app's configured `package_name` when the file
 has none, so a graph file whose nodes record no package still loads and resumes.
+
+### Graph edges
+
+Each edge in a graph file lists its actions in `actions`. The `num_steps`,
+`instructions`, `target_observations` and `schema_deltas` lists hold one entry
+per action, in the same order, so entry *i* of each describes `actions[i]`. An
+action that recorded no instruction or observation has `""` in that list, and an
+action that recorded no state change has `null` in `schema_deltas`; only
+self-loop actions record one. Skip those entries when you read an edge.
 
 ## Visualize or Audit a Graph
 
@@ -540,15 +471,6 @@ Each issue's outcome is saved to `<app_name>_re_explore.json` as its `status`:
 One replay can be misled by content that changes between runs, such as a feed;
 the outcome records what each correction was based on.
 
-Precompute OpenRouter image embeddings for a graph:
-
-```bash
-uv run app-graph-embed --config configs/explore.yaml --app <app_name>
-```
-
-See [Embedding caches](#embedding-caches) for model changes, forced refreshes
-and text-vector migration.
-
 ## Verify Provider Setup
 
 Install the checkout being tested with `uv sync --locked`, then follow
@@ -569,265 +491,6 @@ model usage. Android-App-Graph is a Python package and does not produce an APK.
    Expect model-selected actions on the emulator, saved graph nodes and
    screenshots under the scratch directory, and model-tagged text vectors in
    the `.emb.json` sidecar. The second run should continue the saved graph.
-3. Run screenshot precomputation twice without changing the graph:
-
-   ```bash
-   uv run --locked app-graph-embed --config /tmp/app-graph-smoke.yaml
-   uv run --locked app-graph-embed --config /tmp/app-graph-smoke.yaml
-   ```
-
-   The first run should report computed vectors and write `.image_emb.json`.
-   After a successful first run, the second should report cached entries and
-   `computed=0`. Compare migration behavior with [Embedding caches](#embedding-caches).
-
-For V2, install the same checkout in the AITK environment using the steps below.
-Run a task in the target app and check that identification, planning and action
-execution complete using the configured roles.
-
-## Use Android-App-Graph with AITK
-
-After opening the app, each turn matches the screen to a graph node, records
-task-relevant observations, chooses a neighboring or free-form instruction, and
-executes one action. As in the UI-KOBE paper, one small model runs the turn: node
-identification, recording, the decision, free-form planning, the final answer and
-action execution all use the `action` model, and the embedding model retrieves
-candidate nodes by screenshot. No page description is generated at runtime:
-upstream UI-KOBE asked `page_detail` for one each turn but never used it, and the
-paper identifies nodes from screenshots alone. The roles it requires are listed
-under [Configure API Credentials](#configure-api-credentials).
-
-Exploration records the app's configured `package_name` in its graph file, and
-each turn uses the graph whose `package_name` is the foreground package; when no
-graph has that package, the turn plans a free-form action. The runtime does not
-load a graph file without `package_name`, nor any of several files that share
-one, and logs an error naming each such file.
-
-AITK loads a translator by module name: `register_translator()` in
-`aitk/utils/register.py` builds the name `aitk.translators.<value of translator:>`
-from `configs/controller.yaml`, imports it with `importlib.import_module`, and
-calls its `register(translator_args)` function. It cannot import a translator
-from another installed package, so a module of that name must exist inside the
-AITK checkout that the environment imports. `aitk_files/android_app_graph_v2.py`
-is that module: a five-line shim that re-exports `register` and
-`UIKobeV2Translator` from `android_app_graph.adapters.aitk_translator`, so the
-translator itself stays in the installed package. Verified against AITK commit
-`fd06a28e2286cbc1ae699401c1a6f894ba926c44`, the commit this project pins.
-
-1. Set up AITK first, in its own environment, following AITK's `docs/setup.md`
-   (`pip install -r requirements.txt` then `pip install -e .` inside the AITK
-   checkout). Create that environment with Python 3.14: Android-App-Graph requires
-   Python >= 3.14 and AITK accepts >= 3.10. AITK's `pyproject.toml` declares
-   no dependencies of its own; its runtime needs come from its
-   `requirements.txt`, which is why AITK must be installed before Android-App-Graph.
-
-2. Install Android-App-Graph into that same environment, after AITK, from a checkout of
-   this repository:
-
-   ```bash
-   uv pip install --python /path/to/aitk-env/bin/python --no-sources /path/to/Android-App-Graph
-   ```
-
-   `--no-sources` makes uv ignore this project's `[tool.uv.sources]` pin for
-   `aitk`, so the editable AITK you installed in step 1 satisfies the `aitk`
-   requirement and is kept. Order matters: the PyPI project named `aitk` is an
-   unrelated package, and installing Android-App-Graph before AITK pulls it in.
-
-3. Verify that the environment imports the AITK checkout and Android-App-Graph:
-
-   ```bash
-   /path/to/aitk-env/bin/python -c "import aitk, aitk.translators as t, android_app_graph; print(aitk.__version__, aitk.__file__); print(t.__path__[0]); print(android_app_graph.__version__)"
-   ```
-
-   Expected: `0.2.1 /path/to/AITK/aitk/__init__.py`, then
-   `/path/to/AITK/aitk/translators`, then the Android-App-Graph version. If
-   `aitk.__file__` points into `site-packages` or the version is not `0.2.1`,
-   the wrong `aitk` is installed; fix that before continuing.
-
-4. Copy the shim into the directory printed on the second line:
-
-   ```bash
-   cp /path/to/Android-App-Graph/aitk_files/android_app_graph_v2.py \
-     "$(/path/to/aitk-env/bin/python -c 'import aitk.translators as t; print(t.__path__[0])')/android_app_graph_v2.py"
-   ```
-
-5. Register it in AITK's `configs/controller.yaml`: set `translator: android_app_graph_v2`
-   and pass the graph directory and VLM settings through `translator_args`:
-
-   AITK's own `scripts/interact.py` reads `translator_args.max_pixels`
-   unconditionally, so it must be set even though this translator itself
-   defaults it to `1_000_000` when the key is absent:
-
-   ```yaml
-   translator_args:
-     graph_dir: /path/to/Android-App-Graph/graphs
-     max_pixels: 784000
-     vlm_config:
-       similarity_threshold: 0.84
-       embedding:
-         model: ${APP_GRAPH_EMBEDDING_MODEL}
-       action:
-         model: ${APP_GRAPH_ACTION_MODEL}
-         temperature: 0.0
-   ```
-
-6. Smoke-test the import without a device:
-
-   ```bash
-   /path/to/aitk-env/bin/python -c "import aitk.translators.android_app_graph_v2 as m; print(m.register)"
-   ```
-
-   Expected: `<function register at 0x...>`. Then run AITK as its README
-   describes (its own `interact.py` entry point with `configs/controller.yaml`).
-
-The copied shim imports the translator from the installed `android_app_graph`
-package; that is why Android-App-Graph must be installed in the AITK
-environment. Re-copy the shim only when it changes, which it rarely does:
-changes to the translator reach AITK through `uv pip install` of this project,
-not through step 4. The one exception is an AITK checkout that holds a full
-copy of the translator rather than this shim: that copy imports a private
-helper name the installed package does not define, so it fails to import
-until the shim is copied over it once.
-
-`UIKobeV2Translator` takes no `history_window` constructor argument, so a
-`controller.yaml` that sets `translator_args.history_window` must drop it, or
-AITK's `register()` call fails with a `TypeError`.
-
-## Use Android-App-Graph with Android World
-
-Android World is not published on PyPI and, at commit
-`3e50888527ef9f29b9157ecd537e408008bb1c85` (2026-07-10), requires Python
->= 3.11 while pinning `numpy==1.26.3` and `pandas==2.1.4`, which publish no
-CPython 3.14 wheels; its `dm-env==1.6` dependency needs CMake to build
-`dm-tree`. Android-App-Graph requires Python >= 3.14. There is therefore no single
-environment that can hold both this project and Android World today.
-`aw_files/android_app_graph_aw_agent.py` is kept as a reference implementation; it is
-not installed, type-checked or tested by this repository.
-
-To run it anyway, use an environment that Android World supports (Python
-3.11 or 3.12, following its README). This fork cannot be installed there
-(it requires Python >= 3.14), so the procedure uses the upstream UI-KOBE
-project instead, whose `pyproject.toml` declares `requires-python = ">=3.10"`:
-
-1. In that environment, install AITK (`pip install -r requirements.txt`
-   then `pip install -e .` in the AITK checkout, as in the AITK section
-   above) and then the upstream UI-KOBE project from
-   https://github.com/YuxiangChai/UI-KOBE following its README. Copy
-   upstream's `aitk_files/ui_kobe_v2.py` into the AITK checkout's
-   `aitk/translators/` directory exactly as in step 4 of the AITK section,
-   with the upstream path in place of `/path/to/Android-App-Graph`. The
-   adapter imports `aitk.translators.ui_kobe_v2`, so this copy-in must
-   come first. Do not run the `uv pip install --no-sources` command from the
-   AITK section in this environment; it would fail on `requires-python`.
-2. Copy the adapter:
-
-   ```bash
-   cp /path/to/UI-KOBE/aw_files/ui_kobe_aw_agent.py \
-     /path/to/android_world/android_world/agents/ui_kobe_aw_agent.py
-   ```
-
-3. Register the agent in Android World's `run.py`. Android World has no
-   registry; agents are selected by an `if/elif` chain in `_get_agent`. Add
-   the import:
-
-   ```python
-   from android_world.agents import ui_kobe_aw_agent
-   ```
-
-   and a branch inside `_get_agent`, before `if not agent:`:
-
-   ```python
-   elif _AGENT_NAME.value == 'ui_kobe':
-     agent = ui_kobe_aw_agent.UIKobeAndroidWorldAgent.from_config(
-         env,
-         '/path/to/UI-KOBE/configs/explore.yaml',
-     )
-   ```
-
-4. Run Android World with the agent:
-
-   ```bash
-   python run.py \
-     --suite_family=android_world \
-     --agent_name=ui_kobe \
-     --perform_emulator_setup \
-     --tasks=ContactsAddContact
-   ```
-
-The adapter reuses the AITK translator runtime and converts AITK actions into
-Android World `JSONAction` objects.
-
-## Create Custom Agents
-
-The included AITK translator and Android World adapter are reference
-implementations for using an Android-App-Graph graph inside an interactive agent loop. You
-do not need to copy their framework choices exactly. For a custom agent, reuse
-the graph workflow shown in these files and adapt it to your own runtime,
-benchmark, simulator, browser tool, desktop controller, or mobile automation
-system.
-
-The core pattern is:
-
-1. Load an Android-App-Graph graph for the target app.
-2. Match the current observation to a graph node.
-3. Read nearby edges and state metadata as action affordances.
-4. Choose either a graph-guided transition or a free-form fallback action.
-5. Convert that decision into the action format required by your environment.
-
-The two examples below show this pattern in concrete systems.
-
-### AITK translator
-
-Create a translator in `AITK/aitk/translators/` that implements the AITK
-translator interface:
-
-```python
-from aitk.translators.base import BaseTranslator
-
-
-class MyTranslator(BaseTranslator):
-    def to_agent(self, task: str, state: dict, history: dict) -> str:
-        return '{"message": "Tap search", "aitk_action": {"action": "tap", "x": 100, "y": 200}}'
-
-    def to_device(self, action: str, width: int, height: int) -> dict:
-        return {"action": "wait", "time": 1}
-
-
-def register(kargs: dict) -> MyTranslator:
-    return MyTranslator(**kargs)
-```
-
-Use `src/android_app_graph/adapters/aitk_translator.py` as the full graph-guided AITK
-example (`aitk_files/android_app_graph_v2.py` is only the 5-line shim you copy into an
-AITK checkout; see "Use Android-App-Graph with AITK" above). It shows how to load an
-Android-App-Graph graph, identify the current node, record task-relevant
-information, choose a graph edge, and convert the choice into a low-level AITK
-action. You can transfer the same graph usage to other agent frameworks by
-replacing only the final action-conversion layer.
-
-### Android World agent
-
-Create an Android World agent by subclassing `EnvironmentInteractingAgent` and
-implementing `step(goal)`. The step should:
-
-1. Read the current state with `get_post_transition_state()`.
-2. Choose one action for the current goal.
-3. Execute the action with `self.env.execute_action(...)`.
-4. Return `AgentInteractionResult(done=<bool>, data=<dict>)`.
-
-Use `aw_files/android_app_graph_aw_agent.py` as an example of adapting the same graph
-runtime to another interactive system. It wraps the Android-App-Graph AITK translator and
-maps its output into Android World's `JSONAction` format. For other tools, write
-an equivalent adapter that maps graph-guided decisions into that tool's action
-space.
-
-### Graph edges
-
-Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations` and `schema_deltas` lists hold one entry
-per action, in the same order, so entry *i* of each describes `actions[i]`. An
-action that recorded no instruction or observation has `""` in that list, and an
-action that recorded no state change has `null` in `schema_deltas`; only
-self-loop actions record one. Skip those entries when you read an edge.
 
 ## Development
 
@@ -879,5 +542,5 @@ Android-App-Graph is a fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE)
 by [Yuxiang Chai](https://github.com/YuxiangChai), released under the
 [Apache License 2.0](LICENSE). Files from the original work have been modified
 in this repository; the attribution notice is in [NOTICE](NOTICE).
-[AITK](https://github.com/YuxiangChai/AITK), the agent framework this project
-plugs into, is by the same author.
+[AITK](https://github.com/YuxiangChai/AITK), the device toolkit exploration uses
+to drive the emulator, is by the same author.
