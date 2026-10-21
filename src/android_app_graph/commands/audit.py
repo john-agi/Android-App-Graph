@@ -858,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     # After argument validation, so --help and the parser.error paths above never
-    # touch the root logger; before the controller, which logs while it connects.
+    # touch the root logger.
     setup_logging(level=logging.INFO)
 
     session = (
