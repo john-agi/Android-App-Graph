@@ -302,6 +302,52 @@ def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: 
     assert graph.edges["s0_list", "s1_info"]["label"] == "tap (9, 40)\n[1 step]"
 
 
+@pytest.mark.parametrize(
+    ("edge", "label"),
+    [
+        (
+            {
+                "target": "s1_results",
+                "instruction_templates": [{"template": "Search for {query}"}],
+                "instructions": ["Search for cafe"],
+            },
+            "Search for {query}\n[1 step]",
+        ),
+        (
+            {
+                "target": "s0_search",
+                "instructions": ["Go back"],
+                "schema_deltas": [None, {}],
+                "num_steps": [2],
+            },
+            "Go back\n[2 steps]",
+        ),
+    ],
+)
+def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
+    edge: dict[str, object], label: str, tmp_path: Path
+) -> None:
+    graph_path = tmp_path / "demo.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "s0_search", "page_description": "Search"},
+                    {"id": "s1_results", "page_description": "Results"},
+                ],
+                "edges": [
+                    {"source": "s0_search", "actions": [{"action": "tap", "x": 1, "y": 2}], **edge}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _data, graph = plot.load_graph(str(graph_path))
+
+    assert graph.edges["s0_search", edge["target"]]["label"] == label
+
+
 def test_load_graph_falls_back_to_the_unaudited_screenshots(tmp_path: Path) -> None:
     graph_path = _write_graph(tmp_path, stem="demo_audited")
     screenshots = tmp_path / "demo_screenshots"

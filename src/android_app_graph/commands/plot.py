@@ -110,15 +110,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
 
         is_self_loop = edge["source"] == edge["target"]
         schema_deltas = edge.get("schema_deltas", [])
-        delta_str = ""
-        if is_self_loop and schema_deltas:
-            delta_parts = []
-            for delta in schema_deltas:
-                if delta:
-                    for k, v in delta.items():
-                        delta_parts.append(f"{k}: {v.get('before')} → {v.get('after')}")
-            if delta_parts:
-                delta_str = "\n[Δ " + ", ".join(delta_parts) + "]"
+        delta_str = _delta_suffix(schema_deltas) if is_self_loop and schema_deltas else ""
 
         num_steps_list = edge.get("num_steps", [])
         weight = min(num_steps_list) if num_steps_list else len(edge["actions"])
@@ -135,6 +127,17 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         )
 
     return data, graph
+
+
+def _delta_suffix(schema_deltas: list[Any]) -> str:
+    """Return the label suffix listing a self-loop's state changes, or "" when none changed."""
+    delta_parts = [
+        f"{k}: {v.get('before')} → {v.get('after')}"
+        for delta in schema_deltas
+        if delta
+        for k, v in delta.items()
+    ]
+    return "\n[Δ " + ", ".join(delta_parts) + "]" if delta_parts else ""
 
 
 def _summarize_actions(actions: list[Any]) -> str:

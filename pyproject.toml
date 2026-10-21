@@ -128,6 +128,10 @@ extend-select = [
     "N",
     "EM",
     "TRY",
+    "C90",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
 ]
 # FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
 # they need no `ignore` entry.
@@ -207,7 +211,7 @@ show_missing = true
 skip_covered = true
 skip_empty = true
 # Ratchet: set from the measured baseline, only ever raised.
-fail_under = 95
+fail_under = 96
 
 [tool.mutmut]
 # scripts/, aitk_files/ and aw_files/ are copy-in adapters, not package code.

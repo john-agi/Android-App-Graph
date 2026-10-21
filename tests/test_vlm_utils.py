@@ -271,6 +271,34 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
     "describe": ("action_description", True),
 }
 
+_ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
+    "page": lambda client, screenshot: vlm.describe_page_and_state(
+        client, screenshot, settings=PAGE_DETAIL
+    ),
+    "verify": lambda client, screenshot: vlm.verify_same_node(
+        client, screenshot, screenshot, "home", settings=PAGE_DETAIL
+    ),
+    "normalize": lambda client, _screenshot: vlm.normalize_edge(
+        client, ["search milk"], settings=PAGE_DETAIL
+    ),
+    "merge": lambda client, _screenshot: vlm.audit_merge_nodes(
+        client, "home", settings=PAGE_DETAIL
+    ),
+    "audit": lambda client, _screenshot: vlm.audit_graph(client, "home", settings=PAGE_DETAIL),
+    "target": lambda client, _screenshot: vlm.select_exploration_target(
+        client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
+    ),
+    "planner": lambda client, screenshot: vlm.plan_next_action(
+        client, screenshot, "home", [], app_name="demo", settings=PAGE_DETAIL
+    ),
+    "describe": lambda client, screenshot: vlm.describe_executed_action(
+        client, screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+    ),
+    "action": lambda client, screenshot: vlm.predict_next_action(
+        client, screenshot, "wait", settings=ACTION
+    ),
+}
+
 
 @pytest.mark.parametrize(
     ("operation", "call_type", "model", "content", "expected"),
@@ -346,41 +374,7 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     chat_usage_totals: dict[str, float],
 ) -> None:
     router_responses.append(chat_response(content=content))
-    result: object
-    match operation:
-        case "page":
-            result = vlm.describe_page_and_state(
-                router_client, png_screenshot, settings=PAGE_DETAIL
-            )
-        case "verify":
-            result = vlm.verify_same_node(
-                router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-            )
-        case "normalize":
-            result = vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
-        case "merge":
-            result = vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
-        case "audit":
-            result = vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
-        case "target":
-            result = vlm.select_exploration_target(
-                router_client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
-            )
-        case "planner":
-            result = vlm.plan_next_action(
-                router_client,
-                png_screenshot,
-                "home",
-                [],
-                app_name="demo",
-                settings=PAGE_DETAIL,
-            )
-        case "describe":
-            result = vlm.describe_executed_action(
-                router_client, png_screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
-            )
-        case _:
-            result = vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
+    result = _ROLE_HELPERS[operation](router_client, png_screenshot)
     assert result == expected
     body = json.loads(router_requests[0].content)
     assert body["model"] == model
@@ -412,10 +406,11 @@ def test_a_native_tool_call_without_text_content_is_still_read(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.append(chat_response(content="", tool_arguments=_CLICK))
-    action, _ = vlm.predict_next_action(
+    action, history = vlm.predict_next_action(
         router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
+    assert history == "{'action': 'click', 'coordinate': [500, 500]}"
 
 
 def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
@@ -444,7 +439,15 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     assert "1080" not in prompt
 
 
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        '{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [752, 170]}}',
+        '{"action": "click", "coordinate": [752, 170]}',
+    ],
+)
 def test_a_tool_call_missing_its_closing_tag_is_still_read(
+    tool_call: str,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
@@ -453,7 +456,7 @@ def test_a_tool_call_missing_its_closing_tag_is_still_read(
 ) -> None:
     content = (
         "Thought: The search icon is at the top.\nAction: Tap the search icon.\n<tool_call>\n"
-        '{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [752, 170]}}'
+        + tool_call
     )
     router_responses.append(chat_response(content=content))
     action, history = vlm.predict_next_action(
@@ -1319,6 +1322,10 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
         ({"action": "click", "coordinate": [float("nan"), 300]}, "two finite numbers"),
         ({"action": "swipe", "coordinate": [500, 300]}, "coordinates or a supported direction"),
         ({"action": "swipe", "coordinate": [500, 300], "coordinate2": [500]}, "two finite numbers"),
+        ({"action": "swipe", "direction": "north", "coordinate": [500]}, "two finite numbers"),
+        ({"action": ["click"]}, "Unknown action"),
+        ({"action": "swipe", "direction": ["up"]}, "Swipe requires a supported direction"),
+        ({"action": "system_button", "button": ["Back"]}, "Back, Home or Enter"),
     ],
 )
 def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message: str) -> None:
@@ -1367,6 +1374,9 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
         ({"action": "system_button", "button": "Enter"}, {"action": "enter"}),
         ({"action": "answer", "text": "9 EUR"}, {"action": "end"}),
         ({"action": "error"}, {"action": "end"}),
+        ({"action": "wait"}, {"action": "wait", "time": 3}),
+        ({"action": "wait", "duration": 2}, {"action": "wait", "time": 2}),
+        ({"action": "wait", "time": "5"}, {"action": "wait", "time": "5"}),
         (
             {"name": "mobile_use", "arguments": {"action": "click", "coordinate": [500, 500]}},
             {"action": "tap", "x": 540, "y": 960},
