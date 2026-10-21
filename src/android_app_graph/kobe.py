@@ -322,7 +322,9 @@ class Kobe:
                     node_id,
                     action.get("action", "?"),
                 )
-                self.controller.exe_action(action)
+                # find_path yields {} for an edge a loaded graph file holds without actions.
+                if action:
+                    self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
         device_state = self.controller.get_state()
