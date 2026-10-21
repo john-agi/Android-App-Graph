@@ -1226,6 +1226,21 @@ def test_relabel_edge_action_replaces_one_instruction_and_drops_the_edge_templat
     assert data["instruction_templates"] == []
 
 
+def test_find_edge_action_matches_nothing_for_an_action_without_an_instruction() -> None:
+    """A graph loaded from JSON can hold more actions than instructions: the actions
+    past the last instruction match nothing, and the length mismatch is not an error.
+    """
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, instruction="open search")
+    gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
+
+    assert gm.find_edge_action("s0_home", "s1_settings", "open settings") == (0, {"action": "tap"})
+    assert gm.find_edge_action("s0_home", "s1_settings", "open search") is None
+
+
 @dataclass
 class FakeNormalizer:
     """Stand-in for vlm_utils.normalize_edge; the client is unused, so it is _client."""

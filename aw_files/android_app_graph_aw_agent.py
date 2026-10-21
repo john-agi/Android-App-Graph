@@ -84,7 +84,7 @@ def _aitk_to_android_world_action(
 
 def load_agent_settings(config_path: Path) -> tuple[str, dict]:
     """Load graph_dir and vlm_config from either AITK or explorer YAML."""
-    with open(config_path, "r", encoding="utf-8") as f:
+    with Path(config_path).open(encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
     translator_args = config.get("translator_args") or {}

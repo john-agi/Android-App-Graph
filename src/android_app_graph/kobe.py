@@ -619,10 +619,7 @@ class Kobe:
         if new_node == move.source:
             schema_delta = _compute_schema_delta(move.detail_before, detail_after)
             if schema_delta:
-                self.logger.info(
-                    "  Schema delta: %s",
-                    {k: v for k, v in schema_delta.items()},
-                )
+                self.logger.info("  Schema delta: %s", dict(schema_delta))
 
         self.graph.add_edge(
             move.source,

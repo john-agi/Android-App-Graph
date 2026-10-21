@@ -210,7 +210,7 @@ one-step instruction. No explanations."""
 
 
 def load_graph_from_json(path: Path) -> nx.DiGraph:
-    with open(path, "r", encoding="utf-8") as f:
+    with path.open(encoding="utf-8") as f:
         raw = json.load(f)
     # Run before anything else below: a graph with one bad node or edge must
     # reject before the node loop's per-node screenshot path lookup, and
@@ -1120,7 +1120,7 @@ class UIKobeV2Translator(BaseTranslator):
         """
         prompt = RECORD_PROMPT.format(
             task=task,
-            today=datetime.now().strftime("%Y-%m-%d (%A)"),
+            today=datetime.now().astimezone().strftime("%Y-%m-%d (%A)"),
             memory=self._memory.format(),
         )
 
@@ -1141,7 +1141,7 @@ class UIKobeV2Translator(BaseTranslator):
         option's graph-built one, then to the task text).
         """
         current_desc = graph.nodes[node_id].get("page_description", "")
-        today = datetime.now()
+        today = datetime.now().astimezone()
 
         # Show state keys (from schema) so the model knows what parameters this screen has.
         # Values are omitted — the model can read them from the screenshot directly.
