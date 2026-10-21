@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from android_app_graph.utils.vlm_utils import (
 )
 
 EXPLORATION_ROLES = ("page_detail", "embedding", "instruction", "action")
+_STEP_AGENT_NAMES = ("page_describe_and_state", "node_verify", "embedding", "instruction", "action")
 
 
 class NoPathError(ValueError):
@@ -55,6 +57,46 @@ def _compute_schema_delta(
         if val_before != val_after:
             delta[key] = {"before": val_before, "after": val_after}
     return delta or None
+
+
+def _target_observation(page_description: str, detail_snapshot: dict[str, Any]) -> str:
+    """Return ``"<description> (key=value, ...)"`` for the details that have a value, or
+    the bare description when none has."""
+    details = (
+        ", ".join(f"{k}={v}" for k, v in detail_snapshot.items() if v is not None)
+        if detail_snapshot
+        else ""
+    )
+    return f"{page_description} ({details})" if details else page_description
+
+
+def _is_outside_app(package: str, app_package: str) -> bool:
+    return bool(package) and package != app_package and not is_system_overlay(package)
+
+
+@dataclass(frozen=True, slots=True)
+class _Position:
+    """Where the next exploration step starts."""
+
+    node: str
+    device_state: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _Move:
+    """One executed action, and what the step read before it that recording it needs."""
+
+    source: str
+    action: dict[str, Any]
+    instruction: str
+    planned_element: int | None
+    detail_before: dict[str, Any]
+    tokens_before: dict[str, int]
+
+    @property
+    def action_sequence(self) -> list[dict[str, Any]]:
+        """An edge records each of its actions as a sequence, which can be compound."""
+        return [self.action]
 
 
 class Kobe:
@@ -130,33 +172,15 @@ class Kobe:
         current_node: str,
     ) -> str | None:
         """Periodically jump to an under-explored reachable node and continue."""
-        if self.coverage_checkpoint_steps <= 0:
-            return None
-        if step <= 0 or step >= max_steps:
-            return None
-        if step % self.coverage_checkpoint_steps != 0:
+        if not self._is_coverage_checkpoint(step, max_steps):
             return None
 
         self.logger.info(
             "Coverage checkpoint at step %d: evaluating under-explored continuation targets.",
             step,
         )
-        merge_result = self.graph.run_node_merge_audit(app_name=self.app_name)
-        merged_count = merge_result.get("merged_count", 0)
-        if merged_count:
-            self.logger.info(
-                "Coverage checkpoint at step %d: merged %d duplicate node(s).",
-                step,
-                merged_count,
-            )
-            self.save_graph()
-            current_node = self.graph.resolve_node_id(current_node)
-
-        candidates = self.graph.get_exploration_target_candidates(
-            package_name=self.package_name,
-            top_k=self.coverage_checkpoint_top_k,
-        )
-        candidates = [c for c in candidates if c.get("node_id") != current_node]
+        current_node = self._merge_duplicate_nodes(step, current_node)
+        candidates = self._continuation_candidates(current_node)
         if not candidates:
             self.logger.info(
                 "Coverage checkpoint at step %d: no alternate under-explored candidates.",
@@ -186,6 +210,39 @@ class Kobe:
             step,
             selected,
         )
+        return self._navigate_to_continuation(selected, current_node)
+
+    def _is_coverage_checkpoint(self, step: int, max_steps: int) -> bool:
+        return (
+            self.coverage_checkpoint_steps > 0
+            and 0 < step < max_steps
+            and step % self.coverage_checkpoint_steps == 0
+        )
+
+    def _merge_duplicate_nodes(self, step: int, current_node: str) -> str:
+        """Run the checkpoint's merge audit and return the ID ``current_node`` has after it."""
+        merge_result = self.graph.run_node_merge_audit(app_name=self.app_name)
+        merged_count = merge_result.get("merged_count", 0)
+        if merged_count:
+            self.logger.info(
+                "Coverage checkpoint at step %d: merged %d duplicate node(s).",
+                step,
+                merged_count,
+            )
+            self.save_graph()
+            current_node = self.graph.resolve_node_id(current_node)
+        return current_node
+
+    def _continuation_candidates(self, current_node: str) -> list[dict[str, Any]]:
+        candidates = self.graph.get_exploration_target_candidates(
+            package_name=self.package_name,
+            top_k=self.coverage_checkpoint_top_k,
+        )
+        return [c for c in candidates if c.get("node_id") != current_node]
+
+    def _navigate_to_continuation(self, selected: str, current_node: str) -> str | None:
+        """Return the node the checkpoint continues from, or ``None`` when the navigation
+        failed before the app restart and the device is still on ``current_node``."""
         try:
             actual_node = self.navigate_to_node(selected)
         except (NoPathError, ForceStopRefusedError) as exc:
@@ -376,265 +433,15 @@ class Kobe:
             self.save_graph()
             return
 
-        if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
-            if resume_from == "auto":
-                resume_from = self.graph.get_least_explored_node(package_name=self.package_name)
-                self.logger.info("Auto-selected least-explored node: %s", resume_from)
-
-            if resume_from and resume_from in self.graph.graph:
-                current_node = self.navigate_to_node(resume_from)
-                device_state = self.controller.get_state()
-            else:
-                self.logger.warning(
-                    "Node %s not found in graph. Starting from current screen.",
-                    resume_from,
-                )
-                device_state = self.controller.get_state()
-                current_node = self.graph.identify_state(
-                    device_state["activity"],
-                    device_state["screenshot"],
-                    device_state["package"],
-                )
-        elif start_step > 0:
-            self.logger.info(
-                "Resuming exploration from step %d (target: %d steps total)",
-                start_step,
-                max_steps,
-            )
-            device_state = self.controller.get_state()
-            current_node = self.graph.identify_state(
-                device_state["activity"],
-                device_state["screenshot"],
-                device_state["package"],
-            )
-        else:
-            device_state = self.controller.get_state()
-            current_node = self.graph.identify_state(
-                device_state["activity"],
-                device_state["screenshot"],
-                device_state["package"],
-            )
-
-        step = start_step
+        position = self._starting_position(resume_from, start_step, max_steps)
 
         try:
-            while step < max_steps:
-                tokens_before = token_tracker.snapshot_by_type()
-
-                screenshot = device_state["screenshot"]
-                node_data = self._require_node(current_node)
-
-                detail_before = dict(node_data.get("last_detail_snapshot", {}))
-
-                explored_edges = self.graph.get_all_edges_from_node(current_node)
-
-                # Check before planning so the planner can choose type vs tap.
-                keyboard_hint = soft_keyboard_hint()
-                input_status = keyboard_status(keyboard_hint)
-
-                unexplored_elements = self.graph.get_unexplored_elements(current_node)
-                instruction, planned_element = plan_next_action(
-                    client=self.client,
-                    screenshot_b64=screenshot,
-                    page_description=node_data["page_description"],
-                    explored_edges=explored_edges,
-                    app_name=self.app_name,
-                    unexplored_elements=unexplored_elements,
-                    input_status=input_status,
-                    settings=self.instruction,
-                )
-
-                left_app = False
-
-                action, _history_entry = predict_next_action(
-                    client=self.client,
-                    screenshot_b64=screenshot,
-                    instruction=instruction + keyboard_hint,
-                    screen_w=self.controller.w,
-                    screen_h=self.controller.h,
-                    action_history=[],
-                    settings=self.action,
-                )
-
-                recorded_instruction = instruction
-                if action.get("action") == "end":
-                    self.logger.info(
-                        '  Action agent said end for: "%s", recording as back',
-                        instruction,
-                    )
-                    action = {"action": "back"}
-                    recorded_instruction = "Press back"
-                    self.controller.exe_action(action)
-                elif action.get("action") == "wait":
-                    self.logger.info("  Action agent requested wait")
-                    time.sleep(1)
-                    device_state = self.controller.get_state()
-                    step += 1
-                    self.graph.total_steps_completed = step
-                    self.save_graph()
-                    continue
-                else:
-                    self.controller.exe_action(action)
-
-                action_sequence = [action]
-
-                time.sleep(0.5)
-                device_state = self.controller.get_state()
-
-                if not left_app:
-                    current_package = device_state.get("package", "").strip()
-                    if (
-                        current_package
-                        and current_package != self.package_name
-                        and not is_system_overlay(current_package)
-                    ):
-                        left_app = True
-
-                if left_app:
-                    new_node = self._handle_external_app(
-                        current_node,
-                        action_sequence,
-                        current_package,
-                        device_state,
-                        instruction=recorded_instruction,
-                    )
-                    device_state = self.controller.get_state()
-                    step += 1
-                    self.graph.total_steps_completed = step
-                    self.graph.maybe_normalize_node_edges(current_node)
-                    self.save_graph()
-                    current_node = self.graph.identify_state(
-                        device_state["activity"],
-                        device_state["screenshot"],
-                        device_state["package"],
-                    )
-                    current_node, device_state = self._apply_coverage_checkpoint_after_step(
-                        step,
-                        max_steps,
-                        current_node,
-                        device_state,
-                    )
-                    continue
-
-                new_node = self.graph.identify_state(
-                    device_state["activity"],
-                    device_state["screenshot"],
-                    device_state["package"],
-                )
-                current_node = self.graph.resolve_node_id(current_node)
-
-                new_node_data = self._require_node(new_node)
-                if new_node == EXTERNAL_WEB_NODE:
-                    self.logger.warning(
-                        "External web page opened from %s. Recording the edge and pressing back.",
-                        current_node,
-                    )
-                    self.graph.add_edge(
-                        current_node,
-                        new_node,
-                        action=action_sequence,
-                        instruction=recorded_instruction,
-                        target_observation=new_node_data.get("page_description", ""),
-                    )
-                    step += 1
-                    self.graph.total_steps_completed = step
-                    self.save_graph()
-                    current_node, device_state = self._leave_external_web()
-                    current_node, device_state = self._apply_coverage_checkpoint_after_step(
-                        step,
-                        max_steps,
-                        current_node,
-                        device_state,
-                    )
-                    continue
-
-                schema_delta = None
-                if new_node == current_node:
-                    new_data = self._require_node(new_node)
-                    detail_after = new_data.get("last_detail_snapshot", {})
-                    schema_delta = _compute_schema_delta(detail_before, detail_after)
-                    if schema_delta:
-                        self.logger.info(
-                            "  Schema delta: %s",
-                            {k: v for k, v in schema_delta.items()},
-                        )
-
-                target_obs = new_node_data.get("page_description", "")
-                post_detail = new_node_data.get("last_detail_snapshot", {})
-                if post_detail:
-                    detail_str = ", ".join(
-                        f"{k}={v}" for k, v in post_detail.items() if v is not None
-                    )
-                    if detail_str:
-                        target_obs = f"{target_obs} ({detail_str})"
-
-                self.graph.add_edge(
-                    current_node,
-                    new_node,
-                    action=action_sequence,
-                    instruction=recorded_instruction,
-                    target_observation=target_obs,
-                    schema_delta=schema_delta,
-                    num_steps=len(action_sequence),
-                )
-                self.graph.mark_element_explored(current_node, planned_element)
-                self.graph.maybe_normalize_node_edges(current_node)
-                step += 1
-                self.graph.total_steps_completed = step
-
-                tokens_after = token_tracker.snapshot_by_type()
-                agent_names = [
-                    "page_describe_and_state",
-                    "node_verify",
-                    "embedding",
-                    "instruction",
-                    "action",
-                ]
-                step_tokens = {
-                    a: tokens_after.get(a, 0) - tokens_before.get(a, 0) for a in agent_names
-                }
-                step_total = sum(step_tokens.values())
-                cumulative = sum(tokens_after.values())
-
-                token_parts = " | ".join(
-                    f"{a}={step_tokens[a]}" for a in agent_names if step_tokens[a] > 0
-                )
-
-                action_summary = "+".join(a.get("action", "?") for a in action_sequence)
-                total_actions = sum(
-                    len(self.graph.graph[s][t].get("actions", []))
-                    for s, t in self.graph.graph.edges()
-                )
-                self.logger.info(
-                    "Step %d/%d: %s --[%s]--> %s | graph: %d nodes, %d edges, %d total actions",
-                    step,
-                    max_steps,
-                    current_node,
-                    action_summary,
-                    new_node,
-                    self.graph.graph.number_of_nodes(),
-                    self.graph.graph.number_of_edges(),
-                    total_actions,
-                )
-                self.logger.info(
-                    "  Tokens this step: %s | step_total=%d, cumulative=%d",
-                    token_parts or "0",
-                    step_total,
-                    cumulative,
-                )
-
-                self.save_graph()
-
-                current_node, device_state = self._apply_coverage_checkpoint_after_step(
-                    step,
-                    max_steps,
-                    new_node,
-                    device_state,
-                )
+            while self.graph.total_steps_completed < max_steps:
+                position = self._explore_step(position, max_steps)
         except KeyboardInterrupt:
             self.logger.warning(
                 "Exploration interrupted at step %d. Saving graph before exit.",
-                step,
+                self.graph.total_steps_completed,
             )
             self.save_graph()
             token_tracker.print_summary()
@@ -642,7 +449,7 @@ class Kobe:
         except Exception:
             self.logger.error(
                 "Exploration crashed at step %d. Graph saved. Re-run to resume.",
-                step,
+                self.graph.total_steps_completed,
             )
             self.save_graph()
             token_tracker.print_summary()
@@ -653,11 +460,229 @@ class Kobe:
         self.save_graph()
         self.logger.info(
             "Exploration finished after %d steps. Graph: %d nodes, %d edges.",
-            step,
+            self.graph.total_steps_completed,
             self.graph.graph.number_of_nodes(),
             self.graph.graph.number_of_edges(),
         )
         token_tracker.print_summary()
+
+    def _starting_position(
+        self, resume_from: str | None, start_step: int, max_steps: int
+    ) -> _Position:
+        if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
+            if resume_from == "auto":
+                resume_from = self.graph.get_least_explored_node(package_name=self.package_name)
+                self.logger.info("Auto-selected least-explored node: %s", resume_from)
+
+            if resume_from and resume_from in self.graph.graph:
+                node = self.navigate_to_node(resume_from)
+                return _Position(node, self.controller.get_state())
+            self.logger.warning(
+                "Node %s not found in graph. Starting from current screen.",
+                resume_from,
+            )
+        elif start_step > 0:
+            self.logger.info(
+                "Resuming exploration from step %d (target: %d steps total)",
+                start_step,
+                max_steps,
+            )
+        device_state = self.controller.get_state()
+        return _Position(self._identify(device_state), device_state)
+
+    def _explore_step(self, position: _Position, max_steps: int) -> _Position:
+        """Take one step from ``position``, record it, and return where the next one starts."""
+        tokens_before = token_tracker.snapshot_by_type()
+        move = self._plan_and_act(position, tokens_before)
+        if move is None:
+            time.sleep(1)
+            device_state = self.controller.get_state()
+            self.graph.total_steps_completed += 1
+            self.save_graph()
+            return _Position(position.node, device_state)
+
+        time.sleep(0.5)
+        device_state = self.controller.get_state()
+        package = device_state.get("package", "").strip()
+        if _is_outside_app(package, self.package_name):
+            return self._record_external_app_step(move, package, device_state, max_steps)
+
+        new_node = self._identify(device_state)
+        move = replace(move, source=self.graph.resolve_node_id(move.source))
+        new_node_data = self._require_node(new_node)
+        if new_node == EXTERNAL_WEB_NODE:
+            return self._record_external_web_step(move, new_node_data, max_steps)
+        return self._record_in_app_step(move, new_node, device_state, max_steps)
+
+    def _plan_and_act(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
+        """Plan an action from ``position`` and execute it; ``None`` when the action
+        model asks to wait, which executes nothing."""
+        screenshot = position.device_state["screenshot"]
+        node_data = self._require_node(position.node)
+
+        detail_before = dict(node_data.get("last_detail_snapshot", {}))
+
+        explored_edges = self.graph.get_all_edges_from_node(position.node)
+
+        # Check before planning so the planner can choose type vs tap.
+        keyboard_hint = soft_keyboard_hint()
+        input_status = keyboard_status(keyboard_hint)
+
+        unexplored_elements = self.graph.get_unexplored_elements(position.node)
+        instruction, planned_element = plan_next_action(
+            client=self.client,
+            screenshot_b64=screenshot,
+            page_description=node_data["page_description"],
+            explored_edges=explored_edges,
+            app_name=self.app_name,
+            unexplored_elements=unexplored_elements,
+            input_status=input_status,
+            settings=self.instruction,
+        )
+
+        action, _history_entry = predict_next_action(
+            client=self.client,
+            screenshot_b64=screenshot,
+            instruction=instruction + keyboard_hint,
+            screen_w=self.controller.w,
+            screen_h=self.controller.h,
+            action_history=[],
+            settings=self.action,
+        )
+
+        recorded_instruction = instruction
+        if action.get("action") == "end":
+            self.logger.info(
+                '  Action agent said end for: "%s", recording as back',
+                instruction,
+            )
+            action = {"action": "back"}
+            recorded_instruction = "Press back"
+        elif action.get("action") == "wait":
+            self.logger.info("  Action agent requested wait")
+            return None
+        self.controller.exe_action(action)
+        return _Move(
+            source=position.node,
+            action=action,
+            instruction=recorded_instruction,
+            planned_element=planned_element,
+            detail_before=detail_before,
+            tokens_before=tokens_before,
+        )
+
+    def _record_external_app_step(
+        self, move: _Move, package: str, device_state: dict[str, Any], max_steps: int
+    ) -> _Position:
+        self._handle_external_app(
+            move.source,
+            move.action_sequence,
+            package,
+            device_state,
+            instruction=move.instruction,
+        )
+        device_state = self.controller.get_state()
+        self.graph.total_steps_completed += 1
+        self.graph.maybe_normalize_node_edges(move.source)
+        self.save_graph()
+        return self._continue_after(self._identify(device_state), device_state, max_steps)
+
+    def _record_external_web_step(
+        self, move: _Move, web_node_data: dict[str, Any], max_steps: int
+    ) -> _Position:
+        self.logger.warning(
+            "External web page opened from %s. Recording the edge and pressing back.",
+            move.source,
+        )
+        self.graph.add_edge(
+            move.source,
+            EXTERNAL_WEB_NODE,
+            action=move.action_sequence,
+            instruction=move.instruction,
+            target_observation=web_node_data.get("page_description", ""),
+        )
+        self.graph.total_steps_completed += 1
+        self.save_graph()
+        node, device_state = self._leave_external_web()
+        return self._continue_after(node, device_state, max_steps)
+
+    def _record_in_app_step(
+        self, move: _Move, new_node: str, device_state: dict[str, Any], max_steps: int
+    ) -> _Position:
+        new_node_data = self._require_node(new_node)
+        detail_after = new_node_data.get("last_detail_snapshot", {})
+        schema_delta = None
+        if new_node == move.source:
+            schema_delta = _compute_schema_delta(move.detail_before, detail_after)
+            if schema_delta:
+                self.logger.info(
+                    "  Schema delta: %s",
+                    {k: v for k, v in schema_delta.items()},
+                )
+
+        self.graph.add_edge(
+            move.source,
+            new_node,
+            action=move.action_sequence,
+            instruction=move.instruction,
+            target_observation=_target_observation(
+                new_node_data.get("page_description", ""), detail_after
+            ),
+            schema_delta=schema_delta,
+            num_steps=len(move.action_sequence),
+        )
+        self.graph.mark_element_explored(move.source, move.planned_element)
+        self.graph.maybe_normalize_node_edges(move.source)
+        self.graph.total_steps_completed += 1
+        self._log_step(move, new_node, max_steps)
+        self.save_graph()
+        return self._continue_after(new_node, device_state, max_steps)
+
+    def _log_step(self, move: _Move, new_node: str, max_steps: int) -> None:
+        tokens_after = token_tracker.snapshot_by_type()
+        step_tokens = {
+            a: tokens_after.get(a, 0) - move.tokens_before.get(a, 0) for a in _STEP_AGENT_NAMES
+        }
+        token_parts = " | ".join(
+            f"{a}={step_tokens[a]}" for a in _STEP_AGENT_NAMES if step_tokens[a] > 0
+        )
+        action_summary = "+".join(a.get("action", "?") for a in move.action_sequence)
+        total_actions = sum(
+            len(self.graph.graph[s][t].get("actions", [])) for s, t in self.graph.graph.edges()
+        )
+        self.logger.info(
+            "Step %d/%d: %s --[%s]--> %s | graph: %d nodes, %d edges, %d total actions",
+            self.graph.total_steps_completed,
+            max_steps,
+            move.source,
+            action_summary,
+            new_node,
+            self.graph.graph.number_of_nodes(),
+            self.graph.graph.number_of_edges(),
+            total_actions,
+        )
+        self.logger.info(
+            "  Tokens this step: %s | step_total=%d, cumulative=%d",
+            token_parts or "0",
+            sum(step_tokens.values()),
+            sum(tokens_after.values()),
+        )
+
+    def _identify(self, device_state: dict[str, Any]) -> str:
+        return self.graph.identify_state(
+            device_state["activity"],
+            device_state["screenshot"],
+            device_state["package"],
+        )
+
+    def _continue_after(self, node: str, device_state: dict[str, Any], max_steps: int) -> _Position:
+        node, device_state = self._apply_coverage_checkpoint_after_step(
+            self.graph.total_steps_completed,
+            max_steps,
+            node,
+            device_state,
+        )
+        return _Position(node, device_state)
 
     def _leave_external_web(self) -> tuple[str, dict[str, Any]]:
         """Press back until the screen is no longer an outside web page, restarting the
