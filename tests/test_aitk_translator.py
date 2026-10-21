@@ -41,8 +41,10 @@ def _write_graph(
     audited: bool = False,
     nodes: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
+    image_embeddings: dict[str, list[float]] | None = None,
 ) -> Path:
-    """Write ``<tmp_path>/<app>/<stem>.json`` and return its path."""
+    """Write ``<tmp_path>/<app>/<stem>.json``, and its embedding sidecar when
+    ``image_embeddings`` is given, and return the graph's path."""
     app_dir = tmp_path / app
     app_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{app}_audited" if audited else app
@@ -59,6 +61,12 @@ def _write_graph(
         ),
         encoding="utf-8",
     )
+    if image_embeddings is not None:
+        embedding_cache.save_image_embeddings(
+            path,
+            image_embeddings,
+            model=embedding_cache.resolve_image_embedding_settings(_VLM_CONFIG).model,
+        )
     return path
 
 
@@ -1764,22 +1772,40 @@ def test_runtime_image_embedding_propagates_an_error_without_asking_again(
     assert calls == ["shot"]
 
 
-@pytest.fixture
-def identifiable(
-    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
+_DEMO_IMAGE_EMBEDDINGS: dict[str, list[float]] = {"home": [1.0, 0.0], "results": [0.0, 1.0]}
+
+
+def _identifiable_translator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    nodes: list[dict[str, Any]],
+    image_embeddings: dict[str, list[float]] | None,
 ) -> aitk_translator.UIKobeV2Translator:
-    """A translator whose image embeddings come from a fake."""
+    """A translator over the demo app with ``nodes``, whose sidecar holds
+    ``image_embeddings`` and whose runtime image embeddings come from a fake."""
     monkeypatch.setattr(
         embedding_cache,
         "get_image_embedding",
         lambda *_args, **_kwargs: [1.0, 0.0],
     )
-    graph = translator._graphs["demo"]
-    graph.nodes["home"]["image_embedding"] = [1.0, 0.0]
-    graph.nodes["results"]["image_embedding"] = [0.0, 1.0]
-    translator._current_graph = graph
+    _write_graph(
+        tmp_path, app="demo", nodes=nodes, edges=_DEMO_EDGES, image_embeddings=image_embeddings
+    )
+    translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
+    translator._current_graph = translator._graphs["demo"]
     translator._app_name = "demo"
     return translator
+
+
+@pytest.fixture
+def identifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> aitk_translator.UIKobeV2Translator:
+    """A translator whose image embeddings come from a fake."""
+    return _identifiable_translator(
+        tmp_path, monkeypatch, nodes=_DEMO_NODES, image_embeddings=_DEMO_IMAGE_EMBEDDINGS
+    )
 
 
 def test_identify_node_without_a_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
@@ -1812,25 +1838,27 @@ def test_identify_node_only_asks_the_action_model_to_pick_a_candidate(
 
 
 def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     use_model: _UseModel,
-    identifiable: aitk_translator.UIKobeV2Translator,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A cached image embedding from a different embedding-model dimension must
     never be scored against the fresh query vector (see cosine_similarity's
     ValueError); it is skipped and warned about once, not per candidate.
     """
-    graph = identifiable._graphs["demo"]
-    graph.add_node(
-        "stale",
-        package="com.demo.app",
-        activity="com.demo.app/.HomeActivity",
-        page_description="a wrong-dimension screen",
-        state_schema={},
-        last_detail_snapshot={},
-        reference_screenshot_path=None,
-        visit_count=0,
-        image_embedding=[1.0, 0.0, 0.0],
+    identifiable = _identifiable_translator(
+        tmp_path,
+        monkeypatch,
+        nodes=[
+            *_DEMO_NODES,
+            {
+                "id": "stale",
+                "activity": "com.demo.app/.HomeActivity",
+                "page_description": "a wrong-dimension screen",
+            },
+        ],
+        image_embeddings={**_DEMO_IMAGE_EMBEDDINGS, "stale": [1.0, 0.0, 0.0]},
     )
     use_model(identifiable, "A")
 
@@ -1912,11 +1940,11 @@ def test_identify_node_without_candidates_in_the_current_package(
 
 
 def test_identify_node_without_cached_embeddings(
-    identifiable: aitk_translator.UIKobeV2Translator,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    graph = identifiable._graphs["demo"]
-    for node in graph.nodes:
-        del graph.nodes[node]["image_embedding"]
+    identifiable = _identifiable_translator(
+        tmp_path, monkeypatch, nodes=_DEMO_NODES, image_embeddings=None
+    )
     assert identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
@@ -1949,11 +1977,11 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
                 "target_observations": None,
             }
         ],
+        image_embeddings={"home": [1.0, 0.0]},
     )
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
     graph = translator._graphs["demo"]
-    graph.nodes["home"]["image_embedding"] = [1.0, 0.0]
     translator._current_graph = graph
     translator._app_name = "demo"
 
@@ -2280,12 +2308,15 @@ _SHOP_NODES: list[dict[str, Any]] = [
 
 @pytest.fixture
 def two_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> aitk_translator.UIKobeV2Translator:
-    _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
-    _write_graph(tmp_path, app="shop", nodes=_SHOP_NODES)
+    _write_graph(
+        tmp_path,
+        app="demo",
+        nodes=_DEMO_NODES,
+        edges=_DEMO_EDGES,
+        image_embeddings=_DEMO_IMAGE_EMBEDDINGS,
+    )
+    _write_graph(tmp_path, app="shop", nodes=_SHOP_NODES, image_embeddings={"cart": [1.0, 0.0]})
     built = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    built._graphs["demo"].nodes["home"]["image_embedding"] = [1.0, 0.0]
-    built._graphs["demo"].nodes["results"]["image_embedding"] = [0.0, 1.0]
-    built._graphs["shop"].nodes["cart"]["image_embedding"] = [1.0, 0.0]
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
     monkeypatch.setattr(
@@ -2331,10 +2362,14 @@ def _stepping_over_one_graph(
     nodes: list[dict[str, Any]],
     image_embeddings: dict[str, list[float]],
 ) -> aitk_translator.UIKobeV2Translator:
-    _write_graph(tmp_path, app="app", package_name=package_name, nodes=nodes)
+    _write_graph(
+        tmp_path,
+        app="app",
+        package_name=package_name,
+        nodes=nodes,
+        image_embeddings=image_embeddings,
+    )
     built = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    for node_id, vector in image_embeddings.items():
-        built._graphs["app"].nodes[node_id]["image_embedding"] = vector
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
     monkeypatch.setattr(
@@ -2475,16 +2510,19 @@ def test_last_answer_signal_returns_none_without_any_signal() -> None:
 
 
 def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
-    identifiable: aitk_translator.UIKobeV2Translator, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """score_by_cosine drops a cached vector of the wrong dimension as well as a
     missing one, so the "no candidates" line must not claim every same-package
     node has an embedding when all of them were dropped as stale.
     """
-    graph = identifiable._graphs["demo"]
-    same_pkg = [n for n, data in graph.nodes(data=True) if data["package"] == "com.demo.app"]
-    for node in same_pkg:
-        graph.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
+    same_pkg = [node["id"] for node in _DEMO_NODES]
+    identifiable = _identifiable_translator(
+        tmp_path,
+        monkeypatch,
+        nodes=_DEMO_NODES,
+        image_embeddings={node_id: [1.0, 0.0, 0.0] for node_id in same_pkg},
+    )
 
     with caplog.at_level("WARNING"):
         assert (
