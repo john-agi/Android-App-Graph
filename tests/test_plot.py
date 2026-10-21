@@ -322,9 +322,9 @@ def test_plot_pyvis_writes_fullscreen_html(tmp_path: Path) -> None:
 
 
 def test_plot_matplotlib_writes_an_image(tmp_path: Path) -> None:
-    import matplotlib
+    import matplotlib as mpl
 
-    matplotlib.use("agg")
+    mpl.use("agg")
     _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
     output = tmp_path / "graph.png"
     plot.plot_matplotlib(graph, str(output))
@@ -332,9 +332,9 @@ def test_plot_matplotlib_writes_an_image(tmp_path: Path) -> None:
 
 
 def test_plot_paper_matplotlib_writes_an_image(tmp_path: Path) -> None:
-    import matplotlib
+    import matplotlib as mpl
 
-    matplotlib.use("agg")
+    mpl.use("agg")
     _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
     output = tmp_path / "paper.png"
     plot.plot_paper_matplotlib(graph, str(output), layout="spring")
@@ -344,9 +344,9 @@ def test_plot_paper_matplotlib_writes_an_image(tmp_path: Path) -> None:
 def test_plot_paper_graphviz_falls_back_without_dot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import matplotlib
+    import matplotlib as mpl
 
-    matplotlib.use("agg")
+    mpl.use("agg")
     monkeypatch.setattr(plot.shutil, "which", lambda _cmd: None)
     _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
     output = tmp_path / "paper.png"

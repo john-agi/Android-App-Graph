@@ -157,13 +157,13 @@ def test_explorer_reports_all_missing_models_before_importing_device_tools(
 
     def guarded_import(
         name: str,
-        globals: dict[str, object] | None = None,
-        locals: dict[str, object] | None = None,
+        globals_: dict[str, object] | None = None,
+        locals_: dict[str, object] | None = None,
         fromlist: tuple[str, ...] = (),
         level: int = 0,
     ) -> object:
         assert not name.startswith("aitk"), "configuration must be checked before device setup"
-        return original_import(name, globals, locals, fromlist, level)
+        return original_import(name, globals_, locals_, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     with pytest.raises(SystemExit) as caught:

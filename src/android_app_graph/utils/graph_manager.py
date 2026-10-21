@@ -104,10 +104,9 @@ def _merge_into_schema(
         if key not in schema:
             schema[key] = [value]
             logger.debug("Schema: new key '%s' with value %s", key, value)
-        else:
-            if value not in schema[key]:
-                schema[key].append(value)
-                logger.debug("Schema: key '%s' got new value %s", key, value)
+        elif value not in schema[key]:
+            schema[key].append(value)
+            logger.debug("Schema: key '%s' got new value %s", key, value)
     return schema
 
 
@@ -533,10 +532,7 @@ class GraphManager:
 
     def _renamed_node_id(self, node_id: str, page_description: str) -> str:
         """Build a unique node ID that keeps the original numeric prefix."""
-        if "_" in node_id:
-            prefix = node_id.split("_", 1)[0]
-        else:
-            prefix = node_id
+        prefix = node_id.split("_", 1)[0] if "_" in node_id else node_id
         base = f"{prefix}_{self._sanitize_description_for_node_id(page_description)}"
         if base == node_id or base not in self.graph:
             return base
@@ -574,9 +570,8 @@ class GraphManager:
             cached = self._last_identify_cache
             if cached is not None and cached.node_id == node_id:
                 self._last_identify_cache = cached._replace(node_id=new_node_id)
-        else:
-            if node_data.get("reference_screenshot"):
-                self._dirty_screenshots.add(node_id)
+        elif node_data.get("reference_screenshot"):
+            self._dirty_screenshots.add(node_id)
 
         logger.info(
             "Renamed node %s → %s: '%s' → '%s'",
@@ -802,7 +797,11 @@ class GraphManager:
         if not instruction or not self.graph.has_edge(source, target):
             return None
         edge_data = self.graph[source][target]
-        recorded = zip(edge_data.get("actions", []), edge_data.get("instructions", []))
+        # A graph loaded from JSON can hold more actions than instructions; an action
+        # without an instruction matches nothing, so a shorter list is not an error.
+        recorded = zip(
+            edge_data.get("actions", []), edge_data.get("instructions", []), strict=False
+        )
         for index, (action, recorded_instruction) in enumerate(recorded):
             if recorded_instruction == instruction:
                 return index, action
@@ -1395,7 +1394,7 @@ class GraphManager:
         none.
         """
         path = Path(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             raw = json.load(f)
         # Run before any attribute below is assigned or the graph is cleared: a
         # corrupt file must leave the previously loaded graph and counters
@@ -1407,7 +1406,7 @@ class GraphManager:
         embeddings: dict[str, list[float]] = {}
         embedding_models: dict[str, str] = {}
         if emb_path.exists():
-            with open(emb_path, "r", encoding="utf-8") as f:
+            with emb_path.open(encoding="utf-8") as f:
                 for node_id, entry in as_str_dict(json.load(f)).items():
                     if isinstance(entry, dict):
                         tagged = as_str_dict(entry)

@@ -352,7 +352,6 @@ def plot_paper_graphviz(
 
     edge_seen: Counter[tuple[str, str]] = Counter()
     for src, tgt, data in graph.edges(data=True):
-        data = graph.edges[src, tgt]
         label = data.get("label", "")
         short = _wrap_label(_shorten_words(label, max_edge_words, 34), width=14)
         visits = data.get("visit_count", 0)
