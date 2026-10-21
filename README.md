@@ -539,11 +539,16 @@ screenshots, oldest first and at most ten, with Previous and Next buttons and th
 position, such as `3 / 10`. A member whose image is missing from `steps/` is
 skipped. Clicking the background or an edge closes the panel.
 
+Hovering a node shows its ID, full page description, activity, visits, state keys,
+explored element count and first ten unexplored elements, then its representative
+screenshot. Every value from the graph is shown as text, never read as HTML.
+
 The images are embedded in the HTML as data URIs, so the file opens anywhere
 without its step log. Base64 adds a third to each WebP: every member shown adds
 about 100 KB for the Settings screenshots measured in [Step log](#step-log), 235 KB
-at most, and the node's tooltip embeds the representative's image once more. A
-Settings graph of 82 nodes holding 232 screenshots plots to a 30 MB file.
+at most. The tooltip shows the panel's copy of the representative, so a node embeds
+one more image only when the panel does not show its representative. A Settings
+graph of 82 nodes holding 232 screenshots plots to a 22 MB file.
 
 Run the graph audit utility:
 

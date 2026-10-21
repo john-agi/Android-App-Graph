@@ -472,7 +472,6 @@ def _plot_member_graph(tmp_path: Path, observations: list[str], representative: 
 def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
     tmp_path: Path,
 ) -> None:
-    """The representative is embedded twice, in the tooltip and as the panel's first image."""
     observations = _steps(12)
     uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
 
@@ -482,17 +481,85 @@ def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
     assert node["memberImages"] == uris[:10]
     assert node["memberTotal"] == 12
     assert node["label"] == "Home\n[12 screenshots]"
-    assert [html.count(uri) for uri in uris] == [2] + [1] * 9 + [0, 0]
+    assert [html.count(uri) for uri in uris] == [1] * 10 + [0, 0]
 
 
-def test_plot_pyvis_tooltip_holds_only_the_representative(tmp_path: Path) -> None:
-    observations = _steps(3)
+@pytest.mark.parametrize(
+    ("representative", "member"),
+    [(0, 0), (4, 4), (10, None)],
+    ids=["oldest-member", "later-member", "beyond-the-ten"],
+)
+def test_plot_pyvis_tooltip_shows_the_representative_from_one_copy_of_its_image(
+    tmp_path: Path, representative: int, member: int | None
+) -> None:
+    """The tooltip points at the representative among the panel's images, and carries the
+    image itself only when the panel does not show it."""
+    observations = _steps(12)
     uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
 
-    html = _plot_member_graph(tmp_path, observations, observations[1])
+    html = _plot_member_graph(tmp_path, observations, observations[representative])
 
-    title = _vis_nodes(html)["s0_home"]["title"]
-    assert [uri in title for uri in uris] == [False, True, False]
+    node = _vis_nodes(html)["s0_home"]
+    assert "title" not in node
+    assert node["representativeMember"] == member
+    if member is None:
+        assert node["representativeImage"] == uris[representative]
+    else:
+        assert node["memberImages"][member] == uris[representative]
+        assert node["representativeImage"] is None
+    assert all(html.count(uri) == 1 for uri in [*uris[:10], uris[representative]])
+
+
+def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) -> None:
+    _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
+    output = tmp_path / "graph.html"
+
+    plot.plot_pyvis(graph, str(output))
+
+    nodes = _vis_nodes(output.read_text(encoding="utf-8"))
+    assert nodes["s0_home"]["tooltipRows"] == [
+        ["Description", "Home"],
+        ["Activity", "com.demo.Home"],
+        ["Visits", "3"],
+        ["State keys", "tab"],
+        ["Elements", "1/2 explored"],
+        ["Unexplored", "?"],
+    ]
+    assert nodes["s1_search"]["tooltipRows"] == [
+        ["Description", "Search results"],
+        ["Activity", "com.demo.Search"],
+        ["Visits", "0"],
+        ["State keys", "none"],
+        ["Elements", "0/0 explored"],
+    ]
+    assert nodes["s1_search"]["representativeMember"] is None
+    assert nodes["s1_search"]["representativeImage"] is None
+
+
+def test_plot_pyvis_passes_markup_in_a_description_to_the_page_only_as_data(
+    tmp_path: Path,
+) -> None:
+    """Descriptions come from a model: the page holds them as escaped JSON strings, and the
+    tooltip script sets them with textContent, so no value is ever parsed as HTML."""
+    description = '<script>alert("x")</script> & <b>bold</b>'
+    graph = nx.DiGraph()
+    graph.add_node("s0_home", page_description=description, elements=[{"description": description}])
+    output = tmp_path / "graph.html"
+
+    plot.plot_pyvis(graph, str(output))
+
+    html = output.read_text(encoding="utf-8")
+    rows = _vis_nodes(html)["s0_home"]["tooltipRows"]
+    assert rows[0] == ["Description", description]
+    assert rows[-1] == ["Unexplored", description]
+    assert "<script>alert" not in html
+    injected = html[html.index("drawGraph();") :]
+    tooltip_script = injected[: injected.index('<div id="member-panel"')]
+    assert "value.textContent = row[1];" in tooltip_script
+    assert not any(
+        sink in injected
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write")
+    )
 
 
 @pytest.mark.parametrize(
@@ -511,8 +578,10 @@ def test_plot_pyvis_labels_each_node_with_its_screenshot_count(
     assert _vis_nodes(output.read_text(encoding="utf-8"))["s0_home"]["label"] == label
 
 
-def test_plot_pyvis_adds_the_member_panel_after_the_graph_is_drawn(tmp_path: Path) -> None:
-    """The panel's script reads the network that the template's drawGraph() call creates."""
+def test_plot_pyvis_adds_the_tooltips_and_the_member_panel_after_the_graph_is_drawn(
+    tmp_path: Path,
+) -> None:
+    """Both scripts read the network and nodes that the template's drawGraph() call creates."""
     graph = nx.DiGraph()
     graph.add_node("s0_home", page_description="Home")
     output = tmp_path / "graph.html"
@@ -521,8 +590,10 @@ def test_plot_pyvis_adds_the_member_panel_after_the_graph_is_drawn(tmp_path: Pat
 
     html = output.read_text(encoding="utf-8")
     body = html[html.index("<body>") : html.index("</body>")]
+    injected = body[body.index("drawGraph();") :]
     assert body.count('<div id="member-panel" hidden>') == 1
-    assert body.index("drawGraph();") < body.index('network.on("click"')
+    assert "title: tooltipOf(node)" in injected
+    assert 'network.on("click"' in injected
     assert body.endswith("})();\n</script>\n")
 
 
@@ -547,7 +618,7 @@ def test_plot_pyvis_lists_ten_unexplored_elements_and_counts_the_rest(tmp_path: 
     plot.plot_pyvis(graph, str(output))
     html = output.read_text(encoding="utf-8")
     listed = ", ".join(f"Button {letter}" for letter in "ABCDEFGHIJ")
-    assert f"{listed} (+1 more)" in html
+    assert _vis_nodes(html)["s0_home"]["tooltipRows"][-1] == ["Unexplored", f"{listed} (+1 more)"]
     assert "Button K" not in html
 
 
