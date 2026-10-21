@@ -50,6 +50,7 @@ from android_app_graph.graph_files import graph_steps_dir
 from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.utils import (
     ModelSettings,
+    check_config_keys,
     open_client,
     resolve_api_key,
     resolve_audit_timeout,
@@ -901,6 +902,7 @@ def main(argv: list[str] | None = None) -> int:
     graph_dir = Path(exp_config.get("graph_dir", "graphs"))
 
     try:
+        check_config_keys(config)
         selected_apps = select_apps_for_audit(
             config,
             graph_dir,

@@ -5,11 +5,14 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
@@ -17,9 +20,8 @@ from openrouter.components.security import Security
 from rich.console import Console
 
 from android_app_graph.utils import (
-    REMOVED_KEYS,
-    ROLES,
     ModelSettings,
+    check_config_keys,
     open_client,
     resolve_api_key,
     resolve_audit_timeout,
@@ -100,18 +102,105 @@ def test_a_missing_or_empty_openrouter_key_is_actionable(
         resolve_api_key()
 
 
-@pytest.mark.parametrize("key", REMOVED_KEYS)
-@pytest.mark.parametrize("role", ROLES)
-def test_removed_endpoint_and_credential_keys_are_rejected_in_every_role_block(
-    role: str, key: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    secret = "dummy-secret-never-log"  # noqa: S105  # fake credential; the test proves it is never logged
-    monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "qwen/qwen3.8-flash")
-    monkeypatch.setenv("GEMINI_API_KEY", secret)
-    with pytest.raises(ValueError, match=rf"{role}\.{key} was removed") as caught:
-        resolve_model_settings({role: {key: "${GEMINI_API_KEY}"}}, roles=("action",))
-    assert "OPENROUTER_API_KEY" in str(caught.value)
-    assert secret not in str(caught.value)
+_EVERY_ACCEPTED_KEY: dict[str, object] = {
+    "device": {"udid": "emulator-5554", "avd_name": "Pixel"},
+    "experiment": {
+        "graph_dir": "graphs",
+        "max_steps": 10,
+        "resume_from": "auto",
+        "coverage_checkpoint_steps": 5,
+        "coverage_checkpoint_top_k": 3,
+    },
+    "apps": [
+        {"name": "demo", "package_name": "com.demo"},
+        {"name": "other", "package_name": "com.other", "launch_activity": "com.other/.Main"},
+    ],
+    "vlm": {
+        "similarity_threshold": 0.84,
+        "page_detail": {
+            "model": "m",
+            "temperature": 0,
+            "request_timeout": 30,
+            "timeout": 30,
+            "audit_request_timeout": 300,
+        },
+        "embedding": {"model": "m", "request_timeout": 30, "timeout": 30},
+        "instruction": {"model": "m", "temperature": 0, "request_timeout": 30, "timeout": 30},
+        "action": {"model": "m", "temperature": 0, "request_timeout": 30, "timeout": 30},
+    },
+}
+
+
+def test_every_key_a_command_uses_is_accepted() -> None:
+    check_config_keys(_EVERY_ACCEPTED_KEY)
+
+
+def test_every_committed_config_is_accepted() -> None:
+    configs = sorted((Path(__file__).resolve().parents[1] / "configs").glob("*.yaml"))
+    assert configs
+    for config in configs:
+        with config.open(encoding="utf-8") as f:
+            check_config_keys(yaml.safe_load(f))
+
+
+def test_an_unknown_top_level_key_is_rejected_naming_it() -> None:
+    with pytest.raises(ValueError, match=r"^Unknown configuration keys: devices$"):
+        check_config_keys({"devices": {"udid": "emulator-5554"}})
+
+
+def test_an_unknown_vlm_key_is_rejected_naming_its_path() -> None:
+    with pytest.raises(ValueError, match=r"^Unknown configuration keys: vlm\.similarity$"):
+        check_config_keys({"vlm": {"similarity": 0.9}})
+
+
+def test_an_unknown_role_key_is_rejected_naming_its_path_and_never_its_value() -> None:
+    value = "sk-or-v1-not-a-real-key"
+    with pytest.raises(
+        ValueError, match=r"^Unknown configuration keys: vlm\.instruction\.api_key$"
+    ) as caught:
+        check_config_keys({"vlm": {"instruction": {"model": "m", "api_key": value}}})
+    assert value not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("config", "path"),
+    [
+        ({"vlm": {"embedding": {"temperature": 0}}}, "vlm.embedding.temperature"),
+        ({"vlm": {"action": {"audit_request_timeout": 9}}}, "vlm.action.audit_request_timeout"),
+        ({"vlm": {"vision": {"model": "m"}}}, "vlm.vision"),
+        ({"experiment": {"name": "demo"}}, "experiment.name"),
+        ({"apps": [{"name": "demo", "package": "com.demo"}]}, "apps[0].package"),
+        ({"apps": {"name": "demo"}}, "apps.name"),
+        ({"vlm": [{"action": {}}]}, "vlm[0].action"),
+        ({1: "one"}, "1"),
+    ],
+)
+def test_a_key_no_command_uses_is_rejected(config: dict[object, object], path: str) -> None:
+    with pytest.raises(ValueError, match=rf"^Unknown configuration keys: {re.escape(path)}$"):
+        check_config_keys(config)
+
+
+def test_every_unknown_key_is_reported_at_once_in_file_order() -> None:
+    config: dict[str, object] = {
+        "device": {"udid": "emulator-5554", "serial": "emulator-5554"},
+        "apps": [
+            {"name": "demo", "package_name": "com.demo"},
+            {"name": "other", "package_name": "com.other", "launch_activty": "com.other/.Main"},
+        ],
+        "vlm": {"action": {"model": "m", "max_tokens": 512}},
+        "extra": True,
+    }
+    with pytest.raises(ValueError, match=r"^Unknown configuration keys: ") as caught:
+        check_config_keys(config)
+    assert str(caught.value) == (
+        "Unknown configuration keys: device.serial, apps[1].launch_activty, "
+        "vlm.action.max_tokens, extra"
+    )
+
+
+@pytest.mark.parametrize("config", [None, {"vlm": None, "apps": None, "device": "emulator"}])
+def test_a_missing_or_empty_section_has_no_unknown_keys(config: object) -> None:
+    check_config_keys(config)
 
 
 def test_role_model_environment_reference_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,14 +324,12 @@ def test_every_invalid_setting_is_reported_on_one_line() -> None:
     config: dict[str, object] = {
         "page_detail": {"model": "openai/gpt-6.1-sol", "request_timeout": -1},
         "action": {"model": "qwen/qwen3.8-flash", "temperature": 3, "timeout": "soon"},
-        "instruction": {"base_url": "https://provider.example/v1"},
     }
     with pytest.raises(ValueError, match=r"^Invalid vlm configuration: ") as caught:
         resolve_model_settings(config, roles=("page_detail", "embedding", "action"))
     message = str(caught.value)
     assert "\n" not in message
     for problem in (
-        "instruction.base_url was removed",
         "page_detail.request_timeout",
         "embedding.model is required",
         "action.temperature",

@@ -64,9 +64,14 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - No issue or pull request numbers in code, comments, docstrings (test
   docstrings included), docs or configuration. Write the reason itself, so
   the line reads without opening GitHub.
-- Comments, docstrings and docs describe the code as it is now; how it used
-  to behave belongs in the pull request description. A regression test's
-  docstring states the behaviour it pins, not the bug it fixed.
+- Code, tests, comments, docstrings, error messages and docs describe the
+  system as it is, in the present tense and in positive terms: what it does,
+  not what it stopped doing. No "was removed", "no longer", "used to",
+  "previously", "legacy" or "before X", and no comparison with a format or
+  approach the code does not use. Removing a setting, field or behaviour
+  removes every trace of it. History and the reasons for a change go in the
+  pull request description. A regression test's docstring states the
+  behaviour it pins, not the bug it fixed.
 - Annotate everything you touch; no `Any` to silence the checker. Narrow
   untyped payloads with the helpers in `payloads.py`, not with `cast`.
 - Take the `DeviceController` and `AvdManager` Protocols from `device.py`,
@@ -147,7 +152,7 @@ Each fact has one home. Other places link to it and never restate it.
 | Rules for agents and contributors | This file |
 | Multi-step procedures | One skill each under `.agents/skills/`; Claude Code reads them through the `.claude/skills` symlink |
 | Setup, usage, and the lasting behaviour and values users or operators rely on | `README.md`, updated in the pull request that changes them |
-| Why one change was made: decisions and alternatives, testing, trade-offs, what was left out | The pull request description, never the docs |
+| Why one change was made: what came before it, decisions and alternatives, testing, trade-offs, what was left out | The pull request description, never the code or the docs |
 | Structure of a pull request description | `.github/pull_request_template.md` |
 | Why a setting exists | A comment on the setting, only when the reason is not obvious |
 

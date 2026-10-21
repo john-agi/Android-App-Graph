@@ -1502,7 +1502,6 @@ class GraphManager:
         steps_dir = graph_steps_dir(path)
         _require_node_members(data["nodes"], path, steps_dir)
 
-        # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self.embeddings_path(path)
         embeddings: dict[str, list[float]] = {}
         embedding_models: dict[str, str] = {}
@@ -1530,9 +1529,7 @@ class GraphManager:
 
         for node_data in data.get("nodes", []):
             node_id = node_data["id"]
-            # Prefer companion file; fall back to inline (backwards compat)
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
-            # Backwards compat: old graphs have "activity" only, new ones have "activities" list
             activities = node_data.get("activities", [node_data.get("activity", "")])
             self.graph.add_node(
                 node_id,
