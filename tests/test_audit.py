@@ -26,19 +26,20 @@ from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 
 PAGE_DETAIL = ModelSettings("gpt-test")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
-_PACKAGE_LAUNCH = [
-    "adb",
-    "-s",
-    "test-device",
-    "shell",
-    "monkey",
-    "-p",
-    "com.demo",
-    "-c",
-    "android.intent.category.LAUNCHER",
-    "1",
+_RESOLVE_LAUNCHER = [
+    *("adb", "-s", "test-device", "shell", "pm", "resolve-activity", "--brief"),
+    *("-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "com.demo"),
 ]
-_ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
+
+
+def _clear_task_start(component: str) -> list[str]:
+    return ["adb", "-s", "test-device", "shell", "am", "start", "-n", component, "-f", "0x10008000"]
+
+
+_HOME_START = _clear_task_start("com.demo/.Home")
+# The run's first restart asks the device for the launcher activity; later ones reuse it.
+_FIRST_RESTART = [_FORCE_STOP, _RESOLVE_LAUNCHER, _HOME_START]
+_RESTART = [_FORCE_STOP, _HOME_START]
 
 
 @pytest.fixture
@@ -637,7 +638,7 @@ _BACK = {"action": "back"}
 
 @pytest.mark.parametrize(
     ("back_presses_on_the_page", "leaving"),
-    [(1, [_BACK, _BACK]), (3, [_BACK, _BACK, _BACK, _FORCE_STOP, _PACKAGE_LAUNCH])],
+    [(1, [_BACK, _BACK]), (3, [_BACK, _BACK, _BACK, *_RESTART])],
 )
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
@@ -681,7 +682,7 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     ]
     assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
     replay = {"action": "tap", "coordinate": [10, 20]}
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay, tap, *leaving, tap]
+    assert device_log == [*_FIRST_RESTART, replay, tap, *leaving, tap]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -777,19 +778,25 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
     )
 
 
+_MAIN_RESTART = [_FORCE_STOP, _clear_task_start("com.demo/.Main")]
+
+
 @pytest.mark.parametrize(
-    ("launch_activity", "launch"), [(None, _PACKAGE_LAUNCH), ("com.demo/.Main", _ACTIVITY_LAUNCH)]
+    ("launch_activity", "first_restart", "restart"),
+    [(None, _FIRST_RESTART, _RESTART), ("com.demo/.Main", _MAIN_RESTART, _MAIN_RESTART)],
 )
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_restarts_the_app_before_each_replay(
     launch_activity: str | None,
-    launch: list[str],
+    first_restart: list[list[str]],
+    restart: list[list[str]],
     client: OpenRouter,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
 ) -> None:
-    """Each replay starts from a restarted app, not the screen the previous issue ended on."""
+    """Each replay starts from a restarted app, not the screen the previous issue ended on,
+    and the run asks the device for the launcher activity once."""
     graph, _graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
@@ -818,7 +825,7 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
     assert [r["status"] for r in results] == ["instruction_not_found", "explored"]
     replay = {"action": "tap", "coordinate": [10, 20]}
     explore_step = {"action": "back"}
-    assert device_log == [_FORCE_STOP, launch, replay, explore_step] * 2
+    assert device_log == [*first_restart, replay, explore_step, *restart, replay, explore_step]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -864,7 +871,7 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     ]
     assert graph.graph.has_edge("s1_detail", "s2_camera_permission")
     replay = {"action": "tap", "coordinate": [10, 20]}
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay, tap]
+    assert device_log == [*_FIRST_RESTART, replay, tap]
 
 
 _FLAGGED = "open the detail page"
@@ -971,8 +978,7 @@ def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reache
     assert edge["instructions"] == ["open settings", _FLAGGED]
     assert edge["target_observations"] == ["Settings", "Settings"]
     assert [(step["from"], step["to"]) for step in result["steps"]] == [("s0_home", "s0_home")]
-    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
-    assert device_log == [*restart, _DETAIL_TAP, *restart, _BACK]
+    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART, _BACK]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1112,7 +1118,7 @@ def test_re_explore_explores_from_the_source_when_the_flagged_instruction_is_not
     assert result["status"] == "instruction_not_found"
     assert [(step["from"], step["to"]) for step in result["steps"]] == [("s0_home", "s0_home")]
     assert {key: _edges(graph)[key] for key in before} == before
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, _BACK]
+    assert device_log == [*_FIRST_RESTART, _BACK]
 
 
 @pytest.mark.parametrize(
@@ -1216,8 +1222,7 @@ def test_re_explore_moves_a_flagged_action_that_opens_an_outside_web_page_to_the
     assert not graph.graph.has_edge("s0_home", "s1_detail")
     assert graph.graph["s0_home"][EXTERNAL_WEB_NODE]["instructions"] == [_FLAGGED]
     assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
-    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
-    assert device_log == [*restart, _DETAIL_TAP, *restart]
+    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1259,8 +1264,7 @@ def test_re_explore_does_not_explore_when_the_replay_after_a_correction_misses_t
     )
 
     assert (result["status"], result["steps"]) == ("moved", [])
-    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
-    assert device_log == [*restart, _DETAIL_TAP, *restart]
+    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1300,8 +1304,7 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     assert [r["status"] for r in results] == ["relabelled", "explored"]
     assert graph.graph["s0_start"]["s1_detail"]["instructions"] == ["Tap the card"]
     assert results[1]["navigated_to"] == "s2_app_settings"
-    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
-    assert device_log == [*restart, _DETAIL_TAP, *restart, *restart, _GEAR_TAP]
+    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART, *_RESTART, _GEAR_TAP]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1337,7 +1340,7 @@ def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_re
     )
 
     assert (result["status"], result["navigated_to"]) == ("explored", "s2_detail")
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, _DETAIL_TAP]
+    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1361,7 +1364,7 @@ def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
         "navigated_to": "s1_detail",
         "steps": [],
     }
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == _FIRST_RESTART
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1388,7 +1391,7 @@ def test_re_explore_takes_no_step_from_a_screen_the_graph_has_no_node_for(
         "steps": [],
     }
     replay = {"action": "tap", "coordinate": [10, 20]}
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay]
+    assert device_log == [*_FIRST_RESTART, replay]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1420,7 +1423,7 @@ def test_re_explore_spends_a_step_on_an_action_model_wait_without_recording_it(
     assert result == {"issue": issue, "status": "explored", "navigated_to": "s0_home", "steps": []}
     assert len(predictions) == 2
     assert _edges(graph) == before
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == _FIRST_RESTART
 
 
 _HOME_SCREEN = {"activity": "com.demo.Home", "screenshot": _png(200), "package": "com.demo"}
@@ -1438,7 +1441,7 @@ _BROWSER_SCREEN = {
         ([_BROWSER_SCREEN, _HOME_SCREEN], [_BACK]),
         (
             [_BROWSER_SCREEN, _BROWSER_SCREEN, _BROWSER_SCREEN, _HOME_SCREEN],
-            [_BACK, _FORCE_STOP, _PACKAGE_LAUNCH],
+            [_BACK, *_RESTART],
         ),
     ],
     ids=["back returns", "back leaves the other app in front"],
@@ -1462,7 +1465,7 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
     issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
     # The replay's restart shows home, and the second step's tap opens the detail page.
-    controller = screens_by_log(*[_HOME_SCREEN] * 3, *after_the_tap, _DETAIL_SCREEN)
+    controller = screens_by_log(*[_HOME_SCREEN] * 4, *after_the_tap, _DETAIL_SCREEN)
 
     (result,) = _re_explore(graph, [issue], controller, client, tmp_path, steps_per_issue=2)
 
@@ -1470,7 +1473,7 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
         (2, "s0_home", "s1_detail")
     ]
     assert set(graph.graph.edges) == {("s0_home", "s1_detail")}
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, tap, *leaving, tap]
+    assert device_log == [*_FIRST_RESTART, tap, *leaving, tap]
 
 
 @pytest.mark.usefixtures("_fake_device")

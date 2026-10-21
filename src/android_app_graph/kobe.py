@@ -11,6 +11,7 @@ from typing import Any
 from openrouter import OpenRouter
 
 from android_app_graph.device import (
+    AppLaunch,
     DeviceController,
     ForceStopRefusedError,
     is_outside_app,
@@ -141,7 +142,7 @@ class Kobe:
     ) -> None:
         self.app_name = config.app_name
         self.package_name = config.package_name
-        self.launch_activity = config.launch_activity
+        self.app_launch = AppLaunch(config.app_name, config.package_name, config.launch_activity)
         logger_name = getattr(logger, "name", "")
         if logger_name.startswith("android_app_graph"):
             self.logger = logging.getLogger("android_app_graph.kobe")
@@ -354,9 +355,7 @@ class Kobe:
             msg = f"No path from {start_node} to {target_node} in the graph."
             raise NoPathError(msg)
 
-        restart_app(
-            self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
-        )
+        restart_app(self.controller, self.app_launch, self.logger)
 
         if len(path) <= 1:
             self.logger.info("Already at target node %s", target_node)
@@ -714,13 +713,7 @@ class Kobe:
                 "%s is in front of %s. Restarting %s.", package, self.package_name, self.app_name
             )
             with self.controller.source("external_app_recovery"):
-                device_state = restart_into_app(
-                    self.controller,
-                    self.app_name,
-                    self.package_name,
-                    self.launch_activity,
-                    self.logger,
-                )
+                device_state = restart_into_app(self.controller, self.app_launch, self.logger)
         node = self.graph.identify_state(Observation.from_state(device_state))
         return node, device_state
 
@@ -755,9 +748,7 @@ class Kobe:
             EXTERNAL_WEB_BACK_PRESSES,
             self.package_name,
         )
-        restart_app(
-            self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
-        )
+        restart_app(self.controller, self.app_launch, self.logger)
         return self._identify(self.controller.get_state())
 
     def _handle_external_app(self, move: _Move, device_state: dict[str, Any]) -> dict[str, Any]:
@@ -794,9 +785,7 @@ class Kobe:
             ext_node_id,
         )
         with self.controller.source("external_app_recovery"):
-            return return_to_app(
-                self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
-            )
+            return return_to_app(self.controller, self.app_launch, self.logger)
 
     def save_graph(self) -> None:
         """Persist the graph to disk."""

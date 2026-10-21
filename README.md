@@ -384,10 +384,13 @@ For long runs, use the auto-resume wrapper:
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
 steps and each issue that `app-graph-audit --re-explore` works on reach their node
 by replaying recorded actions from the app's start screen. Before every replay the
-app is force-stopped (`adb shell am force-stop <package_name>`) and launched again,
-through its `launch_activity` when the config sets one. Whatever the app holds only
-in memory, such as an unsaved form, is lost at each replay; data it has stored
-survives.
+app is force-stopped (`adb shell am force-stop <package_name>`) and launched again
+with its task cleared (`adb shell am start -n <component> -f 0x10008000`), so another
+app's screen left in that task, such as a search screen the app opened, does not come
+back. The component is the app's `launch_activity` when the config sets one, and
+otherwise the package's launcher activity, looked up once per run; of several, the
+first is used and a warning names the others. Whatever the app holds only in memory,
+such as an unsaved form, is lost at each replay; data it has stored survives.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
