@@ -20,8 +20,10 @@ from android_app_graph.step_log import (
     Observation,
     StepRecorder,
     Transition,
+    TransitionRecord,
     annotate_observation,
     load_image_embeddings,
+    read_exploration_transitions,
     read_observation_record,
     save_image_embeddings,
 )
@@ -332,6 +334,51 @@ def test_record_transition_names_both_screens_the_plan_and_the_nodes(
         "from_node": "s0_home",
         "to_node": "s1_search",
     }
+
+
+def _transition(recorder: StepRecorder, action: dict[str, Any], to_node: str) -> None:
+    before = Observation.from_state(recorder.get_state())
+    recorder.exe_action(action)
+    after = Observation.from_state(recorder.get_state())
+    recorder.record_transition(
+        Transition(
+            before=before,
+            after=after,
+            instruction="",
+            element=None,
+            action=action,
+            from_node="s0_home",
+            to_node=to_node,
+        )
+    )
+
+
+def test_the_exploration_transitions_are_read_in_step_order(device: _Device, steps: Path) -> None:
+    """The audit's re-exploration records transitions against the audited copy, so
+    only exploration runs' transitions are read."""
+    explore = _recorder(device, steps)
+    for number in range(10):
+        _transition(explore, {"action": "tap", "x": number, "y": 0}, f"s{number}_page")
+    _transition(
+        StepRecorder(device, steps, run_kind="audit", source="re_explore"),
+        {"action": "back"},
+        "s0_home",
+    )
+
+    transitions = read_exploration_transitions(steps)
+
+    assert [t.to_node for t in transitions] == [f"s{number}_page" for number in range(10)]
+    assert transitions[0] == TransitionRecord(
+        before="000000",
+        after="000002",
+        action={"action": "tap", "x": 0, "y": 0},
+        from_node="s0_home",
+        to_node="s0_page",
+    )
+
+
+def test_a_step_log_that_does_not_exist_has_no_transitions(steps: Path) -> None:
+    assert read_exploration_transitions(steps) == []
 
 
 def test_observation_from_state_reads_a_recorded_state(device: _Device, steps: Path) -> None:
