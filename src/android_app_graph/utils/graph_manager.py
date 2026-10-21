@@ -63,6 +63,7 @@ from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
+    cosine_similarity,
     describe_page_and_state,
     get_embedding,
     get_image_embedding,
@@ -181,11 +182,10 @@ class _StoredScreen(NamedTuple):
 
 
 class ClosestMember(NamedTuple):
-    """A node's member most similar to a screen by image, and that cosine; ``score`` is
-    ``None`` when no member has an image vector and the member is the representative."""
+    """A node's member most similar to a screen by image, and that cosine."""
 
     observation_id: str
-    score: float | None
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,9 +232,7 @@ def _image_scores(
     graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
 ) -> list[tuple[str, float]]:
     return [
-        (node_id, closest.score)
-        for node_id in node_ids
-        if (closest := graph.closest_member(node_id, query.image_vector)).score is not None
+        (node_id, graph.closest_member(node_id, query.image_vector).score) for node_id in node_ids
     ]
 
 
@@ -255,8 +253,7 @@ SHORT_LIST_SOURCES = (
 
 
 def _short_list_order(candidate: Candidate) -> tuple[int, float]:
-    score = candidate.closest_member.score
-    return candidate.best_rank, -score if score is not None else float("inf")
+    return candidate.best_rank, -candidate.closest_member.score
 
 
 @dataclass(slots=True)
@@ -577,16 +574,34 @@ class GraphManager:
 
     def closest_member(self, node_id: str, image_vector: list[float]) -> ClosestMember:
         """Return the member of ``node_id`` whose image vector is most similar to
-        ``image_vector``, or its representative when no member has a vector."""
-        data = self.graph.nodes[node_id]
-        scored = score_by_cosine(
-            image_vector,
-            [(member, self._image_vectors.get(member)) for member in data.get("observations", [])],
-            scope="closest-member image-embedding",
+        ``image_vector``.
+
+        A node without members raises ``ValueError``, and so does a node with members
+        that have no image vector of ``image_vector``'s dimension, naming each of them.
+        """
+        observations = _member_observations(self.graph.nodes[node_id])
+        if not observations:
+            msg = f"Node {node_id!r} has no members to compare the screen with"
+            raise ValueError(msg)
+        unusable = [
+            member
+            for member in observations
+            if len(self._image_vectors.get(member, [])) != len(image_vector)
+        ]
+        if unusable:
+            msg = (
+                f"Node {node_id!r} has members without an image vector of the screen's "
+                f"{len(image_vector)} dimensions: {', '.join(unusable)}. Delete the step "
+                "log's image_emb.json to embed every member again."
+            )
+            raise ValueError(msg)
+        member, score = max(
+            (
+                (member, cosine_similarity(image_vector, self._image_vectors[member]))
+                for member in observations
+            ),
+            key=lambda kv: kv[1],
         )
-        if not scored:
-            return ClosestMember(data["representative_observation"], None)
-        member, score = max(scored, key=lambda kv: kv[1])
         return ClosestMember(member, score)
 
     def representative_image_b64(self, node_id: str) -> str:

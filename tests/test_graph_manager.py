@@ -27,7 +27,7 @@ from hypothesis import strategies as st
 from openrouter import OpenRouter
 from PIL import Image, ImageDraw
 
-from android_app_graph.step_log import Observation, StepRecorder
+from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
@@ -786,8 +786,16 @@ def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
     vlm.descriptions.append(("Home screen", {}, []))
     vlm.verdicts.append({"same": True, "reason": "same page"})
     gm = make_manager(screen.steps_dir)
-    add_screen(gm, "s0_empty", "Home screen", description_embedding=[], **members(screen.steps_dir))
+    add_screen(
+        gm,
+        "s0_empty",
+        "Home screen",
+        description_embedding=[],
+        **members(screen.steps_dir, b"empty"),
+    )
     add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
+    vlm.images[b64(b"empty")] = FAR
+    gm.embed_missing_members()
 
     with caplog.at_level("WARNING"):
         node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
@@ -809,9 +817,15 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     vlm.verdicts.append({"same": True, "reason": "same page"})
     gm = make_manager(screen.steps_dir)
     add_screen(
-        gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0], **members(screen.steps_dir)
+        gm,
+        "s0_stale",
+        "Home screen",
+        description_embedding=[1.0, 0.0],
+        **members(screen.steps_dir, b"stale"),
     )
     add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
+    vlm.images[b64(b"stale")] = FAR
+    gm.embed_missing_members()
 
     with caplog.at_level("WARNING"):
         node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
@@ -833,6 +847,9 @@ def test_a_node_whose_description_scores_low_is_still_verified(
     vlm.verdicts.append({"same": False, "reason": "another page"})
     gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir, b"screenshot-b"))
+    vlm.images[SHOT_B] = FAR
+    gm.embed_missing_members()
+    vlm.calls.clear()
 
     node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
@@ -1027,6 +1044,8 @@ def test_an_expected_node_that_cannot_be_compared_is_not_checked(
     )
     add_screen(gm, "s2_no_members", "Home screen")
     gm.record_external_app_visit(screen(OTHER_APP, SHOT_B, OTHER_PACKAGE))
+    gm.embed_missing_members()
+    vlm.calls.clear()
     vlm.descriptions.append(("Home screen", {}, []))
     vlm.verdicts.append({"same": True, "reason": "home"})
 
@@ -1040,6 +1059,7 @@ def test_an_expected_node_that_cannot_be_compared_is_not_checked(
 def test_an_expected_node_is_followed_through_its_renames(vlm: FakeVlm, screen: Screens) -> None:
     gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir))
+    gm.embed_missing_members()
     renamed = gm.rename_node("s0_home", "Home feed")
     vlm.calls.clear()
     vlm.descriptions.append(("Home screen", {}, []))
@@ -1167,7 +1187,10 @@ def test_a_member_whose_record_holds_no_usable_describe_output_is_never_an_exact
     )
     gm = make_manager()
     gm.load_graph(path)
+    gm.embed_missing_members()
+    vlm.calls.clear()
     vlm.descriptions.append(("Home screen", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "home"})
 
     gm.identify_state(Screens(steps_dir)(HOME, SHOT_A, PACKAGE))
 
@@ -1242,13 +1265,45 @@ def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vect
     }
 
 
-def test_closest_member_is_the_representative_when_no_member_has_a_vector() -> None:
-    gm = make_manager()
-    add_screen(
-        gm, "s0_home", "Home screen", observations=["000001"], representative_observation="000001"
+@pytest.mark.parametrize(
+    ("vectors", "unusable"),
+    [
+        pytest.param({}, [0, 1, 2], id="no member has one"),
+        pytest.param({0: NEAR, 2: FAR}, [1], id="one member has none"),
+        pytest.param({0: NEAR, 1: [1.0, 0.0], 2: FAR}, [1], id="another dimension"),
+    ],
+)
+def test_closest_member_raises_naming_the_node_and_every_member_without_a_usable_image_vector(
+    vectors: dict[int, list[float]], unusable: list[int], tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    member = members(steps_dir, b"home", b"home-2", b"home-3")
+    observations = member["observations"]
+    save_image_embeddings(
+        steps_dir,
+        {observations[index]: vector for index, vector in vectors.items()},
+        model=IMAGE_EMBEDDING.model,
     )
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
+    )
+    gm = make_manager()
+    gm.load_graph(path)
 
-    assert gm.closest_member("s0_home", NEAR) == ("000001", None)
+    with pytest.raises(ValueError, match="'s0_home'") as caught:
+        gm.closest_member("s0_home", NEAR)
+
+    named = [observation for observation in observations if observation in str(caught.value)]
+    assert named == [observations[index] for index in unusable]
+
+
+def test_closest_member_raises_for_a_node_without_members() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+
+    with pytest.raises(ValueError, match="'s0_home' has no members"):
+        gm.closest_member("s0_home", NEAR)
 
 
 def test_the_short_list_orders_ties_in_rank_by_image_score(vlm: FakeVlm, tmp_path: Path) -> None:
@@ -2956,6 +3011,7 @@ def test_identify_state_matches_a_node_of_the_package_under_another_activity(
         package=package,
         **members(screen.steps_dir),
     )
+    gm.embed_missing_members()
 
     assert gm.identify_state(screen(activity, SHOT_A, package)) == "s0_home"
     assert gm.graph.nodes["s0_home"]["activities"] == [other_activity, activity]
@@ -3190,8 +3246,10 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
     gm = make_manager(screen.steps_dir)
     gm.load_graph(path)
     assert gm.graph.nodes["s0_home"]["description_embedding"] == []
+    gm.embed_missing_members()
 
     vlm.descriptions.append(("Home screen", {}, []))
+    vlm.verdicts.append({"same": False, "reason": "another page"})
     with caplog.at_level("WARNING"):
         node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 

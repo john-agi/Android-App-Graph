@@ -587,6 +587,9 @@ what each step found.
    screen and the rejected node, which is renamed after its new description; later
    rejections refine nothing.
 
+A member without an image vector of the screenshot's dimension stops the command with
+an error naming it and its node.
+
 The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
