@@ -1985,6 +1985,30 @@ def test_identify_node_propagates_an_embedding_failure(
         identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_identify_node_logs_an_embedding_failure_with_its_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    identifiable: aitk_translator.UIKobeV2Translator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    failure = RuntimeError("embedding down")
+
+    def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
+        raise failure
+
+    monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
+    with (
+        caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name),
+        pytest.raises(RuntimeError),
+    ):
+        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert error.getMessage() == "Runtime image embedding failed for current screenshot."
+    assert isinstance(error.exc_info, tuple)
+    assert error.exc_info[1] is failure
+
+
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:

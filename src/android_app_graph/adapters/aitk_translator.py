@@ -822,8 +822,8 @@ class UIKobeV2Translator(BaseTranslator):
                 "[IDENTIFY] current screenshot image embedding computed in %.1fs",
                 time.perf_counter() - started,
             )
-        except Exception as exc:
-            logger.error("Runtime image embedding failed for current screenshot. Error: %s", exc)
+        except Exception:
+            logger.exception("Runtime image embedding failed for current screenshot.")
             raise
         # Stored already narrowed; re-narrowing it per step doubled this loop's cost.
         same_pkg_image_candidates = (

@@ -641,7 +641,7 @@ class Kobe:
             token_tracker.print_summary()
             raise
         except Exception:
-            self.logger.error(
+            self.logger.exception(
                 "Exploration crashed at step %d. Graph saved. Re-run to resume.",
                 step,
             )
