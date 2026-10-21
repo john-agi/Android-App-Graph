@@ -82,7 +82,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
         def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
             events.append("device")
 
-        def _terminate_all_apps(self) -> None:
+        def set_task_eval(self) -> None:
             events.append("terminate")
 
     class Explorer:
