@@ -24,7 +24,7 @@ from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
-from android_app_graph.retrying import UnusableOutputError, call_with_retry, capped_retries
+from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
 from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
@@ -746,15 +746,19 @@ def _send_chat_once(
     README.md#requests-and-recovery.
     """
     try:
-        response: object = client.chat.send(
-            model=settings.model,
-            messages=messages,
-            response_format=response_format,
-            plugins=None if response_format is None else [{"id": "response-healing"}],
-            temperature=settings.temperature if settings.temperature is not None else UNSET,
-            stream=False,
-            retries=capped_retries(settings.request_timeout),
-            timeout_ms=int(settings.request_timeout * 1000),
+        response: object = send_within_deadline(
+            call_type,
+            settings.request_timeout,
+            lambda retries: client.chat.send(
+                model=settings.model,
+                messages=messages,
+                response_format=response_format,
+                plugins=None if response_format is None else [{"id": "response-healing"}],
+                temperature=settings.temperature if settings.temperature is not None else UNSET,
+                stream=False,
+                retries=retries,
+                timeout_ms=int(settings.request_timeout * 1000),
+            ),
         )
     except httpx.TimeoutException:
         logger.warning("%s: timed out after retries", call_type)
@@ -1520,12 +1524,16 @@ def get_embedding(
     """Get a text embedding through the official OpenRouter SDK."""
 
     def request_embedding() -> list[float]:
-        response = client.embeddings.generate(
-            model=model,
-            input=text,
-            encoding_format="float",
-            retries=capped_retries(request_timeout),
-            timeout_ms=int(request_timeout * 1000),
+        response = send_within_deadline(
+            "embedding",
+            request_timeout,
+            lambda retries: client.embeddings.generate(
+                model=model,
+                input=text,
+                encoding_format="float",
+                retries=retries,
+                timeout_ms=int(request_timeout * 1000),
+            ),
         )
         return _embedding_vector(response, call_type="embedding", model=model)
 
@@ -1545,21 +1553,25 @@ def get_image_embedding(
     """
 
     def request_embedding() -> list[float]:
-        response = client.embeddings.generate(
-            model=model,
-            input=[
-                {
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{MEDIA_TYPE};base64,{screenshot_b64}"},
-                        }
-                    ]
-                }
-            ],
-            encoding_format="float",
-            retries=capped_retries(request_timeout),
-            timeout_ms=int(request_timeout * 1000),
+        response = send_within_deadline(
+            "image_embedding",
+            request_timeout,
+            lambda retries: client.embeddings.generate(
+                model=model,
+                input=[
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{MEDIA_TYPE};base64,{screenshot_b64}"},
+                            }
+                        ]
+                    }
+                ],
+                encoding_format="float",
+                retries=retries,
+                timeout_ms=int(request_timeout * 1000),
+            ),
         )
         return _embedding_vector(response, call_type="image_embedding", model=model)
 
