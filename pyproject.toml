@@ -118,6 +118,10 @@ extend-select = [
     "PLE",
     "I",
     "ANN",
+    "PLR0913",
+    "PLR0917",
+    "PLR2004",
+    "FBT",
     "PYI",
     "ARG",
     "ERA",
@@ -141,8 +145,11 @@ extend-select = [
 # Copy-in adapters are single files copied into other repositories, not packages.
 "aitk_files/**" = ["INP001"]
 "aw_files/**" = ["INP001"]
-# pytest checks results with plain `assert`.
-"tests/**" = ["S101"]
+# pytest checks results with plain `assert`. Pytest passes fixtures and parametrize values by
+# name, so a test's parameters declare dependencies rather than a call signature (FBT001,
+# FBT002, PLR0913, PLR0917), and a literal in a test is the value under test or the expected
+# value (FBT003, PLR2004).
+"tests/**" = ["S101", "FBT", "PLR0913", "PLR0917", "PLR2004"]
 # Vulture allowlist entries are intentionally bare attribute expressions.
 "vulture_allowlist.py" = ["B018"]
 
