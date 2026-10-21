@@ -4354,6 +4354,25 @@ def test_a_merge_check_of_nodes_without_image_vectors_shows_their_representative
     assert gm.closest_members("s0_home", "s1_home") == ("000000", "000002", None)
 
 
+def test_a_merge_check_leaves_out_members_without_an_image_vector_and_shows_the_first_closest(
+    tmp_path: Path,
+) -> None:
+    """s0's first member and s1's second have no vector; s0's other two tie."""
+    steps_dir = tmp_path / "steps"
+    first = members(steps_dir, b"0a", b"0b", b"0c")
+    second = members(steps_dir, b"1a", b"1b")
+    save_image_embeddings(
+        steps_dir, dict.fromkeys(["000001", "000002", "000003"], NEAR), model=IMAGE_EMBEDDING.model
+    )
+    path = tmp_path / "graph.json"
+    nodes = [{"id": "s0_home", **first}, {"id": "s1_home", **second}]
+    path.write_text(json.dumps({"package_name": PACKAGE, "nodes": nodes}), "utf-8")
+    gm = make_manager()
+    gm.load_graph(path)
+
+    assert gm.closest_members("s0_home", "s1_home") == ("000001", "000003", pytest.approx(1.0))
+
+
 POOL = [f"s{i}_screen" for i in range(5)]
 
 json_scalars = (
