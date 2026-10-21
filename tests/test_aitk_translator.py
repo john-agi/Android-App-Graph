@@ -23,6 +23,7 @@ from android_app_graph.adapters import aitk_translator
 from android_app_graph.payloads import as_list, as_str, as_str_dict
 from android_app_graph.utils import ModelSettings, open_client, vlm_utils
 from android_app_graph.utils.graph_manager import EdgeDetails, GraphManager
+from android_app_graph.utils.vlm_utils import ActionRequest
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -1232,9 +1233,9 @@ def _record_screen_sizes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int
     screen_sizes: list[tuple[int, int]] = []
 
     def _fake_predict(
-        *_args: object, screen_w: int, screen_h: int, **_kwargs: object
+        _client: object, request: ActionRequest, **_kwargs: object
     ) -> tuple[dict[str, Any], str]:
-        screen_sizes.append((screen_w, screen_h))
+        screen_sizes.append((request.screen_w, request.screen_h))
         return {"action": "back"}, "went back"
 
     monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
@@ -2063,10 +2064,10 @@ def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     seen: dict[str, object] = {}
 
     def _fake_predict(
-        _client: object, _shot: str, instruction: str, **kwargs: object
+        _client: object, request: ActionRequest, **_kwargs: object
     ) -> tuple[dict[str, Any], str]:
-        seen["instruction"] = instruction
-        seen.update(kwargs)
+        seen["instruction"] = request.instruction
+        seen["overall_task"] = request.overall_task
         return {"action": "tap", "x": 1, "y": 2}, "tapped Search | on the home screen"
 
     monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: " (keyboard up)")

@@ -38,6 +38,7 @@ from android_app_graph.utils import (
     resolve_model_settings,
 )
 from android_app_graph.utils.vlm_utils import (
+    ActionRequest,
     TruncatedReplyError,
     build_image_message,
     message_text,
@@ -1247,13 +1248,15 @@ class UIKobeV2Translator(BaseTranslator):
 
         aitk_action, history_entry = predict_next_action(
             self.client,
-            screenshot,
-            task + keyboard_hint,
-            screen_w=self._screen_w,
-            screen_h=self._screen_h,
-            action_history=action_history,
+            ActionRequest(
+                screenshot_b64=screenshot,
+                instruction=task + keyboard_hint,
+                screen_w=self._screen_w,
+                screen_h=self._screen_h,
+                action_history=action_history,
+                overall_task=overall_task,
+            ),
             settings=self.action,
-            overall_task=overall_task,
         )
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry

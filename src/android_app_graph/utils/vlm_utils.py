@@ -2057,51 +2057,59 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     return as_object_dict(action), history_entry
 
 
+@dataclass(frozen=True, kw_only=True)
+class ActionRequest:
+    """The step ``predict_next_action`` asks the action agent to take.
+
+    Attributes:
+        instruction: The high-level task instruction.
+        screen_w: Actual device screen width in pixels.
+        screen_h: Actual device screen height in pixels.
+        action_history: List of NL descriptions of previous actions taken.
+        overall_task: Optional real task for supplementary context.
+    """
+
+    screenshot_b64: str
+    instruction: str
+    screen_w: int = 1080
+    screen_h: int = 1920
+    action_history: list[str] | None = None
+    overall_task: str = ""
+
+
 def predict_next_action(
     client: OpenRouter,
-    screenshot_b64: str,
-    instruction: str,
-    screen_w: int = 1080,
-    screen_h: int = 1920,
-    action_history: list[str] | None = None,
+    request: ActionRequest,
     *,
     settings: ModelSettings,
-    overall_task: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Call the action agent VLM for one step.
 
     The agent sees the instruction, action history, and current screenshot,
     and decides the next action (or "end" if the task is complete).
 
-    Args:
-        instruction: The high-level task instruction.
-        screen_w: Actual device screen width in pixels.
-        screen_h: Actual device screen height in pixels.
-        action_history: List of NL descriptions of previous actions taken.
-        overall_task: Optional real task for supplementary context.
-
     Returns:
         (aitk_action, history_entry):
         - aitk_action: action dict in AITK format (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
-    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)
 
     system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format()
 
-    if action_history:
-        history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(action_history))
+    if request.action_history:
+        history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(request.action_history))
         history_section = f"Task progress (actions already taken):\n{history_text}\n\n"
     else:
         history_section = ""
 
-    if overall_task and overall_task != instruction:
-        overall_task_section = f"(Overall goal for context: {overall_task})\n\n"
+    if request.overall_task and request.overall_task != request.instruction:
+        overall_task_section = f"(Overall goal for context: {request.overall_task})\n\n"
     else:
         overall_task_section = ""
 
     user_prompt = NEXT_ACTION_USER_PROMPT.format(
-        instruction=instruction,
+        instruction=request.instruction,
         overall_task_section=overall_task_section,
         history_section=history_section,
     )
@@ -2130,7 +2138,7 @@ def predict_next_action(
             client, call_type="action", settings=settings, messages=[*messages, *retry]
         )
         try:
-            return _read_action(resp, screen_w, screen_h)
+            return _read_action(resp, request.screen_w, request.screen_h)
         except _MalformedActionOutputError as exc:
             failure = exc
             raise

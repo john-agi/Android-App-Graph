@@ -28,6 +28,7 @@ from android_app_graph.utils.graph_manager import (
     GraphManager,
 )
 from android_app_graph.utils.vlm_utils import (
+    ActionRequest,
     PlanRequest,
     plan_next_action,
     predict_next_action,
@@ -558,11 +559,13 @@ class Kobe:
 
         action, _history_entry = predict_next_action(
             client=self.client,
-            screenshot_b64=screenshot,
-            instruction=instruction + keyboard_hint,
-            screen_w=self.controller.w,
-            screen_h=self.controller.h,
-            action_history=[],
+            request=ActionRequest(
+                screenshot_b64=screenshot,
+                instruction=instruction + keyboard_hint,
+                screen_w=self.controller.w,
+                screen_h=self.controller.h,
+                action_history=[],
+            ),
             settings=self.action,
         )
 
