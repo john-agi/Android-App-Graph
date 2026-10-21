@@ -289,13 +289,17 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
         client, "demo", [{"node_id": "home"}], settings=PAGE_DETAIL
     ),
     "planner": lambda client, screenshot: vlm.plan_next_action(
-        client, screenshot, "home", [], app_name="demo", settings=PAGE_DETAIL
+        client,
+        vlm.PlanRequest(
+            screenshot_b64=screenshot, page_description="home", explored_edges=[], app_name="demo"
+        ),
+        settings=PAGE_DETAIL,
     ),
     "describe": lambda client, screenshot: vlm.describe_executed_action(
-        client, screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+        client, screenshot, {"action": "back"}, (1080, 1920), settings=PAGE_DETAIL
     ),
     "action": lambda client, screenshot: vlm.predict_next_action(
-        client, screenshot, "wait", settings=ACTION
+        client, vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait"), settings=ACTION
     ),
 }
 
@@ -407,7 +411,11 @@ def test_a_native_tool_call_without_text_content_is_still_read(
 ) -> None:
     router_responses.append(chat_response(content="", tool_arguments=_CLICK))
     action, history = vlm.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot, instruction="tap", screen_w=100, screen_h=200
+        ),
+        settings=ACTION,
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
     assert history == "{'action': 'click', 'coordinate': [500, 500]}"
@@ -423,10 +431,9 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     router_responses.append(chat_response(content='<tool_call>{"action":"wait"}</tool_call>'))
     vlm.predict_next_action(
         router_client,
-        png_screenshot,
-        "wait",
-        screen_w=1080,
-        screen_h=2400,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot, instruction="wait", screen_w=1080, screen_h=2400
+        ),
         settings=ACTION,
     )
     system = as_str_dict(json.loads(router_requests[0].content)["messages"][0])
@@ -461,10 +468,9 @@ def test_a_tool_call_missing_its_closing_tag_is_still_read(
     router_responses.append(chat_response(content=content))
     action, history = vlm.predict_next_action(
         router_client,
-        png_screenshot,
-        "tap",
-        screen_w=1000,
-        screen_h=2000,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot, instruction="tap", screen_w=1000, screen_h=2000
+        ),
         settings=ACTION,
     )
     assert action == {"action": "tap", "x": 752, "y": 340}
@@ -528,7 +534,7 @@ def _sent_schemas(
         router_client, "demo", [{"node_id": "b"}, {"node_id": "a"}], settings=PAGE_DETAIL
     )
     vlm.describe_executed_action(
-        router_client, png_screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+        router_client, png_screenshot, {"action": "back"}, (1080, 1920), settings=PAGE_DETAIL
     )
     schemas = [
         json.loads(request.content)["response_format"]["json_schema"] for request in router_requests
@@ -705,7 +711,11 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
         case "text":
             return vlm.get_embedding(client, "home", model="google/gemini-embedding-2")
         case "action":
-            return vlm.predict_next_action(client, png_screenshot, "tap", settings=ACTION)[0]
+            return vlm.predict_next_action(
+                client,
+                vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                settings=ACTION,
+            )[0]
         case _:
             return vlm.describe_page_and_state(client, png_screenshot, settings=PAGE_DETAIL)[0]
 
@@ -835,8 +845,16 @@ def test_no_request_overrides_the_sdk_retry_policy(
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     vlm.select_exploration_target(router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL)
     vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
-    vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
-    vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
+        settings=PAGE_DETAIL,
+    )
+    vlm.predict_next_action(
+        router_client,
+        vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="wait"),
+        settings=ACTION,
+    )
     vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
     vlm.get_image_embedding(router_client, "shot", model="google/gemini-embedding-2")
     assert len(sent) == 10
@@ -864,10 +882,18 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
         }
     elif operation == "planner":
         assert vlm.plan_next_action(
-            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
         ) == ("", None)
     else:
-        assert vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION) == (
+        assert vlm.predict_next_action(
+            router_client,
+            vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+            settings=ACTION,
+        ) == (
             {"action": "wait", "time": 1},
             "Failed to parse action response -> wait",
         )
@@ -1064,11 +1090,13 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
                 )
             case "describe":
                 result = vlm.describe_executed_action(
-                    router_client, png_screenshot, {"action": "back"}, 1, 1, settings=PAGE_DETAIL
+                    router_client, png_screenshot, {"action": "back"}, (1, 1), settings=PAGE_DETAIL
                 )
             case _:
                 result = vlm.predict_next_action(
-                    router_client, png_screenshot, "tap", settings=ACTION
+                    router_client,
+                    vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                    settings=ACTION,
                 )[0]
     assert result == fallback
     assert len(router_requests) == 1
@@ -1114,7 +1142,13 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
     def request() -> object:
         if operation == "description":
             return vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-        return vlm.plan_next_action(router_client, png_screenshot, "home", [], settings=PAGE_DETAIL)
+        return vlm.plan_next_action(
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
+        )
 
     with pytest.raises(vlm.TruncatedReplyError, match="token limit"):
         request()
@@ -1132,7 +1166,11 @@ def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_conte
     router_responses.append(chat_response(content="Tap", finish_reason="content_filter"))
     with caplog.at_level("WARNING"):
         assert vlm.plan_next_action(
-            router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
         ) == ("Tap", None)
     assert "instruction: the provider's content filter stopped the reply" in caplog.text
     assert len(router_requests) == 1
@@ -1151,13 +1189,15 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     )
     assert vlm.plan_next_action(
         router_client,
-        png_screenshot,
-        "home",
-        [],
-        unexplored_elements=[
-            {"description": "Turn on dark mode toggle", "position": "top"},
-            {"description": "Compose FAB", "position": "bottom right"},
-        ],
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot,
+            page_description="home",
+            explored_edges=[],
+            unexplored_elements=[
+                {"description": "Turn on dark mode toggle", "position": "top"},
+                {"description": "Compose FAB", "position": "bottom right"},
+            ],
+        ),
         settings=PAGE_DETAIL,
     ) == (instruction, 2)
     prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
@@ -1183,7 +1223,9 @@ def test_the_planner_keeps_every_quote_in_its_instruction(
 ) -> None:
     router_responses.append(chat_response(content=reply))
     assert vlm.plan_next_action(
-        router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
+        router_client,
+        vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
+        settings=PAGE_DETAIL,
     ) == (instruction, None)
 
 
@@ -1210,7 +1252,7 @@ def test_an_executed_action_is_described_from_its_screen_or_not_at_all(
     router_responses.append(chat_response(content=reply))
 
     described = vlm.describe_executed_action(
-        router_client, png_screenshot, swipe, 1080, 1920, settings=PAGE_DETAIL
+        router_client, png_screenshot, swipe, (1080, 1920), settings=PAGE_DETAIL
     )
 
     assert described == instruction
@@ -1240,7 +1282,11 @@ def test_action_text_observations_survive_native_calls(
         )
     )
     action, history = vlm.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot, instruction="tap", screen_w=100, screen_h=200
+        ),
+        settings=ACTION,
     )
     assert history == "Search is visible | Tap Search"
     assert action == (
@@ -1303,7 +1349,11 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
 ) -> None:
     router_responses.append(chat_response(content=f"<tool_call>{json.dumps(args)}</tool_call>"))
     action, _ = vlm.predict_next_action(
-        router_client, png_screenshot, "act", screen_w=100, screen_h=200, settings=ACTION
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot, instruction="act", screen_w=100, screen_h=200
+        ),
+        settings=ACTION,
     )
     assert action == expected
     assert len(router_requests) == 1
@@ -1433,7 +1483,11 @@ def test_an_unusable_action_reply_is_retried_with_what_was_wrong(
     router_responses.append(chat_response(content=reply))
     router_responses.append(chat_response(content=f"<tool_call>{_CLICK}</tool_call>"))
     action, _ = vlm.predict_next_action(
-        router_client, png_screenshot, "tap", screen_w=100, screen_h=200, settings=ACTION
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot, instruction="tap", screen_w=100, screen_h=200
+        ),
+        settings=ACTION,
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
     first, retry = (json.loads(request.content)["messages"] for request in router_requests)
@@ -1460,7 +1514,11 @@ def test_a_second_unusable_action_reply_falls_back_to_wait(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend(chat_response(content="Tap Search") for _ in range(2))
-    assert vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION) == (
+    assert vlm.predict_next_action(
+        router_client,
+        vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+        settings=ACTION,
+    ) == (
         {"action": "wait", "time": 1},
         "Failed to parse action response -> wait",
     )
@@ -1490,10 +1548,18 @@ def test_action_sdk_retries_and_the_single_re_ask_are_separate(
         ]
     )
     if recover:
-        action, _ = vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
+        action, _ = vlm.predict_next_action(
+            router_client,
+            vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+            settings=ACTION,
+        )
         assert action == {"action": "tap", "x": 540, "y": 576}
     else:
         with pytest.raises(ResponseValidationError):
-            vlm.predict_next_action(router_client, png_screenshot, "tap", settings=ACTION)
+            vlm.predict_next_action(
+                router_client,
+                vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                settings=ACTION,
+            )
     assert len(router_requests) == 3
     assert len(no_sleep) == 1

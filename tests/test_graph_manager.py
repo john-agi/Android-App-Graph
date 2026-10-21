@@ -29,6 +29,7 @@ from android_app_graph.utils.graph_manager import (
     DEFAULT_SIMILARITY_THRESHOLD,
     EXTERNAL_WEB_NODE,
     NORMALIZE_EVERY_N_VISITS,
+    EdgeDetails,
     GraphManager,
     _merge_elements,
     _merge_into_schema,
@@ -766,8 +767,7 @@ def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:
         "s0_home",
         "s1_settings",
         {"action": "tap"},
-        instruction="open settings",
-        target_observation="the settings page",
+        details=EdgeDetails(instruction="open settings", target_observation="the settings page"),
     )
 
     edges = gm.get_all_edges_from_node("s0_home")
@@ -791,9 +791,11 @@ def test_get_all_edges_from_node_skips_the_placeholders_of_unrecorded_values() -
         "s0_home",
         "s0_home",
         {"action": "swipe"},
-        instruction="scroll the feed",
-        target_observation="more posts",
-        schema_delta={"first_post": {"before": "a", "after": "b"}},
+        details=EdgeDetails(
+            instruction="scroll the feed",
+            target_observation="more posts",
+            schema_delta={"first_post": {"before": "a", "after": "b"}},
+        ),
     )
 
     edges = gm.get_all_edges_from_node("s0_home")
@@ -807,7 +809,12 @@ def test_get_all_edges_from_node_skips_the_placeholders_of_unrecorded_values() -
 def test_get_all_edges_from_node_includes_a_non_empty_schema_delta() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    gm.add_edge("s0_home", "s0_home", {"action": "tap"}, schema_delta={"sort": {"after": "price"}})
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "tap"},
+        details=EdgeDetails(schema_delta={"sort": {"after": "price"}}),
+    )
 
     edges = gm.get_all_edges_from_node("s0_home")
 
@@ -867,7 +874,7 @@ def test_add_edge_honours_an_explicit_num_steps() -> None:
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
 
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, num_steps=7)
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, details=EdgeDetails(num_steps=7))
 
     assert gm.graph["s0_home"]["s1_settings"]["num_steps"] == [7]
 
@@ -876,15 +883,22 @@ def test_add_edge_appends_a_different_action_with_its_metadata() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
 
     gm.add_edge(
         "s0_home",
         "s1_settings",
         {"action": "swipe"},
-        instruction="swipe to settings",
-        target_observation="the settings page",
-        schema_delta={"tab": {"after": "settings"}},
+        details=EdgeDetails(
+            instruction="swipe to settings",
+            target_observation="the settings page",
+            schema_delta={"tab": {"after": "settings"}},
+        ),
     )
 
     data = gm.graph["s0_home"]["s1_settings"]
@@ -901,7 +915,9 @@ def test_add_edge_pads_an_edge_whose_lists_are_missing_before_appending() -> Non
     add_screen(gm, "s0_home", "Home screen")
     gm.graph.add_edge("s0_home", "s0_home", actions=[{"action": "tap"}, ["a", "b"]])
 
-    gm.add_edge("s0_home", "s0_home", {"action": "swipe"}, instruction="scroll")
+    gm.add_edge(
+        "s0_home", "s0_home", {"action": "swipe"}, details=EdgeDetails(instruction="scroll")
+    )
 
     data = gm.graph["s0_home"]["s0_home"]
     assert data["num_steps"] == [1, 2, 1]
@@ -918,9 +934,11 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
         "s0_home",
         "s0_home",
         {"action": "tap"},
-        instruction="sort by price",
-        target_observation="sorted by price",
-        schema_delta={"sort": {"after": "price"}},
+        details=EdgeDetails(
+            instruction="sort by price",
+            target_observation="sorted by price",
+            schema_delta={"sort": {"after": "price"}},
+        ),
     )
 
     data = gm.graph["s0_home"]["s0_home"]
@@ -1075,9 +1093,17 @@ def test_merge_nodes_merges_edge_data_into_an_existing_edge() -> None:
         ("s2_other", "Settings page"),
     ):
         add_screen(gm, node_id, description)
-    gm.add_edge("s0_keep", "s2_other", {"action": "keep"}, instruction="from keep", num_steps=1)
     gm.add_edge(
-        "s1_remove", "s2_other", {"action": "remove"}, instruction="from remove", num_steps=3
+        "s0_keep",
+        "s2_other",
+        {"action": "keep"},
+        details=EdgeDetails(instruction="from keep", num_steps=1),
+    )
+    gm.add_edge(
+        "s1_remove",
+        "s2_other",
+        {"action": "remove"},
+        details=EdgeDetails(instruction="from remove", num_steps=3),
     )
     gm.graph["s1_remove"]["s2_other"]["instruction_templates"] = [{"template": "go to {x}"}]
 
@@ -1098,7 +1124,12 @@ def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> No
     add_screen(gm, "s1_remove", "Home screen again")
     bare, full = ("s0_keep", "s1_remove") if bare_side == "kept" else ("s1_remove", "s0_keep")
     gm.graph.add_edge(bare, bare, actions=[["tap", "type"]], visit_count=1)
-    gm.add_edge(full, full, {"action": "sort"}, instruction="sort", schema_delta={"sort": "price"})
+    gm.add_edge(
+        full,
+        full,
+        {"action": "sort"},
+        details=EdgeDetails(instruction="sort", schema_delta={"sort": "price"}),
+    )
 
     assert gm.merge_nodes("s0_keep", "s1_remove") is True
 
@@ -1125,18 +1156,30 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
     ):
         add_screen(gm, node_id, description)
     search = [{"action": "tap"}, {"action": "type", "text": "milk"}]
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
     gm.add_edge(
         "s0_home",
         "s1_settings",
         search,
-        instruction="search for milk",
-        target_observation="Settings page",
-        schema_delta={"query": {"after": "milk"}},
+        details=EdgeDetails(
+            instruction="search for milk",
+            target_observation="Settings page",
+            schema_delta={"query": {"after": "milk"}},
+        ),
     )
-    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, num_steps=3)
+    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, details=EdgeDetails(num_steps=3))
     gm.graph["s0_home"]["s1_settings"]["instruction_templates"] = [{"template": "{verb} for x"}]
-    gm.add_edge("s0_home", "s2_search", {"action": "enter"}, instruction="submit the search")
+    gm.add_edge(
+        "s0_home",
+        "s2_search",
+        {"action": "enter"},
+        details=EdgeDetails(instruction="submit the search"),
+    )
 
     assert gm.move_edge_action("s0_home", "s1_settings", 1, "s2_search") is True
 
@@ -1156,7 +1199,12 @@ def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_ne
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
 
     assert gm.move_edge_action("s0_home", "s1_settings", 0, "s0_home") is True
 
@@ -1173,7 +1221,12 @@ def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
 
     with caplog.at_level(logging.WARNING, logger=gm_module.__name__):
         assert gm.move_edge_action("s0_home", "s1_settings", 0, "ext_com.other") is False
@@ -1192,7 +1245,12 @@ def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
     add_screen(gm, EXTERNAL_WEB_NODE, "Outside page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
     # add_edge refuses an edge out of an ext_ node, but a loaded graph file can hold one.
     gm.graph.add_edge(EXTERNAL_WEB_NODE, "s0_home", actions=[{"action": "back"}])
 
@@ -1214,8 +1272,15 @@ def test_relabel_edge_action_replaces_one_instruction_and_drops_the_edge_templat
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open search")
-    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home", "s1_settings", {"action": "tap"}, details=EdgeDetails(instruction="open search")
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "swipe"},
+        details=EdgeDetails(instruction="open settings"),
+    )
     gm.graph["s0_home"]["s1_settings"]["instruction_templates"] = [{"template": "open {page}"}]
 
     gm.relabel_edge_action("s0_home", "s1_settings", 0, "Tap the gear icon")
@@ -1233,8 +1298,18 @@ def test_find_edge_action_matches_nothing_for_an_action_without_an_instruction()
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
-    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, instruction="open search")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "swipe"},
+        details=EdgeDetails(instruction="open search"),
+    )
     gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
 
     assert gm.find_edge_action("s0_home", "s1_settings", "open settings") == (0, {"action": "tap"})
@@ -1280,8 +1355,18 @@ def normalizer(monkeypatch: pytest.MonkeyPatch) -> FakeNormalizer:
 def _search_graph(gm: GraphManager) -> None:
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_results", "Search results")
-    gm.add_edge("s0_home", "s1_results", {"type": "shoes"}, instruction='search for "shoes"')
-    gm.add_edge("s0_home", "s1_results", {"type": "hats"}, instruction='search for "hats"')
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "shoes"},
+        details=EdgeDetails(instruction='search for "shoes"'),
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "hats"},
+        details=EdgeDetails(instruction='search for "hats"'),
+    )
 
 
 def test_normalize_all_edges_templatizes_and_then_skips(normalizer: FakeNormalizer) -> None:
@@ -1312,8 +1397,7 @@ def test_normalize_all_edges_passes_target_observations(normalizer: FakeNormaliz
         "s0_home",
         "s1_results",
         {"type": "shoes"},
-        instruction='search for "shoes"',
-        target_observation="shoe results",
+        details=EdgeDetails(instruction='search for "shoes"', target_observation="shoe results"),
     )
 
     gm.normalize_all_edges()
@@ -1369,8 +1453,18 @@ def test_normalize_all_edges_counts_only_the_recorded_instructions(
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_results", "Search results")
     gm.add_edge("s0_home", "s1_results", {"action": "tap"})
-    gm.add_edge("s0_home", "s1_results", {"type": "shoes"}, instruction='search for "shoes"')
-    gm.add_edge("s0_home", "s1_results", {"type": "hats"}, instruction='search for "hats"')
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "shoes"},
+        details=EdgeDetails(instruction='search for "shoes"'),
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "hats"},
+        details=EdgeDetails(instruction='search for "hats"'),
+    )
 
     gm.normalize_all_edges()
     gm.normalize_all_edges()  # two examples cover the two recorded instructions
@@ -1391,7 +1485,9 @@ def test_normalize_all_edges_applies_the_single_instruction_heuristic_past_place
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_results", "Search results")
     gm.add_edge("s0_home", "s1_results", {"action": "tap"})
-    gm.add_edge("s0_home", "s1_results", {"action": "click"}, instruction="open search")
+    gm.add_edge(
+        "s0_home", "s1_results", {"action": "click"}, details=EdgeDetails(instruction="open search")
+    )
 
     gm.normalize_all_edges()
 
@@ -1403,7 +1499,12 @@ def test_normalize_all_edges_skips_a_short_single_instruction(normalizer: FakeNo
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
 
     gm.normalize_all_edges()
 
@@ -1421,7 +1522,7 @@ def test_normalize_all_edges_normalizes_a_long_single_instruction(
         "s0_home",
         "s1_settings",
         {"action": "tap"},
-        instruction="open the settings page from the home screen menu",
+        details=EdgeDetails(instruction="open the settings page from the home screen menu"),
     )
 
     gm.normalize_all_edges()
@@ -1445,7 +1546,12 @@ def test_normalize_node_edges_counts_templatized_edges(normalizer: FakeNormalize
     gm = make_manager()
     _search_graph(gm)
     add_screen(gm, "s2_settings", "Settings page")
-    gm.add_edge("s0_home", "s2_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s2_settings",
+        {"action": "tap"},
+        details=EdgeDetails(instruction="open settings"),
+    )
 
     assert gm.normalize_node_edges("s0_home") == 1
     assert len(normalizer.calls) == 1
@@ -1502,9 +1608,9 @@ def _line_graph(gm: GraphManager) -> None:
         ("s3_results", "Search results"),
     ):
         add_screen(gm, node_id, description)
-    gm.add_edge("s0_home", "s1_settings", {"action": "a"}, num_steps=1)
-    gm.add_edge("s1_settings", "s3_results", {"action": "b"}, num_steps=1)
-    gm.add_edge("s0_home", "s3_results", {"action": "c"}, num_steps=5)
+    gm.add_edge("s0_home", "s1_settings", {"action": "a"}, details=EdgeDetails(num_steps=1))
+    gm.add_edge("s1_settings", "s3_results", {"action": "b"}, details=EdgeDetails(num_steps=1))
+    gm.add_edge("s0_home", "s3_results", {"action": "c"}, details=EdgeDetails(num_steps=5))
 
 
 def test_find_path_from_a_node_to_itself_is_a_single_step() -> None:
@@ -1547,8 +1653,8 @@ def test_find_path_picks_the_action_with_the_fewest_steps() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "long"}, num_steps=3)
-    gm.add_edge("s0_home", "s1_settings", {"action": "short"}, num_steps=1)
+    gm.add_edge("s0_home", "s1_settings", {"action": "long"}, details=EdgeDetails(num_steps=3))
+    gm.add_edge("s0_home", "s1_settings", {"action": "short"}, details=EdgeDetails(num_steps=1))
 
     path = gm.find_path("s0_home", "s1_settings")
 
@@ -1571,9 +1677,11 @@ def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:
         "s3_results",
         "s3_results",
         {"action": "sort"},
-        instruction="sort by price",
-        target_observation="sorted by price",
-        schema_delta={"sort": {"after": "price"}},
+        details=EdgeDetails(
+            instruction="sort by price",
+            target_observation="sorted by price",
+            schema_delta={"sort": {"after": "price"}},
+        ),
     )
     gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
     gm.graph["s0_home"]["s1_settings"]["target_observations"] = ["the settings page"]
@@ -1608,7 +1716,12 @@ def test_find_guided_path_records_a_schema_gap_without_a_self_loop() -> None:
 def test_find_guided_path_records_a_schema_gap_when_no_delta_matches() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    gm.add_edge("s0_home", "s0_home", {"action": "sort"}, schema_delta={"other": {"after": 1}})
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "sort"},
+        details=EdgeDetails(schema_delta={"other": {"after": 1}}),
+    )
 
     steps = gm.find_guided_path(
         "s0_home", [{"node_id": "s0_home", "required_schema": {"sort": "price"}}]
@@ -1952,8 +2065,9 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
         "s0_home",
         "s1_settings",
         {"action": "tap"},
-        instruction="open settings",
-        schema_delta={"tab": {"after": "settings"}},
+        details=EdgeDetails(
+            instruction="open settings", schema_delta={"tab": {"after": "settings"}}
+        ),
     )
     path = tmp_path / "graph.json"
 
@@ -2420,10 +2534,11 @@ def test_format_for_audit_lists_nodes_edges_and_marks_self_loops() -> None:
         "s0_home",
         "s1_settings",
         {"action": "tap"},
-        instruction="open settings",
-        target_observation="the settings page",
+        details=EdgeDetails(instruction="open settings", target_observation="the settings page"),
     )
-    gm.add_edge("s0_home", "s0_home", {"action": "sort"}, instruction="sort by price")
+    gm.add_edge(
+        "s0_home", "s0_home", {"action": "sort"}, details=EdgeDetails(instruction="sort by price")
+    )
 
     text = gm.format_for_audit()
 
@@ -2439,8 +2554,18 @@ def test_format_for_audit_pairs_each_instruction_with_its_own_observation() -> N
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, target_observation="first only")
-    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, instruction="swipe to settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "tap"},
+        details=EdgeDetails(target_observation="first only"),
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "swipe"},
+        details=EdgeDetails(instruction="swipe to settings"),
+    )
 
     edge_lines = gm.format_for_audit().split("## Edges (1)\n", 1)[1].splitlines()
 
@@ -2742,7 +2867,7 @@ def test_readding_an_identical_edge_is_idempotent(
     add_screen(gm, "s1_settings", "Settings page")
 
     for _ in range(repeats):
-        gm.add_edge("s0_home", "s1_settings", action, instruction=instruction)
+        gm.add_edge("s0_home", "s1_settings", action, details=EdgeDetails(instruction=instruction))
 
     assert gm.graph.number_of_edges() == 1
     data = gm.graph["s0_home"]["s1_settings"]
@@ -2850,9 +2975,9 @@ def test_every_per_action_list_has_one_entry_per_action(
                 a,
                 b,
                 action,
-                instruction=instruction,
-                target_observation=observation,
-                schema_delta=delta,
+                details=EdgeDetails(
+                    instruction=instruction, target_observation=observation, schema_delta=delta
+                ),
             )
         else:
             gm.merge_nodes(a, b)

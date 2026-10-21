@@ -18,6 +18,7 @@ ROLES = ("page_detail", "embedding", "image_embedding", "instruction", "action")
 REMOVED_KEYS = ("api_key", "base_url", "native_base_url")
 DEFAULT_REQUEST_TIMEOUT = 60.0
 DEFAULT_AUDIT_TIMEOUT = 300.0
+MAX_TEMPERATURE = 2
 
 
 class ModelSettings(NamedTuple):
@@ -117,7 +118,7 @@ def resolve_audit_timeout(vlm_config: Mapping[str, object]) -> float:
 
 def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None:
     """Validate an optional sampling temperature before any request."""
-    message = f"{role}.temperature must be a finite number between 0 and 2"
+    message = f"{role}.temperature must be a finite number between 0 and {MAX_TEMPERATURE}"
     value = resolve_env(cfg.get("temperature"))
     if value is None:
         return None
@@ -125,7 +126,7 @@ def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None
         temperature = float(value)
     except ValueError as exc:
         raise ValueError(message) from exc
-    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+    if not math.isfinite(temperature) or not 0 <= temperature <= MAX_TEMPERATURE:
         raise ValueError(message)
     return temperature
 

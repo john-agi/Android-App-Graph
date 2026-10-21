@@ -16,6 +16,7 @@ from openrouter import OpenRouter
 
 from android_app_graph import cli
 from android_app_graph.cli import build_parser, main
+from android_app_graph.kobe import ExplorerConfig
 
 
 def test_help_exits_zero(
@@ -89,25 +90,20 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
         def __init__(
             self,
             controller: Device,
-            app_name: str,
-            package_name: str,
-            _logger: logging.Logger,
+            config: ExplorerConfig,
             *,
-            vlm_config: dict[str, object],
-            graph_dir: str,
-            max_steps: int,
             client: OpenRouter,
-            launch_activity: str | None,
-            **_kwargs: object,
+            logger: logging.Logger,
         ) -> None:
+            del logger
             assert isinstance(controller, Device)
-            assert package_name == f"com.{app_name}"
-            assert vlm_config == vlm
-            assert graph_dir == str(tmp_path / "graphs")
-            assert max_steps == 3
+            assert config.package_name == f"com.{config.app_name}"
+            assert config.vlm_config == vlm
+            assert config.graph_dir == str(tmp_path / "graphs")
+            assert config.max_steps == 3
             assert client.sdk_configuration.client is router_http
             clients.append(client)
-            launch_activities.append(launch_activity)
+            launch_activities.append(config.launch_activity)
 
         def explore(self, *, resume_from: str) -> None:
             assert resume_from == "auto"

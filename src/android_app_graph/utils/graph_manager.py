@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
+_FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
@@ -69,6 +70,27 @@ class _SamePackageNodes(NamedTuple):
     candidates: list[tuple[str, list[float]]]
     descriptions: list[str]
     keys: list[str]
+
+
+@dataclass(frozen=True, kw_only=True)
+class EdgeDetails:
+    """What one traversal records next to its action in the edge's aligned lists.
+
+    Attributes:
+        instruction: The natural language instruction that produced the action.
+        target_observation: Description of the screen state after performing
+            the action. Helps the runtime model predict what will happen.
+        schema_delta: For self-loop edges (source == target), records which
+            schema keys changed and their before/after values.
+            Format: {"key": {"before": old_val, "after": new_val}, ...}
+        num_steps: Number of action steps the edge takes to traverse.
+            If None, defaults to len(action) for lists or 1 for single actions.
+    """
+
+    instruction: str | None = None
+    target_observation: str | None = None
+    schema_delta: dict[str, Any] | None = None
+    num_steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -710,24 +732,15 @@ class GraphManager:
         source: str,
         target: str,
         action: dict[str, Any] | list[dict[str, Any]],
-        instruction: str | None = None,
-        target_observation: str | None = None,
-        schema_delta: dict[str, Any] | None = None,
-        num_steps: int | None = None,
+        *,
+        details: EdgeDetails | None = None,
     ) -> None:
         """Add a directed edge (action) from source to target.
 
         Args:
             action: A single AITK action dict, or a list of action dicts
                 (compound action sequence, e.g. [tap, type, enter]).
-            instruction: The natural language instruction that produced this action.
-            target_observation: Description of the screen state after performing
-                this action. Helps the runtime model predict what will happen.
-            schema_delta: For self-loop edges (source == target), records which
-                schema keys changed and their before/after values.
-                Format: {"key": {"before": old_val, "after": new_val}, ...}
-            num_steps: Number of action steps this edge takes to traverse.
-                If None, defaults to len(action) for lists or 1 for single actions.
+            details: What this traversal recorded next to its action; none by default.
 
         If an edge with the same action already exists, it is not duplicated.
         Instead, a visit counter is incremented.
@@ -747,6 +760,9 @@ class GraphManager:
             )
             return
 
+        if details is None:
+            details = EdgeDetails()
+        num_steps = details.num_steps
         if num_steps is None:
             num_steps = _default_num_steps(action)
 
@@ -763,9 +779,9 @@ class GraphManager:
         for key, value in (
             ("actions", action),
             ("num_steps", num_steps),
-            ("instructions", instruction or ""),
-            ("target_observations", target_observation or ""),
-            ("schema_deltas", schema_delta),
+            ("instructions", details.instruction or ""),
+            ("target_observations", details.target_observation or ""),
+            ("schema_deltas", details.schema_delta),
         ):
             edge_data[key].append(value)
 
@@ -880,7 +896,7 @@ class GraphManager:
             instr = recorded[0]
             # Heuristic: if no quoted values, numbers, or proper nouns, unlikely to be parameterizable
             has_variable = any(c.isdigit() for c in instr) or '"' in instr or "'" in instr
-            if not has_variable and len(instr.split()) <= 6:
+            if not has_variable and len(instr.split()) <= _FIXED_INSTRUCTION_MAX_WORDS:
                 edge_data["instruction_templates"] = []
                 return False
 

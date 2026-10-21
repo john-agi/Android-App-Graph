@@ -9,6 +9,7 @@ import logging
 import math
 import re
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from openrouter import OpenRouter
@@ -31,10 +32,7 @@ from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 if TYPE_CHECKING:
     from openrouter.components.chatcontentimage import ChatContentImageTypedDict
     from openrouter.components.chatmessages import ChatMessagesTypedDict
-    from openrouter.components.chatrequest import (
-        ChatRequestPluginTypedDict,
-        ResponseFormatTypedDict,
-    )
+    from openrouter.components.chatrequest import ResponseFormatTypedDict
     from openrouter.operations.createembeddings import (
         CreateEmbeddingsResponse,
         CreateEmbeddingsUsage,
@@ -43,6 +41,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_PIXELS = 1_000_000
+_COORDINATE_AXES = 2
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -771,14 +770,17 @@ def _send_chat_once(
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
-    plugins: list[ChatRequestPluginTypedDict] | None = None,
 ) -> ChatResult:
-    """Send one completion, record its usage and check how it finished."""
+    """Send one completion, record its usage and check how it finished.
+
+    A ``response_format`` brings the response-healing plugin with it;
+    README.md#requests-and-recovery.
+    """
     response: object = client.chat.send(
         model=settings.model,
         messages=messages,
         response_format=response_format,
-        plugins=plugins,
+        plugins=None if response_format is None else [{"id": "response-healing"}],
         temperature=settings.temperature if settings.temperature is not None else UNSET,
         stream=False,
         timeout_ms=int(settings.request_timeout * 1000),
@@ -815,7 +817,6 @@ def send_chat(
     settings: ModelSettings,
     messages: list[ChatMessagesTypedDict],
     response_format: ResponseFormatTypedDict | None = None,
-    plugins: list[ChatRequestPluginTypedDict] | None = None,
 ) -> ChatResult:
     """Send a non-streaming completion, asking once more for unusable output.
 
@@ -832,7 +833,6 @@ def send_chat(
             settings=settings,
             messages=messages,
             response_format=response_format,
-            plugins=plugins,
         ),
     )
 
@@ -975,7 +975,6 @@ def describe_page_and_state(
             response_format=_structured_output(
                 "page_description", _PAGE_DESCRIPTION_SCHEMA, strict=False
             ),
-            plugins=[{"id": "response-healing"}],
         )
         try:
             return _parse_page_description(message_text(resp))
@@ -1035,7 +1034,6 @@ def verify_same_node(
                 }
             ],
             response_format=_structured_output("node_verification", _NODE_VERIFICATION_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"same": False, "reason": "reply truncated"}
@@ -1110,7 +1108,6 @@ def normalize_edge(
             response_format=_structured_output(
                 "edge_template", _EDGE_TEMPLATE_SCHEMA, strict=False
             ),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return unchanged
@@ -1360,7 +1357,6 @@ def audit_merge_nodes(
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"issues": [], "summary": "reply truncated"}
@@ -1455,7 +1451,6 @@ def select_exploration_target(
             response_format=_structured_output(
                 "exploration_target", _exploration_target_schema(sorted(valid_ids))
             ),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return None
@@ -1503,7 +1498,6 @@ def audit_graph(
             settings=settings,
             messages=[{"role": "user", "content": prompt}],
             response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return {"issues": [], "summary": "reply truncated"}
@@ -1615,7 +1609,7 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
 
 def _scale(coord: object, screen_w: int, screen_h: int) -> tuple[int, int]:
     """Scale a coordinate on the model's 0-1000 scale to device pixels."""
-    if not isinstance(coord, list) or len(coord) != 2:
+    if not isinstance(coord, list) or len(coord) != _COORDINATE_AXES:
         msg = "Action coordinates must be two finite numbers"
         raise ValueError(msg)
     values = as_float_list(coord)
@@ -1759,14 +1753,28 @@ _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True, kw_only=True)
+class PlanRequest:
+    """The screen ``plan_next_action`` plans the next instruction for.
+
+    Attributes:
+        explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
+            each with "target_description", "instructions", "actions", "visit_count".
+        unexplored_elements: List of element dicts not yet interacted with.
+        input_status: Runtime hint about whether a text field/keyboard is active.
+    """
+
+    screenshot_b64: str
+    page_description: str
+    explored_edges: list[dict[str, Any]]
+    app_name: str = ""
+    unexplored_elements: list[dict[str, Any]] | None = None
+    input_status: str = "unknown from screenshot"
+
+
 def plan_next_action(
     client: OpenRouter,
-    screenshot_b64: str,
-    page_description: str,
-    explored_edges: list[dict[str, Any]],
-    app_name: str = "",
-    unexplored_elements: list[dict[str, Any]] | None = None,
-    input_status: str = "unknown from screenshot",
+    request: PlanRequest,
     *,
     settings: ModelSettings,
 ) -> tuple[str, int | None]:
@@ -1775,21 +1783,15 @@ def plan_next_action(
     This separates the "what" (exploration strategy) from the "how" (coordinate grounding).
     Each instruction is ONE atomic action (one tap, one type, one swipe, or one back).
 
-    Args:
-        explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
-            each with "target_description", "instructions", "actions", "visit_count".
-        unexplored_elements: List of element dicts not yet interacted with.
-        input_status: Runtime hint about whether a text field/keyboard is active.
-
     Returns:
         ``(instruction, element)``, where ``element`` is the number of the listed
         unexplored element the instruction acts on, or None.
     """
-    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)
 
-    if explored_edges:
+    if request.explored_edges:
         lines = []
-        for edge in explored_edges:
+        for edge in request.explored_edges:
             target_desc = edge.get("target_description", "unknown")
             instructions = edge.get("instructions", [])
             if instructions:
@@ -1805,9 +1807,9 @@ def plan_next_action(
     else:
         instructions_str = "(none — this screen has not been explored yet)"
 
-    if unexplored_elements:
+    if request.unexplored_elements:
         elem_lines = []
-        for number, elem in enumerate(unexplored_elements, start=1):
+        for number, elem in enumerate(request.unexplored_elements, start=1):
             desc = elem.get("description", "?")
             pos = elem.get("position", "?")
             elem_lines.append(f"{number}. {desc} ({pos})")
@@ -1820,9 +1822,9 @@ def plan_next_action(
         unexplored_section = ""
 
     prompt = NEXT_ACTION_PLAN_PROMPT.format(
-        app_name=app_name,
-        page_description=page_description,
-        input_status=input_status,
+        app_name=request.app_name,
+        page_description=request.page_description,
+        input_status=request.input_status,
         explored_instructions=instructions_str,
         unexplored_elements_section=unexplored_section,
     )
@@ -1842,7 +1844,6 @@ def plan_next_action(
         settings=settings,
         messages=messages,
         response_format=_structured_output("next_action_plan", _NEXT_ACTION_PLAN_SCHEMA),
-        plugins=[{"id": "response-healing"}],
     )
     raw = message_text(resp)
     try:
@@ -1897,16 +1898,18 @@ def describe_executed_action(
     client: OpenRouter,
     screenshot_b64: str,
     action: dict[str, Any] | list[dict[str, Any]],
-    screen_w: int,
-    screen_h: int,
+    screen_size: tuple[int, int],
     *,
     settings: ModelSettings,
 ) -> str | None:
     """Write the instruction for an AITK action from the screenshot taken before it ran.
 
-    Returns None when the reply is truncated, not a JSON object or has a blank instruction.
+    ``screen_size`` is the device's ``(width, height)`` in pixels, which the action's
+    coordinates are measured in. Returns None when the reply is truncated, not a JSON
+    object or has a blank instruction.
     """
     screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    screen_w, screen_h = screen_size
     prompt = ACTION_DESCRIPTION_PROMPT.format(
         screen_w=screen_w, screen_h=screen_h, action=json.dumps(action)
     )
@@ -1925,7 +1928,6 @@ def describe_executed_action(
                 }
             ],
             response_format=_structured_output("action_description", _ACTION_DESCRIPTION_SCHEMA),
-            plugins=[{"id": "response-healing"}],
         )
     except TruncatedReplyError:
         return None
@@ -2047,51 +2049,59 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     return as_object_dict(action), history_entry
 
 
+@dataclass(frozen=True, kw_only=True)
+class ActionRequest:
+    """The step ``predict_next_action`` asks the action agent to take.
+
+    Attributes:
+        instruction: The high-level task instruction.
+        screen_w: Actual device screen width in pixels.
+        screen_h: Actual device screen height in pixels.
+        action_history: List of NL descriptions of previous actions taken.
+        overall_task: Optional real task for supplementary context.
+    """
+
+    screenshot_b64: str
+    instruction: str
+    screen_w: int = 1080
+    screen_h: int = 1920
+    action_history: list[str] | None = None
+    overall_task: str = ""
+
+
 def predict_next_action(
     client: OpenRouter,
-    screenshot_b64: str,
-    instruction: str,
-    screen_w: int = 1080,
-    screen_h: int = 1920,
-    action_history: list[str] | None = None,
+    request: ActionRequest,
     *,
     settings: ModelSettings,
-    overall_task: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Call the action agent VLM for one step.
 
     The agent sees the instruction, action history, and current screenshot,
     and decides the next action (or "end" if the task is complete).
 
-    Args:
-        instruction: The high-level task instruction.
-        screen_w: Actual device screen width in pixels.
-        screen_h: Actual device screen height in pixels.
-        action_history: List of NL descriptions of previous actions taken.
-        overall_task: Optional real task for supplementary context.
-
     Returns:
         (aitk_action, history_entry):
         - aitk_action: action dict in AITK format (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
-    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
+    screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)
 
     system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format()
 
-    if action_history:
-        history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(action_history))
+    if request.action_history:
+        history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(request.action_history))
         history_section = f"Task progress (actions already taken):\n{history_text}\n\n"
     else:
         history_section = ""
 
-    if overall_task and overall_task != instruction:
-        overall_task_section = f"(Overall goal for context: {overall_task})\n\n"
+    if request.overall_task and request.overall_task != request.instruction:
+        overall_task_section = f"(Overall goal for context: {request.overall_task})\n\n"
     else:
         overall_task_section = ""
 
     user_prompt = NEXT_ACTION_USER_PROMPT.format(
-        instruction=instruction,
+        instruction=request.instruction,
         overall_task_section=overall_task_section,
         history_section=history_section,
     )
@@ -2120,7 +2130,7 @@ def predict_next_action(
             client, call_type="action", settings=settings, messages=[*messages, *retry]
         )
         try:
-            return _read_action(resp, screen_w, screen_h)
+            return _read_action(resp, request.screen_w, request.screen_h)
         except _MalformedActionOutputError as exc:
             failure = exc
             raise

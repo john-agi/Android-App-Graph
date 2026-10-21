@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import webbrowser
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -284,27 +285,30 @@ def prepare_paper_graph(
     return filtered
 
 
+@dataclass(frozen=True, kw_only=True)
+class PaperStyle:
+    """How the paper renderers shorten labels and, without Graphviz, lay out the graph."""
+
+    max_node_words: int = 5
+    max_edge_words: int = 5
+    layout: str = "circular"
+    show_edge_labels: bool = True
+
+
+_DEFAULT_PAPER_STYLE = PaperStyle()
+
+
 def plot_paper_graphviz(
     graph: nx.DiGraph,
     output_path: str,
     *,
-    max_node_words: int = 5,
-    max_edge_words: int = 5,
-    layout: str = "circular",
-    show_edge_labels: bool = True,
+    style: PaperStyle = _DEFAULT_PAPER_STYLE,
 ) -> None:
     """Create a paper-friendly static graph using Graphviz."""
     dot_bin = shutil.which("dot")
     if not dot_bin:
         logger.warning("Graphviz 'dot' command not found; using matplotlib paper fallback.")
-        plot_paper_matplotlib(
-            graph,
-            output_path,
-            max_node_words=max_node_words,
-            max_edge_words=max_edge_words,
-            layout=layout,
-            show_edge_labels=show_edge_labels,
-        )
+        plot_paper_matplotlib(graph, output_path, style=style)
         return
 
     def q(value: str) -> str:
@@ -344,7 +348,7 @@ def plot_paper_graphviz(
         category = node_category(desc)
         fill, border = palette[category]
         visits = data.get("visit_count", 0)
-        short_desc = wrap_label(shorten_words(desc, max_node_words, 38), width=16)
+        short_desc = wrap_label(shorten_words(desc, style.max_node_words, 38), width=16)
         node_attrs = {
             "label": f"{node_id}\\n{short_desc}",
             "fillcolor": fill,
@@ -356,7 +360,7 @@ def plot_paper_graphviz(
     edge_seen: Counter[tuple[str, str]] = Counter()
     for src, tgt, data in graph.edges(data=True):
         label = data.get("label", "")
-        short = wrap_label(shorten_words(label, max_edge_words, 34), width=14)
+        short = wrap_label(shorten_words(label, style.max_edge_words, 34), width=14)
         visits = data.get("visit_count", 0)
         edge_attrs = {
             "label": f" {short} " if short else "",
@@ -394,10 +398,7 @@ def plot_paper_matplotlib(
     graph: nx.DiGraph,
     output_path: str,
     *,
-    max_node_words: int = 5,
-    max_edge_words: int = 5,
-    layout: str = "circular",
-    show_edge_labels: bool = True,
+    style: PaperStyle = _DEFAULT_PAPER_STYLE,
 ) -> None:
     """Paper-style fallback renderer that does not require Graphviz."""
     import matplotlib.pyplot as plt
@@ -407,9 +408,9 @@ def plot_paper_matplotlib(
     fig_h = min(24, max(11, n_nodes * 0.24))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=220)
 
-    if layout == "circular":
+    if style.layout == "circular":
         pos = nx.circular_layout(graph, scale=1.0)
-    elif layout == "kamada":
+    elif style.layout == "kamada":
         pos = nx.kamada_kawai_layout(graph, scale=1.0)
     else:
         pos = nx.spring_layout(
@@ -485,7 +486,7 @@ def plot_paper_matplotlib(
         )
 
     node_labels = {
-        node: f"{node}\n{shorten_words(data.get('page_description', node), max_node_words, 34)}"
+        node: f"{node}\n{shorten_words(data.get('page_description', node), style.max_node_words, 34)}"
         for node, data in graph.nodes(data=True)
     }
     nx.draw_networkx_labels(
@@ -503,9 +504,9 @@ def plot_paper_matplotlib(
         },
     )
 
-    if show_edge_labels:
+    if style.show_edge_labels:
         edge_labels = {
-            (s, t): shorten_words(data.get("label", ""), max_edge_words, 24)
+            (s, t): shorten_words(data.get("label", ""), style.max_edge_words, 24)
             for s, t, data in graph.edges(data=True)
             if data.get("label") and s != t
         }
@@ -538,16 +539,29 @@ def plot_paper_matplotlib(
     logger.info("Paper graph saved to %s", output_path)
 
 
+_TOOLTIP_UNEXPLORED_LIMIT = 10
+
+
+@dataclass(frozen=True, kw_only=True)
+class PyvisStyle:
+    """How the interactive pyvis graph shortens its labels and sizes its nodes and edges."""
+
+    max_node_words: int = 5
+    max_edge_words: int = 6
+    node_size: int = 34
+    node_font_size: int = 20
+    edge_font_size: int = 14
+    edge_width: float = 2.6
+
+
+_DEFAULT_PYVIS_STYLE = PyvisStyle()
+
+
 def plot_pyvis(
     graph: nx.DiGraph,
     output_path: str,
     *,
-    max_node_words: int = 5,
-    max_edge_words: int = 6,
-    node_size: int = 34,
-    node_font_size: int = 20,
-    edge_font_size: int = 14,
-    edge_width: float = 2.6,
+    style: PyvisStyle = _DEFAULT_PYVIS_STYLE,
 ) -> None:
     """Create an interactive HTML graph using pyvis."""
     from pyvis.network import Network
@@ -611,7 +625,7 @@ def plot_pyvis(
 
     for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
         desc = data.get("page_description", node_id)
-        short_desc = shorten_words(desc, max_node_words, 40)
+        short_desc = shorten_words(desc, style.max_node_words, 40)
         visits = data.get("visit_count", 0)
         state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
@@ -631,9 +645,11 @@ def plot_pyvis(
         unexplored = [e for e in elements if not e.get("explored", False)]
         if unexplored:
             tooltip += "<br><b>Unexplored:</b> "
-            tooltip += ", ".join(e.get("description", "?") for e in unexplored[:10])
-            if len(unexplored) > 10:
-                tooltip += f" (+{len(unexplored) - 10} more)"
+            tooltip += ", ".join(
+                e.get("description", "?") for e in unexplored[:_TOOLTIP_UNEXPLORED_LIMIT]
+            )
+            if len(unexplored) > _TOOLTIP_UNEXPLORED_LIMIT:
+                tooltip += f" (+{len(unexplored) - _TOOLTIP_UNEXPLORED_LIMIT} more)"
         if screenshot_uri:
             tooltip += (
                 f'<br><br><img src="{screenshot_uri}" '
@@ -649,8 +665,8 @@ def plot_pyvis(
                 "border": "#5c6bc0",
                 "highlight": {"background": "#c5cae9", "border": "#1a237e"},
             },
-            size=node_size,
-            font={"size": node_font_size, "face": "Arial"},
+            size=style.node_size,
+            font={"size": style.node_font_size, "face": "Arial"},
             borderWidth=3,
         )
 
@@ -662,7 +678,7 @@ def plot_pyvis(
         n_actions = data.get("num_actions", 0)
 
         tooltip = f"Visits: {visits}<br>Action sequences: {n_actions}<br>{label}"
-        short_label = shorten_edge_label(label, max_edge_words, 54)
+        short_label = shorten_edge_label(label, style.max_edge_words, 54)
 
         # Parallel edges get different curvatures so they stay distinguishable.
         pair = (min(src, tgt), max(src, tgt))
@@ -675,9 +691,9 @@ def plot_pyvis(
             label=short_label,
             title=tooltip,
             smooth={"type": "curvedCW", "roundness": roundness},
-            width=edge_width,
+            width=style.edge_width,
             font={
-                "size": edge_font_size,
+                "size": style.edge_font_size,
                 "align": "horizontal",
                 "background": "rgba(255,255,255,0.92)",
             },
@@ -696,6 +712,9 @@ def plot_pyvis(
     Path(output_path).write_text(html, encoding="utf-8")
 
     logger.info("Interactive graph saved to %s", output_path)
+
+
+_GRAPHVIZ_EDGE_LABEL_CHARS = 35
 
 
 def plot_graphviz(graph: nx.DiGraph, output_path: str) -> None:
@@ -719,7 +738,11 @@ def plot_graphviz(graph: nx.DiGraph, output_path: str) -> None:
     for edge in agraph.edges():
         data = graph.edges[edge[0], edge[1]]
         label = data.get("label", "")
-        short = label[:35] + "..." if len(label) > 35 else label
+        short = (
+            label[:_GRAPHVIZ_EDGE_LABEL_CHARS] + "..."
+            if len(label) > _GRAPHVIZ_EDGE_LABEL_CHARS
+            else label
+        )
         edge.attr["label"] = f"  {short}  "
 
     agraph.draw(output_path, prog="dot")
@@ -894,9 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.backend == "pyvis":
-        plot_pyvis(
-            graph,
-            output_path,
+        pyvis_style = PyvisStyle(
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
             node_size=args.node_size,
@@ -904,19 +925,19 @@ def main(argv: list[str] | None = None) -> int:
             edge_font_size=args.edge_font_size,
             edge_width=args.edge_width,
         )
+        plot_pyvis(graph, output_path, style=pyvis_style)
     elif args.backend == "graphviz":
         plot_graphviz(graph, output_path)
     elif args.backend == "matplotlib":
         plot_matplotlib(graph, output_path)
     elif args.backend == "paper":
-        plot_paper_graphviz(
-            graph,
-            output_path,
+        paper_style = PaperStyle(
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
             layout=args.paper_layout,
             show_edge_labels=not args.hide_edge_labels,
         )
+        plot_paper_graphviz(graph, output_path, style=paper_style)
 
     if not args.no_open:
         webbrowser.open(Path(output_path).resolve().as_uri())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -367,6 +368,134 @@ def test_plot_pyvis_writes_fullscreen_html(tmp_path: Path) -> None:
     assert "100vh" in html
 
 
+def test_plot_pyvis_lists_ten_unexplored_elements_and_counts_the_rest(tmp_path: Path) -> None:
+    graph = nx.DiGraph()
+    graph.add_node(
+        "s0_home",
+        elements=[
+            {"description": f"Button {letter}", "explored": False} for letter in "ABCDEFGHIJK"
+        ],
+    )
+    output = tmp_path / "graph.html"
+    plot.plot_pyvis(graph, str(output))
+    html = output.read_text(encoding="utf-8")
+    listed = ", ".join(f"Button {letter}" for letter in "ABCDEFGHIJ")
+    assert f"{listed} (+1 more)" in html
+    assert "Button K" not in html
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (
+            [],
+            {
+                "max_node_words": 5,
+                "max_edge_words": 5,
+                "node_size": 34,
+                "node_font_size": 20,
+                "edge_font_size": 14,
+                "edge_width": 2.6,
+            },
+        ),
+        (
+            [
+                "--max-node-words",
+                "3",
+                "--max-edge-words",
+                "4",
+                "--node-size",
+                "40",
+                "--node-font-size",
+                "18",
+                "--edge-font-size",
+                "12",
+                "--edge-width",
+                "1.5",
+            ],
+            {
+                "max_node_words": 3,
+                "max_edge_words": 4,
+                "node_size": 40,
+                "node_font_size": 18,
+                "edge_font_size": 12,
+                "edge_width": 1.5,
+            },
+        ),
+    ],
+)
+def test_plot_main_passes_the_pyvis_options_to_the_renderer(
+    options: list[str],
+    expected: dict[str, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's own defaults arrive too, such as 5 edge words where plot_pyvis defaults to 6."""
+    received: list[tuple[str, dict[str, object]]] = []
+
+    def record(_graph: nx.DiGraph, output_path: str, *, style: plot.PyvisStyle) -> None:
+        received.append((output_path, dataclasses.asdict(style)))
+
+    monkeypatch.setattr(plot, "plot_pyvis", record)
+    monkeypatch.setattr(plot, "setup_logging", lambda **_kwargs: None)
+    graph_path = _write_graph(tmp_path)
+
+    assert plot.main([str(graph_path), "--backend", "pyvis", "--no-open", *options]) == 0
+
+    assert received == [(str(graph_path.with_suffix(".html")), expected)]
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (
+            [],
+            {
+                "max_node_words": 5,
+                "max_edge_words": 5,
+                "layout": "circular",
+                "show_edge_labels": True,
+            },
+        ),
+        (
+            [
+                "--max-node-words",
+                "2",
+                "--max-edge-words",
+                "3",
+                "--paper-layout",
+                "kamada",
+                "--hide-edge-labels",
+            ],
+            {
+                "max_node_words": 2,
+                "max_edge_words": 3,
+                "layout": "kamada",
+                "show_edge_labels": False,
+            },
+        ),
+    ],
+)
+def test_plot_main_passes_the_paper_options_to_the_renderer(
+    options: list[str],
+    expected: dict[str, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[tuple[str, dict[str, object]]] = []
+
+    def record(_graph: nx.DiGraph, output_path: str, *, style: plot.PaperStyle) -> None:
+        received.append((output_path, dataclasses.asdict(style)))
+
+    monkeypatch.setattr(plot, "plot_paper_graphviz", record)
+    monkeypatch.setattr(plot, "setup_logging", lambda **_kwargs: None)
+    graph_path = _write_graph(tmp_path)
+
+    assert plot.main([str(graph_path), "--backend", "paper", "--no-open", *options]) == 0
+
+    assert received == [(str(graph_path.with_suffix(".png")), expected)]
+
+
 def test_plot_matplotlib_writes_an_image(tmp_path: Path) -> None:
     import matplotlib as mpl
 
@@ -383,7 +512,7 @@ def test_plot_paper_matplotlib_writes_an_image(tmp_path: Path) -> None:
     mpl.use("agg")
     _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
     output = tmp_path / "paper.png"
-    plot.plot_paper_matplotlib(graph, str(output), layout="spring")
+    plot.plot_paper_matplotlib(graph, str(output), style=plot.PaperStyle(layout="spring"))
     assert output.stat().st_size > 0
 
 

@@ -99,17 +99,12 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
     monkeypatch.setattr(device.subprocess, "run", run)
     device.run_adb(
         ["shell", "dumpsys", "input_method"],
-        capture_output=True,
+        output="capture",
         errors="replace",
         timeout=3,
         check=True,
     )
-    device.run_adb(
-        ["shell", "am", "force-stop", "com.demo"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    device.run_adb(["shell", "am", "force-stop", "com.demo"], output="discard", check=False)
 
     adb = "/opt/platform-tools/adb"
     assert calls == [

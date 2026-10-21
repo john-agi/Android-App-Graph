@@ -53,10 +53,13 @@ from android_app_graph.utils import (
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
     EXTERNAL_WEB_NODE,
+    EdgeDetails,
     GraphManager,
 )
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
+    ActionRequest,
+    PlanRequest,
     describe_executed_action,
     plan_next_action,
     predict_next_action,
@@ -108,6 +111,7 @@ def normalize_and_save_audited_graph(graph: GraphManager, audited_graph_path: Pa
 def select_apps_for_audit(
     config: dict[str, Any],
     graph_dir: Path,
+    *,
     app_name: str | None = None,
     re_explore: bool = False,
 ) -> list[dict[str, Any]]:
@@ -234,26 +238,31 @@ def verify_and_merge_nodes(
     return results
 
 
-@dataclass(frozen=True, slots=True)
-class _ReExploreRun:
-    """The graph, device, app and models that one ``re_explore_issues`` call works with."""
+@dataclass(frozen=True, kw_only=True)
+class ReExploreTarget:
+    """The app ``re_explore_issues`` works on and the graph file it saves after each step."""
 
-    graph: GraphManager
-    controller: DeviceController
     app_name: str
     package_name: str
     graph_path: Path
+    launch_activity: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReExploreRun:
+    """The graph, app, device session and client that one ``re_explore_issues`` call works with."""
+
+    graph: GraphManager
+    target: ReExploreTarget
+    session: ReExploreSession
     client: OpenRouter
-    instruction_settings: ModelSettings
-    action_settings: ModelSettings
-    launch_activity: str | None
     start_node: str
 
 
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
     """A keyboard or system dialog on top of the app does not count as leaving it."""
     package = device_state.get("package", "").strip()
-    return bool(package and package != run.package_name and not is_system_overlay(package))
+    return bool(package and package != run.target.package_name and not is_system_overlay(package))
 
 
 def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[str, Any]]) -> None:
@@ -275,9 +284,9 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         return None
 
     for _node_id, action in path[1:]:
-        _execute(run.controller, action)
+        _execute(run.session.controller, action)
 
-    device_state = run.controller.get_state()
+    device_state = run.session.controller.get_state()
     actual = run.graph.identify_state(
         device_state["activity"],
         device_state["screenshot"],
@@ -300,9 +309,9 @@ def _leave_external_web(run: _ReExploreRun) -> str:
     ``add_edge`` would refuse its edge.
     """
     for _ in range(EXTERNAL_WEB_BACK_PRESSES):
-        run.controller.exe_action({"action": "back"})
+        run.session.controller.exe_action({"action": "back"})
         time.sleep(1)
-        device_state = run.controller.get_state()
+        device_state = run.session.controller.get_state()
         node = run.graph.identify_state(
             device_state["activity"], device_state["screenshot"], device_state["package"]
         )
@@ -311,10 +320,16 @@ def _leave_external_web(run: _ReExploreRun) -> str:
     logger.warning(
         "Still on an external web page after %d back presses. Restarting %s.",
         EXTERNAL_WEB_BACK_PRESSES,
-        run.package_name,
+        run.target.package_name,
     )
-    restart_app(run.controller, run.app_name, run.package_name, run.launch_activity, logger)
-    device_state = run.controller.get_state()
+    restart_app(
+        run.session.controller,
+        run.target.app_name,
+        run.target.package_name,
+        run.target.launch_activity,
+        logger,
+    )
+    device_state = run.session.controller.get_state()
     return run.graph.identify_state(
         device_state["activity"], device_state["screenshot"], device_state["package"]
     )
@@ -334,22 +349,26 @@ def _plan_and_act(
 
     instruction, _planned_element = plan_next_action(
         client=run.client,
-        screenshot_b64=screenshot,
-        page_description=page_description,
-        explored_edges=explored_edges,
-        app_name=run.app_name,
-        input_status=input_status,
-        settings=run.instruction_settings,
+        request=PlanRequest(
+            screenshot_b64=screenshot,
+            page_description=page_description,
+            explored_edges=explored_edges,
+            app_name=run.target.app_name,
+            input_status=input_status,
+        ),
+        settings=run.session.instruction,
     )
 
     action, _history_entry = predict_next_action(
         client=run.client,
-        screenshot_b64=screenshot,
-        instruction=instruction + keyboard_hint,
-        screen_w=run.controller.w,
-        screen_h=run.controller.h,
-        action_history=[],
-        settings=run.action_settings,
+        request=ActionRequest(
+            screenshot_b64=screenshot,
+            instruction=instruction + keyboard_hint,
+            screen_w=run.session.controller.w,
+            screen_h=run.session.controller.h,
+            action_history=[],
+        ),
+        settings=run.session.action,
     )
 
     if action.get("action") == "end":
@@ -359,12 +378,12 @@ def _plan_and_act(
         )
         action = {"action": "back"}
         instruction = "Press back"
-        run.controller.exe_action(action)
+        run.session.controller.exe_action(action)
     elif action.get("action") == "wait":
         time.sleep(1)
         return None
     else:
-        run.controller.exe_action(action)
+        run.session.controller.exe_action(action)
     return instruction, action
 
 
@@ -393,9 +412,7 @@ def _record_step(
         source,
         new_node,
         action=[action],
-        instruction=instruction,
-        target_observation=target_obs,
-        num_steps=1,
+        details=EdgeDetails(instruction=instruction, target_observation=target_obs, num_steps=1),
     )
 
     step_result: dict[str, Any] = {
@@ -415,7 +432,7 @@ def _record_step(
         instruction,
     )
 
-    run.graph.save_graph(run.graph_path)
+    run.graph.save_graph(run.target.graph_path)
     if new_node == EXTERNAL_WEB_NODE:
         logger.warning("Opened an external web page during re-explore, pressing back")
         return _leave_external_web(run), step_result
@@ -433,7 +450,7 @@ def _explore_steps(
     step_results: list[dict[str, Any]] = []
 
     for step_i in range(num_steps):
-        device_state = run.controller.get_state()
+        device_state = run.session.controller.get_state()
         screenshot = device_state["screenshot"]
         node_data = run.graph.get_node(current_node)
         if node_data is None:
@@ -445,13 +462,13 @@ def _explore_steps(
             continue
 
         time.sleep(0.5)
-        device_state = run.controller.get_state()
+        device_state = run.session.controller.get_state()
 
         if _left_app(run, device_state):
             logger.warning("Left app during re-explore, pressing back")
-            run.controller.exe_action({"action": "back"})
+            run.session.controller.exe_action({"action": "back"})
             time.sleep(1)
-            device_state = run.controller.get_state()
+            device_state = run.session.controller.get_state()
             current_node = run.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],
@@ -466,7 +483,13 @@ def _explore_steps(
 
 
 def _replay_to(run: _ReExploreRun, node: str) -> str | None:
-    restart_app(run.controller, run.app_name, run.package_name, run.launch_activity, logger)
+    restart_app(
+        run.session.controller,
+        run.target.app_name,
+        run.target.package_name,
+        run.target.launch_activity,
+        logger,
+    )
     return _navigate_to(run, node)
 
 
@@ -482,9 +505,9 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, action = found
 
-    before = run.controller.get_state()
-    _execute(run.controller, action)
-    after = run.controller.get_state()
+    before = run.session.controller.get_state()
+    _execute(run.session.controller, action)
+    after = run.session.controller.get_state()
     if _left_app(run, after):
         reached = f"ext_{after['package'].strip()}"
     else:
@@ -500,9 +523,8 @@ def _correct_flagged_edge(
         client=run.client,
         screenshot_b64=before["screenshot"],
         action=action,
-        screen_w=run.controller.w,
-        screen_h=run.controller.h,
-        settings=run.instruction_settings,
+        screen_size=(run.session.controller.w, run.session.controller.h),
+        settings=run.session.instruction,
     )
     if label is None:
         return {"status": "relabel_failed"}
@@ -510,7 +532,7 @@ def _correct_flagged_edge(
     return {"status": "relabelled", "instruction": label}
 
 
-def _retry_edge(run: _ReExploreRun, issue: dict[str, Any], steps_per_issue: int) -> dict[str, Any]:
+def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     source = run.graph.resolve_node_id(issue.get("source_node", ""))
     target = run.graph.resolve_node_id(issue.get("target_node", ""))
     instruction = issue.get("instruction", "")
@@ -551,13 +573,13 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any], steps_per_issue: int)
         f"gone to the wrong place. Check if any elements on this screen could lead "
         f"to '{target_desc}'."
     )
-    steps = _explore_steps(run, run.graph.resolve_node_id(source), steps_per_issue, hint=hint)
+    steps = _explore_steps(
+        run, run.graph.resolve_node_id(source), run.session.steps_per_issue, hint=hint
+    )
     return {"issue": issue, **outcome, "steps": steps}
 
 
-def _explore_node(
-    run: _ReExploreRun, issue: dict[str, Any], steps_per_issue: int
-) -> dict[str, Any]:
+def _explore_node(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     node = run.graph.resolve_node_id(issue.get("node", ""))
     expected = issue.get("expected_pages", [])
 
@@ -580,7 +602,7 @@ def _explore_node(
         f"This screen might be able to lead to pages like {expected_pages}. "
         f"Check if any elements on this screen should be interacted with."
     )
-    step_results = _explore_steps(run, actual, steps_per_issue, hint=hint)
+    step_results = _explore_steps(run, actual, run.session.steps_per_issue, hint=hint)
 
     return {
         "issue": issue,
@@ -593,15 +615,10 @@ def _explore_node(
 def re_explore_issues(
     graph: GraphManager,
     issues: list[dict[str, Any]],
-    controller: DeviceController,
-    app_name: str,
-    package_name: str,
-    graph_path: Path,
+    *,
+    target: ReExploreTarget,
+    session: ReExploreSession,
     client: OpenRouter,
-    instruction_settings: ModelSettings,
-    action_settings: ModelSettings,
-    steps_per_issue: int = 5,
-    launch_activity: str | None = None,
 ) -> list[dict[str, Any]]:
     """Re-explore flagged issues on device; README.md#correcting-flagged-edges.
 
@@ -618,30 +635,21 @@ def re_explore_issues(
         return results
 
     run = _ReExploreRun(
-        graph=graph,
-        controller=controller,
-        app_name=app_name,
-        package_name=package_name,
-        graph_path=graph_path,
-        client=client,
-        instruction_settings=instruction_settings,
-        action_settings=action_settings,
-        launch_activity=launch_activity,
-        start_node=start_node,
+        graph=graph, target=target, session=session, client=client, start_node=start_node
     )
     for issue in issues:
         itype = issue.get("type", "")
 
         if itype == "retry_edge":
-            results.append(_retry_edge(run, issue, steps_per_issue))
+            results.append(_retry_edge(run, issue))
         elif itype == "explore_node":
-            results.append(_explore_node(run, issue, steps_per_issue))
+            results.append(_explore_node(run, issue))
 
     return results
 
 
 class ReExploreSession(NamedTuple):
-    """Device controller and role settings needed by ``--re-explore``.
+    """Device controller, role settings and step budget needed by ``--re-explore``.
 
     Built as a unit so ``re_explore_issues`` takes non-optional arguments: the
     audit-only path never constructs one and never imports ``aitk``.
@@ -650,12 +658,14 @@ class ReExploreSession(NamedTuple):
     controller: DeviceController
     instruction: ModelSettings
     action: ModelSettings
+    steps_per_issue: int = 5
 
 
 def _open_re_explore_session(
     parser: argparse.ArgumentParser,
     config: dict[str, Any],
     settings: dict[str, ModelSettings],
+    steps_per_issue: int,
 ) -> ReExploreSession:
     """Build the device session for ``--re-explore``, or exit with guidance.
 
@@ -675,6 +685,7 @@ def _open_re_explore_session(
         controller=ADBController(config, logger),
         instruction=settings["instruction"],
         action=settings["action"],
+        steps_per_issue=steps_per_issue,
     )
 
 
@@ -723,7 +734,6 @@ class _AuditRun:
     client: OpenRouter
     settings: dict[str, ModelSettings]
     session: ReExploreSession | None
-    steps_per_issue: int
 
 
 def _app_file(graph_dir: Path, app_name: str, suffix: str = "") -> Path:
@@ -769,19 +779,13 @@ def _re_explore_app(
     launch_app(run.config, app, logger)
     time.sleep(4)
 
-    re_results = re_explore_issues(
-        graph,
-        issues,
-        session.controller,
-        app_name,
-        package_name,
-        _app_file(run.graph_dir, app_name, "_audited"),
-        run.client,
-        session.instruction,
-        session.action,
-        steps_per_issue=run.steps_per_issue,
+    target = ReExploreTarget(
+        app_name=app_name,
+        package_name=package_name,
+        graph_path=_app_file(run.graph_dir, app_name, "_audited"),
         launch_activity=app.get("launch_activity"),
     )
+    re_results = re_explore_issues(graph, issues, target=target, session=session, client=run.client)
 
     results_path = _app_file(run.graph_dir, app_name, "_re_explore")
     _write_json(results_path, re_results)
@@ -870,7 +874,11 @@ def main(argv: list[str] | None = None) -> int:
     # touch the root logger; before the controller, which logs while it connects.
     setup_logging(level=logging.INFO)
 
-    session = _open_re_explore_session(parser, config, settings) if args.re_explore else None
+    session = (
+        _open_re_explore_session(parser, config, settings, args.steps_per_issue)
+        if args.re_explore
+        else None
+    )
 
     with open_client(api_key) as client:
         run = _AuditRun(
@@ -880,7 +888,6 @@ def main(argv: list[str] | None = None) -> int:
             client=client,
             settings=settings,
             session=session,
-            steps_per_issue=args.steps_per_issue,
         )
         for app in selected_apps:
             _audit_app(run, app)

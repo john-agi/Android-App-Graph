@@ -19,6 +19,7 @@ from openrouter import OpenRouter
 from android_app_graph import device
 from android_app_graph.android_packages import saved_node_package
 from android_app_graph.embedding_cache import (
+    ImageEmbedder,
     compute_embedding_with_retry,
     compute_missing_image_embeddings,
     iter_screenshot_candidates,
@@ -38,6 +39,7 @@ from android_app_graph.utils import (
     resolve_model_settings,
 )
 from android_app_graph.utils.vlm_utils import (
+    ActionRequest,
     TruncatedReplyError,
     build_image_message,
     message_text,
@@ -442,6 +444,9 @@ def parse_model_choice(raw: str, valid_letters: str) -> str | None:
     return last_answer_signal(text, valid_letters)
 
 
+_MAX_ONE_STEP_INSTRUCTION_CHARS = 500
+
+
 def parse_one_step_instruction(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
@@ -461,7 +466,7 @@ def parse_one_step_instruction(raw: str) -> str:
     if final_matches:
         text = text[final_matches[-1].start(1) :].strip()
 
-    if len(text) > 500:
+    if len(text) > _MAX_ONE_STEP_INSTRUCTION_CHARS:
         return ""
     generic_phrases = (
         "take one immediate visible ui action",
@@ -856,8 +861,7 @@ class UIKobeV2Translator(BaseTranslator):
             graph_file,
             embeddings,
             candidates,
-            client=self.client,
-            settings=self.image_embedding,
+            embedder=ImageEmbedder(self.client, self.image_embedding),
             app_name=app_name,
         )
         for node_id, _screenshot_path in pending:
@@ -1200,13 +1204,15 @@ class UIKobeV2Translator(BaseTranslator):
 
         aitk_action, history_entry = predict_next_action(
             self.client,
-            screenshot,
-            task + keyboard_hint,
-            screen_w=self._screen_w,
-            screen_h=self._screen_h,
-            action_history=action_history,
+            ActionRequest(
+                screenshot_b64=screenshot,
+                instruction=task + keyboard_hint,
+                screen_w=self._screen_w,
+                screen_h=self._screen_h,
+                action_history=action_history,
+                overall_task=overall_task,
+            ),
             settings=self.action,
-            overall_task=overall_task,
         )
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
