@@ -709,6 +709,168 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     assert "add_edge: missing node(s)" not in caplog.text
 
 
+_WAIT_REPLY = '{"action":"wait"}'
+
+
+def _planner(instruction: str, planned_from: list[object]) -> Callable[..., tuple[str, int | None]]:
+    """A ``plan_next_action`` that records the page description of each screen it plans from."""
+
+    def plan(**kwargs: object) -> tuple[str, int | None]:
+        planned_from.append(kwargs["page_description"])
+        return instruction, None
+
+    return plan
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reached(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay that arrives at another node continues from where it arrived."""
+    kobe.graph.graph.add_node("s0_home", page_description="home")
+    kobe.graph.graph.add_node("s1_settings", page_description="settings")
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> str:
+        replayed.append(node_id)
+        return "s0_home"
+
+    planned_from: list[object] = []
+    monkeypatch.setattr(kobe, "navigate_to_node", replay)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from="s1_settings")
+
+    assert replayed == ["s1_settings"]
+    assert planned_from == ["home"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_screen(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    kobe.graph.graph.add_node("s0_home", page_description="home")
+    planned_from: list[object] = []
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from="s9_removed")
+
+    assert "Node s9_removed not found in graph. Starting from current screen." in caplog.text
+    assert planned_from == ["home"]
+
+
+@pytest.mark.parametrize("interruption", [RuntimeError, KeyboardInterrupt])
+def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
+    interruption: type[BaseException],
+    kobe: Kobe,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A step that raises is not counted, so a re-run repeats it."""
+    kobe.graph.graph.add_node("s0_home", page_description="home")
+    kobe.graph.total_steps_completed = 3
+
+    def stop_planning(**_kwargs: object) -> tuple[str, int | None]:
+        msg = "planning stopped"
+        raise interruption(msg)
+
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", stop_planning)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    caplog.set_level(logging.INFO, logger="test")
+
+    with pytest.raises(interruption, match="planning stopped"):
+        kobe.explore(max_steps=5)
+
+    assert "Resuming exploration from step 3 (target: 5 steps total)" in caplog.text
+    assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 3
+    assert "at step 3" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("detail_after", "delta", "observation"),
+    [
+        ({"sort": "price"}, {"sort": {"before": "name", "after": "price"}}, "home (sort=price)"),
+        ({"sort": None}, {"sort": {"before": "name", "after": None}}, "home"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
+    detail_after: dict[str, object],
+    delta: dict[str, object],
+    observation: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The self-loop's target observation names the details shown after the step, leaving
+    out those with no value."""
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+    graph = explorer.graph.graph
+    graph.add_node("s0_home", page_description="home", last_detail_snapshot={"sort": "name"})
+    details = iter([{"sort": "name"}, detail_after])
+
+    def identify(*_args: object) -> str:
+        graph.nodes["s0_home"]["last_detail_snapshot"] = next(details)
+        return "s0_home"
+
+    monkeypatch.setattr(explorer.graph, "identify_state", identify)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Sort by price", []))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    router_responses.append(chat_response(content=_TAP_REPLY))
+
+    explorer.explore(max_steps=1)
+
+    edge = graph.edges["s0_home", "s0_home"]
+    assert edge["schema_deltas"] == [delta]
+    assert edge["target_observations"] == [observation]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No step is followed by a merge audit or a choice of where to continue."""
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+    explorer.coverage_checkpoint_steps = 0
+    explorer.graph.graph.add_node("s0_home", page_description="home")
+    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    for _ in range(2):
+        router_responses.extend(
+            [
+                chat_response(content='{"element":null,"instruction":"Tap Sort"}'),
+                chat_response(content=_TAP_REPLY),
+            ]
+        )
+
+    explorer.explore(max_steps=2)
+
+    assert [json.loads(request.content)["model"] for request in router_requests] == [
+        "provider/instruction",
+        "provider/action",
+    ] * 2
+
+
 def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     kobe: Kobe,
     router_responses: list[httpx.Response],
