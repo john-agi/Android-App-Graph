@@ -122,15 +122,15 @@ def test_summarize_actions(actions: list[Any], expected: str) -> None:
 
 def _paper_graph() -> nx.DiGraph:
     """Two connected nodes, one external node and one disconnected leaf."""
-    G = nx.DiGraph()
-    G.add_node("s0_home", page_description="Home")
-    G.add_node("s1_search", page_description="Search results")
-    G.add_node("ext_launcher", page_description="Launcher")
-    G.add_node("s2_orphan", page_description="Orphan")
-    G.add_edge("s0_home", "s1_search", label="open search", visit_count=2)
-    G.add_edge("s1_search", "s0_home", label="go back", visit_count=1)
-    G.add_edge("s0_home", "ext_launcher", label="leave app")
-    return G
+    graph = nx.DiGraph()
+    graph.add_node("s0_home", page_description="Home")
+    graph.add_node("s1_search", page_description="Search results")
+    graph.add_node("ext_launcher", page_description="Launcher")
+    graph.add_node("s2_orphan", page_description="Orphan")
+    graph.add_edge("s0_home", "s1_search", label="open search", visit_count=2)
+    graph.add_edge("s1_search", "s0_home", label="go back", visit_count=1)
+    graph.add_edge("s0_home", "ext_launcher", label="leave app")
+    return graph
 
 
 def test_largest_weak_component_of_empty_graph() -> None:

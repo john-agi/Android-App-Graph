@@ -1966,7 +1966,7 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, s
         return None, thought, action_desc
 
 
-class _MalformedActionOutput(UnusableOutputError):
+class _MalformedActionOutputError(UnusableOutputError):
     """An action reply that cannot become an action, kept so the retry can show it to the model."""
 
     def __init__(self, reason: str, reply: str) -> None:
@@ -2000,14 +2000,14 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     try:
         tool_args, thought, action_desc = _parse_agent_response(resp)
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
-        raise _MalformedActionOutput(_unparsed_reason(raw), raw) from exc
+        raise _MalformedActionOutputError(_unparsed_reason(raw), raw) from exc
     if tool_args is None:
-        raise _MalformedActionOutput(_unparsed_reason(raw), raw)
+        raise _MalformedActionOutputError(_unparsed_reason(raw), raw)
     try:
         action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
         reason = f"the mobile_use arguments were invalid: {exc}"
-        raise _MalformedActionOutput(reason, raw) from exc
+        raise _MalformedActionOutputError(reason, raw) from exc
     history_entry = f"{thought} | {action_desc}" if thought else (action_desc or str(action))
     logger.info("  Agent action: %s → AITK: %s", tool_args.get("action"), action)
     return as_object_dict(action), history_entry
@@ -2073,7 +2073,7 @@ def predict_next_action(
         },
     ]
 
-    failure: _MalformedActionOutput | None = None
+    failure: _MalformedActionOutputError | None = None
 
     def request_action() -> tuple[dict[str, object], str]:
         nonlocal failure
@@ -2087,12 +2087,12 @@ def predict_next_action(
         )
         try:
             return _read_action(resp, screen_w, screen_h)
-        except _MalformedActionOutput as exc:
+        except _MalformedActionOutputError as exc:
             failure = exc
             raise
 
     try:
         return call_with_retry("[API] action response", request_action)
-    except _MalformedActionOutput, TruncatedReplyError:
+    except _MalformedActionOutputError, TruncatedReplyError:
         logger.warning("Action agent gave no usable action, falling back to 'wait'", exc_info=True)
         return {"action": "wait", "time": 1}, "Failed to parse action response -> wait"
