@@ -8,6 +8,7 @@ retry budget that HTTP, schema and parse failures share.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import time
@@ -29,6 +30,7 @@ from openrouter.utils import RetryConfig
 
 from android_app_graph.payloads import as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UNUSABLE_OUTPUT_ATTEMPTS, UnusableOutputError
+from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings, open_client
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
@@ -36,6 +38,19 @@ from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 ACTION = ModelSettings("qwen/qwen3.8-flash")
 OTHER = ModelSettings("provider/other")
+
+
+@pytest.fixture
+def webp_screenshot(png_screenshot: str) -> str:
+    """A screenshot as the step log hands it over: encoded once at capture."""
+    return base64.b64encode(encode_screenshot(png_screenshot)).decode("ascii")
+
+
+def test_build_image_message_labels_the_screenshot_as_webp(webp_screenshot: str) -> None:
+    assert vlm.build_image_message(webp_screenshot) == {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/webp;base64,{webp_screenshot}"},
+    }
 
 
 def test_cosine_similarity_of_identical_vectors_is_one() -> None:
@@ -373,13 +388,14 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
-    png_screenshot: str,
+    webp_screenshot: str,
     tracked_usage: vlm.TokenTracker,
     chat_response: Callable[..., httpx.Response],
     chat_usage_totals: dict[str, float],
 ) -> None:
+    """Each role sends the captured WebP screenshot unchanged, labelled image/webp."""
     router_responses.append(chat_response(content=content))
-    result = _ROLE_HELPERS[operation](router_client, png_screenshot)
+    result = _ROLE_HELPERS[operation](router_client, webp_screenshot)
     assert result == expected
     body = json.loads(router_requests[0].content)
     assert body["model"] == model
@@ -389,7 +405,7 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
         parts = body["messages"][-1]["content"]
         images = [part for part in parts if part["type"] == "image_url"]
         assert len(images) == (2 if operation == "verify" else 1)
-        assert images[0]["image_url"]["url"] == f"data:image/png;base64,{png_screenshot}"
+        assert images[0]["image_url"]["url"] == f"data:image/webp;base64,{webp_screenshot}"
     if operation in _STRUCTURED:
         name, strict = _STRUCTURED[operation]
         json_schema = body["response_format"]["json_schema"]

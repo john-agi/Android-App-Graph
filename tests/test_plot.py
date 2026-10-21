@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import sys
@@ -203,11 +204,15 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
                         "visit_count": 3,
                         "state_schema": {"tab": ["map"]},
                         "interactable_elements": [{"explored": True}, {"explored": False}],
+                        "observations": ["000000", "000002"],
+                        "representative_observation": "000000",
                     },
                     {
                         "id": "s1_search",
                         "page_description": "Search results",
                         "activity": "com.demo.Search",
+                        "observations": ["000001"],
+                        "representative_observation": "000001",
                     },
                 ],
                 "edges": [
@@ -233,11 +238,20 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
     return graph_path
 
 
+def _write_step_image(tmp_path: Path, observation_id: str, image: bytes) -> str:
+    """Write an observation's image into the step log beside the graph; return its data URI."""
+    steps = tmp_path / "steps"
+    steps.mkdir(exist_ok=True)
+    (steps / f"{observation_id}.webp").write_bytes(image)
+    return f"data:image/webp;base64,{base64.b64encode(image).decode('ascii')}"
+
+
 def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
+    """A node's thumbnail is its representative's WebP image from the step log; a node
+    whose representative has no image there gets none."""
     graph_path = _write_graph(tmp_path)
-    screenshots = tmp_path / "demo_screenshots"
-    screenshots.mkdir()
-    (screenshots / "s0_home.png").write_bytes(b"not-really-a-png")
+    home_uri = _write_step_image(tmp_path, "000000", b"representative")
+    _write_step_image(tmp_path, "000002", b"another member")
 
     data, graph = load_result = plot.load_graph(str(graph_path))
     assert len(load_result) == 2
@@ -245,7 +259,7 @@ def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
     assert set(graph) == {"s0_home", "s1_search"}
     assert graph.nodes["s0_home"]["elements_explored"] == 1
     assert graph.nodes["s0_home"]["elements_total"] == 2
-    assert graph.nodes["s0_home"]["screenshot_uri"].startswith("data:image/png;base64,")
+    assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
     assert graph.nodes["s1_search"]["screenshot_uri"] is None
     assert graph.edges["s0_home", "s1_search"]["label"].startswith("open search")
     # The self-loop edge falls back to an action summary plus its schema delta.
@@ -349,14 +363,27 @@ def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
     assert graph.edges["s0_search", edge["target"]]["label"] == label
 
 
-def test_load_graph_falls_back_to_the_unaudited_screenshots(tmp_path: Path) -> None:
+def test_load_graph_reads_an_audited_graph_from_the_shared_step_log(tmp_path: Path) -> None:
     graph_path = _write_graph(tmp_path, stem="demo_audited")
-    screenshots = tmp_path / "demo_screenshots"
-    screenshots.mkdir()
-    (screenshots / "s0_home.png").write_bytes(b"not-really-a-png")
+    home_uri = _write_step_image(tmp_path, "000000", b"representative")
 
     _data, graph = plot.load_graph(str(graph_path))
-    assert graph.nodes["s0_home"]["screenshot_uri"] is not None
+    assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
+
+
+@pytest.mark.parametrize("representative", [None, 7], ids=["absent", "not-a-string"])
+def test_load_graph_shows_no_thumbnail_without_a_representative(
+    tmp_path: Path, representative: object
+) -> None:
+    node: dict[str, object] = {"id": "s0_home", "page_description": "Home"}
+    if representative is not None:
+        node["representative_observation"] = representative
+    graph_path = tmp_path / "demo.json"
+    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    _write_step_image(tmp_path, "000007", b"image")
+
+    _data, graph = plot.load_graph(str(graph_path))
+    assert graph.nodes["s0_home"]["screenshot_uri"] is None
 
 
 def test_plot_pyvis_writes_fullscreen_html(tmp_path: Path) -> None:

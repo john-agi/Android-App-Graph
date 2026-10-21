@@ -1,5 +1,5 @@
-"""Graph files on disk: atomic writes, the step log's layout, per-node
-reference-screenshot lookup, and graph-structure validation.
+"""Graph files on disk: atomic writes, the step log's layout, and graph-structure
+validation.
 """
 
 from __future__ import annotations
@@ -144,41 +144,6 @@ def observation_image_b64(steps: Path, observation_id: str) -> str:
     """
     image = observation_image_path(steps, observation_id).read_bytes()
     return base64.b64encode(image).decode("ascii")
-
-
-def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
-    """Return one node's reference screenshot path, or ``None`` when it has none.
-
-    ``GraphManager.save_graph`` writes only the nodes it re-explored into
-    ``<stem>_screenshots`` (``demo_audited_screenshots`` for an audited graph);
-    every other node's screenshot stays where it always was, under the app
-    directory's own name (``<parent.name>_screenshots``). An audited graph is
-    thus split across both directories, so each node is looked up on its own
-    rather than picking one directory for the whole graph.
-
-    The app-directory fallback only ever applies to that plain/audited pair:
-    a graph with any other stem (an operator's ``demo_v1.json`` kept next to
-    ``demo.json``) never falls back to it, or it would silently borrow a
-    sibling graph's screenshot for a colliding node id.
-    """
-    stem_path = graph_path.parent / f"{graph_path.stem}_screenshots" / f"{node_id}.png"
-    if stem_path.exists():
-        return stem_path
-    app_name = graph_path.parent.name
-    if graph_path.stem not in (app_name, f"{app_name}_audited"):
-        return None
-    app_path = graph_path.parent / f"{app_name}_screenshots" / f"{node_id}.png"
-    if app_path.exists():
-        return app_path
-    return None
-
-
-def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
-    """Return one node's reference screenshot as base64, or ``None`` when it has none."""
-    screenshot_path = reference_screenshot_path(graph_path, node_id)
-    if screenshot_path is None:
-        return None
-    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
 
 
 def require_graph_shape(data: object, path: Path) -> dict[str, Any]:

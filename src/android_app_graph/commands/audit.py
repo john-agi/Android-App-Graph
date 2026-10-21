@@ -45,6 +45,8 @@ from android_app_graph.device import (
     return_to_app,
     soft_keyboard_hint,
 )
+from android_app_graph.graph_files import graph_steps_dir
+from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.utils import (
     ModelSettings,
     open_client,
@@ -147,9 +149,9 @@ def verify_and_merge_nodes(
 ) -> list[dict[str, Any]]:
     """Verify merge candidates using screenshot comparison, then merge confirmed pairs.
 
-    For each merge_nodes issue, the verifier compares the reference screenshots
-    of the two candidate nodes. If the verifier says they are the same screen,
-    the nodes are merged (the lower-numbered node is kept).
+    For each merge_nodes issue, the verifier compares the representatives of the
+    two candidate nodes. If the verifier says they are the same screen, the nodes
+    are merged (the lower-numbered node is kept).
 
     Returns a list of result dicts with status "merged" or "kept_separate".
     """
@@ -170,15 +172,14 @@ def verify_and_merge_nodes(
             results.append({"issue": issue, "status": "skipped", "reason": "same node"})
             continue
 
+        skip_reason = graph.merge_skip_reason(node_a, node_b)
+        if skip_reason is not None:
+            logger.warning("Skipping merge %s + %s — %s", node_a, node_b, skip_reason)
+            results.append({"issue": issue, "status": "skipped", "reason": skip_reason})
+            continue
+
         data_a = graph.graph.nodes[node_a]
         data_b = graph.graph.nodes[node_b]
-        screenshot_a = data_a.get("reference_screenshot")
-        screenshot_b = data_b.get("reference_screenshot")
-
-        if not screenshot_a or not screenshot_b:
-            logger.warning("Skipping merge %s + %s — missing screenshot(s)", node_a, node_b)
-            results.append({"issue": issue, "status": "skipped", "reason": "missing screenshot"})
-            continue
 
         # The more-visited node has the better-established description.
         desc_a = data_a.get("page_description", "")
@@ -197,8 +198,8 @@ def verify_and_merge_nodes(
 
         verify_result = verify_same_node(
             client=client,
-            screenshot_new_b64=screenshot_b,
-            screenshot_existing_b64=screenshot_a,
+            screenshot_new_b64=graph.representative_image_b64(node_b),
+            screenshot_existing_b64=graph.representative_image_b64(node_a),
             existing_description=ref_desc,
             settings=page_detail,
         )
@@ -252,13 +253,34 @@ class ReExploreTarget:
 
 @dataclass(frozen=True, slots=True)
 class _ReExploreRun:
-    """The graph, app, device session and client that one ``re_explore_issues`` call works with."""
+    """The graph, app, device session and client that one ``re_explore_issues`` call works
+    with, and the recorder every device call goes through."""
 
     graph: GraphManager
     target: ReExploreTarget
     session: ReExploreSession
+    recorder: StepRecorder
     client: OpenRouter
     start_node: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Step:
+    """One planned and executed action.
+
+    ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
+    wrote, which differs when an ``end`` is recorded as a back press.
+    """
+
+    before: Observation
+    instruction: str
+    planned_instruction: str
+    element: int | None
+    action: dict[str, Any]
+
+
+def _identify(run: _ReExploreRun, device_state: dict[str, Any]) -> str:
+    return run.graph.identify_state(Observation.from_state(device_state))
 
 
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
@@ -285,14 +307,9 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         return None
 
     for _node_id, action in path[1:]:
-        _execute(run.session.controller, action)
+        _execute(run.recorder, action)
 
-    device_state = run.session.controller.get_state()
-    actual = run.graph.identify_state(
-        device_state["activity"],
-        device_state["screenshot"],
-        device_state["package"],
-    )
+    actual = _identify(run, run.recorder.get_state())
     if actual != target_node:
         logger.warning(
             "Expected to reach %s but arrived at %s",
@@ -309,49 +326,45 @@ def _leave_external_web(run: _ReExploreRun) -> str:
     A step from the shared ``ext_web`` node would act on a page outside the app, and
     ``add_edge`` would refuse its edge.
     """
-    for _ in range(EXTERNAL_WEB_BACK_PRESSES):
-        run.session.controller.exe_action({"action": "back"})
-        time.sleep(1)
-        device_state = run.session.controller.get_state()
-        node = run.graph.identify_state(
-            device_state["activity"], device_state["screenshot"], device_state["package"]
+    with run.recorder.source("external_web_recovery"):
+        for _ in range(EXTERNAL_WEB_BACK_PRESSES):
+            run.recorder.exe_action({"action": "back"})
+            time.sleep(1)
+            node = _identify(run, run.recorder.get_state())
+            if node != EXTERNAL_WEB_NODE:
+                return node
+        logger.warning(
+            "Still on an external web page after %d back presses. Restarting %s.",
+            EXTERNAL_WEB_BACK_PRESSES,
+            run.target.package_name,
         )
-        if node != EXTERNAL_WEB_NODE:
-            return node
-    logger.warning(
-        "Still on an external web page after %d back presses. Restarting %s.",
-        EXTERNAL_WEB_BACK_PRESSES,
-        run.target.package_name,
-    )
-    restart_app(
-        run.session.controller,
-        run.target.app_name,
-        run.target.package_name,
-        run.target.launch_activity,
-        logger,
-    )
-    device_state = run.session.controller.get_state()
-    return run.graph.identify_state(
-        device_state["activity"], device_state["screenshot"], device_state["package"]
-    )
+        restart_app(
+            run.recorder,
+            run.target.app_name,
+            run.target.package_name,
+            run.target.launch_activity,
+            logger,
+        )
+        return _identify(run, run.recorder.get_state())
 
 
 def _plan_and_act(
-    run: _ReExploreRun, node: str, screenshot: str, page_description: str
-) -> tuple[str, dict[str, Any]] | None:
-    """Plan a step from *node*, execute its action, and return the instruction and the
-    action executed, or ``None`` when the action model waits.
+    run: _ReExploreRun, node: str, device_state: dict[str, Any], page_description: str
+) -> _Step | None:
+    """Plan a step from *node*, shown in *device_state*, execute its action, and return
+    it, or ``None`` when the action model waits.
     """
+    before = Observation.from_state(device_state)
     explored_edges = run.graph.get_all_edges_from_node(node)
 
     # Check before planning so the planner can choose type vs tap.
     keyboard_hint = soft_keyboard_hint()
     input_status = keyboard_status(keyboard_hint)
 
-    instruction, _planned_element = plan_next_action(
+    planned_instruction, element = plan_next_action(
         client=run.client,
         request=PlanRequest(
-            screenshot_b64=screenshot,
+            screenshot_b64=before.screenshot_b64,
             page_description=page_description,
             explored_edges=explored_edges,
             app_name=run.target.app_name,
@@ -363,15 +376,16 @@ def _plan_and_act(
     action, _history_entry = predict_next_action(
         client=run.client,
         request=ActionRequest(
-            screenshot_b64=screenshot,
-            instruction=instruction + keyboard_hint,
-            screen_w=run.session.controller.w,
-            screen_h=run.session.controller.h,
+            screenshot_b64=before.screenshot_b64,
+            instruction=planned_instruction + keyboard_hint,
+            screen_w=run.recorder.w,
+            screen_h=run.recorder.h,
             action_history=[],
         ),
         settings=run.session.action,
     )
 
+    instruction = planned_instruction
     if action.get("action") == "end":
         logger.info(
             '  Action agent said end for: "%s", recording as back',
@@ -379,31 +393,34 @@ def _plan_and_act(
         )
         action = {"action": "back"}
         instruction = "Press back"
-        run.session.controller.exe_action(action)
+        run.recorder.exe_action(action)
     elif action.get("action") == "wait":
         time.sleep(1)
         return None
     else:
-        run.session.controller.exe_action(action)
-    return instruction, action
+        run.recorder.exe_action(action)
+    return _Step(
+        before=before,
+        instruction=instruction,
+        planned_instruction=planned_instruction,
+        element=element,
+        action=action,
+    )
 
 
 def _record_step(
     run: _ReExploreRun,
     source: str,
-    taken: tuple[str, dict[str, Any]],
+    step: _Step,
     device_state: dict[str, Any],
     step_number: int,
 ) -> tuple[str, dict[str, Any]]:
-    """Record the edge *taken* from *source* to the screen *device_state* shows and save
-    the graph. Returns the node the next step starts from, with the step's result.
+    """Record the edge *step* took from *source* to the screen *device_state* shows and
+    save the graph. Returns the node the next step starts from, with the step's result.
     """
-    instruction, action = taken
-    new_node = run.graph.identify_state(
-        device_state["activity"],
-        device_state["screenshot"],
-        device_state["package"],
-    )
+    instruction, action = step.instruction, step.action
+    after = Observation.from_state(device_state)
+    new_node = run.graph.identify_state(after)
     source = run.graph.resolve_node_id(source)
 
     new_node_data = run.graph.get_node(new_node)
@@ -414,6 +431,17 @@ def _record_step(
         new_node,
         action=[action],
         details=EdgeDetails(instruction=instruction, target_observation=target_obs, num_steps=1),
+    )
+    run.recorder.record_transition(
+        Transition(
+            before=step.before,
+            after=after,
+            instruction=step.planned_instruction,
+            element=step.element,
+            action=action,
+            from_node=source,
+            to_node=new_node,
+        )
     )
 
     step_result: dict[str, Any] = {
@@ -451,51 +479,48 @@ def _explore_steps(
     step_results: list[dict[str, Any]] = []
 
     for step_i in range(num_steps):
-        device_state = run.session.controller.get_state()
-        screenshot = device_state["screenshot"]
+        device_state = run.recorder.get_state()
         node_data = run.graph.get_node(current_node)
         if node_data is None:
             break
 
         page_desc = f"{node_data['page_description']}\n[AUDIT HINT: {hint}]"
-        taken = _plan_and_act(run, current_node, screenshot, page_desc)
-        if taken is None:
+        step = _plan_and_act(run, current_node, device_state, page_desc)
+        if step is None:
             continue
 
         time.sleep(0.5)
-        device_state = run.session.controller.get_state()
+        device_state = run.recorder.get_state()
 
         if _left_app(run, device_state):
             logger.warning("Left app during re-explore, pressing back")
-            device_state = return_to_app(
-                run.session.controller,
-                run.target.app_name,
-                run.target.package_name,
-                run.target.launch_activity,
-                logger,
-            )
-            current_node = run.graph.identify_state(
-                device_state["activity"],
-                device_state["screenshot"],
-                device_state["package"],
-            )
+            with run.recorder.source("external_app_recovery"):
+                device_state = return_to_app(
+                    run.recorder,
+                    run.target.app_name,
+                    run.target.package_name,
+                    run.target.launch_activity,
+                    logger,
+                )
+            current_node = _identify(run, device_state)
             continue
 
-        current_node, step_result = _record_step(run, current_node, taken, device_state, step_i + 1)
+        current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
         step_results.append(step_result)
 
     return step_results
 
 
 def _replay_to(run: _ReExploreRun, node: str) -> str | None:
-    restart_app(
-        run.session.controller,
-        run.target.app_name,
-        run.target.package_name,
-        run.target.launch_activity,
-        logger,
-    )
-    return _navigate_to(run, node)
+    with run.recorder.source("navigation_replay"):
+        restart_app(
+            run.recorder,
+            run.target.app_name,
+            run.target.package_name,
+            run.target.launch_activity,
+            logger,
+        )
+        return _navigate_to(run, node)
 
 
 def _correct_flagged_edge(
@@ -510,14 +535,22 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, action = found
 
-    before = run.session.controller.get_state()
-    _execute(run.session.controller, action)
-    after = run.session.controller.get_state()
-    if _left_app(run, after):
-        reached = f"ext_{after['package'].strip()}"
-    else:
-        reached = run.graph.identify_state(after["activity"], after["screenshot"], after["package"])
+    before = run.recorder.get_state()
+    _execute(run.recorder, action)
+    after = run.recorder.get_state()
+    reached = f"ext_{after['package'].strip()}" if _left_app(run, after) else _identify(run, after)
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
+    run.recorder.record_transition(
+        Transition(
+            before=Observation.from_state(before),
+            after=Observation.from_state(after),
+            instruction=instruction,
+            element=None,
+            action=action,
+            from_node=source,
+            to_node=reached,
+        )
+    )
 
     if reached != target:
         if not run.graph.move_edge_action(source, target, index, reached):
@@ -528,7 +561,7 @@ def _correct_flagged_edge(
         client=run.client,
         screenshot_b64=before["screenshot"],
         action=action,
-        screen_size=(run.session.controller.w, run.session.controller.h),
+        screen_size=(run.recorder.w, run.recorder.h),
         settings=run.session.instruction,
     )
     if label is None:
@@ -556,7 +589,8 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     if reached != source:
         return {"issue": issue, "status": "unverified", "reached": reached}
 
-    outcome = _correct_flagged_edge(run, source, target, instruction)
+    with run.recorder.source("edge_retry"):
+        outcome = _correct_flagged_edge(run, source, target, instruction)
     logger.info("Flagged edge %s → %s: %s", source, target, outcome)
     if outcome["status"] == "unverified":
         return {"issue": issue, **outcome}
@@ -632,6 +666,8 @@ def re_explore_issues(
 
     For explore_node: navigates to the node and explores with hints about
     expected missing actions.
+
+    Every screenshot and action goes into the step log beside ``target.graph_path``.
     """
     results: list[dict[str, Any]] = []
     start_node = graph.get_start_node()
@@ -639,8 +675,19 @@ def re_explore_issues(
         logger.warning("Graph is empty — nothing to re-explore")
         return results
 
+    recorder = StepRecorder(
+        session.controller,
+        graph_steps_dir(target.graph_path),
+        run_kind="audit",
+        source="re_explore",
+    )
     run = _ReExploreRun(
-        graph=graph, target=target, session=session, client=client, start_node=start_node
+        graph=graph,
+        target=target,
+        session=session,
+        recorder=recorder,
+        client=client,
+        start_node=start_node,
     )
     for issue in issues:
         itype = issue.get("type", "")
