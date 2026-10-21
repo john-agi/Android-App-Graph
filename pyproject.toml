@@ -122,9 +122,12 @@ extend-select = [
     "ARG",
     "ERA",
     "PT",
+    "S",
     "T20",
     "INP001",
     "N",
+    "EM",
+    "TRY",
 ]
 # FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
 # they need no `ignore` entry.
@@ -133,7 +136,7 @@ extend-select = [
 # Copy-in adapters are single files copied into other repositories, not packages.
 "aitk_files/**" = ["INP001"]
 "aw_files/**" = ["INP001"]
-# S101 is listed now so `assert` stays allowed if S is ever enabled.
+# pytest checks results with plain `assert`.
 "tests/**" = ["S101"]
 # Vulture allowlist entries are intentionally bare attribute expressions.
 "vulture_allowlist.py" = ["B018"]

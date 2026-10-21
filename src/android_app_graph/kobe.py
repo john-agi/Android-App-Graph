@@ -17,6 +17,7 @@ from android_app_graph.device import (
     is_system_overlay,
     keyboard_status,
     restart_app,
+    run_adb,
     soft_keyboard_hint,
 )
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
@@ -329,11 +330,13 @@ class Kobe:
         """
         start_node = self.graph.get_start_node()
         if start_node is None:
-            raise NoPathError("Graph is empty — cannot navigate.")
+            msg = "Graph is empty — cannot navigate."
+            raise NoPathError(msg)
 
         path = self.graph.find_path(start_node, target_node)
         if path is None:
-            raise NoPathError(f"No path from {start_node} to {target_node} in the graph.")
+            msg = f"No path from {start_node} to {target_node} in the graph."
+            raise NoPathError(msg)
 
         restart_app(
             self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
@@ -379,7 +382,9 @@ class Kobe:
                     node_id,
                     action.get("action", "?"),
                 )
-                self.controller.exe_action(action)
+                # find_path yields {} for an edge a loaded graph file holds without actions.
+                if action:
+                    self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
         device_state = self.controller.get_state()
@@ -446,7 +451,7 @@ class Kobe:
             token_tracker.print_summary()
             raise
         except Exception:
-            self.logger.error(
+            self.logger.exception(
                 "Exploration crashed at step %d. Graph saved. Re-run to resume.",
                 self.graph.total_steps_completed,
             )
@@ -781,9 +786,8 @@ class Kobe:
             )
             ctrl_config = self.controller.config
             udid = ctrl_config.get("device", ctrl_config).get("udid", "emulator-5554")
-            relaunch = subprocess.run(
+            relaunch = run_adb(
                 [
-                    "adb",
                     "-s",
                     udid,
                     "shell",

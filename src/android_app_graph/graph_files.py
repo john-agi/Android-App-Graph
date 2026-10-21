@@ -156,29 +156,36 @@ def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     this one case, one skipping the node and the other adding it.
     """
     if not isinstance(data, dict):
-        raise TypeError(f"Graph JSON must be an object: {path}")
+        msg = f"Graph JSON must be an object: {path}"
+        raise TypeError(msg)
     # JSON object keys are always strings; the comprehension is what narrows the
     # loaded object to dict[str, Any] for the type checker (as payloads does).
     graph: dict[str, Any] = {key: value for key, value in data.items() if isinstance(key, str)}
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
     if not isinstance(nodes, list) or not isinstance(edges, list):
-        raise TypeError(f"Graph JSON must contain list fields 'nodes' and 'edges': {path}")
+        msg = f"Graph JSON must contain list fields 'nodes' and 'edges': {path}"
+        raise TypeError(msg)
     graph["nodes"] = nodes
     graph["edges"] = edges
     for node in nodes:
         if not isinstance(node, dict):
-            raise TypeError(f"Graph node must be an object: {node!r} in {path}")
+            msg = f"Graph node must be an object: {node!r} in {path}"
+            raise TypeError(msg)
         node_id = node.get("id")
         if not isinstance(node_id, str):
-            raise TypeError(f"Graph node id must be a string: {node!r} in {path}")
+            msg = f"Graph node id must be a string: {node!r} in {path}"
+            raise TypeError(msg)
         if not node_id:
-            raise TypeError(f"Graph node id must be a non-empty string: {node!r} in {path}")
+            msg = f"Graph node id must be a non-empty string: {node!r} in {path}"
+            raise TypeError(msg)
     for edge in edges:
         if not isinstance(edge, dict):
-            raise TypeError(f"Graph edge must be an object: {edge!r} in {path}")
+            msg = f"Graph edge must be an object: {edge!r} in {path}"
+            raise TypeError(msg)
         if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
-            raise TypeError(f"Graph edge endpoint must be a string: {edge!r} in {path}")
+            msg = f"Graph edge endpoint must be a string: {edge!r} in {path}"
+            raise TypeError(msg)
     return graph
 
 

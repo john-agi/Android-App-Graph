@@ -380,7 +380,7 @@ def plot_paper_graphviz(
 
     ext = Path(output_path).suffix.lstrip(".").lower() or "png"
     fmt = "pdf" if ext == "pdf" else "svg" if ext == "svg" else "png"
-    subprocess.run(
+    subprocess.run(  # noqa: S603  # argv list without a shell; dot was resolved with shutil.which and the paths are built here
         [dot_bin, f"-T{fmt}", str(dot_path), "-o", output_path],
         check=True,
     )

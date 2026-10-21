@@ -193,7 +193,8 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def touched(*_args: object, **_kwargs: object) -> NoReturn:
-        raise AssertionError("settings must be validated before any device work")
+        msg = "settings must be validated before any device work"
+        raise AssertionError(msg)
 
     if key is not None:
         monkeypatch.setenv("OPENROUTER_API_KEY", key)
@@ -222,3 +223,45 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     assert message in line
     assert error.rstrip().endswith(line)
     assert opened_clients == []
+
+
+class _NoRunningAvd:
+    def __init__(self) -> None:
+        self.duplicated: list[str] = []
+
+    def get_running_avd_list(self) -> None:
+        return None
+
+    def duplicate_avd(self, avd_name: str) -> None:
+        self.duplicated.append(avd_name)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_check_avd_starts_the_duplicate_with_the_emulator_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[list[str]] = []
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/opt/android-sdk/emulator/{name}")
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda cmd, **_kwargs: started.append(cmd))
+    avds = _NoRunningAvd()
+
+    cli.check_avd(avds, {"device": {"avd_name": "Pixel"}}, logging.getLogger("test"))
+
+    assert avds.duplicated == ["Pixel"]
+    emulator = "/opt/android-sdk/emulator/emulator"
+    assert started == [[emulator, "-avd", "Pixel_dup", "-no-snapshot"]]
+
+
+def test_check_avd_raises_file_not_found_naming_the_emulator_when_it_is_not_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``FileNotFoundError`` is what ``subprocess.Popen`` raises for a missing program."""
+
+    def must_not_start(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "the emulator started although it is not on PATH"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(cli.subprocess, "Popen", must_not_start)
+    with pytest.raises(FileNotFoundError, match=r"^emulator was not found on PATH$"):
+        cli.check_avd(_NoRunningAvd(), {"device": {"avd_name": "Pixel"}}, logging.getLogger("test"))
