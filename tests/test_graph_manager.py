@@ -2472,7 +2472,100 @@ def test_normalize_all_edges_templatizes_and_then_skips(normalizer: FakeNormaliz
     assert normalizer.calls[0]["target_observations"] is None
     assert normalizer.calls[0]["settings"] == PAGE_DETAIL
 
-    gm.normalize_all_edges()  # the existing template already covers every instruction
+    gm.normalize_all_edges()  # nothing changed since the last normalization
+
+    assert len(normalizer.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("result", "templated"),
+    [({**TEMPLATE_RESULT, "examples": []}, 1), ({"is_template": False}, 0)],
+    ids=["template", "not-a-template"],
+)
+def test_normalize_all_edges_does_not_send_a_normalized_edge_again(
+    normalizer: FakeNormalizer, result: dict[str, Any], templated: int
+) -> None:
+    """Whatever the model answered, and however many examples its template lists."""
+    normalizer.result = result
+    gm = make_manager()
+    _search_graph(gm)
+
+    assert gm.normalize_all_edges() == templated
+    assert gm.normalize_all_edges() == templated
+
+    assert len(normalizer.calls) == 1
+
+
+def test_normalize_all_edges_sends_an_edge_again_once_it_gains_an_instruction(
+    normalizer: FakeNormalizer,
+) -> None:
+    """However many examples its template lists: here two, as many as the instructions it ends
+    with."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_results", "Search results")
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "shoes"},
+        details=EdgeDetails(instruction='search for "shoes"'),
+    )
+    gm.normalize_all_edges()
+    gm.normalize_all_edges()
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "hats"},
+        details=EdgeDetails(instruction='search for "hats"'),
+    )
+
+    gm.normalize_all_edges()
+
+    assert [call["instructions"] for call in normalizer.calls] == [
+        ['search for "shoes"'],
+        ['search for "shoes"', 'search for "hats"'],
+    ]
+
+
+def test_normalize_all_edges_sends_a_relabelled_edge_again_even_under_the_same_instruction(
+    normalizer: FakeNormalizer,
+) -> None:
+    """Relabelling drops the edge's templates, so the next normalization rebuilds them."""
+    gm = make_manager()
+    _search_graph(gm)
+    gm.normalize_all_edges()
+
+    gm.relabel_edge_action("s0_home", "s1_results", 1, 'search for "hats"')
+    gm.normalize_all_edges()
+
+    assert len(normalizer.calls) == 2
+    assert gm.graph["s0_home"]["s1_results"]["instruction_templates"][0]["template"] == (
+        "search for {query}"
+    )
+
+
+def test_a_reloaded_graph_keeps_what_each_edge_last_normalization_covered(
+    normalizer: FakeNormalizer, tmp_path: Path
+) -> None:
+    normalizer.result = {**TEMPLATE_RESULT, "examples": []}
+    steps_dir = tmp_path / "steps"
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir))
+    add_screen(gm, "s1_results", "Search results", **members(steps_dir))
+    for query in ("shoes", "hats"):
+        gm.add_edge(
+            "s0_home",
+            "s1_results",
+            {"type": query},
+            details=EdgeDetails(instruction=f'search for "{query}"'),
+        )
+    gm.normalize_all_edges()
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    loaded.normalize_all_edges()
 
     assert len(normalizer.calls) == 1
 
@@ -2493,13 +2586,17 @@ def test_normalize_all_edges_passes_target_observations(normalizer: FakeNormaliz
     assert normalizer.calls[0]["target_observations"] == ["shoe results"]
 
 
-def test_normalize_all_edges_renormalizes_past_a_non_dict_template(
+def test_normalize_all_edges_sends_once_an_edge_that_records_no_normalization(
     normalizer: FakeNormalizer,
 ) -> None:
+    """Even when its template's examples cover every instruction."""
     gm = make_manager()
     _search_graph(gm)
-    gm.graph["s0_home"]["s1_results"]["instruction_templates"] = ["stale string"]
+    gm.graph["s0_home"]["s1_results"]["instruction_templates"] = [
+        {"template": "search for {item}", "examples": ['search for "shoes"', 'search for "hats"']}
+    ]
 
+    gm.normalize_all_edges()
     gm.normalize_all_edges()
 
     assert len(normalizer.calls) == 1
@@ -2555,7 +2652,7 @@ def test_normalize_all_edges_counts_only_the_recorded_instructions(
     )
 
     gm.normalize_all_edges()
-    gm.normalize_all_edges()  # two examples cover the two recorded instructions
+    gm.normalize_all_edges()  # nothing changed since the last normalization
 
     assert len(normalizer.calls) == 1
     assert normalizer.calls[0]["instructions"] == [
@@ -4374,6 +4471,7 @@ edge_attrs = st.fixed_dictionaries(
         "visit_count": st.integers(min_value=0, max_value=20),
         "schema_deltas": small_dicts,
         "setups": st.lists(setup_entries, max_size=3),
+        "normalized_instructions_hash": st.none() | st.text(max_size=12),
     }
 )
 graphs = st.tuples(
@@ -4410,6 +4508,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "visit_count": d.get("visit_count", 0),
             "schema_deltas": d.get("schema_deltas") or None,
             "setups": d.get("setups") or None,
+            "normalized_instructions_hash": d.get("normalized_instructions_hash"),
         }
         for u, v, d in gm.graph.edges(data=True)
     }

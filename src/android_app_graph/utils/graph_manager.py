@@ -31,6 +31,7 @@ tells apart, split off or moved to the node screen matching confirms.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
@@ -224,12 +225,14 @@ class _ScreenDescription:
 
 @dataclass(frozen=True)
 class _EdgeToNormalize:
-    """An edge's normalize_edge inputs, copied so that a worker thread never reads the graph."""
+    """An edge's normalize_edge inputs, copied so that a worker thread never reads the graph,
+    and the hash of the recorded instructions they cover."""
 
     source: str
     target: str
     instructions: list[str]
     target_observations: list[str] | None
+    instructions_hash: str
 
 
 class _Described(NamedTuple):
@@ -669,6 +672,18 @@ def _action_costs(edge_data: dict[str, Any]) -> list[int]:
         own + len(_setup_actions(setup))
         for own, setup in zip(steps, aligned["setups"], strict=False)
     ]
+
+
+def _instructions_hash(instructions: list[str]) -> str:
+    """SHA-256 of *instructions* as a JSON list, which keeps every instruction apart."""
+    return hashlib.sha256(json.dumps(instructions).encode()).hexdigest()
+
+
+def _drop_templates(edge_data: dict[str, Any]) -> None:
+    """Drop the edge's templates and the record of what they covered, so that the next
+    normalization rebuilds them."""
+    edge_data["instruction_templates"] = []
+    edge_data.pop("normalized_instructions_hash", None)
 
 
 def _member_observations(node: dict[str, Any]) -> list[str]:
@@ -1657,7 +1672,7 @@ class GraphManager:
         moved["visit_count"] = 1
         if remaining["actions"]:
             edge_data.update(remaining)
-            edge_data["instruction_templates"] = []
+            _drop_templates(edge_data)
         else:
             self.graph.remove_edge(source, target)
         self._merge_edge_data(source, new_target, moved)
@@ -1673,7 +1688,7 @@ class GraphManager:
         edge_data = self.graph[source][target]
         edge_data.update(_aligned_lists(edge_data))
         edge_data["instructions"][index] = instruction
-        edge_data["instruction_templates"] = []
+        _drop_templates(edge_data)
 
     def member_plans(self, floor: float = GROUPING_FLOOR) -> list[tuple[str, MemberPlan]]:
         """Return, in node order, the groups of the members of every in-app node at the
@@ -1924,7 +1939,9 @@ class GraphManager:
         )
 
     def _edge_to_normalize(self, source: str, target: str) -> _EdgeToNormalize | None:
-        """Return the edge's normalize_edge inputs, or None when the skip rules spare it a call."""
+        """Return the edge's normalize_edge inputs, or None when the skip rules spare it a call:
+        it has no instruction, its last normalization covered the instructions it has, or it has
+        one short instruction with no value in it."""
         edge_data = self.graph[source][target]
         instructions = edge_data.get("instructions", [])
         observations = edge_data.get("target_observations", [])
@@ -1933,15 +1950,9 @@ class GraphManager:
         if not recorded:
             return None
 
-        existing_templates = edge_data.get("instruction_templates", [])
-        if existing_templates:
-            examples = (
-                existing_templates[0].get("examples", [])
-                if isinstance(existing_templates[0], dict)
-                else []
-            )
-            if len(examples) >= len(recorded):
-                return None
+        instructions_hash = _instructions_hash(recorded)
+        if edge_data.get("normalized_instructions_hash") == instructions_hash:
+            return None
 
         if len(recorded) == 1:
             instr = recorded[0]
@@ -1956,11 +1967,13 @@ class GraphManager:
             target,
             list(instructions),
             list(observations) if any(observations) else None,
+            instructions_hash,
         )
 
-    def _apply_edge_template(self, edge: _EdgeToNormalize, result: dict[str, Any]) -> bool:
-        """Write normalize_edge's *result* to the edge; return whether it is a template."""
+    def _apply_edge_template(self, edge: _EdgeToNormalize, result: dict[str, Any]) -> None:
+        """Write normalize_edge's *result* to the edge, and record the instructions it covered."""
         edge_data = self.graph[edge.source][edge.target]
+        edge_data["normalized_instructions_hash"] = edge.instructions_hash
         if result.get("is_template"):
             edge_data["instruction_templates"] = [
                 {
@@ -1977,21 +1990,20 @@ class GraphManager:
                 result["instruction_template"],
                 len(result.get("examples", [])),
             )
-            return True
-
-        edge_data["instruction_templates"] = []
-        return False
+        else:
+            edge_data["instruction_templates"] = []
 
     def _normalize_edges(self, edges: Iterable[tuple[str, str]]) -> int:
         """Normalize *edges* into templates, sending their calls concurrently.
 
         The skip rules choose the edges that need a call, and the results are written and
         logged in the order of *edges*, both on this thread, whichever call returns first.
-        Returns the number of edges that produced a template.
+        Returns the number of *edges* that hold a template afterwards, including those the
+        skip rules spared a call.
         """
         client, settings = self._require_page_detail()
-        chosen = [self._edge_to_normalize(source, target) for source, target in edges]
-        templatized = 0
+        edge_list = list(edges)
+        chosen = [self._edge_to_normalize(source, target) for source, target in edge_list]
 
         def call(edge: _EdgeToNormalize) -> dict[str, Any]:
             return normalize_edge(
@@ -2001,20 +2013,22 @@ class GraphManager:
                 settings=settings,
             )
 
-        def apply(edge: _EdgeToNormalize, result: dict[str, Any]) -> None:
-            nonlocal templatized
-            if self._apply_edge_template(edge, result):
-                templatized += 1
-
         call_concurrently(
-            "normalize_edge", call, [edge for edge in chosen if edge is not None], apply
+            "normalize_edge",
+            call,
+            [edge for edge in chosen if edge is not None],
+            self._apply_edge_template,
         )
-        return templatized
+        return sum(
+            1
+            for source, target in edge_list
+            if self.graph[source][target].get("instruction_templates")
+        )
 
     def normalize_node_edges(self, node_id: str) -> int:
         """Normalize all outgoing edges from one node.
 
-        Returns the number of outgoing edges that produced a parameterized template.
+        Returns the number of outgoing edges that hold a template afterwards.
         """
         if self._page_detail() is None or node_id not in self.graph:
             return 0
@@ -2059,9 +2073,10 @@ class GraphManager:
         exploration finishes. Replaces per-edge on-the-fly normalization to
         save API costs.
 
-        For each edge, groups all instructions and their target observations,
-        then calls the normalizer to produce templates with {param} placeholders.
-        Returns the number of edges that produced a parameterized template.
+        For each edge whose instructions changed since its last normalization, groups
+        all instructions and their target observations, then calls the normalizer to
+        produce templates with {param} placeholders. Returns the number of edges that
+        hold a template afterwards.
         """
         if self._page_detail() is None:
             logger.warning("No page_detail settings — skipping normalization")
@@ -2452,6 +2467,7 @@ class GraphManager:
                 "target_observations": attrs.get("target_observations", []),
                 "num_steps": attrs.get("num_steps", []),
                 "visit_count": attrs.get("visit_count", 0),
+                "normalized_instructions_hash": attrs.get("normalized_instructions_hash"),
             }
             for key in ("schema_deltas", "setups"):
                 if attrs.get(key):
@@ -2553,6 +2569,7 @@ class GraphManager:
                 "target_observations": edge_data.get("target_observations", []),
                 "num_steps": edge_data.get("num_steps", []),
                 "visit_count": edge_data.get("visit_count", 0),
+                "normalized_instructions_hash": edge_data.get("normalized_instructions_hash"),
             }
             for key in ("schema_deltas", "setups"):
                 if edge_data.get(key):
