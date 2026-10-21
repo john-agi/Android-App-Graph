@@ -596,6 +596,50 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
     assert '"is_external_web"' in body["messages"][0]["content"][0]["text"]
 
 
+def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    for existing_nodes in (None, ["Add Wi-Fi network dialog"]):
+        router_responses.append(
+            chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
+        )
+        vlm.describe_page_and_state(
+            router_client, png_screenshot, existing_nodes=existing_nodes, settings=PAGE_DETAIL
+        )
+    for request in router_requests:
+        prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
+        assert 'never change "page_description"' in prompt
+        assert '"focused_field"' in prompt
+        assert '"keyboard_visible"' in prompt
+        assert "input field focused" not in prompt
+        assert "which field is active" not in prompt
+
+
+def test_the_verifier_treats_keyboard_focus_and_scroll_as_the_same_screen(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"same":true,"reason":"keyboard only"}'))
+    vlm.verify_same_node(
+        router_client,
+        png_screenshot,
+        png_screenshot,
+        "Add Wi-Fi network dialog",
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    assert "differ only in whether the on-screen keyboard is shown" in prompt
+    assert "Which input field is active" not in prompt
+    assert "A screen with such a menu" in prompt  # an open menu still makes a DIFFERENT screen
+
+
 @pytest.mark.parametrize(
     ("operation", "reply", "expected"),
     [
