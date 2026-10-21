@@ -207,9 +207,9 @@ physical `.env` file is not required or loaded automatically.
 | `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning and relabelling flagged edges |
 | `APP_GRAPH_ACTION_MODEL` | Action prediction and v2 runtime decisions |
 
-The template's model selections were approved from OpenRouter's catalog on
-2026-10-12 based on documented capabilities; Android-task improvements have not
-been measured.
+The template's model selections were approved from OpenRouter's catalog based on
+documented capabilities, the chat models on 2026-10-12 and the embedding model on
+2026-10-21; Android-task improvements have not been measured.
 Check a replacement model's supported input modalities and parameters in the
 [chat catalog](https://openrouter.ai/api/v1/models) or
 [embedding catalog](https://openrouter.ai/api/v1/embeddings/models).
