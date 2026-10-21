@@ -983,7 +983,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
     assert caplog.messages == [f"adb {command} timed out after 30 s; retrying once"]
 
 
-@pytest.mark.parametrize("stalled", [_UI_DUMP, _SCREENCAP, _DUMPSYS_WINDOW])
+@pytest.mark.parametrize("stalled", [_SCREENCAP, _DUMPSYS_WINDOW])
 def test_get_state_raises_naming_the_command_when_a_read_times_out_twice(
     controller: device.AdbController, adb: _FakeAdb, stalled: tuple[str, ...]
 ) -> None:
@@ -996,6 +996,27 @@ def test_get_state_raises_naming_the_command_when_a_read_times_out_twice(
     assert (raised.value.cmd, raised.value.timeout) == (["adb", *stalled], 30)
     stopped = _STATE_READS.index(["adb", *stalled])
     assert adb.events == [*_STATE_READS[: stopped + 1], ["adb", *stalled]]
+
+
+def test_a_dump_that_times_out_twice_leaves_no_tree_with_the_reason_and_takes_the_screenshot(
+    controller: device.AdbController, adb: _FakeAdb, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The read has already run the dump a second time, so no third dump is tried, even
+    one that would reply, and without a first dump there is no pair to confirm."""
+    adb.replies[_UI_DUMP] = (0, _SCREEN.encode())
+    adb.replies[_SCREENCAP] = (0, _PNG)
+    adb.stalls[_UI_DUMP] = 2
+
+    with caplog.at_level(logging.WARNING, logger="test"):
+        state = controller.get_state()
+
+    assert _reads(adb) == ["dump", "dump", "screencap", "dumpsys"]
+    assert adb.timeouts == [30, 30, 30, 30]
+    assert (state["xml"], state["ui_tree_error"]) == (None, "adb timed out twice")
+    assert (state["ui_tree_retakes"], state["ui_tree_settled"]) == (0, False)
+    assert state["screenshot"] == base64.b64encode(_PNG).decode("ascii")
+    dump = "-s emulator-5554 exec-out 'uiautomator dump --windows /dev/stdout'"
+    assert caplog.messages == [f"adb {dump} timed out after 30 s; retrying once"]
 
 
 @pytest.mark.parametrize(

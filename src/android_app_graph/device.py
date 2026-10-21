@@ -171,6 +171,8 @@ _CLEAR_KEY_PRESSES = 20
 _MIN_API_LEVEL = 30
 _UI_DUMP = "uiautomator dump --windows /dev/stdout"
 _MAX_RETAKES = 2
+_DUMP_TIMED_OUT = "adb timed out twice"
+_DUMP_ERRORS_NOT_RETRIED = frozenset({IDLE_FAILURE, _DUMP_TIMED_OUT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,17 +281,22 @@ class AdbController:
 
     def _dump(self) -> _Dump:
         """Dump every window, and once more when the dump is unusable, except after an
-        idle failure: that dump has already waited ten seconds for a quiet second, and
-        one right after it fails the same way.
+        idle failure or a timeout.
+
+        An idle failure has already waited ten seconds for a quiet second, and a dump
+        right after it fails the same way; ``_read`` has already run a dump that timed
+        out once more.
         """
         dump = self._dump_once()
-        if dump.tree is None and dump.error != IDLE_FAILURE:
+        if dump.tree is None and dump.error not in _DUMP_ERRORS_NOT_RETRIED:
             dump = self._dump_once()
         return dump
 
     def _dump_once(self) -> _Dump:
         try:
             output = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", _UI_DUMP])
+        except subprocess.TimeoutExpired:
+            return _Dump(None, None, _DUMP_TIMED_OUT)
         except subprocess.CalledProcessError as exc:
             return _Dump(None, None, f"adb exited with status {exc.returncode}")
         try:
