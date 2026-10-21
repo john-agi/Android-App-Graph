@@ -106,12 +106,11 @@ extend-select = [
 # they need no `ignore` entry.
 
 [tool.ruff.lint.per-file-ignores]
-# Operator scripts and copy-in adapters are not packages, and printing is their user interface.
-"scripts/**" = ["T201", "T203", "INP001"]
-"aitk_files/**" = ["T201", "T203", "INP001"]
-"aw_files/**" = ["T201", "T203", "INP001"]
-# Tests are not a package. S101 is listed now so `assert` stays allowed if S is ever enabled.
-"tests/**" = ["INP001", "S101"]
+# Copy-in adapters are single files copied into other repositories, not packages.
+"aitk_files/**" = ["INP001"]
+"aw_files/**" = ["INP001"]
+# S101 is listed now so `assert` stays allowed if S is ever enabled.
+"tests/**" = ["S101"]
 # Vulture allowlist entries are intentionally bare attribute expressions.
 "vulture_allowlist.py" = ["B018"]
 
