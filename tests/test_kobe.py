@@ -169,11 +169,7 @@ def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
 ) -> None:
     built = Kobe(
         _Device(AssertionError("a finished exploration must not access the device")),
-        ExplorerConfig(
-            app_name="demo",
-            package_name="com.demo",
-            graph_dir=tmp_path,
-        ),
+        ExplorerConfig(app_name="demo", package_name="com.demo", graph_dir=tmp_path),
         client=router_client,
         logger=logging.getLogger("test"),
     )
