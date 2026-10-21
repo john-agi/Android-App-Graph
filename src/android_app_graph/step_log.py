@@ -127,6 +127,25 @@ def read_observation_record(steps: Path, observation_id: str) -> dict[str, objec
     return as_object_dict(json.loads(text))
 
 
+def read_observation_tree(steps: Path, observation_id: str) -> UiTree | None:
+    """Return the accessibility tree of observation ``observation_id`` in the step log
+    ``steps``, or ``None`` when its record says why it has none.
+
+    A tree missing without a recorded reason raises ``FileNotFoundError``: every
+    observation has one or the other, so a missing one means the step log was changed
+    by hand.
+    """
+    path = observation_tree_path(steps, observation_id)
+    try:
+        document = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        record = read_observation_record(steps, observation_id) or {}
+        if as_str(record.get("ui_tree_error"), ""):
+            return None
+        raise
+    return parse_tree(document)
+
+
 def annotate_observation(steps: Path, observation_id: str, fields: Mapping[str, object]) -> None:
     """Add ``fields`` to the record of observation ``observation_id`` in the step log
     ``steps``, replacing the record atomically.

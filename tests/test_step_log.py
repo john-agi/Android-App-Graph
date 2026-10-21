@@ -24,6 +24,7 @@ from android_app_graph.step_log import (
     annotate_observation,
     load_image_embeddings,
     read_observation_record,
+    read_observation_tree,
     save_image_embeddings,
 )
 from android_app_graph.ui_tree import IDLE_FAILURE, UiTree, parse_tree, xml_document
@@ -483,6 +484,29 @@ def test_annotating_an_observation_without_a_record_raises(steps: Path) -> None:
     with pytest.raises(FileNotFoundError):
         annotate_observation(steps, "000000", {"identify": {}})
     assert read_observation_record(steps, "000000") is None
+
+
+def test_a_recorded_tree_reads_back_as_the_capture_s_tree(device: _Device, steps: Path) -> None:
+    state = _recorder(device, steps).get_state()
+
+    assert read_observation_tree(steps, "000000") == state["ui_tree"] == parse_tree(DOCUMENT)
+
+
+def test_an_observation_recorded_without_a_tree_reads_back_none(steps: Path) -> None:
+    _recorder(_Device(_png((40, 30), "white"), capture={}), steps).get_state()
+
+    assert read_observation_tree(steps, "000000") is None
+
+
+def test_a_tree_missing_without_a_recorded_reason_raises(device: _Device, steps: Path) -> None:
+    """Every observation has its tree or the reason it has none."""
+    _recorder(device, steps).get_state()
+    (steps / "000000.xml").unlink()
+
+    with pytest.raises(FileNotFoundError):
+        read_observation_tree(steps, "000000")
+    with pytest.raises(FileNotFoundError):
+        read_observation_tree(steps, "000001")
 
 
 MODEL = "voyageai/voyage-multimodal-3.5"
