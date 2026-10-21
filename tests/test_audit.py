@@ -1092,6 +1092,135 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     assert device_log == [*restart, _DETAIL_TAP, *restart, *restart, _GEAR_TAP]
 
 
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _graph_with_nodes(
+        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
+    )
+    graph.graph.add_edge("s0_home", "s1_detail")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s1_detail")
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
+    )
+
+    assert result == {
+        "issue": issue,
+        "status": "explored",
+        "navigated_to": "s1_detail",
+        "steps": [],
+    }
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_takes_no_step_from_a_screen_the_graph_has_no_node_for(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s9_unknown")
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph,
+        [issue],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=1,
+    )
+
+    assert result == {
+        "issue": issue,
+        "status": "explored",
+        "navigated_to": "s9_unknown",
+        "steps": [],
+    }
+    replay = {"action": "tap", "coordinate": [10, 20]}
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, replay]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_spends_a_step_on_an_action_model_wait_without_recording_it(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
+    predictions: list[dict[str, object]] = []
+
+    def wait(**kwargs: object) -> tuple[dict[str, str], str]:
+        predictions.append(kwargs)
+        return {"action": "wait"}, ""
+
+    monkeypatch.setattr(audit, "predict_next_action", wait)
+    before = _edges(graph)
+    issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph,
+        [issue],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=2,
+    )
+
+    assert result == {"issue": issue, "status": "explored", "navigated_to": "s0_home", "steps": []}
+    assert len(predictions) == 2
+    assert _edges(graph) == before
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_presses_back_once_and_records_nothing_when_a_step_leaves_the_app(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+    before = _edges(graph)
+    issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph,
+        [issue],
+        _ReplayController(device_log, "com.browser"),
+        client,
+        tmp_path,
+        steps_per_issue=1,
+    )
+
+    assert result == {"issue": issue, "status": "explored", "navigated_to": "s0_home", "steps": []}
+    assert _edges(graph) == before
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, tap, _BACK]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_skips_a_missing_node_and_ignores_an_issue_of_another_type(
+    client: OpenRouter, tmp_path: Path, device_log: list[object]
+) -> None:
+    graph, _graph_path = _two_node_graph(tmp_path)
+    missing = {"type": "explore_node", "node": "s9_missing", "expected_pages": ["Settings"]}
+
+    results = _re_explore(
+        graph,
+        [missing, {"type": "something_else", "node": "s0_home"}],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=1,
+    )
+
+    assert results == [{"issue": missing, "status": "skipped", "reason": "node not found"}]
+    assert device_log == []
+
+
 def _install_fake_adb(monkeypatch: pytest.MonkeyPatch, controller: DeviceController) -> None:
     adb_module = ModuleType("aitk.utils.adb_controller")
     monkeypatch.setattr(
@@ -1245,6 +1374,50 @@ def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
     audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
     assert audited["package_name"] == "com.demo"
     assert [node["package"] for node in audited["nodes"]] == ["com.demo"]
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_skips_a_configured_app_without_a_graph_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = _write_config(tmp_path, str(tmp_path / "graphs"))
+
+    assert audit.main(["-c", str(config)]) == 0
+
+    assert list(tmp_path.rglob("*")) == [config]
+
+
+@pytest.mark.parametrize("status", ["merged", "kept_separate"])
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
+    status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    app_dir = graph_dir / "demo"
+    app_dir.mkdir(parents=True)
+    (app_dir / "demo.json").write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
+    config = _write_config(tmp_path, str(graph_dir))
+    issue = _merge_issue()
+    merge_results = [{"issue": issue, "status": status}]
+    verified: list[list[dict[str, Any]]] = []
+
+    def verify(
+        _graph: GraphManager, merge_issues: list[dict[str, Any]], *_args: object
+    ) -> list[dict[str, Any]]:
+        verified.append(merge_issues)
+        return merge_results
+
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": [issue]})
+    monkeypatch.setattr(audit, "verify_and_merge_nodes", verify)
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+
+    assert audit.main(["-c", str(config)]) == 0
+
+    assert verified == [[issue]]
+    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == merge_results
+    assert (app_dir / "demo_audited.json").exists() == (status == "merged")
 
 
 def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
