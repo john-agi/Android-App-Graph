@@ -36,7 +36,7 @@ def check_avd(avd_manager: AvdManager, config: dict[str, Any], logger: logging.L
         dup_name,
         "-no-snapshot",
     ]
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603  # argv list without a shell; the AVD name comes from the operator's config
     logger.info("Waiting for AVD '%s' to start and load...", dup_name)
     time.sleep(60)
 

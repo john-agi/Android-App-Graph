@@ -71,7 +71,7 @@ def run_adb(
     check: bool,
 ) -> subprocess.CompletedProcess[str]:
     """Run the adb on ``PATH`` with ``args``, decoding captured output as text."""
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603  # argv list without a shell; adb arguments come from this package's config and constants
         [adb_executable(), *args],
         capture_output=capture_output,
         stdout=stdout,

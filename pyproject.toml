@@ -98,6 +98,7 @@ extend-select = [
     "PGH003",
     "PGH004",
     "INP001",
+    "S",
 ]
 # FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
 # they need no `ignore` entry.
@@ -107,7 +108,7 @@ extend-select = [
 "scripts/**" = ["T201", "T203", "INP001"]
 "aitk_files/**" = ["T201", "T203", "INP001"]
 "aw_files/**" = ["T201", "T203", "INP001"]
-# Tests are not a package. S101 is listed now so `assert` stays allowed if S is ever enabled.
+# Tests are not a package, and pytest checks their results with plain `assert`.
 "tests/**" = ["INP001", "S101"]
 # Vulture allowlist entries are intentionally bare attribute expressions.
 "vulture_allowlist.py" = ["B018"]

@@ -99,7 +99,7 @@ def test_a_missing_or_empty_openrouter_key_is_actionable(
 def test_removed_endpoint_and_credential_keys_are_rejected_in_every_role_block(
     role: str, key: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    secret = "dummy-secret-never-log"
+    secret = "dummy-secret-never-log"  # noqa: S105  # fake credential; the test proves it is never logged
     monkeypatch.setenv("APP_GRAPH_ACTION_MODEL", "qwen/qwen3.8-flash")
     monkeypatch.setenv("GEMINI_API_KEY", secret)
     with pytest.raises(ValueError, match=rf"{role}\.{key} was removed") as caught:
