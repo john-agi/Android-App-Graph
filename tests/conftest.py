@@ -46,7 +46,7 @@ def _clear_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name)
 
 
-def _deny_network(*_args: Any, **_kwargs: Any) -> NoReturn:
+def _deny_network(*_args: object, **_kwargs: object) -> NoReturn:
     msg = "network access is disabled in the test suite"
     raise RuntimeError(msg)
 

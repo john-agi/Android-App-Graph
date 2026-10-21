@@ -101,10 +101,10 @@ def add_screen(
     node_id: str,
     description: str,
     activity: str = HOME,
-    **overrides: Any,
+    **overrides: object,
 ) -> None:
     """Insert a node with the attribute set identify_state would create."""
-    attrs: dict[str, Any] = {
+    attrs: dict[str, object] = {
         "package": PACKAGE,
         "activity": activity,
         "activities": [activity],
@@ -2716,7 +2716,7 @@ operations = st.lists(
 
 
 def fake_get_embedding(
-    _client: OpenRouter | None, text: str, *_args: Any, **_kwargs: Any
+    _client: OpenRouter | None, text: str, *_args: object, **_kwargs: object
 ) -> list[float]:
     """Module-level fake for property tests; the model and timeout arrive through the rest."""
     return EMBEDDINGS.get(text, UNKNOWN_EMBEDDING)

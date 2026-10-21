@@ -233,7 +233,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         edge_specs.append((source, target, edge_attrs))
 
     package_name = as_str(data.get("package_name"), "")
-    G = nx.DiGraph(package_name=package_name)
+    graph = nx.DiGraph(package_name=package_name)
     for node_data in data.get("nodes", []):
         node_id = node_data["id"]
         # A path, not the screenshot itself: reading and base64-encoding every
@@ -245,7 +245,7 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         screenshot_path = reference_screenshot_path(path, node_id)
         # `.get(key, default)` keeps a present-but-null value, so every field a reader
         # iterates or indexes is narrowed here once rather than at each read site.
-        G.add_node(
+        graph.add_node(
             node_id,
             package=saved_node_package(node_data, package_name),
             activity=as_str(node_data.get("activity"), ""),
@@ -257,13 +257,13 @@ def _load_graph_from_json(path: Path) -> nx.DiGraph:
         )
 
     for source, target, edge_attrs in edge_specs:
-        G.add_edge(source, target, **edge_attrs)
+        graph.add_edge(source, target, **edge_attrs)
 
-    return G
+    return graph
 
 
-def _graph_package(G: nx.DiGraph) -> str:
-    return as_str(G.graph.get("package_name"), "")
+def _graph_package(graph: nx.DiGraph) -> str:
+    return as_str(graph.graph.get("package_name"), "")
 
 
 type _ParsedGraph = tuple[str, Path, nx.DiGraph]
@@ -279,13 +279,13 @@ def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
     for app_name, graph_file in iter_graph_files(graph_dir):
         logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
         try:
-            G = _load_graph_from_json(graph_file)
+            graph = _load_graph_from_json(graph_file)
         except Exception:
             logger.exception("Failed to load graph %s", graph_file)
             continue
-        package = _graph_package(G)
+        package = _graph_package(graph)
         if package:
-            parsed.setdefault(package, []).append((app_name, graph_file, G))
+            parsed.setdefault(package, []).append((app_name, graph_file, graph))
         else:
             logger.error("[GRAPH] Not loading %s: it has no package_name", graph_file)
     unique: dict[str, _ParsedGraph] = {}
@@ -654,7 +654,7 @@ class UIKobeV2Translator(BaseTranslator):
 
     def _compute_missing_image_embeddings(
         self,
-        G: nx.DiGraph,
+        graph: nx.DiGraph,
         app_name: str,
         graph_file: Path,
         embeddings: dict[str, list[float]],
@@ -663,14 +663,14 @@ class UIKobeV2Translator(BaseTranslator):
 
         ``embeddings`` is the sidecar as already loaded and pruned to this graph's
         nodes by the caller, which has already copied every entry it holds onto
-        ``G``; ``compute_missing_image_embeddings`` adds each newly computed
+        ``graph``; ``compute_missing_image_embeddings`` adds each newly computed
         vector to it in place and persists it (once, not per node -- see its own
         docstring), and only those newly computed vectors are copied back onto
-        ``G`` here -- the caller's entries are on ``G`` already.
+        ``graph`` here -- the caller's entries are on ``graph`` already.
         """
         pending = [
             (node_id, data["reference_screenshot_path"])
-            for node_id, data in G.nodes(data=True)
+            for node_id, data in graph.nodes(data=True)
             if data.get("reference_screenshot_path") and not data.get("image_embedding")
         ]
         if not pending:
@@ -689,36 +689,38 @@ class UIKobeV2Translator(BaseTranslator):
         )
         for node_id, _screenshot_path in pending:
             if node_id in embeddings:
-                G.nodes[node_id]["image_embedding"] = embeddings[node_id]
+                graph.nodes[node_id]["image_embedding"] = embeddings[node_id]
 
     def _load_all_graphs(self) -> None:
         if not self.graph_dir.exists():
             logger.warning("Graph dir %s does not exist", self.graph_dir)
             return
         logger.info("[GRAPH] Loading runtime graphs from %s", self.graph_dir)
-        for package, (app_name, graph_file, G) in _parse_graphs_by_package(self.graph_dir).items():
+        for package, (app_name, graph_file, graph) in _parse_graphs_by_package(
+            self.graph_dir
+        ).items():
             try:
                 embeddings = load_image_embeddings(
-                    graph_file, model=self.image_embedding.model, node_ids=set(G.nodes)
+                    graph_file, model=self.image_embedding.model, node_ids=set(graph.nodes)
                 )
                 for node_id, emb in embeddings.items():
-                    G.nodes[node_id]["image_embedding"] = emb
+                    graph.nodes[node_id]["image_embedding"] = emb
                 ref_count = sum(
-                    1 for _, data in G.nodes(data=True) if data.get("reference_screenshot_path")
+                    1 for _, data in graph.nodes(data=True) if data.get("reference_screenshot_path")
                 )
                 cached_count = sum(
-                    1 for _, data in G.nodes(data=True) if data.get("image_embedding")
+                    1 for _, data in graph.nodes(data=True) if data.get("image_embedding")
                 )
                 logger.info(
                     "[GRAPH] %s: nodes=%d edges=%d reference_screenshots=%d cached_image_embeddings=%d",
                     app_name,
-                    G.number_of_nodes(),
-                    G.number_of_edges(),
+                    graph.number_of_nodes(),
+                    graph.number_of_edges(),
                     ref_count,
                     cached_count,
                 )
-                self._compute_missing_image_embeddings(G, app_name, graph_file, embeddings)
-                self._graphs[app_name] = G
+                self._compute_missing_image_embeddings(graph, app_name, graph_file, embeddings)
+                self._graphs[app_name] = graph
                 self._app_by_package[package] = app_name
                 logger.info("[GRAPH] %s loaded: package=%s", app_name, package)
             except Exception:
@@ -789,8 +791,8 @@ class UIKobeV2Translator(BaseTranslator):
         No page description is generated: the paper's runtime identifies nodes by
         screenshot, and upstream UI-KOBE's describe call here never fed a decision.
         """
-        G = self._current_graph
-        if G is None:
+        graph = self._current_graph
+        if graph is None:
             logger.warning("[IDENTIFY] No current graph is loaded")
             return None
 
@@ -799,11 +801,11 @@ class UIKobeV2Translator(BaseTranslator):
             activity,
             package,
             self._app_name or "(unknown)",
-            _graph_package(G),
+            _graph_package(graph),
         )
 
         same_pkg_node_count = sum(
-            1 for _, data in G.nodes(data=True) if data.get("package") == package
+            1 for _, data in graph.nodes(data=True) if data.get("package") == package
         )
         logger.info("[IDENTIFY] same-package graph nodes=%d", same_pkg_node_count)
 
@@ -824,7 +826,7 @@ class UIKobeV2Translator(BaseTranslator):
         # Stored already narrowed; re-narrowing it per step doubled this loop's cost.
         same_pkg_image_candidates = (
             (str(node_id), data.get("image_embedding"))
-            for node_id, data in G.nodes(data=True)
+            for node_id, data in graph.nodes(data=True)
             if data.get("package") == package
         )
         scored = score_by_cosine(
@@ -834,7 +836,8 @@ class UIKobeV2Translator(BaseTranslator):
             remedy="; the sidecar was hand-edited or is stale, rerun app-graph-embed --recompute",
         )
         candidates: list[tuple[str, float, str]] = [
-            (node_id, sim, G.nodes[node_id].get("page_description", "")) for node_id, sim in scored
+            (node_id, sim, graph.nodes[node_id].get("page_description", ""))
+            for node_id, sim in scored
         ]
         candidates.sort(key=lambda x: x[1], reverse=True)
 
@@ -951,11 +954,13 @@ class UIKobeV2Translator(BaseTranslator):
                     merged.setdefault(key, change)
         return self._format_schema_delta(merged)
 
-    def _build_self_loop_candidates(self, G: nx.DiGraph, node_id: str) -> list[tuple[_Option, str]]:
+    def _build_self_loop_candidates(
+        self, graph: nx.DiGraph, node_id: str
+    ) -> list[tuple[_Option, str]]:
         """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
-        if not G.has_edge(node_id, node_id):
+        if not graph.has_edge(node_id, node_id):
             return []
-        edge_data = G[node_id][node_id]
+        edge_data = graph[node_id][node_id]
         templates = edge_data.get("instruction_templates", [])
         observations = edge_data.get("target_observations", [])
         candidates: list[tuple[_Option, str]] = []
@@ -996,15 +1001,15 @@ class UIKobeV2Translator(BaseTranslator):
         return candidates
 
     def _build_neighbor_candidates(
-        self, G: nx.DiGraph, node_id: str
+        self, graph: nx.DiGraph, node_id: str
     ) -> list[tuple[int, _Option, str]]:
         """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
         candidates: list[tuple[int, _Option, str]] = []
-        for _, raw_neighbor, edge_data in G.out_edges(node_id, data=True):
+        for _, raw_neighbor, edge_data in graph.out_edges(node_id, data=True):
             neighbor = str(raw_neighbor)
             if neighbor == node_id:
                 continue
-            neighbor_desc = G.nodes[neighbor].get("page_description", neighbor)
+            neighbor_desc = graph.nodes[neighbor].get("page_description", neighbor)
             templates = edge_data.get("instruction_templates", [])
             observations = edge_data.get("target_observations", [])
 
@@ -1035,7 +1040,7 @@ class UIKobeV2Translator(BaseTranslator):
             candidates.append((visit_count, option, line))
         return candidates
 
-    def _build_options(self, G: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
+    def _build_options(self, graph: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
         """Build the option list for the DECIDE prompt.
 
         A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
@@ -1050,8 +1055,8 @@ class UIKobeV2Translator(BaseTranslator):
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         max_middle_options = len(letters) - 2  # reserve DONE and FREE
 
-        self_loop_candidates = self._build_self_loop_candidates(G, node_id)
-        neighbor_candidates = self._build_neighbor_candidates(G, node_id)
+        self_loop_candidates = self._build_self_loop_candidates(graph, node_id)
+        neighbor_candidates = self._build_neighbor_candidates(graph, node_id)
 
         kept_self_loop = self_loop_candidates
         kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
@@ -1103,26 +1108,26 @@ class UIKobeV2Translator(BaseTranslator):
 
         return "\n".join(lines), options
 
-    def _decide(self, G: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
+    def _decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
         """Ask the model to pick the next action.
 
         Returns the chosen option's type together with its resolved
         instruction (the model's own instruction, falling back to the
         option's graph-built one, then to the task text).
         """
-        current_desc = G.nodes[node_id].get("page_description", "")
+        current_desc = graph.nodes[node_id].get("page_description", "")
         today = datetime.now()
 
         # Show state keys (from schema) so the model knows what parameters this screen has.
         # Values are omitted — the model can read them from the screenshot directly.
-        state_schema = G.nodes[node_id].get("state_schema", {})
+        state_schema = graph.nodes[node_id].get("state_schema", {})
         if state_schema:
             keys_str = ", ".join(state_schema.keys())
             state_context = f"State parameters: [{keys_str}]\n"
         else:
             state_context = ""
 
-        options_text, options_list = self._build_options(G, node_id)
+        options_text, options_list = self._build_options(graph, node_id)
 
         prompt = DECIDE_PROMPT.format(
             task=task,
@@ -1251,7 +1256,7 @@ class UIKobeV2Translator(BaseTranslator):
             logger.warning("[OPEN] Could not resolve app from task: %s", task)
 
         self._select_graph(package)
-        G = self._current_graph
+        graph = self._current_graph
 
         self._step_count += 1
         logger.info(_SEP_THICK)
@@ -1265,12 +1270,12 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[RECORD] Memory: %s", self._memory.format())
 
         decision: _Decision
-        if node_id is not None and G is not None:
-            decision = self._decide(G, task, node_id, screenshot)
+        if node_id is not None and graph is not None:
+            decision = self._decide(graph, task, node_id, screenshot)
         else:
             reason = (
                 "no graph is loaded"
-                if G is None
+                if graph is None
                 else "the current screen did not match any graph node"
             )
             logger.warning("[DECIDE] Falling back to free action: %s", reason)
