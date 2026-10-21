@@ -689,14 +689,14 @@ def test_load_all_graphs_skips_a_graph_with_an_edge_to_an_undefined_node(tmp_pat
     )
     _write_graph(tmp_path, app="demo", nodes=_DEMO_NODES, edges=_DEMO_EDGES)
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
-    assert set(built._graphs) == {"demo"}
+    assert set(built.graphs) == {"demo"}
 
 
 def test_load_all_graphs_tolerates_a_corrupt_embedding_sidecar(graph_dir: Path) -> None:
     """A corrupt cache file must not take down the whole app graph it caches for."""
     (graph_dir / "demo" / "demo.image_emb.json").write_text("{not json", encoding="utf-8")
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
-    assert set(built._graphs) == {"demo"}
+    assert set(built.graphs) == {"demo"}
 
 
 def test_memory_starts_empty() -> None:
@@ -848,10 +848,14 @@ def translator(graph_dir: Path) -> aitk_translator.UIKobeV2Translator:
     return aitk_translator.register({"graph_dir": str(graph_dir), "vlm_config": _VLM_CONFIG})
 
 
+def _package_names(translator: aitk_translator.UIKobeV2Translator) -> dict[str, str]:
+    return {app: graph.graph["package_name"] for app, graph in translator.graphs.items()}
+
+
 def test_register_loads_every_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
     assert isinstance(translator, aitk_translator.UIKobeV2Translator)
-    assert set(translator._graphs) == {"demo"}
-    assert translator._app_by_package == {"com.demo.app": "demo"}
+    assert set(translator.graphs) == {"demo"}
+    assert _package_names(translator) == {"demo": "com.demo.app"}
     assert translator.action.model == "action-model"
     assert translator.image_embedding.model == "img-model"
     assert not hasattr(translator, "page_detail")
@@ -868,7 +872,7 @@ def test_load_all_graphs_tolerates_a_missing_graph_dir(tmp_path: Path) -> None:
     built = aitk_translator.UIKobeV2Translator(
         graph_dir=str(tmp_path / "absent"), vlm_config=_VLM_CONFIG
     )
-    assert built._graphs == {}
+    assert built.graphs == {}
 
 
 def test_load_all_graphs_skips_a_broken_graph(tmp_path: Path) -> None:
@@ -876,7 +880,7 @@ def test_load_all_graphs_skips_a_broken_graph(tmp_path: Path) -> None:
     app_dir.mkdir()
     (app_dir / "broken.json").write_text("{not json", encoding="utf-8")
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
-    assert built._graphs == {}
+    assert built.graphs == {}
 
 
 @pytest.mark.parametrize("package_name", [None, ""])
@@ -894,8 +898,8 @@ def test_load_all_graphs_skips_a_graph_without_a_package_name_and_names_the_file
     with caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name):
         built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert set(built._graphs) == {"demo"}
-    assert built._app_by_package == {"com.demo.app": "demo"}
+    assert set(built.graphs) == {"demo"}
+    assert _package_names(built) == {"demo": "com.demo.app"}
     (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert str(unnamed) in error.getMessage()
     assert "package_name" in error.getMessage()
@@ -911,8 +915,8 @@ def test_load_all_graphs_loads_neither_graph_that_shares_a_package_name(
     with caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name):
         built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert set(built._graphs) == {"other"}
-    assert built._app_by_package == {"com.other.app": "other"}
+    assert set(built.graphs) == {"other"}
+    assert _package_names(built) == {"other": "com.other.app"}
     (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert str(first) in error.getMessage()
     assert str(second) in error.getMessage()
@@ -939,8 +943,8 @@ def test_load_all_graphs_skips_a_graph_whose_embeddings_fail_and_keeps_the_other
     with caplog.at_level(logging.ERROR, logger=aitk_translator.logger.name):
         built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert built._app_by_package == {"com.demo.app": "demo"}
-    assert set(built._graphs) == {"demo"}
+    assert _package_names(built) == {"demo": "com.demo.app"}
+    assert set(built.graphs) == {"demo"}
     assert f"Failed to load graph {failing}" in caplog.messages
 
 
@@ -960,7 +964,7 @@ def test_load_all_graphs_embeds_no_screenshot_of_a_graph_it_does_not_load(
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert built._graphs == {}
+    assert built.graphs == {}
 
 
 def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
@@ -970,8 +974,8 @@ def test_load_all_graphs_reads_the_embedding_sidecar(graph_dir: Path) -> None:
         encoding="utf-8",
     )
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(graph_dir), vlm_config=_VLM_CONFIG)
-    assert built._graphs["demo"].nodes["home"]["image_embedding"] == [1.0, 0.0]
-    assert "gone" not in built._graphs["demo"]
+    assert built.graphs["demo"].nodes["home"]["image_embedding"] == [1.0, 0.0]
+    assert "gone" not in built.graphs["demo"]
 
 
 def test_load_all_graphs_opens_no_screenshot_when_the_sidecar_covers_every_node(
@@ -1004,7 +1008,7 @@ def test_load_all_graphs_opens_no_screenshot_when_the_sidecar_covers_every_node(
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert set(built._graphs) == {"demo"}
+    assert set(built.graphs) == {"demo"}
     assert calls == 0
 
 
@@ -1096,8 +1100,8 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert set(built._graphs) == {"demo"}
-    graph = built._graphs["demo"]
+    assert set(built.graphs) == {"demo"}
+    graph = built.graphs["demo"]
     assert graph.nodes["n4"]["image_embedding"] == [9.0, 9.0]  # from the sidecar, never recomputed
     assert graph.nodes["n1"]["image_embedding"] == [1.0, 0.0]  # freshly computed
     assert graph.nodes["n3"]["image_embedding"] == [1.0, 0.0]  # freshly computed
@@ -1178,8 +1182,8 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
     with caplog.at_level("ERROR"):
         built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert set(built._graphs) == {"demo"}
-    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [1.0, 0.0]
+    assert set(built.graphs) == {"demo"}
+    assert built.graphs["demo"].nodes["n1"]["image_embedding"] == [1.0, 0.0]
     assert "demo" in caplog.text
 
 
@@ -1528,7 +1532,7 @@ def test_record_info_stores_what_the_model_read_as_written(
 ) -> None:
     completions = use_model(translator, '{"information": "The search field shows \\"milk\\""}')
     translator.record_info("buy milk", "screenshot")
-    assert translator._memory.info == ['The search field shows "milk"']
+    assert translator.memory.info == ['The search field shows "milk"']
     assert _NO_INFORMATION in completions.prompt_text()
 
 
@@ -1539,7 +1543,7 @@ def test_record_info_stores_a_fact_that_starts_with_the_word_nothing(
     task like "Do I have anything on Friday?"."""
     use_model(translator, '{"information": "Nothing is scheduled on Friday"}')
     translator.record_info("Do I have anything on Friday?", "screenshot")
-    assert translator._memory.info == ["Nothing is scheduled on Friday"]
+    assert translator.memory.info == ["Nothing is scheduled on Friday"]
 
 
 def test_record_info_stores_no_information_in_a_single_call(
@@ -1547,7 +1551,7 @@ def test_record_info_stores_no_information_in_a_single_call(
 ) -> None:
     completions = use_model(translator, _NO_INFORMATION, '{"information": "unread"}')
     translator.record_info("buy shoes", "screenshot")
-    assert translator._memory.info == []
+    assert translator.memory.info == []
     assert len(completions.calls) == 1
 
 
@@ -1555,12 +1559,14 @@ def test_record_info_stores_no_information_in_a_single_call(
 def test_record_info_raises_on_an_unreadable_reply_without_asking_again(
     raw: str, use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    translator._memory.add_info("The total is 9 EUR")
-    completions = use_model(translator, raw, '{"information": "unread"}')
+    completions = use_model(
+        translator, '{"information": "The total is 9 EUR"}', raw, '{"information": "unread"}'
+    )
+    translator.record_info("buy shoes", "screenshot")
     with pytest.raises(aitk_translator.RecordReplyError, match=r"^\[RECORD\] "):
         translator.record_info("buy shoes", "screenshot")
-    assert translator._memory.info == ["The total is 9 EUR"]
-    assert len(completions.calls) == 1
+    assert translator.memory.info == ["The total is 9 EUR"]
+    assert len(completions.calls) == 2
 
 
 def test_record_info_raises_on_a_reply_cut_off_at_its_token_limit(
@@ -1578,7 +1584,7 @@ def test_record_info_raises_on_a_reply_cut_off_at_its_token_limit(
         aitk_translator.RecordReplyError, match=r"^\[RECORD\] the reply hit its token limit$"
     ):
         translator.record_info("buy shoes", "screenshot")
-    assert translator._memory.info == []
+    assert translator.memory.info == []
     assert len(router_requests) == 1
 
 
@@ -1659,7 +1665,7 @@ def test_decide_returns_the_chosen_option(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, '{"choice": "c", "instruction": "tap the shoes result"}')
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
 
     assert decision["type"] == "neighbor"
     assert decision["instruction"] == "tap the shoes result"
@@ -1670,7 +1676,7 @@ def test_decide_keeps_the_graph_instruction_when_the_model_omits_one(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, '{"choice": "C"}')
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["instruction"] == "tap the first result"
 
 
@@ -1680,7 +1686,7 @@ def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
     """DONE's instruction is never read by _step, so falling back to the whole task
     here is harmless; the type-specific fallback still applies to it."""
     use_model(translator, '{"choice": "A"}')
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "done", "instruction": "buy shoes"}
 
 
@@ -1695,7 +1701,7 @@ def test_decide_leaves_a_free_pick_without_an_instruction_empty(
     the task text instead.
     """
     use_model(translator, '{"choice": "D"}')
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": ""}
 
 
@@ -1703,7 +1709,7 @@ def test_decide_uses_the_models_instruction_for_a_free_pick(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": "Tap the cart icon"}
 
 
@@ -1711,7 +1717,7 @@ def test_decide_reports_an_unparseable_reply(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, "no json", "still no json")
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {
         "type": "free",
         "instruction": "",
@@ -1727,7 +1733,7 @@ def test_decide_treats_an_empty_json_object_as_parsed_not_failed(
     unusable) parse, so it must reach the "unrecognized choice" path and not be
     retried as a parse failure."""
     completions = use_model(translator, "{}")
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["reason"] == "DECIDE returned unrecognized choice ''"
     assert len(completions.calls) == 1
@@ -1737,7 +1743,7 @@ def test_decide_reports_an_unknown_choice(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, '{"choice": "Z", "instruction": "tap something"}')
-    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["instruction"] == "tap something"
     assert decision["reason"] == "DECIDE returned unrecognized choice 'Z'"
@@ -1747,7 +1753,7 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, '{"choice": "A"}')
-    translator.decide(translator._graphs["demo"], "buy shoes", "results", "screenshot")
+    translator.decide(translator.graphs["demo"], "buy shoes", "results", "screenshot")
     assert "State parameters" not in completions.prompt_text()
 
 
@@ -1793,7 +1799,7 @@ def _identifiable_translator(
         tmp_path, app="demo", nodes=nodes, edges=_DEMO_EDGES, image_embeddings=image_embeddings
     )
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    translator._current_graph = translator._graphs["demo"]
+    translator._current_graph = translator.graphs["demo"]
     translator._app_name = "demo"
     return translator
 
@@ -1981,7 +1987,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     )
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    graph = translator._graphs["demo"]
+    graph = translator.graphs["demo"]
     translator._current_graph = graph
     translator._app_name = "demo"
 
@@ -2173,9 +2179,9 @@ def test_to_agent_runs_the_loop(
         assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
         assert response["message"] == "[Android-App-Graph] Action: tapped the result | on home"
         assert stepping._step_count == turn
-    assert stepping._memory.actions == ["tap the shoes result"] * 2
-    assert stepping._memory.info == ["The total is 9 EUR"] * 2
-    assert stepping._memory.observations == ["tapped the result"] * 2
+    assert stepping.memory.actions == ["tap the shoes result"] * 2
+    assert stepping.memory.info == ["The total is 9 EUR"] * 2
+    assert stepping.memory.observations == ["tapped the result"] * 2
 
 
 def test_to_agent_stops_the_run_on_an_unreadable_record_reply(
@@ -2188,7 +2194,7 @@ def test_to_agent_stops_the_run_on_an_unreadable_record_reply(
     with pytest.raises(aitk_translator.RecordReplyError):
         stepping.to_agent("buy shoes", state, history)
     assert len(completions.calls) == 2
-    assert stepping._memory.actions == []
+    assert stepping.memory.actions == []
 
 
 def test_step_ends_the_task_on_a_done_decision(
@@ -2229,7 +2235,7 @@ def test_step_plans_a_free_action_when_no_node_matches(
     state, history = _step_payload()
 
     json.loads(stepping._step("buy shoes", state, history))
-    assert stepping._memory.actions == ["Tap the cart icon"]
+    assert stepping.memory.actions == ["Tap the cart icon"]
 
 
 def test_step_replans_when_decide_produces_no_instruction(
@@ -2249,7 +2255,7 @@ def test_step_replans_when_decide_produces_no_instruction(
     state, history = _step_payload()
 
     json.loads(stepping._step("buy shoes", state, history))
-    assert stepping._memory.actions == ["Tap the search bar"]
+    assert stepping.memory.actions == ["Tap the search bar"]
 
 
 def test_step_replans_when_a_free_pick_has_no_instruction(
@@ -2271,7 +2277,7 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
     state, history = _step_payload()
 
     json.loads(stepping._step("buy shoes", state, history))
-    assert stepping._memory.actions == ["Tap the search bar"]
+    assert stepping.memory.actions == ["Tap the search bar"]
 
 
 def test_step_resolves_the_graph_from_the_package(
@@ -2298,7 +2304,7 @@ def test_step_uses_no_graph_while_no_graph_matches_the_foreground_package(
     stepping._step("Open demo", {**state, "package": "com.launcher"}, history)
 
     assert stepping._current_graph is None
-    assert stepping._memory.actions == ["Tap the Demo icon"]
+    assert stepping.memory.actions == ["Tap the Demo icon"]
 
 
 _SHOP_NODES: list[dict[str, Any]] = [
@@ -2344,15 +2350,15 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
         {"screenshot": "shot", "activity": "com.demo.app/.HomeActivity", "package": "com.demo.app"},
         history,
     )
-    assert two_apps._current_graph is two_apps._graphs["demo"]
+    assert two_apps._current_graph is two_apps.graphs["demo"]
 
     two_apps._step(
         "buy shoes in shop",
         {"screenshot": "shot", "activity": "com.shop.app/.CartActivity", "package": "com.shop.app"},
         history,
     )
-    assert two_apps._current_graph is two_apps._graphs["shop"]
-    assert two_apps._memory.actions == ["Open the shop app", "Tap checkout"]
+    assert two_apps._current_graph is two_apps.graphs["shop"]
+    assert two_apps.memory.actions == ["Open the shop app", "Tap checkout"]
 
 
 def _stepping_over_one_graph(
@@ -2557,7 +2563,7 @@ def test_load_all_graphs_writes_back_a_sidecar_without_a_node_that_left_the_grap
 
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
-    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [1.0, 0.0]
+    assert built.graphs["demo"].nodes["n1"]["image_embedding"] == [1.0, 0.0]
     assert json.loads(embedding_cache.image_embeddings_path(path).read_text(encoding="utf-8")) == {
         "model": model,
         "embeddings": {"n1": [1.0, 0.0]},
@@ -2584,7 +2590,7 @@ def test_v2_recomputes_a_cache_tagged_with_another_model_and_embeds_runtime_scre
     )
     router_responses.extend(httpx.Response(200, json=embedding_body) for _ in range(2))
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    assert built._graphs["demo"].nodes["n1"]["image_embedding"] == [0.25, 0.75]
+    assert built.graphs["demo"].nodes["n1"]["image_embedding"] == [0.25, 0.75]
     assert json.loads(sidecar.read_text())["model"] == "google/gemini-embedding-2"
     assert built._compute_runtime_image_embedding_with_retry("live-shot", "demo", "current") == [
         0.25,
@@ -2768,7 +2774,7 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
         if turn == 0 and schema_failure:
             with pytest.raises(ResponseValidationError):
                 runtime.to_agent("Find search", state, history)
-            assert runtime._memory.actions == []
+            assert runtime.memory.actions == []
         else:
             result = json.loads(runtime.to_agent("Find search", state, history))
             assert result["aitk_action"] == (

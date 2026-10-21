@@ -6,9 +6,10 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
 
 import networkx as nx
@@ -838,6 +839,16 @@ class UIKobeV2Translator(BaseTranslator):
         self._screen_w = 1080
         self._screen_h = 1920
         self.reset_task_state()
+
+    @property
+    def graphs(self) -> Mapping[str, nx.DiGraph]:
+        """The loaded graphs by app name, as a read-only view."""
+        return MappingProxyType(self._graphs)
+
+    @property
+    def memory(self) -> Memory:
+        """The current task's memory; ``reset_task_state`` starts a new one."""
+        return self._memory
 
     def reset_task_state(self) -> None:
         self._current_graph: nx.DiGraph | None = None
