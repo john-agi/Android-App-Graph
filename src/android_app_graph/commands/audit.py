@@ -53,6 +53,7 @@ from android_app_graph.utils import (
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
     EXTERNAL_WEB_NODE,
+    EdgeDetails,
     GraphManager,
 )
 from android_app_graph.utils.logging import setup_logging
@@ -405,9 +406,7 @@ def _record_step(
         source,
         new_node,
         action=[action],
-        instruction=instruction,
-        target_observation=target_obs,
-        num_steps=1,
+        details=EdgeDetails(instruction=instruction, target_observation=target_obs, num_steps=1),
     )
 
     step_result: dict[str, Any] = {

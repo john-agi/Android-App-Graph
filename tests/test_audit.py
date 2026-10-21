@@ -18,7 +18,7 @@ from openrouter import OpenRouter
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
 from android_app_graph.utils import ModelSettings, graph_manager, open_client
-from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
 
 PAGE_DETAIL = ModelSettings("gpt-test")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -745,14 +745,16 @@ def _flagged_graph() -> GraphManager:
         ("s2_settings", {"page_description": "Settings"}),
     )
     graph.add_edge(
-        "s0_home", "s1_detail", [_DETAIL_TAP], instruction=_FLAGGED, target_observation="Detail"
+        "s0_home",
+        "s1_detail",
+        [_DETAIL_TAP],
+        details=EdgeDetails(instruction=_FLAGGED, target_observation="Detail"),
     )
     graph.add_edge(
         "s0_home",
         "s2_settings",
         [_GEAR_TAP],
-        instruction="open settings",
-        target_observation="Settings",
+        details=EdgeDetails(instruction="open settings", target_observation="Settings"),
     )
     return graph
 
@@ -854,7 +856,12 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
     device_log: list[object],
 ) -> None:
     graph = _flagged_graph()
-    graph.add_edge("s0_home", "s1_detail", [_SWIPE], instruction="scroll to the detail card")
+    graph.add_edge(
+        "s0_home",
+        "s1_detail",
+        [_SWIPE],
+        details=EdgeDetails(instruction="scroll to the detail card"),
+    )
     reached = iter(["s0_home", "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
     described: list[dict[str, object]] = []
@@ -972,7 +979,9 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
 ) -> None:
     graph = _flagged_graph()
     graph.graph.add_node("ext_com.browser", page_description="[external app: com.browser]")
-    graph.add_edge("s0_home", "ext_com.browser", [_GEAR_TAP], instruction="open help")
+    graph.add_edge(
+        "s0_home", "ext_com.browser", [_GEAR_TAP], details=EdgeDetails(instruction="open help")
+    )
     monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap Help")
 
@@ -1044,7 +1053,9 @@ def test_re_explore_skips_a_flagged_edge_out_of_an_external_node(
 ) -> None:
     graph = _flagged_graph()
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
-    graph.add_edge("s0_home", EXTERNAL_WEB_NODE, [_GEAR_TAP], instruction="open help")
+    graph.add_edge(
+        "s0_home", EXTERNAL_WEB_NODE, [_GEAR_TAP], details=EdgeDetails(instruction="open help")
+    )
     # add_edge refuses an edge out of an ext_ node, but a loaded graph file can hold one.
     graph.graph.add_edge(
         EXTERNAL_WEB_NODE, "s0_home", actions=[[_BACK]], instructions=["go home"], num_steps=[1]

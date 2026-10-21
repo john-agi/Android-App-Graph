@@ -24,6 +24,7 @@ from android_app_graph.utils import resolve_audit_timeout, resolve_model_setting
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
     EXTERNAL_WEB_NODE,
+    EdgeDetails,
     GraphManager,
 )
 from android_app_graph.utils.vlm_utils import (
@@ -610,8 +611,10 @@ class Kobe:
             move.source,
             EXTERNAL_WEB_NODE,
             action=move.action_sequence,
-            instruction=move.instruction,
-            target_observation=web_node_data.get("page_description", ""),
+            details=EdgeDetails(
+                instruction=move.instruction,
+                target_observation=web_node_data.get("page_description", ""),
+            ),
         )
         self.graph.total_steps_completed += 1
         self.save_graph()
@@ -633,12 +636,14 @@ class Kobe:
             move.source,
             new_node,
             action=move.action_sequence,
-            instruction=move.instruction,
-            target_observation=_target_observation(
-                new_node_data.get("page_description", ""), detail_after
+            details=EdgeDetails(
+                instruction=move.instruction,
+                target_observation=_target_observation(
+                    new_node_data.get("page_description", ""), detail_after
+                ),
+                schema_delta=schema_delta,
+                num_steps=len(move.action_sequence),
             ),
-            schema_delta=schema_delta,
-            num_steps=len(move.action_sequence),
         )
         self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.maybe_normalize_node_edges(move.source)
@@ -767,8 +772,10 @@ class Kobe:
             source_node,
             ext_node_id,
             action=action,
-            instruction=instruction,
-            target_observation=f"[left app to {external_package}]",
+            details=EdgeDetails(
+                instruction=instruction,
+                target_observation=f"[left app to {external_package}]",
+            ),
         )
 
         if isinstance(action, list):

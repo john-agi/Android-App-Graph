@@ -22,7 +22,7 @@ from android_app_graph import embedding_cache
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.payloads import as_list, as_str, as_str_dict
 from android_app_graph.utils import ModelSettings, open_client, vlm_utils
-from android_app_graph.utils.graph_manager import GraphManager
+from android_app_graph.utils.graph_manager import EdgeDetails, GraphManager
 
 _SCREENSHOT = b"not-really-a-png"
 _LETTERS = "ABCDEFGH"
@@ -1376,9 +1376,9 @@ def test_build_options_shows_each_self_loop_action_its_own_schema_delta() -> Non
             "s0_list",
             "s0_list",
             action,
-            instruction=instruction,
-            target_observation="list",
-            schema_delta=delta,
+            details=EdgeDetails(
+                instruction=instruction, target_observation="list", schema_delta=delta
+            ),
         )
 
     text, _ = aitk_translator.build_options(gm.graph, "s0_list")
@@ -1398,7 +1398,12 @@ def test_build_options_lists_no_self_loop_action_without_an_instruction() -> Non
         ({"action": "click"}, "", {"sort": {"before": "name", "after": "price"}}),
         ({"action": "type"}, "Type 'milk'", {"query": {"before": None, "after": "milk"}}),
     ):
-        gm.add_edge("s0_list", "s0_list", action, instruction=instruction, schema_delta=delta)
+        gm.add_edge(
+            "s0_list",
+            "s0_list",
+            action,
+            details=EdgeDetails(instruction=instruction, schema_delta=delta),
+        )
 
     text, _ = aitk_translator.build_options(gm.graph, "s0_list")
 
