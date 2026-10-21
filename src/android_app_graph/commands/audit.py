@@ -75,7 +75,7 @@ from android_app_graph.utils.vlm_utils import (
 
 logger = logging.getLogger(__name__)
 
-AUDIT_ROLES = ("page_detail", "embedding")
+AUDIT_ROLES = ("page_detail", "embedding", "image_embedding")
 RE_EXPLORE_ROLES = (*AUDIT_ROLES, "instruction", "action")
 
 
@@ -282,8 +282,12 @@ class _Step:
     action: dict[str, Any]
 
 
-def _identify(run: _ReExploreRun, device_state: dict[str, Any]) -> str:
-    return run.graph.identify_state(Observation.from_state(device_state))
+def _identify(
+    run: _ReExploreRun, device_state: dict[str, Any], *, expected_node: str | None = None
+) -> str:
+    return run.graph.identify_state(
+        Observation.from_state(device_state), expected_node=expected_node
+    )
 
 
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
@@ -312,7 +316,7 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     for _node_id, action in path[1:]:
         _execute(run.recorder, action)
 
-    actual = _identify(run, run.recorder.get_state())
+    actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
     if actual != target_node:
         logger.warning(
             "Expected to reach %s but arrived at %s",
@@ -322,18 +326,19 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     return actual
 
 
-def _leave_external_web(run: _ReExploreRun) -> str:
+def _leave_external_web(run: _ReExploreRun, source: str) -> str:
     """Press back until the screen is no longer an outside web page, restarting the
     app if a few presses do not leave it, and return the screen's node.
 
-    A step from the shared ``ext_web`` node would act on a page outside the app, and
-    ``add_edge`` would refuse its edge.
+    A back press is expected to return to ``source``, the node whose step opened the
+    page, and a restart to the start node. A step from the shared ``ext_web`` node
+    would act on a page outside the app, and ``add_edge`` would refuse its edge.
     """
     with run.recorder.source("external_web_recovery"):
         for _ in range(EXTERNAL_WEB_BACK_PRESSES):
             run.recorder.exe_action({"action": "back"})
             time.sleep(1)
-            node = _identify(run, run.recorder.get_state())
+            node = _identify(run, run.recorder.get_state(), expected_node=source)
             if node != EXTERNAL_WEB_NODE:
                 return node
         logger.warning(
@@ -342,7 +347,7 @@ def _leave_external_web(run: _ReExploreRun) -> str:
             run.target.package_name,
         )
         restart_app(run.recorder, run.app_launch, logger)
-        return _identify(run, run.recorder.get_state())
+        return _identify(run, run.recorder.get_state(), expected_node=run.start_node)
 
 
 def _plan_and_act(
@@ -461,7 +466,7 @@ def _record_step(
     run.graph.save_graph(run.target.graph_path)
     if new_node == EXTERNAL_WEB_NODE:
         logger.warning("Opened an external web page during re-explore, pressing back")
-        return _leave_external_web(run), step_result
+        return _leave_external_web(run, source), step_result
     return new_node, step_result
 
 
@@ -493,7 +498,7 @@ def _explore_steps(
             logger.warning("Left app during re-explore, pressing back")
             with run.recorder.source("external_app_recovery"):
                 device_state = return_to_app(run.recorder, run.app_launch, logger)
-            current_node = _identify(run, device_state)
+            current_node = _identify(run, device_state, expected_node=current_node)
             continue
 
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
@@ -523,7 +528,11 @@ def _correct_flagged_edge(
     before = run.recorder.get_state()
     _execute(run.recorder, action)
     after = run.recorder.get_state()
-    reached = f"ext_{after['package'].strip()}" if _left_app(run, after) else _identify(run, after)
+    reached = (
+        f"ext_{after['package'].strip()}"
+        if _left_app(run, after)
+        else _identify(run, after, expected_node=target)
+    )
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
     run.recorder.record_transition(
         Transition(
@@ -847,7 +856,7 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         client=run.client,
         page_detail=run.settings["page_detail"],
         embedding=run.settings["embedding"],
-        similarity_threshold=run.vlm_config.get("similarity_threshold", 0.85),
+        image_embedding=run.settings["image_embedding"],
         audit_timeout=resolve_audit_timeout(run.vlm_config),
     )
 
@@ -863,6 +872,7 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         graph.graph.number_of_nodes(),
         graph.graph.number_of_edges(),
     )
+    graph.embed_missing_members()
 
     report_path = _app_file(run.graph_dir, app_name, "_audit")
     audit_result = run_audit(graph, app_name, report_path)

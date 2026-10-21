@@ -18,7 +18,7 @@ from openrouter import OpenRouter
 from android_app_graph.payloads import as_object_dict
 from android_app_graph.retrying import DeadlineTransport
 
-ROLES = ("page_detail", "embedding", "instruction", "action")
+ROLES = ("page_detail", "embedding", "image_embedding", "instruction", "action")
 _CHAT_ROLES = ("page_detail", "instruction", "action")
 # Every key app-graph or app-graph-audit uses and no other, by path; "[]" stands for each
 # entry of a list. Both commands accept all of them, since they share one config file.
@@ -34,7 +34,6 @@ CONFIG_KEYS = frozenset(
         "apps[].name",
         "apps[].package_name",
         "apps[].launch_activity",
-        "vlm.similarity_threshold",
         "vlm.page_detail.audit_request_timeout",
         *(f"vlm.{role}.{key}" for role in ROLES for key in ("model", "request_timeout", "timeout")),
         *(f"vlm.{role}.temperature" for role in _CHAT_ROLES),
@@ -131,8 +130,13 @@ def resolve_env(value: object) -> str | None:
 
 
 def resolve_model(value: object, *, role: str) -> str:
-    """Require an explicit model, using the role environment variable when omitted."""
-    variable = f"APP_GRAPH_{role.upper()}_MODEL"
+    """Require an explicit model, using the role environment variable when omitted.
+
+    Image embeddings read ``APP_GRAPH_EMBEDDING_MODEL``, so one variable chooses the
+    model for text and screenshot embeddings.
+    """
+    env_role = "embedding" if role == "image_embedding" else role
+    variable = f"APP_GRAPH_{env_role.upper()}_MODEL"
     source = f"${{{variable}}}" if value is None else value
     model = resolve_env(source) if isinstance(source, str) else None
     if not model or not model.strip() or "${" in model:
@@ -188,6 +192,20 @@ def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None
     return temperature
 
 
+def _role_config(vlm_config: Mapping[str, object], role: str) -> dict[str, object]:
+    """Return a role's block; image embeddings inherit the embedding model and timeout."""
+    cfg = as_object_dict(vlm_config.get(role))
+    if role != "image_embedding":
+        return cfg
+    embedding = as_object_dict(vlm_config.get("embedding"))
+    inherited = dict(cfg)
+    if "model" not in cfg:
+        inherited["model"] = embedding.get("model")
+    if "request_timeout" not in cfg and "timeout" not in cfg:
+        inherited["request_timeout"] = embedding.get("request_timeout", embedding.get("timeout"))
+    return inherited
+
+
 def _checked[T](resolve: Callable[[], T], errors: list[str]) -> T | None:
     try:
         return resolve()
@@ -200,7 +218,7 @@ def _role_settings(
     vlm_config: Mapping[str, object], role: str, errors: list[str]
 ) -> ModelSettings | None:
     """Resolve one role, recording every invalid field rather than only the first."""
-    cfg = as_object_dict(vlm_config.get(role))
+    cfg = _role_config(vlm_config, role)
     model = _checked(lambda: resolve_model(cfg.get("model"), role=role), errors)
     temperature = _checked(lambda: resolve_temperature(cfg, role=role), errors)
     timeout = _checked(lambda: resolve_request_timeout(cfg, role=role), errors)

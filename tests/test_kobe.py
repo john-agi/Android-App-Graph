@@ -178,6 +178,7 @@ def test_exploration_resolves_all_role_models_before_device_access(
     assert (agent.action.model, agent.action.temperature) == ("provider/action", 0.0)
     assert agent.action.request_timeout == 9.0
     assert agent.graph.embedding_model == "provider/embedding"
+    assert agent.graph.image_embedding == agent.graph.embedding
     assert agent.graph.page_detail == agent.page_detail
     assert agent.client is agent.graph.client is router_client
 
@@ -240,6 +241,7 @@ def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packag
     router_client: OpenRouter,
     monkeypatch: pytest.MonkeyPatch,
     write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
     """A graph whose nodes record no package resumes at a node of ``com.whatsapp``,
     although no activity's first three dot-segments equal the package."""
@@ -255,6 +257,11 @@ def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packag
     graph_path = tmp_path / "whatsapp" / "whatsapp.json"
     graph_path.parent.mkdir()
     write_graph_file(graph_path, document)
+    write_image_vectors(
+        graph_path.parent / "steps",
+        ["s0_home-observation", "s1_conversation-observation"],
+        model="provider/embedding",
+    )
     explorer = Kobe(
         _Device(AssertionError("the replay must start before the device is read")),
         ExplorerConfig(
@@ -285,6 +292,7 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
     router_client: OpenRouter,
     monkeypatch: pytest.MonkeyPatch,
     write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
     """``auto`` resumes at the form with unexplored fields, not at the dialog with no
     out-edges and nothing left to explore."""
@@ -306,6 +314,11 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir()
     write_graph_file(graph_path, document)
+    write_image_vectors(
+        graph_path.parent / "steps",
+        [f"{node}-observation" for node in ("s0_home", "s1_form", "s2_dialog")],
+        model="provider/embedding",
+    )
     explorer = _explorer(
         _Device(AssertionError("the replay must start before the device is read")),
         tmp_path,
@@ -325,37 +338,41 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
     assert replayed == ["s1_form"]
 
 
-def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
+def test_a_rejected_page_description_leaves_no_node(
     kobe: Kobe,
-    png_screenshot: str,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     no_sleep: list[float],
 ) -> None:
-    """Identifying the rejected screen again asks the model again, although the graph
-    already holds a node that a stale cache entry could answer with."""
+    """Identifying the rejected screen again asks the model again."""
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            *(httpx.Response(401, json={"error": {"message": "bad key"}}) for _ in range(2)),
+            *(
+                response
+                for _ in range(2)
+                for response in (
+                    httpx.Response(200, json=embedding_body),
+                    httpx.Response(401, json={"error": {"message": "bad key"}}),
+                )
+            ),
         ]
     )
-    home = kobe.graph.identify_state(
-        Observation("000000", png_screenshot, "com.demo.Home", "com.demo")
-    )
+    home = kobe.graph.identify_state(Observation.from_state(kobe.controller.get_state()))
 
-    for observation_id in ("000001", "000002"):
+    for _ in range(2):
+        settings = {**kobe.controller.get_state(), "activity": "com.demo.Settings"}
         with pytest.raises(OpenRouterError):
-            kobe.graph.identify_state(
-                Observation(observation_id, png_screenshot, "com.demo.Settings", "com.demo")
-            )
+            kobe.graph.identify_state(Observation.from_state({**settings, "pixel_hash": "other"}))
         assert list(kobe.graph.graph) == [home]
 
-    assert [json.loads(request.content)["model"] for request in router_requests[2:]] == [
-        "provider/page_detail"
+    assert [json.loads(request.content)["model"] for request in router_requests[3:]] == [
+        "provider/embedding",
+        "provider/page_detail",
     ] * 2
     assert no_sleep == []
 
@@ -363,29 +380,31 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
 @pytest.mark.usefixtures("no_sleep")
 def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen_again(
     replaying_kobe: Kobe,
-    png_screenshot: str,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     device_log: list[object],
+    step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    for _ in range(2):
-        router_responses.extend(
-            [
-                chat_response(content='{"page_description":"home"}'),
-                httpx.Response(200, json=embedding_body),
-            ]
-        )
-    # The replay device reports com.demo.Home, so identifying its screen misses the cache.
-    node = replaying_kobe.graph.identify_state(
-        Observation("splash", png_screenshot, "com.demo.Splash", "com.demo")
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            # The replay ends on the start node's own pixels: an exact match.
+            httpx.Response(200, json=embedding_body),
+        ]
     )
-    # A representative would add a verify request.
-    replaying_kobe.graph.graph.nodes[node].pop("representative_observation")
+    node = replaying_kobe.graph.identify_state(
+        Observation.from_state(replaying_kobe.controller.get_state())
+    )
     assert replaying_kobe.navigate_to_node(node) == node
     assert len(router_requests) == 4
     assert device_log == _FIRST_RESTART
+    (*_, replayed) = step_records(replaying_kobe.controller.steps)
+    assert (replayed["source"], replayed["identify"]["stage"]) == ("navigation_replay", "exact")
+    assert replayed["identify"]["expected_node"] == node
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -398,7 +417,7 @@ def test_navigation_restarts_the_app_through_its_launch_activity(
     device = _ReplayDevice(HOME_SCREEN, device_log)
     explorer = _explorer(device, tmp_path, router_client, launch_activity="com.demo/.Main")
     explorer.graph.graph.add_node("s0_home")
-    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     assert explorer.navigate_to_node("s0_home") == "s0_home"
     assert device_log == [_FORCE_STOP, _clear_task_start("com.demo/.Main")]
 
@@ -434,7 +453,9 @@ def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_re
         },
     )
     replaying_kobe.graph.load_graph(graph_file)
-    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s2_detail")
+    monkeypatch.setattr(
+        replaying_kobe.graph, "identify_state", lambda *_args, **_kwargs: "s2_detail"
+    )
 
     assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
     assert device_log == [*_FIRST_RESTART, open_detail]
@@ -448,7 +469,9 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     open_detail = {"action": "tap", "coordinate": [30, 40]}
     replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
     replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=open_detail)
-    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_detail")
+    monkeypatch.setattr(
+        replaying_kobe.graph, "identify_state", lambda *_args, **_kwargs: "s1_detail"
+    )
 
     assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
     assert device_log == [*_FIRST_RESTART, open_detail]
@@ -468,6 +491,7 @@ def test_exploration_wait_recovery_respects_step_limit(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
         ]
@@ -483,6 +507,7 @@ def test_exploration_wait_recovery_respects_step_limit(
     assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 2
     step = ["provider/instruction", *["provider/action"] * (2 if malformed else 1)]
     assert [json.loads(request.content)["model"] for request in router_requests] == [
+        "provider/embedding",
         "provider/page_detail",
         "provider/embedding",
         *step,
@@ -502,6 +527,7 @@ def test_an_exploration_step_asks_the_explored_device_whether_its_keyboard_is_up
 ) -> None:
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content="Tap Search"),
@@ -529,15 +555,18 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap the About row"}'),
             chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"page_description":"About page with privacy policy link",'
                 '"is_external_web":false}'
             ),
             httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
+            chat_response(content=_DIFFERENT),
         ]
     )
 
@@ -550,6 +579,7 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
 
 
 _ORTHOGONAL = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
+_DIFFERENT = '{"same":false,"reason":"another page"}'
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -574,12 +604,15 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     home = {"page_description": "home", "elements": [{"description": "About", "position": "top"}]}
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(home)),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":1,"instruction":"Tap the About row"}'),
             chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"about"}'),
             httpx.Response(200, json={**embedding_body, "data": [_ORTHOGONAL]}),
+            chat_response(content=_DIFFERENT),
         ]
     )
 
@@ -631,11 +664,15 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     explorer = _explorer(_Screens(HOME_SCREEN, browser, HOME_SCREEN), tmp_path, router_client)
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
             chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"news article","is_external_web":true}'),
+            # Back shows home again: an exact match.
+            httpx.Response(200, json=embedding_body),
         ]
     )
 
@@ -679,11 +716,14 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     explorer = _explorer(device, tmp_path, router_client)
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
             chat_response(content=action_reply),
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"news article","is_external_web":true}'),
+            httpx.Response(200, json=embedding_body),
         ]
     )
 
@@ -727,15 +767,27 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
             chat_response(content=_TAP_REPLY),
-            *[chat_response(content=external) for _ in range(1 + back_presses_on_the_page)],
+            *[
+                response
+                for _ in range(1 + back_presses_on_the_page)
+                for response in (
+                    httpx.Response(200, json=embedding_body),
+                    chat_response(content=external),
+                )
+            ],
+            # Home again, before or after a restart: an exact match.
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap Settings"}'),
             chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"settings"}'),
             httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
+            chat_response(content=_DIFFERENT),
         ]
     )
 
@@ -775,7 +827,7 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     )
     kobe.graph.graph.add_node("s1_compose", page_description="compose")
     screens = iter(["s0_home", "s1_compose"])
-    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: next(screens))
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     instruction = "Tap the floating action button in the bottom right"
@@ -805,7 +857,7 @@ def test_a_crash_mid_exploration_is_logged_with_its_traceback(
         raise failure
 
     kobe.graph.graph.add_node("s0_home", page_description="home", interactable_elements=[])
-    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _crash)
 
@@ -859,10 +911,13 @@ def _explore_one_step_the_action_model_ends(
     plan = {"element": 2, "instruction": "Tap the Settings icon"}
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(page)),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(plan)),
             chat_response(content='{"action":"end"}'),
+            # Back shows home again: an exact match.
+            httpx.Response(200, json=embedding_body),
         ]
     )
     kobe.explore(max_steps=1)
@@ -1024,10 +1079,12 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     }
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(search_page)),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":1,"instruction":"Tap the Search button"}'),
             chat_response(content="", tool_arguments='{"action":"click","coordinate":[500,500]}'),
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"Chat search results"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(verdict)),
@@ -1097,7 +1154,7 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
 ) -> None:
     kobe.graph.graph.add_node("s0_home", page_description="home")
     planned_from: list[object] = []
-    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
@@ -1123,7 +1180,7 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
         msg = "planning stopped"
         raise interruption(msg)
 
-    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", stop_planning)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     caplog.set_level(logging.INFO, logger="test")
@@ -1161,7 +1218,7 @@ def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
     graph.add_node("s0_home", page_description="home", last_detail_snapshot={"sort": "name"})
     details = iter([{"sort": "name"}, detail_after])
 
-    def identify(*_args: object) -> str:
+    def identify(*_args: object, **_kwargs: object) -> str:
         graph.nodes["s0_home"]["last_detail_snapshot"] = next(details)
         return "s0_home"
 
@@ -1190,7 +1247,7 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     explorer.coverage_checkpoint_steps = 0
     explorer.graph.graph.add_node("s0_home", page_description="home")
-    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     for _ in range(2):
         router_responses.extend(
@@ -1295,7 +1352,9 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
-    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_settings")
+    monkeypatch.setattr(
+        replaying_kobe.graph, "identify_state", lambda *_args, **_kwargs: "s1_settings"
+    )
     assert (
         replaying_kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
         == "s1_settings"
@@ -1326,7 +1385,7 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
         add_representative(graph, node_id)
     graph.graph.add_node("s2_detail", page_description="Item detail")
     screens = iter(["s1_list_dup", "s1_list_dup", "s2_detail"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(screens))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     replaying_kobe.coverage_checkpoint_steps = 1
     if navigation_fails:
         graph.graph.add_edge("s1_list_dup", "s2_detail")
@@ -1463,7 +1522,9 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     graph.graph.add_nodes_from([*nodes.values(), "s2_detail"], page_description="a screen")
     graph.add_edge("s0_home", "s1_list", action=[open_list])
     graph.add_edge("s1_list", "s2_detail", action=[open_item])
-    monkeypatch.setattr(graph, "identify_state", lambda observation: nodes[observation.activity])
+    monkeypatch.setattr(
+        graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
+    )
     router_responses.extend(
         [
             chat_response(content='{"element":null,"instruction":"Open settings"}'),
@@ -1526,7 +1587,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     )
     nodes = {"com.demo.Home": "s0_home"}
     monkeypatch.setattr(
-        explorer.graph, "identify_state", lambda observation: nodes[observation.activity]
+        explorer.graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
     )
 
     assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
@@ -1560,7 +1621,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
     )
     nodes = {"com.demo.Article": EXTERNAL_WEB_NODE, "com.demo.List": "s1_list"}
     monkeypatch.setattr(
-        explorer.graph, "identify_state", lambda observation: nodes[observation.activity]
+        explorer.graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
     )
 
     assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
@@ -1627,10 +1688,13 @@ def _explore_into_a_permission_dialog(
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap Take photo"}'),
             chat_response(content='{"action":"click","coordinate":[500,500]}'),
+            # The dialog shows home's pixels, but of another package: no exact match.
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"camera permission dialog"}'),
             httpx.Response(200, json=embedding_body),
         ]
@@ -1721,6 +1785,7 @@ def _explore_from_home_into_another_app(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content=_TAP_REPLY),
@@ -1767,7 +1832,14 @@ def test_a_step_into_another_app_returns_to_the_app_before_the_next_step(
     explorer = _explorer(screens_by_log(HOME_SCREEN, *after_the_tap), tmp_path, router_client)
 
     planned_from = _explore_from_home_into_another_app(
-        explorer, router_responses, chat_response, embedding_body, monkeypatch, max_steps=2
+        explorer,
+        router_responses,
+        chat_response,
+        embedding_body,
+        monkeypatch,
+        # Home again, before or after a restart: an exact match.
+        httpx.Response(200, json=embedding_body),
+        max_steps=2,
     )
 
     assert device_log == [_TAP, *leaving]
@@ -1800,6 +1872,7 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
         chat_response,
         embedding_body,
         monkeypatch,
+        httpx.Response(200, json=embedding_body),
         chat_response(content='{"page_description":"home with the keyboard shown"}'),
         httpx.Response(200, json=embedding_body),
     )
@@ -1848,13 +1921,170 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
     explorer = _explorer(device, tmp_path, router_client)
     explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
     explorer.graph.add_edge("s0_home", "s1_detail", action=[open_detail])
-    nodes = {"com.demo.Home": "s0_home"}
-    monkeypatch.setattr(
-        explorer.graph, "identify_state", lambda observation: nodes[observation.activity]
-    )
+    expected = _identifying(explorer, monkeypatch, "s0_home")
 
     assert explorer.navigate_to_node("s1_detail") == "s0_home"
     assert device_log == [*_FIRST_RESTART, open_detail, *_RESTART]
+    assert expected == ["s0_home"]
+
+
+def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *nodes: str) -> list[object]:
+    """Make the explorer's identify_state answer ``nodes`` in turn; return the list the
+    expected node of each call is appended to."""
+    expected: list[object] = []
+    answers = iter(nodes)
+
+    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
+        expected.append(expected_node)
+        return next(answers)
+
+    monkeypatch.setattr(explorer.graph, "identify_state", identify)
+    return expected
+
+
+def _list_reached_from_home(explorer: Kobe, *extra_nodes: str) -> None:
+    for node in ("s0_home", "s1_list", *extra_nodes):
+        explorer.graph.graph.add_node(node, page_description=node, package="com.demo")
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [
+        pytest.param(["s1_list"], ["s1_list"], id="back returns"),
+        pytest.param(
+            [EXTERNAL_WEB_NODE] * 3 + ["s0_home"],
+            ["s1_list", "s1_list", "s1_list", "s0_home"],
+            id="restart",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_leaving_a_web_page_expects_the_screen_that_opened_it_and_a_restart_the_start_node(
+    answers: list[str],
+    expected: list[object],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer, EXTERNAL_WEB_NODE)
+    identified = _identifying(explorer, monkeypatch, "s1_list", EXTERNAL_WEB_NODE, *answers)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Open the link", []))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_TAP_REPLY))
+
+    explorer.explore(max_steps=1)
+
+    assert identified == [None, None, *expected]
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_back_from_another_app_expects_the_screen_the_step_left(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explorer = _explorer(
+        screens_by_log(HOME_SCREEN, _SEARCH_SCREEN, HOME_SCREEN), tmp_path, router_client
+    )
+    _list_reached_from_home(explorer)
+    identified = _identifying(explorer, monkeypatch, "s1_list", "s1_list")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", []))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_TAP_REPLY))
+
+    explorer.explore(max_steps=1)
+
+    assert identified == [None, "s1_list"]
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_a_replay_expects_the_node_it_replays_to(
+    replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _list_reached_from_home(replaying_kobe)
+    replaying_kobe.graph.add_edge("s0_home", "s1_list", action=[{"action": "tap", "x": 1, "y": 2}])
+    identified = _identifying(replaying_kobe, monkeypatch, "s1_list", "s0_home")
+
+    replaying_kobe.navigate_to_node("s1_list")
+    replaying_kobe.navigate_to_node("s0_home")
+
+    assert identified == ["s1_list", "s0_home"]
+
+
+def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """The home screen was embedded before; the list never was, and the other app's
+    screen is not embedded at all."""
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    nodes = [{"id": "s0_home"}, {"id": "s1_list"}, {"id": "ext_com.other", "is_external": True}]
+    write_graph_file(graph_path, {"nodes": nodes, "edges": []})
+    steps_dir = graph_path.parent / "steps"
+    write_image_vectors(steps_dir, ["s0_home-observation"], model="provider/embedding")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+
+    _explorer(_Device(AssertionError("loading must not read the device")), tmp_path, router_client)
+
+    (request,) = router_requests
+    body = json.loads(request.content)
+    assert body["model"] == "provider/embedding"
+    assert body["input"][0]["content"][0]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8")) == {
+        "model": "provider/embedding",
+        "embeddings": {"s0_home-observation": [1.0, 0.0], "s1_list-observation": [0.25, 0.75]},
+    }
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_every_screen_identify_state_takes_is_embedded_and_annotated(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The home screen is described, the step's screen matched exactly, and the vectors of
+    both are saved with the graph, under the image-embedding model."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":null,"instruction":"Scroll down"}'),
+            chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    observations = [
+        r for r in step_records(explorer.controller.steps) if r["kind"] == "observation"
+    ]
+    assert [r["identify"]["stage"] for r in observations] == ["new", "exact"]
+    assert [r["describe"]["page_description"] for r in observations] == ["home", "home"]
+    assert all(len(r["pixel_hash"]) == 64 and r["status_bar_rows"] == 0 for r in observations)
+    stored = json.loads((explorer.controller.steps / "image_emb.json").read_text("utf-8"))
+    assert stored["model"] == "provider/embedding"
+    assert sorted(stored["embeddings"]) == [r["id"] for r in observations]
 
 
 @pytest.mark.usefixtures("no_sleep")

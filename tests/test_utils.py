@@ -116,7 +116,6 @@ _EVERY_ACCEPTED_KEY: dict[str, object] = {
         {"name": "other", "package_name": "com.other", "launch_activity": "com.other/.Main"},
     ],
     "vlm": {
-        "similarity_threshold": 0.84,
         "page_detail": {
             "model": "m",
             "temperature": 0,
@@ -125,6 +124,7 @@ _EVERY_ACCEPTED_KEY: dict[str, object] = {
             "audit_request_timeout": 300,
         },
         "embedding": {"model": "m", "request_timeout": 30, "timeout": 30},
+        "image_embedding": {"model": "m", "request_timeout": 30, "timeout": 30},
         "instruction": {"model": "m", "temperature": 0, "request_timeout": 30, "timeout": 30},
         "action": {"model": "m", "temperature": 0, "request_timeout": 30, "timeout": 30},
     },
@@ -282,10 +282,58 @@ def test_settings_accept_the_temperature_bounds(temperature: int) -> None:
     assert settings.temperature == temperature
 
 
-@pytest.mark.parametrize("value", [None, "", " \t ", "${APP_GRAPH_UNSET_MODEL}", 123])
-def test_settings_reject_a_missing_model(value: object) -> None:
-    with pytest.raises(ValueError, match=r"action\.model is required: set APP_GRAPH_ACTION_MODEL"):
-        _settings("action", {"model": value})
+@pytest.mark.parametrize(
+    ("role", "value", "variable"),
+    [
+        *(
+            ("action", value, "APP_GRAPH_ACTION_MODEL")
+            for value in (None, "", " \t ", "${APP_GRAPH_UNSET_MODEL}", 123)
+        ),
+        ("image_embedding", None, "APP_GRAPH_EMBEDDING_MODEL"),
+    ],
+)
+def test_settings_reject_a_missing_model(role: str, value: object, variable: str) -> None:
+    with pytest.raises(ValueError, match=rf"{role}\.model is required: set {variable}"):
+        _settings(role, {"model": value})
+
+
+def test_image_embedding_settings_inherit_the_embedding_model_and_timeout() -> None:
+    config: dict[str, object] = {
+        "embedding": {"model": "voyageai/voyage-multimodal-3.5", "timeout": 9},
+        "image_embedding": {},
+    }
+    assert resolve_model_settings(config, roles=("image_embedding",)) == {
+        "image_embedding": ModelSettings("voyageai/voyage-multimodal-3.5", None, 9.0)
+    }
+
+
+def test_image_embeddings_read_the_embedding_model_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_GRAPH_EMBEDDING_MODEL", "voyageai/voyage-multimodal-3.5")
+    settings = resolve_model_settings({}, roles=("embedding", "image_embedding"))
+    assert settings["image_embedding"] == settings["embedding"]
+    assert settings["image_embedding"].model == "voyageai/voyage-multimodal-3.5"
+
+
+@pytest.mark.parametrize("timeout_key", ["request_timeout", "timeout"])
+def test_an_image_embedding_block_overrides_what_it_would_inherit(timeout_key: str) -> None:
+    config: dict[str, object] = {
+        "embedding": {"model": "provider/text", "request_timeout": 7.5},
+        "image_embedding": {"model": "provider/image", timeout_key: 2.25},
+    }
+    assert resolve_model_settings(config, roles=("image_embedding",)) == {
+        "image_embedding": ModelSettings("provider/image", None, 2.25)
+    }
+
+
+def test_an_explicit_invalid_image_embedding_model_does_not_inherit() -> None:
+    config: dict[str, object] = {
+        "embedding": {"model": "provider/text"},
+        "image_embedding": {"model": ""},
+    }
+    with pytest.raises(ValueError, match=r"image_embedding\.model is required"):
+        resolve_model_settings(config, roles=("image_embedding",))
 
 
 @pytest.mark.parametrize("value", ["", " \t ", "${APP_GRAPH_UNSET_MODEL}"])

@@ -9,27 +9,30 @@ A node represents a unique app state defined by:
 
 An edge represents a device action that transitions between states.
 
-State matching uses embedding similarity on the page description within the same
-app package to decide whether a new screenshot belongs to an existing node or is
-new.  Different Android activities that display the same screen are merged into a
-single node; the node stores all observed activities.
+State matching compares a new screenshot with the members of the nodes of its app
+package, cheapest evidence first: an exact pixel match outside the status bar, then
+the node the caller expects, then a short list of nodes ranked by image and text
+similarity, each checked by the verifier against its member closest to the screen.
+Different Android activities that display the same screen are merged into a single
+node; the node stores all observed activities.
 
 Every time a node is visited (whether new or existing), the VLM detail JSON is
 used to update the node's state schema — discovering new keys and accumulating
 observed values.
 
 A node holds no image. It lists the step-log observations assigned to it, in
-order, and names one of them its representative: the screen the verifier and the
-merge audit compare against, read from the step log when they need it.
+order, and names one of them its representative: the screen the merge audit
+compares against and the plot shows, read from the step log when they need it.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Collection, Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import networkx as nx
 from openrouter import OpenRouter
@@ -42,23 +45,39 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
     write_json_atomically,
 )
-from android_app_graph.payloads import as_float_list, as_int_list, as_str, as_str_dict
-from android_app_graph.step_log import Observation
+from android_app_graph.payloads import (
+    as_float_list,
+    as_int_list,
+    as_object_dict,
+    as_str,
+    as_str_dict,
+)
+from android_app_graph.step_log import (
+    Observation,
+    annotate_observation,
+    load_image_embeddings,
+    read_observation_record,
+    save_image_embeddings,
+)
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
+    cosine_similarity,
     describe_page_and_state,
     get_embedding,
+    get_image_embedding,
     normalize_edge,
     score_by_cosine,
+    token_tracker,
     verify_same_node,
 )
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
+# The verifier calls the short list may make for one screen; a checked expected node adds one.
+SHORT_LIST_VERIFICATIONS = 3
 _FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
@@ -66,14 +85,11 @@ EXTERNAL_WEB_NODE = "ext_web"
 EXTERNAL_WEB_BACK_PRESSES = 3
 
 
-class _IdentifyCacheEntry(NamedTuple):
-    screenshot_hash: int
-    activity: str
-    node_id: str
-
-
 class _SamePackageNodes(NamedTuple):
-    candidates: list[tuple[str, list[float]]]
+    """A package's in-app nodes that have members to compare with, and the descriptions
+    and state keys of all its nodes."""
+
+    node_ids: list[str]
     descriptions: list[str]
     keys: list[str]
 
@@ -113,6 +129,166 @@ class _ScreenDescription:
     embedding: list[float]
     detail_snapshot: dict[str, object]
     elements: list[dict[str, str]]
+
+
+class _Described(NamedTuple):
+    """What the describe call said about a screen, as an observation's record keeps it."""
+
+    page_description: str
+    state: dict[str, object]
+    elements: list[dict[str, str]]
+    is_external_web: bool
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "page_description": self.page_description,
+            "state": self.state,
+            "elements": self.elements,
+            "is_external_web": self.is_external_web,
+        }
+
+    @classmethod
+    def from_record(cls, record: dict[str, object]) -> _Described | None:
+        """Return the ``describe`` field of an observation's record, or ``None`` when it
+        has none or it is malformed."""
+        describe = as_object_dict(record.get("describe"))
+        description = describe.get("page_description")
+        state = describe.get("state")
+        elements = describe.get("elements")
+        if not isinstance(description, str) or not isinstance(state, dict):
+            return None
+        if not isinstance(elements, list):
+            return None
+        return cls(
+            description,
+            as_object_dict(state),
+            [
+                {
+                    key: value
+                    for key, value in as_object_dict(element).items()
+                    if isinstance(value, str)
+                }
+                for element in elements
+            ],
+            describe.get("is_external_web") is True,
+        )
+
+
+class _StoredScreen(NamedTuple):
+    """A member's pixel hash and the describe output an exact match copies from it."""
+
+    pixel_hash: str
+    described: _Described
+
+
+class ClosestMember(NamedTuple):
+    """A node's member most similar to a screen by image, and that cosine."""
+
+    observation_id: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenQuery:
+    """A screen as the short list's sources rank nodes for it."""
+
+    image_vector: list[float]
+    description_embedding: list[float]
+
+
+type SourceScores = Callable[[GraphManager, ScreenQuery, Sequence[str]], list[tuple[str, float]]]
+
+
+@dataclass(frozen=True, slots=True)
+class ShortListSource:
+    """One named ranking of the candidate nodes, of which the short list takes the
+    ``size`` best."""
+
+    name: str
+    size: int
+    scores: SourceScores
+
+
+@dataclass(slots=True)
+class Candidate:
+    """A node on the short list, the best rank any source gave it, the sources that
+    proposed it with their scores, and its member closest to the screen."""
+
+    node_id: str
+    best_rank: int
+    closest_member: ClosestMember
+    sources: dict[str, float] = field(default_factory=dict)
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "node": self.node_id,
+            "sources": dict(self.sources),
+            "closest_member": self.closest_member.observation_id,
+            "image_score": self.closest_member.score,
+        }
+
+
+def _image_scores(
+    graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
+) -> list[tuple[str, float]]:
+    return [
+        (node_id, graph.closest_member(node_id, query.image_vector).score) for node_id in node_ids
+    ]
+
+
+def _text_scores(
+    graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
+) -> list[tuple[str, float]]:
+    return score_by_cosine(
+        query.description_embedding,
+        [(node_id, graph.description_embedding(node_id)) for node_id in node_ids],
+        scope="identify_state description-embedding",
+    )
+
+
+SHORT_LIST_SOURCES = (
+    ShortListSource("image", 3, _image_scores),
+    ShortListSource("text", 2, _text_scores),
+)
+
+
+def _short_list_order(candidate: Candidate) -> tuple[int, float]:
+    return candidate.best_rank, -candidate.closest_member.score
+
+
+@dataclass(slots=True)
+class _Decision:
+    """What decided a screen's node, as the ``identify`` field of its record keeps it."""
+
+    expected_node: str | None
+    stage: Literal["exact", "expected", "short_list", "new", "external_web"] = "new"
+    exact_match: str | None = None
+    candidates: list[dict[str, object]] = field(default_factory=list)
+    verifications: list[dict[str, object]] = field(default_factory=list)
+    refinement: dict[str, object] | None = None
+
+    def as_record(self, node_id: str) -> dict[str, object]:
+        return {
+            "stage": self.stage,
+            "expected_node": self.expected_node,
+            "exact_match": self.exact_match,
+            "candidates": self.candidates,
+            "verifications": self.verifications,
+            "refinement": self.refinement,
+            "node": node_id,
+        }
+
+
+@dataclass(slots=True)
+class _Identification:
+    """One described screen on its way through ``identify_state``: its description,
+    which the step's first rejection refines, and the decision its record gets."""
+
+    observation: Observation
+    image_vector: list[float]
+    screen: _ScreenDescription
+    decision: _Decision
+    rejected: bool = False
 
 
 def _node_id(value: object) -> str:
@@ -274,6 +450,24 @@ def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Pa
         raise ValueError(msg)
 
 
+def _stored_screens(nodes: list[dict[str, Any]], steps_dir: Path) -> dict[str, _StoredScreen]:
+    """Read the pixel hash and describe output of every member of the saved in-app
+    ``nodes`` whose record in ``steps_dir`` holds both."""
+    stored: dict[str, _StoredScreen] = {}
+    for node in nodes:
+        if node["id"].startswith("ext_") or node.get("is_external"):
+            continue
+        for member in _member_observations(node):
+            record = read_observation_record(steps_dir, member)
+            if record is None:
+                continue
+            described = _Described.from_record(record)
+            pixel_hash = as_str(record.get("pixel_hash"), "")
+            if described is not None and pixel_hash:
+                stored[member] = _StoredScreen(pixel_hash, described)
+    return stored
+
+
 class GraphManager:
     """Manages a directed graph of app UI states and transitions."""
 
@@ -282,7 +476,7 @@ class GraphManager:
         client: OpenRouter | None = None,
         page_detail: ModelSettings | None = None,
         embedding: ModelSettings | None = None,
-        similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        image_embedding: ModelSettings | None = None,
         audit_timeout: float = DEFAULT_AUDIT_TIMEOUT,
     ) -> None:
         self.graph = nx.DiGraph()
@@ -290,14 +484,15 @@ class GraphManager:
         self.client = client
         self.page_detail = page_detail
         self.embedding = embedding
-        self.similarity_threshold = similarity_threshold
+        self.image_embedding = image_embedding
         self.audit_timeout = audit_timeout
         # The step log the nodes' observations are in: load_graph sets the one beside
         # the file it loads, and the owner of a new graph sets it before identify_state.
         self.steps_dir: Path | None = None
         self._next_id = 0
-        self._last_identify_cache: _IdentifyCacheEntry | None = None
         self._node_aliases: dict[str, str] = {}
+        self._image_vectors: dict[str, list[float]] = {}
+        self._stored_screens: dict[str, _StoredScreen] = {}
         self.total_steps_completed = 0
 
     @property
@@ -319,15 +514,40 @@ class GraphManager:
             raise RuntimeError(msg)
         return page_detail
 
-    def _embed(self, text: str) -> list[float]:
+    def _require_embedding(self) -> tuple[OpenRouter, ModelSettings]:
         if self.client is None or self.embedding is None:
             msg = "GraphManager needs a client and embedding settings for this operation"
             raise RuntimeError(msg)
+        return self.client, self.embedding
+
+    def _require_image_embedding(self) -> tuple[OpenRouter, ModelSettings]:
+        if self.client is None or self.image_embedding is None:
+            msg = "GraphManager needs a client and image_embedding settings for this operation"
+            raise RuntimeError(msg)
+        return self.client, self.image_embedding
+
+    def _require_steps_dir(self) -> Path:
+        if self.steps_dir is None:
+            msg = "GraphManager needs a steps_dir to read and annotate observations"
+            raise RuntimeError(msg)
+        return self.steps_dir
+
+    def _embed(self, text: str) -> list[float]:
+        client, embedding = self._require_embedding()
         return get_embedding(
-            self.client,
+            client,
             text,
-            self.embedding.model,
-            request_timeout=self.embedding.request_timeout,
+            embedding.model,
+            request_timeout=embedding.request_timeout,
+        )
+
+    def _embed_image(self, screenshot_b64: str) -> list[float]:
+        client, image_embedding = self._require_image_embedding()
+        return get_image_embedding(
+            client,
+            screenshot_b64,
+            image_embedding.model,
+            request_timeout=image_embedding.request_timeout,
         )
 
     def _text_embedding(self, node_id: str, data: dict[str, object]) -> list[float]:
@@ -343,6 +563,47 @@ class GraphManager:
             raise ValueError(msg)
         return as_float_list(vector)
 
+    def description_embedding(self, node_id: str) -> list[float]:
+        """Return the embedding of a node's description, ``[]`` when it has none; one
+        from another embedding model raises ``ValueError``."""
+        return self._text_embedding(node_id, self.graph.nodes[node_id])
+
+    def image_vector(self, observation_id: str) -> list[float] | None:
+        """Return the image vector of an observation, or ``None`` when it has none."""
+        return self._image_vectors.get(observation_id)
+
+    def closest_member(self, node_id: str, image_vector: list[float]) -> ClosestMember:
+        """Return the member of ``node_id`` whose image vector is most similar to
+        ``image_vector``.
+
+        A node without members raises ``ValueError``, and so does a node with members
+        that have no image vector of ``image_vector``'s dimension, naming each of them.
+        """
+        observations = _member_observations(self.graph.nodes[node_id])
+        if not observations:
+            msg = f"Node {node_id!r} has no members to compare the screen with"
+            raise ValueError(msg)
+        unusable = [
+            member
+            for member in observations
+            if len(self._image_vectors.get(member, [])) != len(image_vector)
+        ]
+        if unusable:
+            msg = (
+                f"Node {node_id!r} has members without an image vector of the screen's "
+                f"{len(image_vector)} dimensions: {', '.join(unusable)}. Delete the step "
+                "log's image_emb.json to embed every member again."
+            )
+            raise ValueError(msg)
+        member, score = max(
+            (
+                (member, cosine_similarity(image_vector, self._image_vectors[member]))
+                for member in observations
+            ),
+            key=lambda kv: kv[1],
+        )
+        return ClosestMember(member, score)
+
     def representative_image_b64(self, node_id: str) -> str:
         """Return the WebP image of a node's representative observation as base64."""
         if self.steps_dir is None:
@@ -352,105 +613,196 @@ class GraphManager:
             self.steps_dir, self.graph.nodes[node_id]["representative_observation"]
         )
 
-    def identify_state(self, observation: Observation) -> str:
-        """Identify which node the current screen belongs to, or create a new one, and
-        add ``observation`` to that node's members.
+    def _in_app_members(self) -> Iterator[str]:
+        for node_id, data in self.graph.nodes(data=True):
+            if not self._is_external(node_id):
+                yield from _member_observations(data)
 
-        Process:
-        1. Collect existing same-package node descriptions and state keys.
-        2. Single VLM call → model outputs a fresh description + dynamic state.
-           Existing node list is provided as context for disambiguation only.
-        3. Compute embedding, find best matching node by similarity.
-        4. If similarity >= threshold → ALWAYS call verifier with both screenshots.
-           Verifier can confirm match, reject it, and rename the existing node.
-        5. If verified → update existing node; if rejected → create new node.
-        6. Merge state snapshot into the node's schema.
+    def embed_missing_members(self) -> int:
+        """Embed the image of every member of an in-app node that has no image vector,
+        save the vectors to the step log, and return how many were embedded.
 
-        The verifier compares the screen with the candidate's representative.
-        Matching uses the ``package`` the device reports (not exact activity) so that
-        the same visual screen reached via different Android activities is merged
-        into one node.
-
-        Returns:
-            The node ID (str) for this state, or ``EXTERNAL_WEB_NODE`` for any web
-            content from outside the app.
+        A member has none when the step log's ``image_emb.json`` is missing, holds no
+        vector for it, or is tagged with another image-embedding model.
         """
-        screen_hash = hash(observation.screenshot_b64)
-        cached_node_id = self._cached_node_id(screen_hash, observation.activity)
-        if cached_node_id is not None:
-            _add_member(self.graph.nodes[cached_node_id], observation.observation_id)
-            return cached_node_id
+        _, image_embedding = self._require_image_embedding()
+        steps_dir = self._require_steps_dir()
+        missing = [m for m in dict.fromkeys(self._in_app_members()) if m not in self._image_vectors]
+        if not missing:
+            return 0
+        logger.info(
+            "Embedding the images of %d member observation(s) without an image vector: "
+            "one %s request each",
+            len(missing),
+            image_embedding.model,
+        )
+        usage_key = f"image_embedding:{image_embedding.model}"
+        cost_before = token_tracker.summary().get(usage_key, {}).get("cost", 0.0)
+        try:
+            for member in missing:
+                self._image_vectors[member] = self._embed_image(
+                    observation_image_b64(steps_dir, member)
+                )
+        finally:
+            save_image_embeddings(steps_dir, self._image_vectors, model=image_embedding.model)
+        cost = token_tracker.summary().get(usage_key, {}).get("cost", 0.0) - cost_before
+        logger.info("Embedded %d member image(s) for $%.6f", len(missing), cost)
+        return len(missing)
 
-        same_package = self._same_package_nodes(observation.package)
+    def identify_state(self, observation: Observation, *, expected_node: str | None = None) -> str:
+        """Return the node the screen in ``observation`` belongs to, creating one when
+        none does, add ``observation`` to its members, and add what decided it to the
+        observation's record.
+
+        The screen is embedded by image, then compared with the members of the in-app
+        nodes of its ``package``, cheapest evidence first:
+
+        1. A member with the same ``pixel_hash`` decides alone, when it belongs to one
+           node only: the screen takes that member's describe output, so neither the
+           describe call nor the verifier runs.
+        2. The describe call describes the screen; web content from outside the app
+           goes to ``EXTERNAL_WEB_NODE``.
+        3. ``expected_node``, the node the caller expects the screen to be, is verified
+           against its member closest to the screen.
+        4. The short list's candidates are verified in order against their closest
+           members, up to ``SHORT_LIST_VERIFICATIONS``.
+
+        The first confirmation decides. A screen every check rejects starts a new node,
+        and the step's first rejection refines the two descriptions.
+        """
         client, page_detail = self._require_page_detail()
-        page_description, detail_snapshot, elements, is_external_web = describe_page_and_state(
-            client,
-            observation.screenshot_b64,
-            existing_nodes=same_package.descriptions or None,
-            existing_keys=same_package.keys or None,
-            settings=page_detail,
+        self._require_embedding()
+        steps_dir = self._require_steps_dir()
+        same_package = self._same_package_nodes(observation.package)
+        image_vector = self._embed_image(observation.screenshot_b64)
+        self._image_vectors[observation.observation_id] = image_vector
+        exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
+        if exact is not None:
+            return self._record_exact_match(observation, *exact, expected_node=expected_node)
+
+        described = _Described(
+            *describe_page_and_state(
+                client,
+                observation.screenshot_b64,
+                existing_nodes=same_package.descriptions or None,
+                existing_keys=same_package.keys or None,
+                settings=page_detail,
+            )
         )
         logger.info(
             "Describe model output: '%s' | state keys: %s | elements: %d",
-            page_description,
-            list(detail_snapshot.keys()) if detail_snapshot else "[]",
-            len(elements),
+            described.page_description,
+            list(described.state.keys()) if described.state else "[]",
+            len(described.elements),
         )
-        if is_external_web:
-            # Returning before the cache update leaves the cache on the screen behind the
-            # page, where a back press usually lands.
-            return self._record_external_web_visit(observation)
-
         screen = _ScreenDescription(
-            page_description, self._embed(page_description), detail_snapshot, elements
+            described.page_description, [], described.state, described.elements
         )
-        matched_node_id, screen = self._match_screen(
-            screen, same_package.candidates, observation.screenshot_b64
-        )
-        if matched_node_id is not None:
-            node_id = matched_node_id
-            self._add_activity(node_id, observation.activity)
+        decision = _Decision(expected_node)
+        identification = _Identification(observation, image_vector, screen, decision)
+        if described.is_external_web:
+            decision.stage = "external_web"
+            node_id = self._record_external_web_visit(observation)
         else:
-            node_id = self._add_screen_node(screen, observation.package, observation.activity)
-
-        self._record_visit(node_id, screen, observation)
-        self._last_identify_cache = _IdentifyCacheEntry(screen_hash, observation.activity, node_id)
+            identification.screen = replace(
+                screen, embedding=self._embed(described.page_description)
+            )
+            node_id = self._assign(identification)
+            self._stored_screens[observation.observation_id] = _StoredScreen(
+                observation.pixel_hash, described
+            )
+        annotate_observation(
+            steps_dir,
+            observation.observation_id,
+            {"describe": described.as_record(), "identify": decision.as_record(node_id)},
+        )
         return node_id
 
-    def _cached_node_id(self, screen_hash: int, activity: str) -> str | None:
-        cached = self._last_identify_cache
-        if (
-            cached is not None
-            and screen_hash == cached.screenshot_hash
-            and activity == cached.activity
-            and cached.node_id in self.graph
-        ):
-            logger.info("identify_state cache hit → %s (skipping VLM)", cached.node_id)
-            return cached.node_id
-        return None
+    def _assign(self, identification: _Identification) -> str:
+        """Return the node the identified screen joins, a new one when every check
+        rejects it, and record the visit there."""
+        observation = identification.observation
+        node_id = self._match_screen(identification)
+        if node_id is None:
+            node_id = self._add_screen_node(
+                identification.screen, observation.package, observation.activity
+            )
+        else:
+            self._add_activity(node_id, observation.activity)
+        screen = identification.screen
+        self._record_visit(node_id, screen.detail_snapshot, screen.elements, observation)
+        return node_id
 
     def _same_package_nodes(self, package: str) -> _SamePackageNodes:
-        """Collect the embeddings, descriptions and state keys of *package*'s nodes.
+        """Collect *package*'s in-app nodes that have members, and the descriptions and
+        state keys of all its nodes.
 
-        Reading an embedding checks its provenance, so a vector from another embedding
+        Every text embedding's provenance is checked, so a vector from another embedding
         model raises here, before any model request.
         """
-        candidates = [
-            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
-            for node_id, data in self.graph.nodes(data=True)
-            if data.get("package") == package
-        ]
+        node_ids: list[str] = []
         descriptions: list[str] = []
         keys: list[str] = []
-        for _, data in self.graph.nodes(data=True):
-            if data.get("package") == package:
-                desc = data.get("page_description", "")
-                if desc and desc not in descriptions:
-                    descriptions.append(desc)
-                for k in data.get("state_schema", {}):
-                    if k not in keys:
-                        keys.append(k)
-        return _SamePackageNodes(candidates, descriptions, keys)
+        for raw_id, data in self.graph.nodes(data=True):
+            node_id = _node_id(raw_id)
+            if data.get("package") != package or self._is_external(node_id):
+                continue
+            self._text_embedding(node_id, data)
+            if data.get("representative_observation"):
+                node_ids.append(node_id)
+            desc = data.get("page_description", "")
+            if desc and desc not in descriptions:
+                descriptions.append(desc)
+            for k in data.get("state_schema", {}):
+                if k not in keys:
+                    keys.append(k)
+        return _SamePackageNodes(node_ids, descriptions, keys)
+
+    def _exact_match(self, pixel_hash: str, node_ids: Sequence[str]) -> tuple[str, str] | None:
+        """Return the node and member whose stored screen has ``pixel_hash``, when the
+        members that have it all belong to one of ``node_ids``; the latest such member."""
+        if not pixel_hash:
+            return None
+        matches: dict[str, str] = {}
+        for node_id in node_ids:
+            for member in self.graph.nodes[node_id].get("observations", []):
+                stored = self._stored_screens.get(member)
+                if stored is not None and stored.pixel_hash == pixel_hash:
+                    matches[node_id] = member
+        if len(matches) > 1:
+            logger.info(
+                "Exact pixel match with members of %d nodes (%s); not deciding on it",
+                len(matches),
+                ", ".join(matches),
+            )
+        if len(matches) != 1:
+            return None
+        return next(iter(matches.items()))
+
+    def _record_exact_match(
+        self, observation: Observation, node_id: str, member: str, *, expected_node: str | None
+    ) -> str:
+        """Add the screen to ``node_id`` as an exact copy of its ``member``, whose
+        describe output it takes, and record that on the screen's record."""
+        described = self._stored_screens[member].described
+        logger.info(
+            "Exact pixel match with member %s of %s; reusing its description", member, node_id
+        )
+        self._add_activity(node_id, observation.activity)
+        self._record_visit(node_id, dict(described.state), described.elements, observation)
+        self._stored_screens[observation.observation_id] = _StoredScreen(
+            observation.pixel_hash, described
+        )
+        decision = _Decision(expected_node, "exact", exact_match=member)
+        annotate_observation(
+            self._require_steps_dir(),
+            observation.observation_id,
+            {
+                "describe": {**described.as_record(), "copied_from": member},
+                "identify": decision.as_record(node_id),
+            },
+        )
+        return node_id
 
     def _record_external_web_visit(self, observation: Observation) -> str:
         self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
@@ -479,94 +831,143 @@ class GraphManager:
         _add_member(node_data, observation.observation_id)
         return node_id
 
-    def _match_screen(
-        self,
-        screen: _ScreenDescription,
-        candidates: list[tuple[str, list[float]]],
-        screenshot_b64: str,
-    ) -> tuple[str | None, _ScreenDescription]:
-        """Return the node *screen* belongs to, or ``None``, and the screen's description.
+    def _verifiable_node(self, node_id: str | None, package: str) -> str | None:
+        """Return ``node_id`` as it is named now, when it is an in-app node of
+        ``package`` with members to compare with."""
+        if node_id is None:
+            return None
+        node_id = self.resolve_node_id(node_id)
+        if node_id not in self.graph or self._is_external(node_id):
+            return None
+        data = self.graph.nodes[node_id]
+        if data.get("package") != package or not data.get("representative_observation"):
+            return None
+        return node_id
 
-        A verifier that rejects the best candidate can refine that description.
-        """
-        scored = score_by_cosine(
-            screen.embedding,
-            candidates,
-            scope="identify_state description-embedding",
-        )
-        if not scored:
-            return None, screen
-        # max() returns the first maximal element on a tie, matching the
-        # earlier "sim > best_similarity" strict-greater loop's tie behaviour.
-        best_node_id, best_similarity = max(scored, key=lambda kv: kv[1])
-        candidate_data = self.graph.nodes[best_node_id]
+    def _match_screen(self, identification: _Identification) -> str | None:
+        """Return the node the verifier confirms the identified screen belongs to: the
+        expected node first, then the short list. ``None`` when it confirms none."""
+        package = identification.observation.package
+        expected = self._verifiable_node(identification.decision.expected_node, package)
+        excluded: set[str] = set()
+        if expected is not None:
+            closest = self.closest_member(expected, identification.image_vector)
+            confirmed = self._verify(identification, expected, closest.observation_id)
+            if confirmed is not None:
+                identification.decision.stage = "expected"
+                return confirmed
+            excluded.add(self.resolve_node_id(expected))
+        return self._verify_short_list(identification, excluded)
+
+    def _verify_short_list(
+        self, identification: _Identification, excluded: Collection[str]
+    ) -> str | None:
+        """Verify the short list of the identified screen, built from the in-app nodes
+        of its package other than ``excluded``, and return the first node confirmed."""
+        node_ids = [
+            node_id
+            for node_id in self._same_package_nodes(identification.observation.package).node_ids
+            if node_id not in excluded
+        ]
+        query = ScreenQuery(identification.image_vector, identification.screen.embedding)
+        candidates = self.short_list(query, node_ids)
+        identification.decision.candidates = [candidate.as_record() for candidate in candidates]
         logger.info(
-            "Best candidate: %s (sim=%.3f, threshold=%.2f) — '%s'",
-            best_node_id,
-            best_similarity,
-            self.similarity_threshold,
-            candidate_data.get("page_description", ""),
-        )
-
-        if best_similarity >= self.similarity_threshold:
-            if candidate_data.get("representative_observation"):
-                return self._verify_match(screen, best_node_id, best_similarity, screenshot_b64)
-            logger.info(
-                "Matched node %s by embedding (sim=%.3f, no representative): %s",
-                best_node_id,
-                best_similarity,
-                candidate_data.get("page_description"),
+            "Short list: %s",
+            ", ".join(
+                f"{c.node_id} ({', '.join(f'{k}={v:.3f}' for k, v in c.sources.items())})"
+                for c in candidates
             )
-            return best_node_id, screen
-        return None, screen
+            or "empty",
+        )
+        for candidate in candidates[:SHORT_LIST_VERIFICATIONS]:
+            node_id = self.resolve_node_id(candidate.node_id)
+            confirmed = self._verify(
+                identification, node_id, candidate.closest_member.observation_id
+            )
+            if confirmed is not None:
+                identification.decision.stage = "short_list"
+                return confirmed
+        return None
 
-    def _verify_match(
-        self,
-        screen: _ScreenDescription,
-        node_id: str,
-        similarity: float,
-        screenshot_b64: str,
-    ) -> tuple[str | None, _ScreenDescription]:
-        """Return *node_id* if the verifier confirms the match, else ``None``, with *screen*.
+    def short_list(self, query: ScreenQuery, node_ids: Sequence[str]) -> list[Candidate]:
+        """Return the nodes of ``node_ids`` that a source in ``SHORT_LIST_SOURCES`` ranks
+        among its best, once each, ordered by their best rank in any source and then
+        by the image score of their closest member."""
+        candidates: dict[str, Candidate] = {}
+        for source in SHORT_LIST_SOURCES:
+            ranked = sorted(
+                source.scores(self, query, node_ids), key=lambda kv: kv[1], reverse=True
+            )
+            for rank, (node_id, score) in enumerate(ranked[: source.size]):
+                candidate = candidates.get(node_id)
+                if candidate is None:
+                    closest = self.closest_member(node_id, query.image_vector)
+                    candidate = candidates[node_id] = Candidate(node_id, rank, closest)
+                candidate.best_rank = min(candidate.best_rank, rank)
+                candidate.sources[source.name] = score
+        return sorted(candidates.values(), key=_short_list_order)
 
-        On a rejection the existing node takes its refined description, and is
-        re-embedded, before *screen* takes its own refined description and embedding.
-        """
+    def _verify(self, identification: _Identification, node_id: str, member: str) -> str | None:
+        """Ask the verifier whether the identified screen is ``node_id``'s ``member``, and
+        return ``node_id`` when it says so; the first rejection refines both descriptions."""
         client, page_detail = self._require_page_detail()
-        candidate_data = self.graph.nodes[node_id]
-        verify_result = verify_same_node(
+        description = self.graph.nodes[node_id].get("page_description", "")
+        verdict = verify_same_node(
             client,
-            screenshot_new_b64=screenshot_b64,
-            screenshot_existing_b64=self.representative_image_b64(node_id),
-            existing_description=candidate_data.get("page_description", ""),
+            screenshot_new_b64=identification.observation.screenshot_b64,
+            screenshot_existing_b64=observation_image_b64(self._require_steps_dir(), member),
+            existing_description=description,
             settings=page_detail,
         )
-        if verify_result.get("same", False):
-            logger.info(
-                "Verifier confirmed match node %s (sim=%.3f): %s | reason: %s",
-                node_id,
-                similarity,
-                candidate_data.get("page_description"),
-                verify_result.get("reason", ""),
-            )
-            return node_id, screen
-
-        refined_existing = verify_result.get("existing_description", "")
-        refined_new = verify_result.get("new_description", "")
-        if refined_existing and refined_existing != candidate_data.get("page_description"):
-            node_id = self.rename_node(node_id, refined_existing)
-        if refined_new:
-            screen = replace(
-                screen, page_description=refined_new, embedding=self._embed(refined_new)
-            )
-        logger.info(
-            "Verifier rejected match node %s (sim=%.3f): reason: %s | new: %s",
-            node_id,
-            similarity,
-            verify_result.get("reason", ""),
-            screen.page_description,
+        same = verdict.get("same") is True
+        reason = as_str(verdict.get("reason"), "")
+        identification.decision.verifications.append(
+            {"node": node_id, "member": member, "same": same, "reason": reason}
         )
-        return None, screen
+        if same:
+            logger.info(
+                "Verifier confirmed node %s against member %s: %s | reason: %s",
+                node_id,
+                member,
+                description,
+                reason,
+            )
+            return node_id
+        logger.info(
+            "Verifier rejected node %s against member %s: reason: %s", node_id, member, reason
+        )
+        if not identification.rejected:
+            identification.rejected = True
+            self._refine(identification, node_id, verdict)
+        return None
+
+    def _refine(
+        self, identification: _Identification, node_id: str, verdict: dict[str, Any]
+    ) -> None:
+        """Give the rejected node and the screen the verifier's refined descriptions,
+        re-embedding both; the node is renamed to match its new description."""
+        refined_existing = as_str(verdict.get("existing_description"), "")
+        refined_new = as_str(verdict.get("new_description"), "")
+        renamed = node_id
+        if refined_existing and refined_existing != self.graph.nodes[node_id].get(
+            "page_description"
+        ):
+            renamed = self.rename_node(node_id, refined_existing)
+        if refined_new:
+            identification.screen = replace(
+                identification.screen,
+                page_description=refined_new,
+                embedding=self._embed(refined_new),
+            )
+        if renamed != node_id or refined_new:
+            identification.decision.refinement = {
+                "node": node_id,
+                "renamed_to": renamed,
+                "existing_description": refined_existing,
+                "new_description": refined_new,
+            }
+            logger.info("Refined descriptions: %s -> %s | new: %s", node_id, renamed, refined_new)
 
     def _add_activity(self, node_id: str, activity: str) -> None:
         node_data = self.graph.nodes[node_id]
@@ -608,16 +1009,20 @@ class GraphManager:
         return node_id
 
     def _record_visit(
-        self, node_id: str, screen: _ScreenDescription, observation: Observation
+        self,
+        node_id: str,
+        detail_snapshot: dict[str, object],
+        elements: list[dict[str, str]],
+        observation: Observation,
     ) -> None:
         node_data = self.graph.nodes[node_id]
         schema = node_data.get("state_schema", {})
-        _merge_into_schema(schema, screen.detail_snapshot)
+        _merge_into_schema(schema, detail_snapshot)
         node_data["state_schema"] = schema
-        node_data["last_detail_snapshot"] = screen.detail_snapshot
+        node_data["last_detail_snapshot"] = detail_snapshot
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         # Structural elements accumulate across visits, so merge rather than replace.
-        _merge_elements(node_data, screen.elements)
+        _merge_elements(node_data, elements)
         # A confirmed match keeps the node's representative; a new node, including a
         # verifier-rejected split, takes this observation as its own.
         _add_member(node_data, observation.observation_id)
@@ -675,9 +1080,6 @@ class GraphManager:
         if new_node_id != node_id:
             nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
             self._record_alias(node_id, new_node_id)
-            cached = self._last_identify_cache
-            if cached is not None and cached.node_id == node_id:
-                self._last_identify_cache = cached._replace(node_id=new_node_id)
 
         logger.info(
             "Renamed node %s → %s: '%s' → '%s'",
@@ -1418,14 +1820,14 @@ class GraphManager:
         return graph_path.with_suffix(".emb.json")
 
     def save_graph(self, path: str | Path) -> None:
-        """Save graph to a JSON file, with embeddings in a separate file."""
+        """Save graph to a JSON file, with text embeddings in a separate file and the
+        image vectors in the step log beside it."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
             "package_name": self.package_name,
             "next_id": self._next_id,
-            "similarity_threshold": self.similarity_threshold,
             "total_steps_completed": self.total_steps_completed,
             "node_aliases": dict(self._node_aliases),
             "nodes": [],
@@ -1479,6 +1881,10 @@ class GraphManager:
 
         emb_path = self.embeddings_path(path)
         write_json_atomically(emb_path, embeddings, ensure_ascii=False)
+        if self.image_embedding is not None and self._image_vectors:
+            save_image_embeddings(
+                graph_steps_dir(path), self._image_vectors, model=self.image_embedding.model
+            )
 
         logger.info(
             "Graph saved to %s (%d nodes, %d edges)", path, len(data["nodes"]), len(data["edges"])
@@ -1486,7 +1892,8 @@ class GraphManager:
 
     def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
         """Load graph from a JSON file (and companion embeddings file), with the step
-        log beside it as the manager's ``steps_dir``.
+        log beside it as the manager's ``steps_dir``, its image vectors when the
+        manager has image-embedding settings, and its members' stored screens.
 
         ``default_package_name`` stands in for the ``package_name`` of a file that has
         none. A node without member observations, or whose representative has no image
@@ -1501,6 +1908,12 @@ class GraphManager:
         data = require_known_edge_endpoints(raw, path)
         steps_dir = graph_steps_dir(path)
         _require_node_members(data["nodes"], path, steps_dir)
+        stored_screens = _stored_screens(data["nodes"], steps_dir)
+        image_vectors = (
+            load_image_embeddings(steps_dir, model=self.image_embedding.model)
+            if self.image_embedding is not None
+            else {}
+        )
 
         emb_path = self.embeddings_path(path)
         embeddings: dict[str, list[float]] = {}
@@ -1517,9 +1930,10 @@ class GraphManager:
 
         self.package_name = as_str(data.get("package_name"), "") or default_package_name
         self._next_id = data.get("next_id", 0)
-        self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.steps_dir = steps_dir
+        self._image_vectors = image_vectors
+        self._stored_screens = stored_screens
         self._node_aliases = {
             old: new
             for old, new in as_str_dict(data.get("node_aliases")).items()

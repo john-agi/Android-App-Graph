@@ -1,0 +1,7 @@
+  mCurrentFocus=Window{4c1e2f0 u0 com.android.settings/com.android.settings.Settings}
+  WindowInsetsStateController
+    InsetsState
+      mDisplayFrame=Rect(0, 0 - 1080, 2400)
+        InsetsSource type=ITYPE_STATUS_BAR frame=[0,0][1080,121] visible=true insetsRoundedCornerFrame=false
+        InsetsSource type=ITYPE_NAVIGATION_BAR frame=[0,2337][1080,2400] visible=true insetsRoundedCornerFrame=false
+        InsetsSource type=ITYPE_IME frame=[0,0][0,0] visibleFrame=[0,1365][1080,2400] visible=false insetsRoundedCornerFrame=false

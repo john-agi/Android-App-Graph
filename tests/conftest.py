@@ -26,6 +26,7 @@ from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
 from android_app_graph.graph_files import graph_steps_dir, observation_image_path
 from android_app_graph.screen_image import encode_screenshot
+from android_app_graph.step_log import save_image_embeddings
 from android_app_graph.utils import open_client
 from android_app_graph.utils.graph_manager import GraphManager
 
@@ -304,11 +305,29 @@ def embedding_body() -> dict[str, object]:
     }
 
 
+def _png_b64(color: str) -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 @pytest.fixture
 def png_screenshot() -> str:
-    buffer = io.BytesIO()
-    Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    return _png_b64("white")
+
+
+@pytest.fixture
+def write_image_vectors() -> Callable[..., None]:
+    """Give observations of a step log image vectors from ``model``, by default the one
+    ``model_environment`` names, so loading the graph embeds none of them."""
+
+    def write(
+        steps_dir: Path, observation_ids: list[str], model: str = "google/gemini-embedding-2"
+    ) -> None:
+        vectors = {observation_id: [1.0, 0.0] for observation_id in observation_ids}
+        save_image_embeddings(steps_dir, vectors, model=model)
+
+    return write
 
 
 @pytest.fixture
@@ -364,7 +383,7 @@ def step_records() -> Callable[[Path], list[dict[str, Any]]]:
     def read(steps_dir: Path) -> list[dict[str, Any]]:
         return [
             json.loads(path.read_text(encoding="utf-8"))
-            for path in sorted(steps_dir.glob("*.json"))
+            for path in sorted(steps_dir.glob("[0-9]*.json"))
         ]
 
     return read
@@ -388,11 +407,12 @@ class _ScreenSequence:
 
 @pytest.fixture
 def two_screen_device(png_screenshot: str) -> DeviceController:
-    # Two activities of one package: identify_state still compares the second screen
-    # with the first, but cannot answer it from its last-screen cache.
+    # Two screens of one package whose pixels differ, so identify_state compares the
+    # second with the first instead of deciding on an exact match.
     search = {
         "activity": "com.demo.app.Search",
         "screenshot": png_screenshot,
         "package": "com.demo.app",
     }
-    return _ScreenSequence(search, {**search, "activity": "com.demo.app.Results"})
+    results = {**search, "activity": "com.demo.app.Results", "screenshot": _png_b64("gray")}
+    return _ScreenSequence(search, results)

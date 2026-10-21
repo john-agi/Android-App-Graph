@@ -123,8 +123,8 @@ cp .env.example .env
 
 The official [OpenRouter Python SDK](https://openrouter.ai/docs/client-sdks/python/overview)
 is installed by `uv sync --locked`. OpenRouter is the only endpoint and
-`OPENROUTER_API_KEY` is the only credential: one key covers chat and text
-embeddings, and a missing or empty key is an error:
+`OPENROUTER_API_KEY` is the only credential: one key covers chat, text embeddings
+and screenshot embeddings, and a missing or empty key is an error:
 
 ```bash
 OPENROUTER_API_KEY=your-key
@@ -160,7 +160,7 @@ or container; a physical `.env` file is not required or loaded automatically.
 | Environment variable | Role |
 |---|---|
 | `APP_GRAPH_PAGE_DETAIL_MODEL` | Screen descriptions and graph auditing |
-| `APP_GRAPH_EMBEDDING_MODEL` | Text embeddings |
+| `APP_GRAPH_EMBEDDING_MODEL` | Text and screenshot embeddings |
 | `APP_GRAPH_INSTRUCTION_MODEL` | Exploration planning and relabelling flagged edges |
 | `APP_GRAPH_ACTION_MODEL` | Action prediction |
 
@@ -176,9 +176,13 @@ reads the corresponding environment variable; an explicit model ID in YAML takes
 precedence. An empty value or unresolved reference is an error.
 To compare models, edit `.env`, export it again and restart the command.
 
-Exploration requires all four roles. A basic audit requires page-detail and
-embedding models; `--re-explore` also requires instruction and action models.
-Help and plotting existing graphs need no model configuration or credentials.
+Exploration requires every role: `page_detail`, `embedding`, `image_embedding`,
+`instruction` and `action`. A basic audit requires `page_detail`, `embedding` and
+`image_embedding`; `--re-explore` also requires `instruction` and `action`.
+`image_embedding` embeds screenshots and takes the `embedding` model when its block
+sets none (see [Requests and recovery](#requests-and-recovery)),
+so the four variables above cover every role. Help and plotting existing graphs need
+no model configuration or credentials.
 
 Each chat role (`page_detail`, `instruction`, `action`) accepts an optional
 `temperature` in its YAML block: a finite number from 0 to 2, inclusive, or an
@@ -194,8 +198,9 @@ temperature does not guarantee deterministic output.
 ### Requests and recovery
 
 All model roles accept a positive, finite `request_timeout` (or `timeout`) in
-seconds, sent with each request; the default is 60 seconds. The graph audit and
-node-merge audit send the whole graph in one prompt, so they use
+seconds, sent with each request; the default is 60 seconds. A screenshot embedding
+takes the `embedding` block's timeout when the `image_embedding` block sets none.
+The graph audit and node-merge audit send the whole graph in one prompt, so they use
 `page_detail.audit_request_timeout` instead, default 300 seconds.
 
 Each attempt ends at that timeout by the wall clock, counted from when the
@@ -294,6 +299,14 @@ command (`adb ... timed out after 30 s; retrying once`). A second timeout raises
 fails as it does when any other adb command fails. A normal read takes at most
 about 12 seconds, when a dump gives up waiting for an idle screen.
 
+Screenshots are embedded through OpenRouter's
+[multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings), as
+`image/webp`. `vlm.image_embedding` inherits the `embedding` model and timeout when
+omitted; set its `model` or `request_timeout` to embed screenshots differently.
+Image embeddings require an image-capable embedding model, such as the one in
+`.env.example`: a text-only model fails the first screenshot request, which stops
+the command.
+
 ### Embedding caches
 
 Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
@@ -306,8 +319,25 @@ Rebuild or re-explore into a new graph directory with the configured embedding
 model before resuming text matching; do not relabel old vectors. Newly generated
 or renamed descriptions carry their model metadata through save/load.
 
-Exploration and the audit match screens by these text vectors and by comparing a
-screenshot with a node's representative (see [Graph nodes](#graph-nodes)).
+Screenshot vectors live in the [step log](#step-log), `steps/image_emb.json`, as
+`{"model": model_id, "embeddings": {observation_id: vector}}`, so the explored
+graph and its audited copy share them. Every screenshot that
+[screen matching](#screen-matching) takes is embedded once and kept. Nothing reads
+the vector of any other screenshot, so none is made for the screens of other apps,
+including one a Back press leaves in front, or for a screenshot read without being
+matched, such as the one after a wait. A file without a model tag, tagged with
+another model, or unreadable counts as empty after one warning, and a malformed
+vector is dropped with a warning. Nothing is pruned, since observation IDs never
+change.
+
+When exploration resumes a graph and when the audit loads one, every member of an
+in-app node that has no vector is embedded first, as when `image_emb.json` is missing
+or tagged with another model. The log names the count before and the cost after. To
+embed every screenshot again, delete the file.
+
+One 670x1490 WebP screenshot, embedded with `voyageai/voyage-multimodal-3.5`, was
+1,782 prompt tokens and $0.000599 on 2026-10-21; Voyage bills images by pixel, so a
+screenshot of at most one million pixels costs at most about $0.0006.
 
 ### Action responses
 
@@ -447,6 +477,8 @@ WebP. That image is the only copy kept: the models receive it and the graph refe
 to it. The image is written before its record, so every record names an
 image that exists. A later run continues the numbering after the highest record,
 and an image a crash left without a record is ignored and its number reused.
+`image_emb.json` beside them holds the screenshots' image vectors (see
+[Embedding caches](#embedding-caches)).
 
 Every record has `id`, `kind`, `run_id` (one per exploration or re-exploration
 run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
@@ -454,7 +486,7 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image |
+| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
 
@@ -464,6 +496,34 @@ last screenshot before it, which can predate the app restart. The planner's
 instruction can differ from the edge's: an action-model `end` is recorded on the
 edge as "Press back".
 
+The status bar's clock and icons change on their own, so `pixel_hash` leaves them
+out. It is the SHA-256 of the image's decoded pixels, mode and size below its top
+`status_bar_rows` rows. Those rows cover `status_bar`, `[left, top, right, bottom]`
+in screen pixels, which every capture reads from the `statusBars` (`ITYPE_STATUS_BAR`
+before Android 14) `InsetsSource` of the `dumpsys window` output it already reads
+for the package and activity: `ceil(bottom * image height / screenshot height)`, and
+3 rows more when encoding shrank the image, because shrinking with LANCZOS blends
+each row into the 3 rows on either side of it. The frame follows the display cutout and the rotation; on a Pixel 9
+emulator it is 142 of 2424 rows in portrait. A bar that is hidden, as in immersive
+mode, not at the top, or not reported gives `null` and 0 rows, and the whole image
+is hashed, which can miss an exact match but never invents one.
+
+`describe` holds the screen description model's `page_description`, `state`,
+`elements` and `is_external_web`; an exact match copies them from the member it
+matched and names it in `copied_from`. `identify` holds what decided the screen's
+node:
+
+- `stage`: `exact`, `expected`, `short_list`, `new` or `external_web`;
+- `expected_node`, the node the caller expected, or `null`;
+- `exact_match`, the member an exact match copied;
+- `candidates`: each short-list node with the `sources` that proposed it and their
+  scores, its `closest_member` and that member's `image_score`;
+- `verifications`: each verifier call's `node`, the `member` it was shown, `same` and
+  the `reason`;
+- `refinement`: the descriptions the step's first rejection refined, and what the
+  rejected node was renamed to, or `null`;
+- `node`, the node the screen joined, under its ID at that moment.
+
 `source` names the part of the run that took the step: `main_loop`,
 `navigation_replay`, `coverage_checkpoint`, `external_app_recovery`,
 `external_web_recovery`, `re_explore` (the audit's exploration steps) or
@@ -472,7 +532,8 @@ planner, so its transition holds the flagged instruction and a `null` element.
 
 On 139 screenshots of the Settings app from a 1280x2856 emulator, each became a
 669x1493 image of 74 KB on average (176 KB at most) and took about 0.35 s to
-encode. A record is a few hundred bytes.
+encode. An action or transition record is a few hundred bytes, and an identified
+observation's record about 2 KB; each vector in `image_emb.json` adds about 14 KB.
 The log keeps every value shown on the screen and every text typed, passwords
 included, so treat a graph directory like the app's data. Run one exploration or
 re-exploration of an app at a time: two runs writing one step log reuse each
@@ -488,10 +549,45 @@ order, and names one of them `representative_observation`:
 - a screen the verifier rejects starts a new node with itself as representative;
 - a merge unites both lists in step order and keeps the kept node's representative.
 
-The explorer's verifier and the audit's merge checks compare a screen with the
-representative's image in `steps/`, and `app-graph-plot` shows it as the node's
-thumbnail. `ext_web` and `ext_<package>` nodes list the screens that reached them
-as well; the merge checks never compare them.
+Screen matching verifies a screen against a node's member closest to it by image.
+The audit's merge checks compare the two nodes' representative images in `steps/`,
+and `app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
+`ext_<package>` nodes list the screens that reached them as well; neither screen
+matching nor the merge checks compare them.
+
+#### Screen matching
+
+Exploration and `app-graph-audit --re-explore` assign every screenshot of the app to
+a node by comparing it with the members of the app's nodes of the same package,
+cheapest evidence first. The screenshot's [`identify`](#step-log) field records
+what each step found.
+
+1. **Image embedding.** The screenshot is embedded (see
+   [Embedding caches](#embedding-caches)).
+2. **Exact match.** A member with the screenshot's `pixel_hash` decides alone when
+   every such member belongs to one node: the screen copies that member's
+   description, state and elements, so neither the description model nor the
+   verifier runs. Members of two nodes with the same hash decide nothing.
+3. **Description.** The description model describes the screen; web content from
+   outside the app goes to `ext_web`. The description is embedded.
+4. **Expected node.** Where the caller knows where the screen should be, that node is
+   verified first, against its member closest to the screen: the node a replay leads
+   to, the screen a step left when Back closes an outside web page or another app, the
+   start node after a restart, and the target of the audit's retried edge. A
+   confirmation decides; a rejection leaves the node off the short list.
+5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
+   each node's closest member, proposes 3, and `text`, by the cosine of the
+   description embeddings, proposes 2. The nodes are taken once each, in the order of
+   their best rank in either source, ties broken by image cosine. The verifier checks
+   them in that order against each one's closest member and stops at the first
+   confirmation, after 3 calls at most (4 with an expected node).
+6. **New node.** A screen every check rejects starts a new node with itself as
+   representative. The step's first rejection refines the descriptions of both the
+   screen and the rejected node, which is renamed after its new description; later
+   rejections refine nothing.
+
+A member without an image vector of the screenshot's dimension stops the command with
+an error naming it and its node.
 
 The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
@@ -630,7 +726,17 @@ model usage. Android-App-Graph is a Python package and does not produce an APK.
    `<app_name>/steps/` for every screenshot, and model-tagged text vectors in the
    `.emb.json` sidecar. The second run should continue the saved graph and the
    step numbering. The models receive every screenshot as `image/webp`, so a
-   provider that rejects it fails the first screen description.
+   provider that rejects it fails the first screen description or the first
+   screenshot embedding.
+
+   Also expect:
+
+   - `<app_name>/steps/image_emb.json` tagged with the embedding model, with a
+     vector for every observation whose record has an `identify` field;
+   - `pixel_hash`, `status_bar_rows`, `describe` and `identify` on those observation
+     records, and a `status_bar_rows` above 0 on an emulator that shows its status
+     bar;
+   - an `image_embedding:<model>` row in the usage summary each run logs.
 
 ## Development
 

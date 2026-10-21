@@ -653,8 +653,69 @@ def test_get_state_returns_the_xml_screenshot_package_and_activity(
         "screenshot": base64.b64encode(_PNG).decode("ascii"),
         "package": package,
         "activity": activity,
+        "status_bar": None,
     }
     assert adb.events == [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+
+
+def _dumpsys_window(name: str) -> str:
+    return (Path(__file__).parent / "data" / f"dumpsys_window_{name}.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_get_state_reads_the_status_bar_from_the_dump_it_reads_the_activity_from(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, _dumpsys_window("api37_pixel_9").encode())
+
+    state = controller.get_state()
+
+    assert (state["package"], state["status_bar"]) == ("com.android.settings", [0, 0, 1080, 142])
+    assert adb.events.count(["adb", *_DUMPSYS_WINDOW]) == 1
+
+
+# Trimmed from `adb shell dumpsys window`: pixel_9 and pixel_8a on API 37 emulators.
+# api33 is hand-written in the layout Android 13's InsetsSource.dump() prints.
+@pytest.mark.parametrize(
+    ("fixture", "frame"),
+    [
+        ("api37_pixel_9", [0, 0, 1080, 142]),
+        ("api37_pixel_8a", [0, 0, 1080, 121]),
+        ("api33", [0, 0, 1080, 121]),
+    ],
+)
+def test_the_status_bar_frame_is_the_first_status_bar_insets_source(
+    fixture: str, frame: list[int]
+) -> None:
+    assert device.status_bar_frame(_dumpsys_window(fixture)) == frame
+
+
+@pytest.mark.parametrize(
+    "dumpsys_window",
+    [
+        pytest.param(
+            "        InsetsSource id=bf360000 type=statusBars frame=[0,0][1080,121] "
+            "visible=false flags= sideHint=TOP\n",
+            id="hidden",
+        ),
+        pytest.param(
+            "        InsetsSource type=ITYPE_STATUS_BAR frame=[0,0][1080,121] visible=false\n",
+            id="hidden before API 34",
+        ),
+        pytest.param(
+            "        InsetsSource id=1 type=statusBars frame=[0,2300][1080,2400] visible=true\n",
+            id="not at the top",
+        ),
+        pytest.param(
+            "  mCurrentFocus=Window{3553291 u0 com.supercook.app/.Main}\n"
+            "        InsetsSource id=27 type=displayCutout frame=[0,0][1080,121] visible=true\n",
+            id="not reported",
+        ),
+    ],
+)
+def test_a_hidden_misplaced_or_missing_status_bar_gives_no_frame(dumpsys_window: str) -> None:
+    assert device.status_bar_frame(dumpsys_window) is None
 
 
 @pytest.mark.parametrize("failing", [_UI_DUMP, _SCREENCAP, _DUMPSYS_WINDOW])
@@ -703,6 +764,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
         "screenshot": base64.b64encode(_PNG).decode("ascii"),
         "package": "com.demo",
         "activity": "com.demo.Main",
+        "status_bar": None,
     }
     retried = _STATE_READS.index(["adb", *stalled])
     assert adb.events == [*_STATE_READS[: retried + 1], *_STATE_READS[retried:]]
