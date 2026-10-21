@@ -311,6 +311,49 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
     assert device_log == []
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_rest(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loaded graph file can hold an edge with no actions; the replay passes over it."""
+    open_detail = {"action": "tap", "coordinate": [30, 40]}
+    graph_file = tmp_path / "hand_edited.json"
+    graph_file.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
+                "edges": [
+                    {"source": "s0_splash", "target": "s1_home", "actions": []},
+                    {"source": "s1_home", "target": "s2_detail", "actions": [[open_detail]]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    replaying_kobe.graph.load_graph(graph_file)
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s2_detail")
+
+    assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_detail]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edge action stored as one dict, not a list of steps, reaches the device as it is."""
+    open_detail = {"action": "tap", "coordinate": [30, 40]}
+    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
+    replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=open_detail)
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_detail")
+
+    assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_detail]
+
+
 @pytest.mark.parametrize("malformed", [False, True])
 def test_exploration_wait_recovery_respects_step_limit(
     malformed: bool,
