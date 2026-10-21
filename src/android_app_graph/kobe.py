@@ -99,6 +99,20 @@ class _Move:
         return [self.action]
 
 
+@dataclass(frozen=True, kw_only=True)
+class ExplorerConfig:
+    """The app ``Kobe`` explores, its model settings, where its graph is saved and its budgets."""
+
+    app_name: str
+    package_name: str
+    vlm_config: dict[str, Any] | None = None
+    graph_dir: str | Path | None = None
+    max_steps: int = 20
+    coverage_checkpoint_steps: int = 50
+    coverage_checkpoint_top_k: int = 15
+    launch_activity: str | None = None
+
+
 class Kobe:
     """Explores an Android app and builds a state-transition graph.
 
@@ -113,22 +127,15 @@ class Kobe:
     def __init__(
         self,
         controller: DeviceController,
-        app_name: str,
-        package_name: str,
-        logger: logging.Logger,
-        vlm_config: dict[str, Any] | None = None,
-        graph_dir: str | Path | None = None,
-        max_steps: int = 20,
-        coverage_checkpoint_steps: int = 50,
-        coverage_checkpoint_top_k: int = 15,
+        config: ExplorerConfig,
         *,
         client: OpenRouter,
-        launch_activity: str | None = None,
+        logger: logging.Logger,
     ) -> None:
         self.controller = controller
-        self.app_name = app_name
-        self.package_name = package_name
-        self.launch_activity = launch_activity
+        self.app_name = config.app_name
+        self.package_name = config.package_name
+        self.launch_activity = config.launch_activity
         logger_name = getattr(logger, "name", "")
         if logger_name.startswith("android_app_graph"):
             self.logger = logging.getLogger("android_app_graph.kobe")
@@ -136,11 +143,11 @@ class Kobe:
             self.logger = logging.getLogger(
                 f"{logger_name}.kobe" if logger_name else "android_app_graph.kobe"
             )
-        self.max_steps = max_steps
-        self.coverage_checkpoint_steps = coverage_checkpoint_steps
-        self.coverage_checkpoint_top_k = coverage_checkpoint_top_k
+        self.max_steps = config.max_steps
+        self.coverage_checkpoint_steps = config.coverage_checkpoint_steps
+        self.coverage_checkpoint_top_k = config.coverage_checkpoint_top_k
 
-        vlm_config = vlm_config or {}
+        vlm_config = config.vlm_config or {}
         settings = resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
         self.client = client
         self.page_detail = settings["page_detail"]
@@ -155,15 +162,16 @@ class Kobe:
             audit_timeout=resolve_audit_timeout(vlm_config),
         )
 
+        graph_dir = config.graph_dir
         base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
-        self.graph_path = base_graph_dir / app_name / f"{app_name}.json"
+        self.graph_path = base_graph_dir / self.app_name / f"{self.app_name}.json"
 
         if self.graph_path.exists():
-            self.graph.load_graph(self.graph_path, default_package_name=package_name)
+            self.graph.load_graph(self.graph_path, default_package_name=self.package_name)
             self.logger.info("Graph loaded from %s", self.graph_path)
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
-        self.graph.package_name = package_name
+        self.graph.package_name = self.package_name
 
     def _maybe_continue_from_coverage_checkpoint(
         self,

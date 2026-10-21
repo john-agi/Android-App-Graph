@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 from android_app_graph.device import AvdManager, grant_runtime_permissions, launch_app
-from android_app_graph.kobe import EXPLORATION_ROLES, Kobe
+from android_app_graph.kobe import EXPLORATION_ROLES, ExplorerConfig, Kobe
 from android_app_graph.utils import open_client, resolve_api_key, resolve_model_settings
 from android_app_graph.utils.logging import setup_logging
 
@@ -116,19 +116,17 @@ def main() -> None:
             launch_app(config, app, logger)
             time.sleep(4)
 
-            kobe = Kobe(
-                controller,
-                app_name,
-                package_name,
-                logger,
+            explorer_config = ExplorerConfig(
+                app_name=app_name,
+                package_name=package_name,
                 vlm_config=vlm_config,
                 graph_dir=graph_dir,
                 max_steps=max_steps,
                 coverage_checkpoint_steps=coverage_checkpoint_steps,
                 coverage_checkpoint_top_k=coverage_checkpoint_top_k,
-                client=client,
                 launch_activity=app.get("launch_activity"),
             )
+            kobe = Kobe(controller, explorer_config, client=client, logger=logger)
             try:
                 kobe.explore(resume_from=resume_from)
             finally:

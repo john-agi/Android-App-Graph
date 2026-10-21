@@ -18,7 +18,7 @@ from openrouter.errors import OpenRouterError
 from PIL import Image
 
 from android_app_graph.device import DeviceController
-from android_app_graph.kobe import Kobe, NoPathError
+from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
@@ -101,12 +101,14 @@ class _ReplayDevice(_Device):
 def _explorer(device: DeviceController, tmp_path: Path, router_client: OpenRouter) -> Kobe:
     return Kobe(
         device,
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ExplorerConfig(
+            app_name="demo",
+            package_name="com.demo",
+            graph_dir=tmp_path,
+            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ),
         client=router_client,
+        logger=logging.getLogger("test"),
     )
 
 
@@ -140,12 +142,14 @@ def test_exploration_resolves_all_role_models_before_device_access(
         monkeypatch.setenv(f"APP_GRAPH_{role.upper()}_MODEL", f"provider/{role}")
     agent = Kobe(
         _Device(AssertionError("model setup must not access the device")),
-        "demo",
-        "com.demo.app",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={"action": {"temperature": 0.0, "timeout": 9}},
+        ExplorerConfig(
+            app_name="demo",
+            package_name="com.demo.app",
+            graph_dir=tmp_path,
+            vlm_config={"action": {"temperature": 0.0, "timeout": 9}},
+        ),
         client=router_client,
+        logger=logging.getLogger("test"),
     )
     assert agent.page_detail.model == "provider/page_detail"
     assert agent.instruction.model == "provider/instruction"
@@ -164,11 +168,13 @@ def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
 ) -> None:
     built = Kobe(
         _Device(AssertionError("a finished exploration must not access the device")),
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
+        ExplorerConfig(
+            app_name="demo",
+            package_name="com.demo",
+            graph_dir=tmp_path,
+        ),
         client=router_client,
+        logger=logging.getLogger("test"),
     )
     built.explore(max_steps=0)
     assert router_client.sdk_configuration.client is router_http
@@ -191,12 +197,14 @@ def test_exploration_records_the_configured_package_name(
         )
     built = Kobe(
         _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
-        "demo",
-        "com.demo",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ExplorerConfig(
+            app_name="demo",
+            package_name="com.demo",
+            graph_dir=tmp_path,
+            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ),
         client=router_client,
+        logger=logging.getLogger("test"),
     )
     built.save_graph()
     saved = json.loads((tmp_path / "demo" / "demo.json").read_text(encoding="utf-8"))
@@ -230,12 +238,14 @@ def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packag
     graph_path.write_text(json.dumps(document), encoding="utf-8")
     explorer = Kobe(
         _Device(AssertionError("the replay must start before the device is read")),
-        "whatsapp",
-        "com.whatsapp",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ExplorerConfig(
+            app_name="whatsapp",
+            package_name="com.whatsapp",
+            graph_dir=tmp_path,
+            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ),
         client=router_client,
+        logger=logging.getLogger("test"),
     )
     replayed: list[str] = []
 
@@ -734,12 +744,14 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
     agent = Kobe(
         two_screen_device,
-        "demo",
-        "com.demo.app",
-        logging.getLogger("test"),
-        graph_dir=tmp_path,
-        vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ExplorerConfig(
+            app_name="demo",
+            package_name="com.demo.app",
+            graph_dir=tmp_path,
+            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ),
         client=router_client,
+        logger=logging.getLogger("test"),
     )
     search_page = {
         "page_description": "Chat search page",
