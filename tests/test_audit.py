@@ -368,14 +368,14 @@ def test_re_explore_issues_retries_explores_and_skips(
             {"type": "explore_node", "node": "s0_home", "expected_pages": ["Settings"]},
             {"type": "retry_edge", "source_node": "s9_missing", "target_node": "s0_home"},
         ],
-        controller,
-        "demo",
-        "com.demo",
-        out_path,
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=1,
+        target=audit.ReExploreTarget(app_name="demo", package_name="com.demo", graph_path=out_path),
+        session=audit.ReExploreSession(
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=1,
+        ),
+        client=client,
     )
 
     assert [r["status"] for r in results] == ["instruction_not_found", "explored", "skipped"]
@@ -403,14 +403,18 @@ def test_re_explore_issues_records_an_action_model_end_as_press_back(
     [result] = audit.re_explore_issues(
         graph,
         [{"type": "explore_node", "node": "s0_home", "expected_pages": ["Settings"]}],
-        controller,
-        "demo",
-        "com.demo",
-        tmp_path / "demo" / "demo_audited.json",
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=1,
+        target=audit.ReExploreTarget(
+            app_name="demo",
+            package_name="com.demo",
+            graph_path=tmp_path / "demo" / "demo_audited.json",
+        ),
+        session=audit.ReExploreSession(
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=1,
+        ),
+        client=client,
     )
 
     assert controller.actions == [({"action": "back"}, True)]
@@ -435,14 +439,18 @@ def test_re_explore_issues_skips_unreachable_nodes(
             {"type": "retry_edge", "source_node": "s1_detail", "target_node": "s0_home"},
             {"type": "explore_node", "node": "s0_home", "expected_pages": []},
         ],
-        controller,
-        "demo",
-        "com.demo",
-        tmp_path / "demo" / "demo_audited.json",
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=1,
+        target=audit.ReExploreTarget(
+            app_name="demo",
+            package_name="com.demo",
+            graph_path=tmp_path / "demo" / "demo_audited.json",
+        ),
+        session=audit.ReExploreSession(
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=1,
+        ),
+        client=client,
     )
 
     assert [r["status"] for r in results] == ["unverified", "skipped"]
@@ -467,14 +475,16 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
     (result,) = audit.re_explore_issues(
         graph,
         [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
-        controller,
-        "demo",
-        "com.demo",
-        graph_path,
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=2,
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=graph_path
+        ),
+        session=audit.ReExploreSession(
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=2,
+        ),
+        client=client,
     )
 
     assert [(step["from"], step["to"]) for step in result["steps"]] == [
@@ -521,14 +531,16 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     (result,) = audit.re_explore_issues(
         graph,
         [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
-        _LoggingController("com.demo", device_log),
-        "demo",
-        "com.demo",
-        graph_path,
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=2,
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=graph_path
+        ),
+        session=audit.ReExploreSession(
+            _LoggingController("com.demo", device_log),
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=2,
+        ),
+        client=client,
     )
 
     assert [(step["from"], step["to"]) for step in result["steps"]] == [
@@ -587,14 +599,18 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
         (result,) = audit.re_explore_issues(
             graph,
             [{"type": "explore_node", "node": start, "expected_pages": ["Search results"]}],
-            two_screen_device,
-            "demo",
-            "com.demo.app",
-            tmp_path / "demo_audited.json",
-            router_client,
-            ModelSettings("provider/instruction"),
-            ModelSettings("provider/action"),
-            steps_per_issue=1,
+            target=audit.ReExploreTarget(
+                app_name="demo",
+                package_name="com.demo.app",
+                graph_path=tmp_path / "demo_audited.json",
+            ),
+            session=audit.ReExploreSession(
+                two_screen_device,
+                ModelSettings("provider/instruction"),
+                ModelSettings("provider/action"),
+                steps_per_issue=1,
+            ),
+            client=router_client,
         )
 
     renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
@@ -611,13 +627,15 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
         audit.re_explore_issues(
             GraphManager(),
             [{"type": "retry_edge", "source_node": "s0_home"}],
-            FakeController("com.demo"),
-            "demo",
-            "com.demo",
-            tmp_path / "demo_audited.json",
-            client,
-            ModelSettings("instruction-model"),
-            ModelSettings("action-model"),
+            target=audit.ReExploreTarget(
+                app_name="demo", package_name="com.demo", graph_path=tmp_path / "demo_audited.json"
+            ),
+            session=audit.ReExploreSession(
+                FakeController("com.demo"),
+                ModelSettings("instruction-model"),
+                ModelSettings("action-model"),
+            ),
+            client=client,
         )
         == []
     )
@@ -646,15 +664,19 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
             {"type": "retry_edge", "source_node": "s1_detail", "target_node": "s0_home"},
             {"type": "explore_node", "node": "s1_detail", "expected_pages": ["Settings"]},
         ],
-        _LoggingController("com.demo", device_log),
-        "demo",
-        "com.demo",
-        tmp_path / "demo_audited.json",
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=1,
-        launch_activity=launch_activity,
+        target=audit.ReExploreTarget(
+            app_name="demo",
+            package_name="com.demo",
+            graph_path=tmp_path / "demo_audited.json",
+            launch_activity=launch_activity,
+        ),
+        session=audit.ReExploreSession(
+            _LoggingController("com.demo", device_log),
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=1,
+        ),
+        client=client,
     )
 
     assert [r["status"] for r in results] == ["instruction_not_found", "explored"]
@@ -681,14 +703,18 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     (result,) = audit.re_explore_issues(
         graph,
         [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
-        _LoggingController("com.google.android.permissioncontroller", device_log),
-        "demo",
-        "com.demo",
-        tmp_path / "demo" / "demo_audited.json",
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=1,
+        target=audit.ReExploreTarget(
+            app_name="demo",
+            package_name="com.demo",
+            graph_path=tmp_path / "demo" / "demo_audited.json",
+        ),
+        session=audit.ReExploreSession(
+            _LoggingController("com.google.android.permissioncontroller", device_log),
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=1,
+        ),
+        client=client,
     )
 
     assert result["steps"] == [
@@ -772,14 +798,16 @@ def _re_explore(
     return audit.re_explore_issues(
         graph,
         issues,
-        controller,
-        "demo",
-        "com.demo",
-        tmp_path / "demo_audited.json",
-        client,
-        ModelSettings("instruction-model"),
-        ModelSettings("action-model"),
-        steps_per_issue=steps_per_issue,
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=tmp_path / "demo_audited.json"
+        ),
+        session=audit.ReExploreSession(
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            steps_per_issue=steps_per_issue,
+        ),
+        client=client,
     )
 
 
