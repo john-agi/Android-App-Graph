@@ -531,16 +531,20 @@ def _parse_record_output(raw: str) -> str:
     """
     reply = _parse_json_reply(raw)
     if reply is None:
-        raise _unreadable_record_reply("the reply has no JSON object", raw)
+        msg = "the reply has no JSON object"
+        raise _unreadable_record_reply(msg, raw)
     if "information" not in reply:
-        raise _unreadable_record_reply('the JSON object has no "information" key', raw)
+        msg = 'the JSON object has no "information" key'
+        raise _unreadable_record_reply(msg, raw)
     information = reply["information"]
     if information is None:
         return ""
     if not isinstance(information, str):
-        raise _unreadable_record_reply('"information" is neither a string nor null', raw)
+        msg = '"information" is neither a string nor null'
+        raise _unreadable_record_reply(msg, raw)
     if not information.strip():
-        raise _unreadable_record_reply('"information" is empty', raw)
+        msg = '"information" is empty'
+        raise _unreadable_record_reply(msg, raw)
     return information
 
 
@@ -905,7 +909,8 @@ class UIKobeV2Translator(BaseTranslator):
         # that the reply hit its token limit.
         info = self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
         if info is None:
-            raise RecordReplyError("[RECORD] the reply hit its token limit")
+            msg = "[RECORD] the reply hit its token limit"
+            raise RecordReplyError(msg)
         logger.info("[RECORD] parsed=%r", info)
         self._memory.add_info(info)
 

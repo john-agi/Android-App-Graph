@@ -924,7 +924,8 @@ def test_load_all_graphs_skips_a_graph_whose_embeddings_fail_and_keeps_the_other
         graph_path: Path, *, model: str, node_ids: set[str]
     ) -> dict[str, list[float]]:
         if graph_path == failing:
-            raise RuntimeError("embedding store unavailable")
+            msg = "embedding store unavailable"
+            raise RuntimeError(msg)
         return load_image_embeddings(graph_path, model=model, node_ids=node_ids)
 
     monkeypatch.setattr(aitk_translator, "load_image_embeddings", _fail_for_one_graph)
@@ -946,7 +947,8 @@ def test_load_all_graphs_embeds_no_screenshot_of_a_graph_it_does_not_load(
         (path.parent / f"{app}_screenshots" / "n1.png").write_bytes(_SCREENSHOT)
 
     def _no_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
-        raise AssertionError("a graph that is not loaded needs no image embedding")
+        msg = "a graph that is not loaded needs no image embedding"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _no_embedding)
 
@@ -1761,7 +1763,8 @@ def test_runtime_image_embedding_propagates_an_error_without_asking_again(
         _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
     ) -> list[float]:
         calls.append(screenshot_b64)
-        raise RuntimeError("embedding failed")
+        msg = "embedding failed"
+        raise RuntimeError(msg)
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _fails)
     with pytest.raises(RuntimeError, match="embedding failed"):
@@ -1974,7 +1977,8 @@ def test_identify_node_propagates_an_embedding_failure(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
-        raise RuntimeError("embedding down")
+        msg = "embedding down"
+        raise RuntimeError(msg)
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):

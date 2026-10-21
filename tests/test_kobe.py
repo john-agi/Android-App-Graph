@@ -83,7 +83,8 @@ class _Device:
         return self._state
 
     def exe_action(self, action: dict[str, object]) -> None:
-        raise AssertionError(f"No device action expected: {action}")
+        msg = f"No device action expected: {action}"
+        raise AssertionError(msg)
 
 
 class _ReplayDevice(_Device):
