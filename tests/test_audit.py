@@ -18,7 +18,11 @@ from PIL import Image
 
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
-from android_app_graph.graph_files import graph_steps_dir, observation_image_path
+from android_app_graph.graph_files import (
+    graph_steps_dir,
+    observation_image_path,
+    observation_tree_path,
+)
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import ModelSettings, graph_manager, open_client
@@ -420,11 +424,15 @@ def _identifying(
 
 
 def _write_representative(graph_path: Path, node_id: str) -> None:
-    """Put the image of the representative a node of ``graph_path`` names in its step log."""
+    """Put the image and the tree of the representative a node of ``graph_path`` names in
+    its step log."""
     steps_dir = graph_steps_dir(graph_path)
     steps_dir.mkdir(exist_ok=True)
     observation_image_path(steps_dir, f"{node_id}-observation").write_bytes(
         encode_screenshot(_png(0))
+    )
+    observation_tree_path(steps_dir, f"{node_id}-observation").write_text(
+        "<displays />", encoding="utf-8"
     )
 
 

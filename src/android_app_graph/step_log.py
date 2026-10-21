@@ -2,10 +2,11 @@
 they send, kept in an app's ``steps/`` directory.
 
 Each step has a zero-padded number. Its record is ``<id>.json``; an observation's
-image, the screenshot as ``screen_image`` encodes it, is ``<id>.webp`` beside it.
-The image is published before its record, so every record names an image that
-exists, and an image a crash left without a record is ignored and its number
-reused. ``image_emb.json`` beside them holds the observations' image vectors.
+image, the screenshot as ``screen_image`` encodes it, is ``<id>.webp`` beside it,
+and its accessibility tree, when the capture has one, is ``<id>.xml``. The image
+and the tree are published before the record, so every record names files that
+exist, and an image or a tree a crash left without a record is ignored and its
+number reused. ``image_emb.json`` beside them holds the observations' image vectors.
 """
 
 from __future__ import annotations
@@ -26,12 +27,20 @@ from PIL import Image
 from android_app_graph.graph_files import (
     image_embeddings_path,
     observation_image_path,
+    observation_tree_path,
     step_record_path,
     write_bytes_atomically,
     write_json_atomically,
 )
-from android_app_graph.payloads import as_float_list, as_int_list, as_object_dict, as_str
+from android_app_graph.payloads import (
+    as_float_list,
+    as_int,
+    as_int_list,
+    as_object_dict,
+    as_str,
+)
 from android_app_graph.screen_image import encode_screenshot, pixel_hash, status_bar_rows
+from android_app_graph.ui_tree import UiTree, UnusableDumpError, parse_tree
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,6 +50,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _FRAME_COORDINATES = 4
+_NO_TREE = "the device state has no tree"
 
 type RunKind = Literal["explore", "audit"]
 type StepSource = Literal[
@@ -57,13 +67,16 @@ type StepSource = Literal[
 @dataclass(frozen=True, slots=True)
 class Observation:
     """One screen as ``StepRecorder.get_state`` captured it, with its screenshot as
-    base64 WebP and the ``pixel_hash`` of that image below the status bar."""
+    base64 WebP, the ``pixel_hash`` of that image below the status bar, and its
+    accessibility tree, or ``None`` with the reason it has none in ``ui_tree_error``."""
 
     observation_id: str
     screenshot_b64: str
     activity: str
     package: str
     pixel_hash: str
+    ui_tree: UiTree | None
+    ui_tree_error: str | None
 
     @classmethod
     def from_state(cls, state: Mapping[str, object]) -> Observation:
@@ -80,6 +93,8 @@ class Observation:
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
             pixel_hash=as_str(state.get("pixel_hash"), ""),
+            ui_tree=tree if isinstance(tree := state.get("ui_tree"), UiTree) else None,
+            ui_tree_error=as_str(state.get("ui_tree_error"), "") or None,
         )
 
 
@@ -193,6 +208,16 @@ def _image_height(image: bytes) -> int:
         return opened.height
 
 
+def _state_tree(state: Mapping[str, object]) -> tuple[str, UiTree]:
+    """Return the XML document of the tree in ``state``, a controller's state, and the
+    tree; raise ``UnusableDumpError`` with the reason the state has none.
+    """
+    xml = state.get("xml")
+    if not isinstance(xml, str):
+        raise UnusableDumpError(as_str(state.get("ui_tree_error"), "") or _NO_TREE)
+    return xml, parse_tree(xml)
+
+
 def _first_free_number(steps: Path) -> int:
     numbers = [
         int(path.stem)
@@ -243,12 +268,20 @@ class StepRecorder:
 
     def get_state(self) -> dict[str, Any]:
         """Return the wrapped controller's state with its screenshot encoded as WebP,
-        the ``observation_id`` it was recorded under and its ``pixel_hash``.
+        the ``observation_id`` it was recorded under, its ``pixel_hash``, and its
+        ``"xml"`` parsed into ``"ui_tree"``, or ``None`` with the reason in
+        ``"ui_tree_error"``.
 
         The hash leaves out the rows of the controller's ``status_bar`` frame; a
         controller that reports none has the whole image hashed.
         """
         state = self._controller.get_state()
+        try:
+            document, tree = _state_tree(state)
+        except UnusableDumpError as exc:
+            document, tree, tree_error = None, None, exc.reason
+        else:
+            tree_error = None
         png = base64.b64decode(state["screenshot"], validate=True)
         webp = encode_screenshot(png)
         with Image.open(io.BytesIO(webp)) as image:
@@ -263,8 +296,15 @@ class StepRecorder:
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
             pixel_hash=pixel_hash(webp, band_rows),
+            ui_tree=tree,
+            ui_tree_error=tree_error,
         )
         write_bytes_atomically(observation_image_path(self.steps, observation.observation_id), webp)
+        if document is not None:
+            write_bytes_atomically(
+                observation_tree_path(self.steps, observation.observation_id),
+                document.encode("utf-8"),
+            )
         self._write_record(
             observation.observation_id,
             "observation",
@@ -275,14 +315,19 @@ class StepRecorder:
                 "status_bar": status_bar,
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
+                "ui_tree_error": tree_error,
+                "ui_tree_retakes": as_int(state.get("ui_tree_retakes")) or 0,
+                "ui_tree_settled": state.get("ui_tree_settled") is True,
             },
         )
         self._last_observation = observation
         return {
-            **state,
+            **{key: value for key, value in state.items() if key != "xml"},
             "screenshot": observation.screenshot_b64,
             "observation_id": observation.observation_id,
             "pixel_hash": observation.pixel_hash,
+            "ui_tree": tree,
+            "ui_tree_error": tree_error,
         }
 
     def exe_action(self, action: dict[str, Any]) -> None:

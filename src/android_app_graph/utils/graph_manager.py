@@ -42,6 +42,7 @@ from android_app_graph.graph_files import (
     graph_steps_dir,
     observation_image_b64,
     observation_image_path,
+    observation_tree_path,
     require_known_edge_endpoints,
     write_json_atomically,
 )
@@ -424,28 +425,46 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
     return members if len(members) == len(observations) else []
 
 
+def _has_tree_or_reason(steps_dir: Path, observation_id: str) -> bool:
+    """Return whether an observation in ``steps_dir`` has its tree, or a record that
+    says why it has none."""
+    if observation_tree_path(steps_dir, observation_id).is_file():
+        return True
+    record = read_observation_record(steps_dir, observation_id)
+    return record is not None and bool(as_str(record.get("ui_tree_error"), ""))
+
+
 def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming every saved node without member observations, or
-    whose representative is not one of them or has no image in ``steps_dir``.
+    whose representative is not one of them, has no image in ``steps_dir``, or has
+    neither a tree there nor a record that says why it has none.
     """
     without_members: list[str] = []
     without_image: list[str] = []
+    without_tree: list[str] = []
     for node in nodes:
         representative = node.get("representative_observation")
         if not isinstance(representative, str) or representative not in _member_observations(node):
             without_members.append(node["id"])
         elif not observation_image_path(steps_dir, representative).is_file():
             without_image.append(node["id"])
+        elif not _has_tree_or_reason(steps_dir, representative):
+            without_tree.append(node["id"])
     problems = []
     if without_members:
         problems.append(f"no member observations with a representative: {without_members}")
     if without_image:
         problems.append(f"a representative without an image in {steps_dir}: {without_image}")
+    if without_tree:
+        problems.append(
+            f"a representative with neither a tree nor a recorded reason in {steps_dir}: "
+            f"{without_tree}"
+        )
     if problems:
         msg = (
             f"{path}: node(s) with {'; '.join(problems)}. Graphs saved before nodes listed "
-            "their member observations cannot be loaded: explore the app again into a new "
-            "graph directory."
+            "their member observations, or before observations kept their accessibility "
+            "tree, cannot be loaded: explore the app again into a new graph directory."
         )
         raise ValueError(msg)
 
@@ -1897,7 +1916,8 @@ class GraphManager:
 
         ``default_package_name`` stands in for the ``package_name`` of a file that has
         none. A node without member observations, or whose representative has no image
-        in the step log, raises ``ValueError`` naming it.
+        in the step log, or neither a tree there nor a recorded reason it has none,
+        raises ``ValueError`` naming it.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:

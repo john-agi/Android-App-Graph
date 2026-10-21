@@ -24,7 +24,11 @@ from PIL import Image
 from android_app_graph import cli, device
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
-from android_app_graph.graph_files import graph_steps_dir, observation_image_path
+from android_app_graph.graph_files import (
+    graph_steps_dir,
+    observation_image_path,
+    observation_tree_path,
+)
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import save_image_embeddings
 from android_app_graph.utils import open_client
@@ -305,6 +309,10 @@ def embedding_body() -> dict[str, object]:
     }
 
 
+# The smallest document the tree parser accepts: a dump that found no window.
+_EMPTY_TREE = "<displays />"
+
+
 def _png_b64(color: str) -> str:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
@@ -333,7 +341,7 @@ def write_image_vectors() -> Callable[..., None]:
 @pytest.fixture
 def add_representative(png_screenshot: str) -> Callable[..., None]:
     """Give a node of a manager one member observation, its representative, with an image
-    in the manager's step log; ``image`` defaults to ``png_screenshot`` as WebP.
+    and a tree in the manager's step log; ``image`` defaults to ``png_screenshot`` as WebP.
 
     The observation ID is not a step number, so a StepRecorder on the same step log
     never reuses it.
@@ -347,6 +355,7 @@ def add_representative(png_screenshot: str) -> Callable[..., None]:
         observation_image_path(steps_dir, observation_id).write_bytes(
             encode_screenshot(png_screenshot) if image is None else image
         )
+        observation_tree_path(steps_dir, observation_id).write_text(_EMPTY_TREE, encoding="utf-8")
         graph.graph.nodes[node_id]["observations"] = [observation_id]
         graph.graph.nodes[node_id]["representative_observation"] = observation_id
 
@@ -356,7 +365,8 @@ def add_representative(png_screenshot: str) -> Callable[..., None]:
 @pytest.fixture
 def write_graph_file(png_screenshot: str) -> Callable[[Path, dict[str, Any]], None]:
     """Write ``document`` as a graph file that ``load_graph`` accepts: every node gets one
-    member observation, its representative, with an image in the step log beside it."""
+    member observation, its representative, with an image and a tree in the step log
+    beside it."""
 
     def write(path: Path, document: dict[str, Any]) -> None:
         steps_dir = graph_steps_dir(path)
@@ -366,6 +376,9 @@ def write_graph_file(png_screenshot: str) -> Callable[[Path, dict[str, Any]], No
             observation_id = f"{node['id']}-observation"
             observation_image_path(steps_dir, observation_id).write_bytes(
                 encode_screenshot(png_screenshot)
+            )
+            observation_tree_path(steps_dir, observation_id).write_text(
+                _EMPTY_TREE, encoding="utf-8"
             )
             nodes.append(
                 {"observations": [observation_id], "representative_observation": observation_id}
