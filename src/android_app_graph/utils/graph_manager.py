@@ -1283,9 +1283,9 @@ class GraphManager:
         candidates: list[dict[str, Any]] = []
 
         for node_id in reachable:
-            node_data = self.graph.nodes[node_id]
-            if node_id.startswith("ext_") or node_data.get("is_external"):
+            if self._is_external(node_id):
                 continue
+            node_data = self.graph.nodes[node_id]
 
             if package_name:
                 node_pkg = node_data.get("package", "")
