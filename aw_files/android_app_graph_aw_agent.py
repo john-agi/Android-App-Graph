@@ -78,7 +78,8 @@ def _aitk_to_android_world_action(
         )
     if action == "type":
         return None
-    raise ValueError(f"Unsupported AITK action for Android World: {aitk_action}")
+    msg = f"Unsupported AITK action for Android World: {aitk_action}"
+    raise ValueError(msg)
 
 
 def load_agent_settings(config_path: Path) -> tuple[str, dict]:

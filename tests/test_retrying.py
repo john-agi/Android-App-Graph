@@ -32,7 +32,8 @@ def test_call_with_retry_asks_once_more_after_unusable_output(no_sleep: list[flo
     def flaky() -> str:
         attempts.append(1)
         if len(attempts) == 1:
-            raise retrying.UnusableOutputError("unreadable")
+            msg = "unreadable"
+            raise retrying.UnusableOutputError(msg)
         return "ok"
 
     assert retrying.call_with_retry("label", flaky) == "ok"
@@ -45,7 +46,8 @@ def test_call_with_retry_reraises_after_the_second_attempt() -> None:
 
     def always_unusable() -> str:
         attempts.append(1)
-        raise retrying.UnusableOutputError("unreadable")
+        msg = "unreadable"
+        raise retrying.UnusableOutputError(msg)
 
     with pytest.raises(retrying.UnusableOutputError, match="unreadable"):
         retrying.call_with_retry("label", always_unusable)
@@ -83,7 +85,8 @@ def test_only_a_validation_failure_on_a_2xx_response_is_re_asked(
 
     def request() -> str:
         attempts.append(1)
-        raise ResponseValidationError("invalid schema", httpx.Response(status), ValueError("x"))
+        msg = "invalid schema"
+        raise ResponseValidationError(msg, httpx.Response(status), ValueError("x"))
 
     with pytest.raises(ResponseValidationError):
         retrying.call_with_retry("sdk", request)

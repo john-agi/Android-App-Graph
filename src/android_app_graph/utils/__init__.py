@@ -53,10 +53,11 @@ def resolve_api_key() -> str:
     """Return OPENROUTER_API_KEY, the only credential."""
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
-        raise ValueError(
+        msg = (
             "OPENROUTER_API_KEY is required: export your OpenRouter API key; it is the only "
             "credential for every role."
         )
+        raise ValueError(msg)
     return api_key
 
 
@@ -77,10 +78,11 @@ def resolve_model(value: object, *, role: str) -> str:
     source = f"${{{variable}}}" if value is None else value
     model = resolve_env(source) if isinstance(source, str) else None
     if not model or not model.strip() or "${" in model:
-        raise ValueError(
+        msg = (
             f"{role}.model is required: set {variable} or configure an explicit model ID "
             f"for {role}; empty values and unresolved environment references are invalid."
         )
+        raise ValueError(msg)
     return model.strip()
 
 

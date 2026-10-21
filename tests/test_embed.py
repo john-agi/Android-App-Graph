@@ -99,7 +99,7 @@ def test_embed_main_reports_invalid_embedding_config(
     router_requests: list[httpx.Request],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "dummy-google-secret-never-log"
+    secret = "dummy-google-secret-never-log"  # noqa: S105  # fake credential; the test proves it is never logged
     monkeypatch.setenv("GEMINI_API_KEY", secret)
     config = tmp_path / "explore.yaml"
     config.write_text(json.dumps({"vlm": {"image_embedding": settings}}), encoding="utf-8")
