@@ -98,6 +98,7 @@ extend-select = [
     "PGH003",
     "PGH004",
     "INP001",
+    "N",
 ]
 # FA100/FA102 can never fire at py314 (annotations are deferred by PEP 649/749), so
 # they need no `ignore` entry.
@@ -110,10 +111,6 @@ extend-select = [
 "tests/**" = ["S101"]
 # Vulture allowlist entries are intentionally bare attribute expressions.
 "vulture_allowlist.py" = ["B018"]
-
-[tool.ruff.lint.flake8-annotations]
-# `**kwargs: Any` is the honest annotation for pass-through keyword arguments.
-allow-star-arg-any = true
 
 [tool.ruff.format]
 docstring-code-format = true
