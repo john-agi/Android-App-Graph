@@ -390,8 +390,16 @@ showing an address bar or URL, records an edge to the single shared `ext_web`
 node. Either way the explorer then presses back. A redirecting link or a browser's
 own history can keep an outside web page up, so the explorer presses back again,
 a few times at most, and if the page is still showing restarts the app as before
-a [replay](#replaying-to-a-node). It never records an edge out of an `ext_` node,
-so a replay never passes through one. The screen-description model decides what
+a [replay](#replaying-to-a-node). Back can also leave another app in front, for
+example when it only closed that app's keyboard. The explorer then restarts the
+app the same way, force-stopping it before the launch, because a launch alone
+resumes the app's task with the other app's screen still on top. If another app
+is still in front after the restart, exploration stops with an error naming its
+package. No screen of another app gets a node: whenever another app is in front
+when the explorer identifies a screen, such as at the end of a replay, it restarts
+the app first, and stops with the same error if the app does not come back. It
+never records an edge out of an `ext_` node, so a replay never passes through one.
+The screen-description model decides what
 counts as external web, so the app's own screens get regular nodes even when they
 run in a web view or mention a privacy policy. A permission prompt or system dialog
 belongs to another package but sits on top of the app, so it gets a regular node
@@ -399,7 +407,9 @@ and no back press. The keyboard also belongs to another package; a page with the
 keyboard shown shares the page's node, and the keyboard's visibility is recorded
 in the node's state.
 `app-graph-audit --re-explore` records external web pages and these dialogs the
-same way.
+same way. A re-explore step that opens another app records nothing; the audit
+presses back, restarts the app if another app is still in front, and stops with
+the same error if the restart does not bring the app back.
 
 Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
