@@ -72,6 +72,14 @@ class _SamePackageNodes(NamedTuple):
     keys: list[str]
 
 
+class PathToStart(NamedTuple):
+    """Nodes from which the start node cannot be reached, split by origin."""
+
+    start_node: str | None
+    in_app: list[str]
+    external: list[str]
+
+
 @dataclass(frozen=True, kw_only=True)
 class EdgeDetails:
     """What one traversal records next to its action in the edge's aligned lists.
@@ -1226,6 +1234,23 @@ class GraphManager:
 
         nodes = sorted(_node_id(n) for n in self.graph if not self._is_external(n))
         return nodes[0] if nodes else None
+
+    def nodes_without_path_to_start(self) -> PathToStart:
+        """Return every node from which no recorded edge path leads to the start node.
+
+        External nodes are listed apart: an ``ext_`` node keeps no outgoing edge, so
+        every one of them is listed, and only the app's own screens need a way back.
+        """
+        start = self.get_start_node()
+        if start is None:
+            return PathToStart(None, [], [])
+        can_return = nx.ancestors(self.graph, start) | {start}
+        missing = sorted(_node_id(n) for n in self.graph if n not in can_return)
+        return PathToStart(
+            start,
+            in_app=[n for n in missing if not self._is_external(n)],
+            external=[n for n in missing if self._is_external(n)],
+        )
 
     def get_least_explored_node(self, package_name: str | None = None) -> str | None:
         """Return the node with the fewest outgoing edges (least explored).

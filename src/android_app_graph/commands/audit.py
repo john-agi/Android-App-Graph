@@ -792,6 +792,29 @@ def _re_explore_app(
     logger.info("Re-exploration results saved to %s", results_path)
 
 
+def _report_no_path_to_start(
+    graph: GraphManager, audit_result: dict[str, Any], report_path: Path, audited_graph_path: Path
+) -> None:
+    """Add the audited graph's nodes with no path back to the start node to the report.
+
+    Called on the final graph because merges and re-exploration add and move edges;
+    the lists therefore name the audited graph's IDs, not the pre-merge IDs of the
+    model's issues.
+    """
+    found = graph.nodes_without_path_to_start()
+    audit_result["no_path_to_start"] = {"graph": audited_graph_path.name, **found._asdict()}
+    _write_json(report_path, audit_result)
+    logger.log(
+        logging.WARNING if found.in_app else logging.INFO,
+        "%d in-app and %d external node(s) of %s have no path back to %s; listed in %s",
+        len(found.in_app),
+        len(found.external),
+        audited_graph_path,
+        found.start_node,
+        report_path,
+    )
+
+
 def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     app_name = app["name"]
     package_name = app["package_name"]
@@ -835,7 +858,9 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     if run.session is not None and other_issues:
         _re_explore_app(run, run.session, graph, app, other_issues)
 
-    normalize_and_save_audited_graph(graph, _app_file(run.graph_dir, app_name, "_audited"))
+    audited_graph_path = _app_file(run.graph_dir, app_name, "_audited")
+    normalize_and_save_audited_graph(graph, audited_graph_path)
+    _report_no_path_to_start(graph, audit_result, report_path, audited_graph_path)
 
 
 def main(argv: list[str] | None = None) -> int:

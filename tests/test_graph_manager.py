@@ -31,6 +31,7 @@ from android_app_graph.utils.graph_manager import (
     NORMALIZE_EVERY_N_VISITS,
     EdgeDetails,
     GraphManager,
+    PathToStart,
     _merge_elements,
     _merge_into_schema,
 )
@@ -1862,6 +1863,72 @@ def test_get_start_node_returns_none_when_every_node_is_external() -> None:
     add_screen(gm, "ext_browser", "Browser")
 
     assert gm.get_start_node() is None
+
+
+def _home_and_list_with_a_dialog_and_two_external_screens() -> GraphManager:
+    """Home and List lead to each other; Dialog and the two external screens lead nowhere."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_list", "List page")
+    add_screen(gm, "s2_dialog", "Dialog")
+    add_screen(gm, "s3_picker", "Picker of another app", is_external=True)
+    add_screen(gm, "ext_browser", "Browser")
+    gm.add_edge("s0_home", "s1_list", {"action": "open list"})
+    gm.add_edge("s1_list", "s0_home", {"action": "back"})
+    gm.add_edge("s1_list", "s2_dialog", {"action": "open dialog"})
+    gm.add_edge("s0_home", "ext_browser", {"action": "open link"})
+    gm.add_edge("s1_list", "s3_picker", {"action": "open picker"})
+    return gm
+
+
+def test_nodes_without_path_to_start_lists_external_nodes_apart_from_in_app_ones() -> None:
+    gm = _home_and_list_with_a_dialog_and_two_external_screens()
+
+    assert gm.nodes_without_path_to_start() == PathToStart(
+        start_node="s0_home", in_app=["s2_dialog"], external=["ext_browser", "s3_picker"]
+    )
+
+
+def test_nodes_without_path_to_start_lists_every_node_of_a_cycle_with_no_way_out() -> None:
+    gm = _home_and_list_with_a_dialog_and_two_external_screens()
+    add_screen(gm, "s5_form_keyboard", "Form with keyboard")
+    add_screen(gm, "s4_form", "Form")
+    gm.add_edge("s1_list", "s4_form", {"action": "open form"})
+    gm.add_edge("s4_form", "s5_form_keyboard", {"action": "focus field"})
+    gm.add_edge("s5_form_keyboard", "s4_form", {"action": "hide keyboard"})
+
+    assert gm.nodes_without_path_to_start().in_app == ["s2_dialog", "s4_form", "s5_form_keyboard"]
+
+
+def test_nodes_without_path_to_start_never_lists_the_start_node() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_list", "List page")
+    gm.add_edge("s0_home", "s1_list", {"action": "open list"})
+
+    assert gm.nodes_without_path_to_start() == PathToStart("s0_home", ["s1_list"], [])
+
+
+def test_nodes_without_path_to_start_is_unchanged_by_a_self_loop_on_a_dead_end() -> None:
+    gm = _home_and_list_with_a_dialog_and_two_external_screens()
+    gm.add_edge("s2_dialog", "s2_dialog", {"action": "toggle option"})
+
+    assert gm.nodes_without_path_to_start() == PathToStart(
+        start_node="s0_home", in_app=["s2_dialog"], external=["ext_browser", "s3_picker"]
+    )
+
+
+def test_nodes_without_path_to_start_of_an_empty_graph_lists_nothing() -> None:
+    assert make_manager().nodes_without_path_to_start() == PathToStart(None, [], [])
+
+
+def test_nodes_without_path_to_start_of_a_graph_of_external_nodes_lists_nothing() -> None:
+    gm = make_manager()
+    add_screen(gm, "ext_browser", "Browser")
+    add_screen(gm, "s0_picker", "Picker of another app", is_external=True)
+    gm.add_edge("s0_picker", "ext_browser", {"action": "open link"})
+
+    assert gm.nodes_without_path_to_start() == PathToStart(None, [], [])
 
 
 def test_get_least_explored_node_returns_none_without_a_start_node() -> None:

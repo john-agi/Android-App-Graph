@@ -1493,6 +1493,103 @@ def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
     assert (app_dir / "demo_audited.json").exists() == (status == "merged")
 
 
+_BROWSER = "ext_com.android.chrome"
+
+
+def _graph_with_a_dead_end(dead_end: str) -> GraphManager:
+    """Home and List lead to each other; *dead_end* and the browser lead nowhere."""
+    graph = _graph_with_nodes(("s0_home", {}), ("s1_list", {}), (dead_end, {}), (_BROWSER, {}))
+    graph.add_edge("s0_home", "s1_list", {"action": "tap", "x": 10, "y": 20})
+    graph.add_edge("s1_list", "s0_home", {"action": "back"})
+    graph.add_edge("s1_list", dead_end, {"action": "tap", "x": 30, "y": 40})
+    graph.add_edge("s0_home", _BROWSER, {"action": "tap", "x": 50, "y": 60})
+    return graph
+
+
+def _no_path_to_start_line(app_dir: Path, in_app: int) -> str:
+    return (
+        f"{in_app} in-app and 1 external node(s) of {app_dir / 'demo_audited.json'} have no "
+        f"path back to s0_home; listed in {app_dir / 'demo_audit.json'}"
+    )
+
+
+def _audit_with_the_model_reporting(
+    issues: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Audit the saved demo graph while the model reports *issues*; return the app directory."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    # setup_logging replaces the root handlers, caplog's among them.
+    monkeypatch.setattr(audit, "setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        GraphManager, "run_audit", lambda _self, **_kwargs: {"issues": issues, "summary": "ok"}
+    )
+    monkeypatch.setattr(GraphManager, "normalize_node_edges", lambda _self, _node_id: 0)
+    graph_dir = tmp_path / "graphs"
+    config = _write_config(tmp_path, str(graph_dir))
+
+    assert audit.main(["--config", str(config), "--app", "demo"]) == 0
+    return graph_dir / "demo"
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_adds_the_nodes_with_no_path_to_the_start_node_to_the_model_s_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    router_requests: list[httpx.Request],
+) -> None:
+    _graph_with_a_dead_end("s2_dialog").save_graph(tmp_path / "graphs" / "demo" / "demo.json")
+    caplog.set_level(logging.INFO, logger=audit.logger.name)
+
+    app_dir = _audit_with_the_model_reporting([], tmp_path, monkeypatch)
+
+    report = json.loads((app_dir / "demo_audit.json").read_text(encoding="utf-8"))
+    assert report == {
+        "issues": [],
+        "summary": "ok",
+        "no_path_to_start": {
+            "graph": "demo_audited.json",
+            "start_node": "s0_home",
+            "in_app": ["s2_dialog"],
+            "external": [_BROWSER],
+        },
+    }
+    assert router_requests == []
+    line = _no_path_to_start_line(app_dir, in_app=1)
+    assert (audit.logger.name, logging.WARNING, line) in caplog.record_tuples
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_reports_no_path_to_the_start_node_for_the_graph_after_its_merges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dead end merged into a node with a path back is gone from the audited graph."""
+    app_dir = tmp_path / "graphs" / "demo"
+    explored = _graph_with_a_dead_end("s2_list")
+    assert explored.nodes_without_path_to_start().in_app == ["s2_list"]
+    explored.save_graph(app_dir / "demo.json")
+    screenshots = app_dir / "demo_screenshots"
+    screenshots.mkdir()
+    for node_id in ("s1_list", "s2_list"):
+        (screenshots / f"{node_id}.png").write_bytes(node_id.encode())
+    monkeypatch.setattr(
+        audit, "verify_same_node", lambda **_kwargs: {"same": True, "reason": "same list"}
+    )
+    caplog.set_level(logging.INFO, logger=audit.logger.name)
+
+    _audit_with_the_model_reporting([_merge_issue("s1_list", "s2_list")], tmp_path, monkeypatch)
+
+    report = json.loads((app_dir / "demo_audit.json").read_text(encoding="utf-8"))
+    assert report["no_path_to_start"] == {
+        "graph": "demo_audited.json",
+        "start_node": "s0_home",
+        "in_app": [],
+        "external": [_BROWSER],
+    }
+    line = _no_path_to_start_line(app_dir, in_app=0)
+    assert (audit.logger.name, logging.INFO, line) in caplog.record_tuples
+
+
 def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
     def touched(*_args: object, **_kwargs: object) -> NoReturn:
         msg = "settings must be validated before any device work"
