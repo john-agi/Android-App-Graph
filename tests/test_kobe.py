@@ -20,9 +20,9 @@ from PIL import Image
 from android_app_graph.device import DeviceController, StillOutsideAppError
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
-from android_app_graph.step_log import Observation, StepRecorder
-from android_app_graph.ui_tree import xml_document
-from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
+from android_app_graph.step_log import ActionEffect, ActionHit, Observation, StepRecorder
+from android_app_graph.ui_tree import Anchor, Bounds, actionable_elements, parse_tree, xml_document
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 from android_app_graph.utils.vlm_utils import PlanRequest
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
@@ -477,6 +477,53 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
 
     assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
     assert device_log == [*_FIRST_RESTART, open_detail]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_now(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The Network & internet row was tapped while it sat higher up Settings' home."""
+    explorer = _explorer(
+        _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
+    )
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_network"])
+    row = next(
+        element
+        for element in actionable_elements(
+            parse_tree(_PLAIN_LIST), "com.demo", Bounds(0, 0, _FIXTURE_W, _FIXTURE_H)
+        )
+        if element.label == "Network & internet"
+    )
+    recorded = {"action": "tap", "x": 672, "y": 524}
+    explorer.graph.add_edge(
+        "s0_home",
+        "s1_network",
+        [recorded],
+        details=EdgeDetails(
+            effect=ActionEffect(
+                (ActionHit("element", Anchor(row.locator, Bounds(0, 415, 1344, 633))),),
+                None,
+                no_visible_effect=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s1_network")
+
+    assert explorer.navigate_to_node("s1_network") == "s1_network"
+
+    assert device_log == [*_FIRST_RESTART, {"action": "tap", "x": 672, "y": 808}]
+    records = step_records(explorer.controller.steps)
+    assert [(record["kind"], record["source"]) for record in records] == [
+        ("observation", "navigation_replay"),
+        ("action", "navigation_replay"),
+        ("observation", "navigation_replay"),
+    ]
+    assert records[1]["observation"] == records[0]["id"]
 
 
 @pytest.mark.parametrize("malformed", [False, True])

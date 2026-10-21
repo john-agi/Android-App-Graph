@@ -47,6 +47,7 @@ from android_app_graph.device import (
     return_to_app,
 )
 from android_app_graph.graph_files import graph_steps_dir
+from android_app_graph.replay import replay_action
 from android_app_graph.step_log import Observation, StepRecorder, Transition, action_effect
 from android_app_graph.utils import (
     ModelSettings,
@@ -295,16 +296,6 @@ def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
     return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
-def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[str, Any]]) -> None:
-    if isinstance(action, list):
-        for sub_action in action:
-            controller.exe_action(sub_action)
-            time.sleep(0.5)
-    elif action:
-        controller.exe_action(action)
-    time.sleep(1)
-
-
 def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     """Navigate to target node by replaying shortest path. Returns actual node reached."""
     start = run.graph.resolve_node_id(run.start_node)
@@ -313,8 +304,8 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         logger.warning("No path from %s to %s", start, target_node)
         return None
 
-    for _node_id, action in path[1:]:
-        _execute(run.recorder, action)
+    for step in path[1:]:
+        replay_action(run.recorder, step.action, step.anchors, logger=logger)
 
     actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
     if actual != target_node:
@@ -517,17 +508,21 @@ def _replay_to(run: _ReExploreRun, node: str) -> str | None:
 def _correct_flagged_edge(
     run: _ReExploreRun, source: str, target: str, instruction: str
 ) -> dict[str, Any]:
-    """Execute the flagged action once from *source* and correct its edge by where it
-    leads. Returns the outcome fields of the issue's result.
+    """Execute the flagged action once from *source*, on the element it recorded as
+    ``replay_action`` finds it, and correct its edge by where it leads. Returns the
+    outcome fields of the issue's result.
     """
     found = run.graph.find_edge_action(source, target, instruction)
     if found is None:
         logger.warning("Instruction '%s' is not on %s → %s", instruction, source, target)
         return {"status": "instruction_not_found"}
-    index, action = found
+    index, recorded, anchors = found
 
     before = run.recorder.get_state()
-    _execute(run.recorder, action)
+    before_observation = Observation.from_state(before)
+    action = replay_action(
+        run.recorder, recorded, anchors, logger=logger, screen=before_observation
+    )
     after = run.recorder.get_state()
     reached = (
         f"ext_{after['package'].strip()}"
@@ -535,10 +530,7 @@ def _correct_flagged_edge(
         else _identify(run, after, expected_node=target)
     )
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
-    before_observation, after_observation = (
-        Observation.from_state(before),
-        Observation.from_state(after),
-    )
+    after_observation = Observation.from_state(after)
     run.recorder.record_transition(
         Transition(
             before=before_observation,
@@ -550,7 +542,7 @@ def _correct_flagged_edge(
             effect=action_effect(
                 before_observation,
                 after_observation,
-                action if isinstance(action, list) else [action],
+                action,
                 planned=None,
                 self_loop=reached == source,
             ),

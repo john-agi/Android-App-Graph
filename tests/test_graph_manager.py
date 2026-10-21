@@ -44,6 +44,7 @@ from android_app_graph.utils.graph_manager import (
     SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
     GraphManager,
+    PathStep,
     PathToStart,
     ScreenQuery,
     _merge_elements,
@@ -2395,8 +2396,43 @@ def test_find_edge_action_matches_nothing_for_an_action_without_an_instruction()
     )
     gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
 
-    assert gm.find_edge_action("s0_home", "s1_settings", "open settings") == (0, {"action": "tap"})
+    found = gm.find_edge_action("s0_home", "s1_settings", "open settings")
+    assert found == (0, {"action": "tap"}, (None,))
     assert gm.find_edge_action("s0_home", "s1_settings", "open search") is None
+
+
+_NETWORK_ANCHOR = Anchor(_ROW, Bounds(0, 699, 1344, 917))
+_APPS_ANCHOR = Anchor(_OTHER_ROW, Bounds(0, 1189, 1344, 1407))
+
+
+def _tap_on(anchor: Anchor) -> dict[str, Any]:
+    bounds = anchor.bounds
+    return {"action": "tap", "x": (bounds.left + bounds.right) // 2, "y": bounds.top + 10}
+
+
+def _anchored(*anchors: Anchor | None) -> ActionEffect:
+    """What an action whose sub-actions acted on ``anchors`` did."""
+    hits = tuple(ActionHit(None if anchor is None else "element", anchor) for anchor in anchors)
+    return ActionEffect(hits, None, no_visible_effect=False)
+
+
+def test_find_edge_action_returns_the_anchors_of_the_action_it_finds() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    for anchor, instruction in ((_NETWORK_ANCHOR, "open network"), (_APPS_ANCHOR, "open apps")):
+        gm.add_edge(
+            "s0_home",
+            "s1_settings",
+            [_tap_on(anchor)],
+            details=EdgeDetails(instruction=instruction, effect=_anchored(anchor)),
+        )
+
+    assert gm.find_edge_action("s0_home", "s1_settings", "open apps") == (
+        1,
+        [_tap_on(_APPS_ANCHOR)],
+        (_APPS_ANCHOR,),
+    )
 
 
 @dataclass
@@ -2700,7 +2736,7 @@ def test_find_path_from_a_node_to_itself_is_a_single_step() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
 
-    assert gm.find_path("s0_home", "s0_home") == [("s0_home", {})]
+    assert gm.find_path("s0_home", "s0_home") == [PathStep("s0_home", {}, ())]
 
 
 def test_find_path_returns_none_for_a_missing_node() -> None:
@@ -2726,9 +2762,9 @@ def test_find_path_prefers_the_fewest_total_steps() -> None:
     path = gm.find_path("s0_home", "s3_results")
 
     assert path == [
-        ("s0_home", {}),
-        ("s1_settings", {"action": "a"}),
-        ("s3_results", {"action": "b"}),
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {"action": "a"}, (None,)),
+        PathStep("s3_results", {"action": "b"}, (None,)),
     ]
 
 
@@ -2741,7 +2777,74 @@ def test_find_path_picks_the_action_with_the_fewest_steps() -> None:
 
     path = gm.find_path("s0_home", "s1_settings")
 
-    assert path == [("s0_home", {}), ("s1_settings", {"action": "short"})]
+    assert path == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {"action": "short"}, (None,)),
+    ]
+
+
+def test_find_path_returns_the_anchors_of_the_action_it_picks() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    swipe = {"action": "swipe", "x1": 500, "y1": 1500, "x2": 500, "y2": 500}
+    compound = [swipe, _tap_on(_APPS_ANCHOR)]
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        compound,
+        details=EdgeDetails(num_steps=2, effect=_anchored(None, _APPS_ANCHOR)),
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        [_tap_on(_NETWORK_ANCHOR)],
+        details=EdgeDetails(num_steps=1, effect=_anchored(_NETWORK_ANCHOR)),
+    )
+    gm.add_edge(
+        "s1_settings",
+        "s0_home",
+        compound,
+        details=EdgeDetails(num_steps=2, effect=_anchored(None, _APPS_ANCHOR)),
+    )
+
+    assert gm.find_path("s0_home", "s1_settings") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", [_tap_on(_NETWORK_ANCHOR)], (_NETWORK_ANCHOR,)),
+    ]
+    assert gm.find_path("s1_settings", "s0_home") == [
+        PathStep("s1_settings", {}, ()),
+        PathStep("s0_home", compound, (None, _APPS_ANCHOR)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "anchors",
+    [
+        pytest.param(None, id="no anchors"),
+        pytest.param([], id="fewer entries than actions"),
+        pytest.param(["not a list"], id="a malformed entry"),
+    ],
+)
+def test_an_action_a_graph_file_saved_without_anchors_has_none_on_its_path(
+    anchors: list[object] | None, tmp_path: Path, write_graph_file: Callable[..., None]
+) -> None:
+    edge: dict[str, object] = {
+        "source": "s0_home",
+        "target": "s1_settings",
+        "actions": [[{"action": "tap", "x": 1, "y": 2}]],
+    }
+    if anchors is not None:
+        edge["anchors"] = anchors
+    graph_file = tmp_path / "demo.json"
+    write_graph_file(
+        graph_file, {"nodes": [{"id": "s0_home"}, {"id": "s1_settings"}], "edges": [edge]}
+    )
+    gm = make_manager()
+    gm.load_graph(graph_file)
+
+    (_, step) = gm.find_path("s0_home", "s1_settings") or []
+    assert step.anchors == ()
 
 
 def test_find_path_uses_an_empty_action_for_an_edge_without_actions() -> None:
@@ -2750,7 +2853,10 @@ def test_find_path_uses_an_empty_action_for_an_edge_without_actions() -> None:
     add_screen(gm, "s1_settings", "Settings page")
     gm.graph.add_edge("s0_home", "s1_settings")
 
-    assert gm.find_path("s0_home", "s1_settings") == [("s0_home", {}), ("s1_settings", {})]
+    assert gm.find_path("s0_home", "s1_settings") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {}, ()),
+    ]
 
 
 def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:

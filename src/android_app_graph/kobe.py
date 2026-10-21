@@ -23,6 +23,7 @@ from android_app_graph.device import (
     return_to_app,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir
+from android_app_graph.replay import replay_action
 from android_app_graph.step_log import (
     ActionEffect,
     MisTap,
@@ -354,7 +355,8 @@ class Kobe:
         """Navigate to a target node by replaying saved edges from the start node.
 
         This executes the shortest path of already-known actions from the
-        app's entry point to the target node — no VLM calls needed.
+        app's entry point to the target node — no VLM calls needed. Each tap
+        goes to the element it recorded, as ``replay_action`` finds it.
 
         Args:
             target_node: The node ID to navigate to.
@@ -389,35 +391,19 @@ class Kobe:
             target_node,
         )
 
-        for i, (node_id, action) in enumerate(path):
-            if i == 0:
-                continue  # the first entry is the start node and carries no action
-
-            if isinstance(action, list):
-                self.logger.info(
-                    "  Replay %d/%d: %s --> %s via %d compound actions",
-                    i,
-                    len(path) - 1,
-                    path[i - 1][0],
-                    node_id,
-                    len(action),
-                )
-                for sub_action in action:
-                    self.controller.exe_action(sub_action)
-                    time.sleep(0.5)
-            else:
-                self.logger.info(
-                    "  Replay %d/%d: %s --> %s via %s",
-                    i,
-                    len(path) - 1,
-                    path[i - 1][0],
-                    node_id,
-                    action.get("action", "?"),
-                )
-                # find_path yields {} for an edge a loaded graph file holds without actions.
-                if action:
-                    self.controller.exe_action(action)
-            time.sleep(1)  # brief pause for the UI to settle
+        for i, step in enumerate(path[1:], start=1):
+            action = step.action
+            self.logger.info(
+                "  Replay %d/%d: %s --> %s via %s",
+                i,
+                len(path) - 1,
+                path[i - 1].node,
+                step.node,
+                f"{len(action)} compound actions"
+                if isinstance(action, list)
+                else action.get("action", "?"),
+            )
+            replay_action(self.controller, action, step.anchors, logger=self.logger)
 
         actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
         if actual_node != target_node:

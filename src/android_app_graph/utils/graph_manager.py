@@ -62,7 +62,7 @@ from android_app_graph.step_log import (
     save_image_embeddings,
     tree_elements,
 )
-from android_app_graph.ui_tree import Locator, TreeElement
+from android_app_graph.ui_tree import Anchor, Locator, TreeElement
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     DescribeRequest,
@@ -106,6 +106,16 @@ class PathToStart(NamedTuple):
     start_node: str | None
     in_app: list[str]
     external: list[str]
+
+
+class PathStep(NamedTuple):
+    """One step of a path ``find_path`` returns: the node it reaches, the recorded action
+    that reaches it, and that action's anchors, one per sub-action, ``None`` for one
+    without. The first step is the path's start, with the action ``{}`` and no anchors."""
+
+    node: str
+    action: dict[str, Any] | list[dict[str, Any]]
+    anchors: tuple[Anchor | None, ...]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -468,6 +478,16 @@ def _default_num_steps(action: object) -> int:
 
 def _sub_action_placeholders(action: object) -> list[None]:
     return [None] * _default_num_steps(action)
+
+
+def _action_anchors(edge_data: Mapping[str, Any], index: int) -> tuple[Anchor | None, ...]:
+    """Return the anchors of action ``index`` of an edge, one per sub-action; an action
+    recorded without them, as in a graph explored before anchors, has none."""
+    entries = edge_data.get("anchors", [])
+    entry = entries[index] if index < len(entries) else None
+    if not isinstance(entry, list):
+        return ()
+    return tuple(Anchor.from_record(record) for record in entry)
 
 
 def _had_no_visible_effect(flags: object) -> bool:
@@ -1450,10 +1470,10 @@ class GraphManager:
 
     def find_edge_action(
         self, source: str, target: str, instruction: str
-    ) -> tuple[int, dict[str, Any] | list[dict[str, Any]]] | None:
-        """Return the index and action of the first action on the edge recorded with exactly
-        *instruction*, or None. An empty *instruction* matches nothing, not the placeholder of
-        an action recorded without one.
+    ) -> tuple[int, dict[str, Any] | list[dict[str, Any]], tuple[Anchor | None, ...]] | None:
+        """Return the index, action and anchors of the first action on the edge recorded
+        with exactly *instruction*, or None. An empty *instruction* matches nothing, not the
+        placeholder of an action recorded without one.
         """
         if not instruction or not self.graph.has_edge(source, target):
             return None
@@ -1465,7 +1485,7 @@ class GraphManager:
         )
         for index, (action, recorded_instruction) in enumerate(recorded):
             if recorded_instruction == instruction:
-                return index, action
+                return index, action, _action_anchors(edge_data, index)
         return None
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
@@ -1683,22 +1703,20 @@ class GraphManager:
         steps = as_int_list(edge_data.get("num_steps"))
         return min(steps) if steps else 1
 
-    def find_path(
-        self, source: str, target: str
-    ) -> list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] | None:
+    def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
 
         Edge weight = minimum num_steps recorded for that edge, so paths
         with fewer total action steps are preferred.
 
         Returns:
-            A list of (node_id, action) tuples representing the path.
-            action can be a single dict or a list of dicts (compound action).
-            The first entry has action={} (it's the starting node).
+            The path's steps, the first being the source itself. A step's action is
+            the edge action with the fewest steps, a single dict or a list of dicts
+            (compound action), with its anchors; an edge without actions gives ``{}``.
             Returns None if no path exists.
         """
         if source == target:
-            return [(source, {})]
+            return [PathStep(source, {}, ())]
 
         if source not in self.graph or target not in self.graph:
             return None
@@ -1713,9 +1731,7 @@ class GraphManager:
         except nx.NetworkXNoPath:
             return None
 
-        result: list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] = [
-            (_node_id(node_path[0]), {})
-        ]
+        result = [PathStep(_node_id(node_path[0]), {}, ())]
         for i in range(len(node_path) - 1):
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
@@ -1723,10 +1739,12 @@ class GraphManager:
             steps_list = edge_data.get("num_steps", [1] * len(actions))
             if actions:
                 best_idx = steps_list.index(min(steps_list)) if steps_list else 0
-                action = actions[best_idx]
+                step = PathStep(
+                    _node_id(t), actions[best_idx], _action_anchors(edge_data, best_idx)
+                )
             else:
-                action = {}
-            result.append((t, action))
+                step = PathStep(_node_id(t), {}, ())
+            result.append(step)
 
         return result
 
@@ -1772,8 +1790,8 @@ class GraphManager:
                     return None
 
                 for i in range(1, len(nav_path)):
-                    node_id, action = nav_path[i]
-                    prev_node = nav_path[i - 1][0]
+                    node_id, action, _anchors = nav_path[i]
+                    prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
                     instruction = ""
                     instructions = edge_data.get("instructions", [])
