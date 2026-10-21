@@ -790,6 +790,14 @@ def test_the_sdk_retries_a_timeout_or_a_dropped_connection_once_it_recovers(
     assert len(no_sleep) == 1
 
 
+def _recording[**P, R](calls: list[dict[str, object]], method: Callable[P, R]) -> Callable[P, R]:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        calls.append(dict(kwargs))
+        return method(*args, **kwargs)
+
+    return wrapper
+
+
 def test_no_request_overrides_the_sdk_retry_policy(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -800,19 +808,8 @@ def test_no_request_overrides_the_sdk_retry_policy(
 ) -> None:
     assert router_client.sdk_configuration.retry_config is UNSET
     sent: list[dict[str, object]] = []
-    chat_send = Chat.send
-    generate = Embeddings.generate
-
-    def spy_send(self: Chat, **kwargs: Any) -> object:
-        sent.append(kwargs)
-        return chat_send(self, **kwargs)
-
-    def spy_generate(self: Embeddings, **kwargs: Any) -> object:
-        sent.append(kwargs)
-        return generate(self, **kwargs)
-
-    monkeypatch.setattr(Chat, "send", spy_send)
-    monkeypatch.setattr(Embeddings, "generate", spy_generate)
+    monkeypatch.setattr(Chat, "send", _recording(sent, Chat.send))
+    monkeypatch.setattr(Embeddings, "generate", _recording(sent, Embeddings.generate))
     router_responses.extend(
         [
             chat_response(content='{"page_description":"home"}'),

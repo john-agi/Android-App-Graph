@@ -119,10 +119,18 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
         cls,
         env: interface.AsyncEnv,
         config_path: str | Path,
-        **kwargs: Any,
+        *,
+        name: str = "Android-App-Graph",
+        transition_pause: float | None = 1.0,
     ) -> UIKobeAndroidWorldAgent:
         graph_dir, vlm_config = load_agent_settings(Path(config_path))
-        return cls(env, graph_dir=graph_dir, vlm_config=vlm_config, **kwargs)
+        return cls(
+            env,
+            graph_dir=graph_dir,
+            vlm_config=vlm_config,
+            name=name,
+            transition_pause=transition_pause,
+        )
 
     def reset(self, go_home: bool = False) -> None:
         super().reset(go_home=go_home)

@@ -449,16 +449,16 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
         ],
         edges=[{"source": "n1", "target": "n2", "instructions": ["tap"], "visit_count": 2}],
     )
-    G = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator._load_graph_from_json(path)
 
-    assert set(G.nodes) == {"n1", "n2"}
-    assert G.nodes["n1"]["page_description"] == "home"
-    assert G.nodes["n1"]["state_schema"] == {"query": "str"}
-    assert G.nodes["n1"]["visit_count"] == 3
-    assert G.nodes["n1"]["reference_screenshot_path"] is None
-    assert G.nodes["n2"]["activity"] == ""
-    assert G.edges["n1", "n2"]["instructions"] == ["tap"]
-    assert "schema_deltas" not in G.edges["n1", "n2"]
+    assert set(graph.nodes) == {"n1", "n2"}
+    assert graph.nodes["n1"]["page_description"] == "home"
+    assert graph.nodes["n1"]["state_schema"] == {"query": "str"}
+    assert graph.nodes["n1"]["visit_count"] == 3
+    assert graph.nodes["n1"]["reference_screenshot_path"] is None
+    assert graph.nodes["n2"]["activity"] == ""
+    assert graph.edges["n1", "n2"]["instructions"] == ["tap"]
+    assert "schema_deltas" not in graph.edges["n1", "n2"]
 
 
 def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> None:
@@ -474,9 +474,9 @@ def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> N
             {"source": "n2", "target": "n1", "schema_deltas": []},
         ],
     )
-    G = aitk_translator._load_graph_from_json(path)
-    assert G.edges["n1", "n2"]["schema_deltas"] == [{"cart": {"before": 0, "after": 1}}]
-    assert "schema_deltas" not in G.edges["n2", "n1"]
+    graph = aitk_translator._load_graph_from_json(path)
+    assert graph.edges["n1", "n2"]["schema_deltas"] == [{"cart": {"before": 0, "after": 1}}]
+    assert "schema_deltas" not in graph.edges["n2", "n1"]
 
 
 def test_load_graph_from_json_records_the_reference_screenshot_path(tmp_path: Path) -> None:
@@ -489,10 +489,10 @@ def test_load_graph_from_json_records_the_reference_screenshot_path(tmp_path: Pa
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
-    G = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator._load_graph_from_json(path)
 
-    assert G.nodes["n1"]["reference_screenshot_path"] == screenshots / "n1.png"
-    assert G.nodes["n2"]["reference_screenshot_path"] is None
+    assert graph.nodes["n1"]["reference_screenshot_path"] == screenshots / "n1.png"
+    assert graph.nodes["n2"]["reference_screenshot_path"] is None
 
 
 def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_path: Path) -> None:
@@ -501,8 +501,8 @@ def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_pat
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
-    G = aitk_translator._load_graph_from_json(path)
-    assert G.nodes["n1"]["reference_screenshot_path"] is not None
+    graph = aitk_translator._load_graph_from_json(path)
+    assert graph.nodes["n1"]["reference_screenshot_path"] is not None
 
 
 @pytest.mark.parametrize(
@@ -523,10 +523,10 @@ def test_load_graph_from_json_accepts_a_file_with_only_nodes(tmp_path: Path) -> 
     path = tmp_path / "demo.json"
     path.write_text(json.dumps({"nodes": [{"id": "n1"}]}), encoding="utf-8")
 
-    G = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator._load_graph_from_json(path)
 
-    assert list(G.nodes) == ["n1"]
-    assert G.number_of_edges() == 0
+    assert list(graph.nodes) == ["n1"]
+    assert graph.number_of_edges() == 0
 
 
 def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
@@ -560,16 +560,16 @@ def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
             }
         ],
     )
-    G = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator._load_graph_from_json(path)
 
-    assert G.nodes["n1"]["activity"] == ""
-    assert G.nodes["n1"]["page_description"] == ""
-    assert G.nodes["n1"]["state_schema"] == {}
-    assert G.nodes["n1"]["last_detail_snapshot"] == {}
-    assert G.edges["n1", "n2"]["instructions"] == []
-    assert G.edges["n1", "n2"]["instruction_templates"] == []
-    assert G.edges["n1", "n2"]["target_observations"] == []
-    assert "schema_deltas" not in G.edges["n1", "n2"]
+    assert graph.nodes["n1"]["activity"] == ""
+    assert graph.nodes["n1"]["page_description"] == ""
+    assert graph.nodes["n1"]["state_schema"] == {}
+    assert graph.nodes["n1"]["last_detail_snapshot"] == {}
+    assert graph.edges["n1", "n2"]["instructions"] == []
+    assert graph.edges["n1", "n2"]["instruction_templates"] == []
+    assert graph.edges["n1", "n2"]["target_observations"] == []
+    assert "schema_deltas" not in graph.edges["n1", "n2"]
 
 
 def test_load_graph_from_json_rejects_a_non_string_node_id(tmp_path: Path) -> None:
@@ -946,7 +946,7 @@ def test_load_all_graphs_embeds_no_screenshot_of_a_graph_it_does_not_load(
         (path.parent / f"{app}_screenshots").mkdir()
         (path.parent / f"{app}_screenshots" / "n1.png").write_bytes(_SCREENSHOT)
 
-    def _no_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+    def _no_embedding(*_args: object, **_kwargs: object) -> list[float]:
         msg = "a graph that is not loaded needs no image embedding"
         raise AssertionError(msg)
 
@@ -1028,7 +1028,7 @@ def test_load_all_graphs_streams_screenshot_reads_lazily(
 
     reads_at_call: list[int] = []
 
-    def fake_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+    def fake_embedding(*_args: object, **_kwargs: object) -> list[float]:
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
@@ -1052,7 +1052,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     pre-cached sidecar entry: it exercises the sidecar-loaded copy-back
     (``_load_all_graphs``'s own loop) alongside ``n1``/``n3``'s freshly
     computed one (``_compute_missing_image_embeddings``'s), so both must land
-    on ``G`` even though only the candidates it computed are its own to copy.
+    on ``graph`` even though only the candidates it computed are its own to copy.
     """
     path = _write_graph(
         tmp_path, app="demo", nodes=[{"id": "n1"}, {"id": "n2"}, {"id": "n3"}, {"id": "n4"}]
@@ -1070,7 +1070,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     }
 
     def _flaky(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         if screenshot_b64 == b64_by_node["n2"]:
             msg = "embedding failed"
@@ -1091,10 +1091,10 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     built = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path), vlm_config=_VLM_CONFIG)
 
     assert set(built._graphs) == {"demo"}
-    G = built._graphs["demo"]
-    assert G.nodes["n4"]["image_embedding"] == [9.0, 9.0]  # from the sidecar, never recomputed
-    assert G.nodes["n1"]["image_embedding"] == [1.0, 0.0]  # freshly computed
-    assert G.nodes["n3"]["image_embedding"] == [1.0, 0.0]  # freshly computed
+    graph = built._graphs["demo"]
+    assert graph.nodes["n4"]["image_embedding"] == [9.0, 9.0]  # from the sidecar, never recomputed
+    assert graph.nodes["n1"]["image_embedding"] == [1.0, 0.0]  # freshly computed
+    assert graph.nodes["n3"]["image_embedding"] == [1.0, 0.0]  # freshly computed
     assert len(save_calls) == 1
     assert save_calls[0] == {"n4": [9.0, 9.0], "n1": [1.0, 0.0], "n3": [1.0, 0.0]}
     assert embedding_cache.load_image_embeddings(
@@ -1127,7 +1127,7 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
     }
 
     def _interrupted_at_n3(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
@@ -1293,8 +1293,8 @@ def test_edge_effect_hint_without_an_index_merges_every_delta(
 def test_build_options_lists_done_self_loops_neighbours_and_free(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    G = translator._graphs["demo"]
-    text, options = translator._build_options(G, "home")
+    graph = translator._graphs["demo"]
+    text, options = translator._build_options(graph, "home")
 
     assert [opt["type"] for opt in options] == ["done", "self_loop", "neighbor", "free"]
     assert [opt["letter"] for opt in options] == ["A", "B", "C", "D"]
@@ -1314,8 +1314,8 @@ def test_build_options_lists_done_self_loops_neighbours_and_free(
 def test_build_options_falls_back_to_raw_self_loop_instructions(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    G = translator._graphs["demo"]
-    G.add_edge(
+    graph = translator._graphs["demo"]
+    graph.add_edge(
         "results",
         "results",
         instructions=["scroll down", "scroll up"],
@@ -1323,7 +1323,7 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(
         instruction_templates=[],
         schema_deltas=[{"page": "1 -> 2"}],
     )
-    text, options = translator._build_options(G, "results")
+    text, options = translator._build_options(graph, "results")
 
     assert [opt["type"] for opt in options] == ["done", "self_loop", "self_loop", "free"]
     assert options[1]["instruction"] == "scroll down"
@@ -1393,8 +1393,8 @@ def test_build_options_lists_no_self_loop_action_without_an_instruction(
 def test_build_options_skips_the_self_loop_when_listing_neighbours(
     translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    G = translator._graphs["demo"]
-    _, options = translator._build_options(G, "home")
+    graph = translator._graphs["demo"]
+    _, options = translator._build_options(graph, "home")
     assert [opt for opt in options if opt["type"] == "neighbor"] == [
         {
             "letter": "C",
@@ -1440,11 +1440,11 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
     most-visited neighbours (edge visit_count descending) rather than an
     arbitrary subset.
     """
-    G = translator._graphs["demo"]
+    graph = translator._graphs["demo"]
     for i in range(30):
         neighbor = f"n{i}"
-        G.add_node(neighbor, page_description=f"screen {i}")
-        G.add_edge(
+        graph.add_node(neighbor, page_description=f"screen {i}")
+        graph.add_edge(
             "home",
             neighbor,
             instructions=[f"go to {i}"],
@@ -1454,7 +1454,7 @@ def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours
         )
 
     with caplog.at_level("WARNING"):
-        text, options = translator._build_options(G, "home")
+        text, options = translator._build_options(graph, "home")
 
     assert len(options) == 26
     assert options[0]["type"] == "done"
@@ -1491,10 +1491,10 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
     must never be able to evict every "Go to" option: neighbours keep at least
     half of the 24 middle slots, and self-loop instructions take the rest.
     """
-    G = translator._graphs["demo"]
-    G.remove_edge("home", "results")
-    G.remove_edge("home", "home")
-    G.add_edge(
+    graph = translator._graphs["demo"]
+    graph.remove_edge("home", "results")
+    graph.remove_edge("home", "home")
+    graph.add_edge(
         "home",
         "home",
         instructions=[f"self loop {i}" for i in range(num_self_loops)],
@@ -1504,8 +1504,8 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
     )
     for i in range(num_neighbors):
         neighbor = f"n{i}"
-        G.add_node(neighbor, page_description=f"screen {i}")
-        G.add_edge(
+        graph.add_node(neighbor, page_description=f"screen {i}")
+        graph.add_edge(
             "home",
             neighbor,
             instructions=[f"go to {i}"],
@@ -1514,7 +1514,7 @@ def test_build_options_reserves_half_the_middle_slots_for_neighbours(
             visit_count=i,
         )
 
-    _text, options = translator._build_options(G, "home")
+    _text, options = translator._build_options(graph, "home")
 
     kept_self_loop = [opt for opt in options if opt["type"] == "self_loop"]
     kept_neighbors = [opt for opt in options if opt["type"] == "neighbor"]
@@ -1760,7 +1760,7 @@ def test_runtime_image_embedding_propagates_an_error_without_asking_again(
     calls: list[str] = []
 
     def _fails(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         calls.append(screenshot_b64)
         msg = "embedding failed"
@@ -1782,10 +1782,10 @@ def identifiable(
         "get_image_embedding",
         lambda *_args, **_kwargs: [1.0, 0.0],
     )
-    G = translator._graphs["demo"]
-    G.nodes["home"]["image_embedding"] = [1.0, 0.0]
-    G.nodes["results"]["image_embedding"] = [0.0, 1.0]
-    translator._current_graph = G
+    graph = translator._graphs["demo"]
+    graph.nodes["home"]["image_embedding"] = [1.0, 0.0]
+    graph.nodes["results"]["image_embedding"] = [0.0, 1.0]
+    translator._current_graph = graph
     translator._app_name = "demo"
     return translator
 
@@ -1828,8 +1828,8 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
     never be scored against the fresh query vector (see cosine_similarity's
     ValueError); it is skipped and warned about once, not per candidate.
     """
-    G = identifiable._graphs["demo"]
-    G.add_node(
+    graph = identifiable._graphs["demo"]
+    graph.add_node(
         "stale",
         package="com.demo.app",
         activity="com.demo.app/.HomeActivity",
@@ -1922,9 +1922,9 @@ def test_identify_node_without_candidates_in_the_current_package(
 def test_identify_node_without_cached_embeddings(
     identifiable: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    G = identifiable._graphs["demo"]
-    for node in G.nodes:
-        del G.nodes[node]["image_embedding"]
+    graph = identifiable._graphs["demo"]
+    for node in graph.nodes:
+        del graph.nodes[node]["image_embedding"]
     assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
@@ -1960,12 +1960,12 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     )
     monkeypatch.setattr(embedding_cache, "get_image_embedding", lambda *_a, **_kw: [1.0, 0.0])
     translator = aitk_translator.register({"graph_dir": str(tmp_path), "vlm_config": _VLM_CONFIG})
-    G = translator._graphs["demo"]
-    G.nodes["home"]["image_embedding"] = [1.0, 0.0]
-    translator._current_graph = G
+    graph = translator._graphs["demo"]
+    graph.nodes["home"]["image_embedding"] = [1.0, 0.0]
+    translator._current_graph = graph
     translator._app_name = "demo"
 
-    _text, options = translator._build_options(G, "home")
+    _text, options = translator._build_options(graph, "home")
     assert [opt["type"] for opt in options] == ["done", "free"]
 
     use_model(translator, "A")
@@ -1976,7 +1976,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
 def test_identify_node_propagates_an_embedding_failure(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
+    def _always_fails(*_args: object, **_kwargs: object) -> list[float]:
         msg = "embedding down"
         raise RuntimeError(msg)
 
@@ -1993,7 +1993,7 @@ def test_identify_node_logs_an_embedding_failure_with_its_traceback(
 ) -> None:
     failure = RuntimeError("embedding down")
 
-    def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
+    def _always_fails(*_args: object, **_kwargs: object) -> list[float]:
         raise failure
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
@@ -2012,10 +2012,10 @@ def test_identify_node_logs_an_embedding_failure_with_its_traceback(
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    seen: dict[str, Any] = {}
+    seen: dict[str, object] = {}
 
     def _fake_predict(
-        _client: object, _shot: str, instruction: str, **kwargs: Any
+        _client: object, _shot: str, instruction: str, **kwargs: object
     ) -> tuple[dict[str, Any], str]:
         seen["instruction"] = instruction
         seen.update(kwargs)
@@ -2492,10 +2492,10 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
     missing one, so the "no candidates" line must not claim every same-package
     node has an embedding when all of them were dropped as stale.
     """
-    G = identifiable._graphs["demo"]
-    same_pkg = [n for n, data in G.nodes(data=True) if data["package"] == "com.demo.app"]
+    graph = identifiable._graphs["demo"]
+    same_pkg = [n for n, data in graph.nodes(data=True) if data["package"] == "com.demo.app"]
     for node in same_pkg:
-        G.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
+        graph.nodes[node]["image_embedding"] = [1.0, 0.0, 0.0]
 
     with caplog.at_level("WARNING"):
         assert (
