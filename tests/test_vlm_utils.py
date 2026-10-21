@@ -268,6 +268,7 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
     "audit": ("graph_audit", True),
     "target": ("exploration_target", True),
     "planner": ("next_action_plan", True),
+    "describe": ("action_description", True),
 }
 
 
@@ -313,6 +314,13 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
             "openai/gpt-6.1-sol",
             '```json\n{"element":null,"instruction":"Tap Search"}\n```',
             ("Tap Search", None),
+        ),
+        (
+            "describe",
+            "action_description",
+            "openai/gpt-6.1-sol",
+            '{"instruction":"Tap Search"}',
+            "Tap Search",
         ),
         (
             "action",
@@ -367,6 +375,10 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
                 app_name="demo",
                 settings=PAGE_DETAIL,
             )
+        case "describe":
+            result = vlm.describe_executed_action(
+                router_client, png_screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
+            )
         case _:
             result = vlm.predict_next_action(router_client, png_screenshot, "wait", settings=ACTION)
     assert result == expected
@@ -374,7 +386,7 @@ def test_role_helpers_serialize_and_parse_real_sdk_responses(
     assert body["model"] == model
     assert body["stream"] is False
     assert "temperature" not in body
-    if operation in {"page", "verify", "planner", "action"}:
+    if operation in {"page", "verify", "planner", "describe", "action"}:
         parts = body["messages"][-1]["content"]
         images = [part for part in parts if part["type"] == "image_url"]
         assert len(images) == (2 if operation == "verify" else 1)
@@ -499,6 +511,7 @@ def _sent_schemas(
             "{}",
             "{}",
             "{}",
+            "{}",
         )
     )
     vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
@@ -510,6 +523,9 @@ def _sent_schemas(
     vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
     vlm.select_exploration_target(
         router_client, "demo", [{"node_id": "b"}, {"node_id": "a"}], settings=PAGE_DETAIL
+    )
+    vlm.describe_executed_action(
+        router_client, png_screenshot, {"action": "back"}, 1080, 1920, settings=PAGE_DETAIL
     )
     schemas = [
         json.loads(request.content)["response_format"]["json_schema"] for request in router_requests
@@ -529,6 +545,7 @@ def test_strict_schemas_close_every_object_and_free_form_ones_keep_their_format(
     )
     strict = {name: schema for name, schema in schemas.items() if schema["strict"]}
     assert sorted(strict) == [
+        "action_description",
         "exploration_target",
         "graph_audit",
         "node_merge_audit",
@@ -1009,6 +1026,7 @@ def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Resp
         ("merge_audit", {"issues": [], "summary": "reply truncated"}),
         ("audit", {"issues": [], "summary": "reply truncated"}),
         ("target", None),
+        ("describe", None),
         ("action", {"action": "wait", "time": 1}),
     ],
 )
@@ -1041,6 +1059,10 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
             case "target":
                 result = vlm.select_exploration_target(
                     router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL
+                )
+            case "describe":
+                result = vlm.describe_executed_action(
+                    router_client, png_screenshot, {"action": "back"}, 1, 1, settings=PAGE_DETAIL
                 )
             case _:
                 result = vlm.predict_next_action(
@@ -1161,6 +1183,38 @@ def test_the_planner_keeps_every_quote_in_its_instruction(
     assert vlm.plan_next_action(
         router_client, png_screenshot, "home", [], settings=PAGE_DETAIL
     ) == (instruction, None)
+
+
+@pytest.mark.parametrize(
+    ("reply", "instruction"),
+    [
+        ('{"instruction": "\\"Swipe up\\" on the results list"}', '"Swipe up" on the results list'),
+        ('{"instruction": " "}', None),
+        ('["Swipe up"]', None),
+        ("Swipe up on the results list", None),
+    ],
+    ids=["quotes kept", "blank", "not an object", "not JSON"],
+)
+def test_an_executed_action_is_described_from_its_screen_or_not_at_all(
+    reply: str,
+    instruction: str | None,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    swipe = [{"action": "swipe", "x1": 540, "y1": 1500, "x2": 540, "y2": 500}]
+    router_responses.append(chat_response(content=reply))
+
+    described = vlm.describe_executed_action(
+        router_client, png_screenshot, swipe, 1080, 1920, settings=PAGE_DETAIL
+    )
+
+    assert described == instruction
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    assert "1080x1920 screen" in prompt
+    assert json.dumps(swipe) in prompt
 
 
 @pytest.mark.parametrize("multipart", [False, True])

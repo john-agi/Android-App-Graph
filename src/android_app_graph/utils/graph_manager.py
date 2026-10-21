@@ -721,6 +721,66 @@ class GraphManager:
                 n_templates,
             )
 
+    def find_edge_action(
+        self, source: str, target: str, instruction: str
+    ) -> tuple[int, dict[str, Any] | list[dict[str, Any]]] | None:
+        """Return the index and action of the first action on the edge recorded with exactly
+        *instruction*, or None. An empty *instruction* matches nothing, not the placeholder of
+        an action recorded without one.
+        """
+        if not instruction or not self.graph.has_edge(source, target):
+            return None
+        edge_data = self.graph[source][target]
+        recorded = zip(edge_data.get("actions", []), edge_data.get("instructions", []))
+        for index, (action, recorded_instruction) in enumerate(recorded):
+            if recorded_instruction == instruction:
+                return index, action
+        return None
+
+    def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
+        """Move action *index* of source→target, with its entry in every per-action list, to
+        source→new_target, which is created when absent.
+
+        The moved action's observation becomes *new_target*'s description, the screen it led
+        to. source→target is removed when no action is left on it; otherwise its templates are
+        dropped, since they were generalised from the moved instruction too, and the next
+        normalization rebuilds them.
+
+        Returns False, changing nothing, when *new_target* is missing or *source* is an
+        ``ext_`` node, which ``add_edge`` gives no outgoing edge either.
+        """
+        if new_target not in self.graph:
+            logger.warning("move_edge_action: missing node %s", new_target)
+            return False
+        if source.startswith("ext_"):
+            logger.warning("move_edge_action: refusing an edge out of external node %s", source)
+            return False
+
+        edge_data = self.graph[source][target]
+        remaining = _aligned_lists(edge_data)
+        moved: dict[str, Any] = {key: [values.pop(index)] for key, values in remaining.items()}
+        moved["target_observations"] = [self.graph.nodes[new_target].get("page_description", "")]
+        moved["visit_count"] = 1
+        if remaining["actions"]:
+            edge_data.update(remaining)
+            edge_data["instruction_templates"] = []
+        else:
+            self.graph.remove_edge(source, target)
+        self._merge_edge_data(source, new_target, moved)
+        logger.info("Moved action %d of %s -> %s to %s", index, source, target, new_target)
+        return True
+
+    def relabel_edge_action(self, source: str, target: str, index: int, instruction: str) -> None:
+        """Replace the instruction of action *index* on source→target.
+
+        The edge's templates are dropped, since they were generalised from the instruction
+        this replaces, and the next normalization rebuilds them.
+        """
+        edge_data = self.graph[source][target]
+        edge_data.update(_aligned_lists(edge_data))
+        edge_data["instructions"][index] = instruction
+        edge_data["instruction_templates"] = []
+
     def _normalize_single_edge(self, source: str, target: str) -> bool:
         """Normalize one edge's instructions into a reusable template if possible."""
         page_detail = self._page_detail()

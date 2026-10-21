@@ -1085,6 +1085,122 @@ def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> No
     assert rows == ([padded, recorded] if bare_side == "kept" else [recorded, padded])
 
 
+def edge_rows(gm: GraphManager, source: str, target: str) -> list[tuple[Any, ...]]:
+    """One (action, num_steps, instruction, observation, schema_delta) row per action."""
+    data = gm.graph[source][target]
+    return list(zip(*(data[key] for key in ("actions", *PER_ACTION_LISTS)), strict=True))
+
+
+def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_other_edge() -> None:
+    gm = make_manager()
+    for node_id, description in (
+        ("s0_home", "Home screen"),
+        ("s1_settings", "Settings page"),
+        ("s2_search", "Search results"),
+    ):
+        add_screen(gm, node_id, description)
+    search = [{"action": "tap"}, {"action": "type", "text": "milk"}]
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        search,
+        instruction="search for milk",
+        target_observation="Settings page",
+        schema_delta={"query": {"after": "milk"}},
+    )
+    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, num_steps=3)
+    gm.graph["s0_home"]["s1_settings"]["instruction_templates"] = [{"template": "{verb} for x"}]
+    gm.add_edge("s0_home", "s2_search", {"action": "enter"}, instruction="submit the search")
+
+    assert gm.move_edge_action("s0_home", "s1_settings", 1, "s2_search") is True
+
+    assert edge_rows(gm, "s0_home", "s1_settings") == [
+        ({"action": "tap"}, 1, "open settings", "", None),
+        ({"action": "swipe"}, 3, "", "", None),
+    ]
+    assert edge_rows(gm, "s0_home", "s2_search") == [
+        ({"action": "enter"}, 1, "submit the search", "", None),
+        (search, 2, "search for milk", "Search results", {"query": {"after": "milk"}}),
+    ]
+    assert gm.graph["s0_home"]["s1_settings"]["instruction_templates"] == []
+    assert gm.graph["s0_home"]["s2_search"]["visit_count"] == 2
+
+
+def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_needs() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+
+    assert gm.move_edge_action("s0_home", "s1_settings", 0, "s0_home") is True
+
+    assert not gm.graph.has_edge("s0_home", "s1_settings")
+    assert edge_rows(gm, "s0_home", "s0_home") == [
+        ({"action": "tap"}, 1, "open settings", "Home screen", None)
+    ]
+    assert gm.graph["s0_home"]["s0_home"]["visit_count"] == 1
+
+
+def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+
+    with caplog.at_level(logging.WARNING, logger=gm_module.__name__):
+        assert gm.move_edge_action("s0_home", "s1_settings", 0, "ext_com.other") is False
+
+    assert list(gm.graph.nodes) == ["s0_home", "s1_settings"]
+    assert edge_rows(gm, "s0_home", "s1_settings") == [
+        ({"action": "tap"}, 1, "open settings", "", None)
+    ]
+    assert "move_edge_action: missing node ext_com.other" in caplog.text
+
+
+def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    add_screen(gm, EXTERNAL_WEB_NODE, "Outside page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open settings")
+    # add_edge refuses an edge out of an ext_ node, but a loaded graph file can hold one.
+    gm.graph.add_edge(EXTERNAL_WEB_NODE, "s0_home", actions=[{"action": "back"}])
+
+    assert gm.move_edge_action("s0_home", "s1_settings", 0, EXTERNAL_WEB_NODE) is True
+    with caplog.at_level(logging.WARNING, logger=gm_module.__name__):
+        assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
+
+    assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
+        ({"action": "tap"}, 1, "open settings", "Outside page", None)
+    ]
+    assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
+    assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
+    assert f"move_edge_action: refusing an edge out of external node {EXTERNAL_WEB_NODE}" in (
+        caplog.text
+    )
+
+
+def test_relabel_edge_action_replaces_one_instruction_and_drops_the_edge_templates() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"}, instruction="open search")
+    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, instruction="open settings")
+    gm.graph["s0_home"]["s1_settings"]["instruction_templates"] = [{"template": "open {page}"}]
+
+    gm.relabel_edge_action("s0_home", "s1_settings", 0, "Tap the gear icon")
+
+    data = gm.graph["s0_home"]["s1_settings"]
+    assert data["instructions"] == ["Tap the gear icon", "open settings"]
+    assert data["actions"] == [{"action": "tap"}, {"action": "swipe"}]
+    assert data["instruction_templates"] == []
+
+
 @dataclass
 class FakeNormalizer:
     """Stand-in for vlm_utils.normalize_edge; the client is unused, so it is _client."""
