@@ -11,8 +11,9 @@ An edge represents a device action that transitions between states.
 
 State matching compares a new screenshot with the members of the nodes of its app
 package, cheapest evidence first: an exact pixel match outside the status bar, then
-the node the caller expects, then a short list of nodes ranked by image and text
-similarity, each checked by the verifier against its member closest to the screen.
+the node the caller expects, then a short list of nodes ranked by image, text and
+layout similarity, each checked by the verifier against its member closest to the
+screen.
 Different Android activities that display the same screen are merged into a single
 node; the node stores all observed activities.
 
@@ -20,16 +21,19 @@ Every time a node is visited (whether new or existing), the VLM detail JSON is
 used to update the node's state schema — discovering new keys and accumulating
 observed values.
 
-A node holds no image. It lists the step-log observations assigned to it, in
-order, and names one of them its representative: the screen the merge audit
-compares against and the plot shows, read from the step log when they need it.
+A node holds no image and no tree. It lists the step-log observations assigned to
+it, in order, and names one of them its representative: the screen the plot shows,
+read from the step log when it needs it. Its stable layout is computed from its
+members' trees when first needed. Merge proposals, from the model's text and from
+close stable layouts, are each verified once on the two nodes' closest members.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -58,7 +62,14 @@ from android_app_graph.step_log import (
     annotate_observation,
     load_image_embeddings,
     read_observation_record,
+    read_observation_tree,
     save_image_embeddings,
+)
+from android_app_graph.ui_tree import (
+    LayoutEntry,
+    layout_signature,
+    layout_similarity,
+    stable_layout,
 )
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
@@ -79,6 +90,10 @@ logger = logging.getLogger(__name__)
 NORMALIZE_EVERY_N_VISITS = 10
 # The verifier calls the short list may make for one screen; a checked expected node adds one.
 SHORT_LIST_VERIFICATIONS = 3
+# The layout similarity a node needs to join a screen's short list, and the one two
+# nodes' stable layouts need to be proposed for a merge.
+LAYOUT_SHORT_LIST_FLOOR = 0.55
+LAYOUT_MERGE_FLOOR = 0.80
 _FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
@@ -191,10 +206,12 @@ class ClosestMember(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class ScreenQuery:
-    """A screen as the short list's sources rank nodes for it."""
+    """A screen as the short list's sources rank nodes for it; ``layout`` is its layout
+    signature, each entry weighing 1, or ``None`` when it has no tree."""
 
     image_vector: list[float]
     description_embedding: list[float]
+    layout: Mapping[LayoutEntry, float] | None = None
 
 
 type SourceScores = Callable[[GraphManager, ScreenQuery, Sequence[str]], list[tuple[str, float]]]
@@ -247,14 +264,83 @@ def _text_scores(
     )
 
 
+def _layout_scores(
+    graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
+) -> list[tuple[str, float]]:
+    if query.layout is None:
+        return []
+    scored = [(node_id, graph.layout_score(node_id, query.layout)) for node_id in node_ids]
+    return [
+        (node_id, score)
+        for node_id, score in scored
+        if score is not None and score >= LAYOUT_SHORT_LIST_FLOOR
+    ]
+
+
 SHORT_LIST_SOURCES = (
     ShortListSource("image", 3, _image_scores),
     ShortListSource("text", 2, _text_scores),
+    ShortListSource("layout", 2, _layout_scores),
 )
 
 
 def _short_list_order(candidate: Candidate) -> tuple[int, float]:
     return candidate.best_rank, -candidate.closest_member.score
+
+
+class MemberVerdict(NamedTuple):
+    """The verifier's answer on whether two member observations show one screen;
+    ``reused`` when an earlier check of the same pair in the run gave it."""
+
+    same: bool
+    reason: str
+    reused: bool = False
+
+
+type MemberVerdicts = dict[frozenset[str], MemberVerdict]
+
+
+class ShownMembers(NamedTuple):
+    """The member of each node a merge check shows the verifier, and the cosine of
+    their images; ``None`` when a node has no image vector and its representative
+    is shown."""
+
+    existing: str
+    new: str
+    score: float | None
+
+
+type MergePairs = Callable[[GraphManager], list[tuple[str, str, dict[str, object]]]]
+
+
+@dataclass(frozen=True, slots=True)
+class MergeSource:
+    """One named way of finding node pairs that may be one screen; ``pairs`` returns
+    each pair with what the source found."""
+
+    name: str
+    pairs: MergePairs
+
+
+def _close_layouts(graph: GraphManager) -> list[tuple[str, str, dict[str, object]]]:
+    return [(node_a, node_b, {"score": score}) for node_a, node_b, score in graph.close_layouts()]
+
+
+MERGE_SOURCES = (MergeSource("layout", _close_layouts),)
+
+
+@dataclass(slots=True)
+class MergeProposal:
+    """A node pair that may be one screen, and the finding of every source that
+    proposed it, each naming its ``source``."""
+
+    node_a: str
+    node_b: str
+    findings: list[dict[str, object]] = field(default_factory=list)
+
+    @property
+    def sources(self) -> list[str]:
+        return list(dict.fromkeys(as_str(finding.get("source"), "") for finding in self.findings))
 
 
 @dataclass(slots=True)
@@ -512,6 +598,8 @@ class GraphManager:
         self._node_aliases: dict[str, str] = {}
         self._image_vectors: dict[str, list[float]] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
+        self._layout_signatures: dict[str, frozenset[LayoutEntry] | None] = {}
+        self._stable_layouts: dict[str, tuple[tuple[str, ...], dict[LayoutEntry, float]]] = {}
         self.total_steps_completed = 0
 
     @property
@@ -623,14 +711,88 @@ class GraphManager:
         )
         return ClosestMember(member, score)
 
-    def representative_image_b64(self, node_id: str) -> str:
-        """Return the WebP image of a node's representative observation as base64."""
-        if self.steps_dir is None:
-            msg = "GraphManager needs a steps_dir to read observation images"
-            raise RuntimeError(msg)
-        return observation_image_b64(
-            self.steps_dir, self.graph.nodes[node_id]["representative_observation"]
-        )
+    def closest_members(self, existing: str, new: str) -> ShownMembers:
+        """Return the member of node ``existing`` and the member of node ``new`` whose
+        images are the most similar, the earliest such pair on a tie, leaving out members
+        without an image vector; both representatives when either node has none with one."""
+        scored = [
+            (
+                cosine_similarity(self._image_vectors[first], self._image_vectors[second]),
+                first,
+                second,
+            )
+            for first in _member_observations(self.graph.nodes[existing])
+            if first in self._image_vectors
+            for second in _member_observations(self.graph.nodes[new])
+            if second in self._image_vectors
+        ]
+        if not scored:
+            return ShownMembers(
+                self.graph.nodes[existing]["representative_observation"],
+                self.graph.nodes[new]["representative_observation"],
+                None,
+            )
+        score, first, second = max(scored, key=lambda shown: shown[0])
+        return ShownMembers(first, second, score)
+
+    def _layout_signature(self, observation_id: str) -> frozenset[LayoutEntry] | None:
+        """Return the layout signature of an observation, read from its tree in the step
+        log once, or ``None`` when it has no tree."""
+        if observation_id not in self._layout_signatures:
+            tree = read_observation_tree(self._require_steps_dir(), observation_id)
+            self._layout_signatures[observation_id] = (
+                layout_signature(tree) if tree is not None else None
+            )
+        return self._layout_signatures[observation_id]
+
+    def node_layout(self, node_id: str) -> dict[LayoutEntry, float]:
+        """Return the stable layout of ``node_id`` from the trees of its members, empty
+        when none has a tree.
+
+        It is computed when first needed, and again once the node's members have
+        changed since, by a visit or a merge.
+        """
+        members = tuple(_member_observations(self.graph.nodes[node_id]))
+        cached = self._stable_layouts.get(node_id)
+        if cached is not None and cached[0] == members:
+            return cached[1]
+        signatures = [
+            signature
+            for member in members
+            if (signature := self._layout_signature(member)) is not None
+        ]
+        layout = stable_layout(signatures)
+        self._stable_layouts[node_id] = (members, layout)
+        return layout
+
+    def layout_score(self, node_id: str, screen: Mapping[LayoutEntry, float]) -> float | None:
+        """Return the layout similarity of a screen's signature ``screen`` and the stable
+        layout of ``node_id``, or ``None`` when either is too small to compare."""
+        return layout_similarity(screen, self.node_layout(node_id))
+
+    def _screen_layout(self, observation_id: str) -> dict[LayoutEntry, float] | None:
+        signature = self._layout_signature(observation_id)
+        return None if signature is None else dict.fromkeys(signature, 1.0)
+
+    def _same_package_pairs(self) -> Iterator[tuple[str, str]]:
+        """Yield every pair of in-app nodes of one package, each in node order."""
+        by_package: dict[str, list[str]] = {}
+        for raw_id, data in self.graph.nodes(data=True):
+            node_id = _node_id(raw_id)
+            if not self._is_external(node_id):
+                by_package.setdefault(as_str(data.get("package"), ""), []).append(node_id)
+        for node_ids in by_package.values():
+            yield from itertools.combinations(sorted(node_ids, key=self._node_numeric_order), 2)
+
+    def close_layouts(self, floor: float = LAYOUT_MERGE_FLOOR) -> list[tuple[str, str, float]]:
+        """Return every pair of in-app nodes of one package whose stable layouts reach the
+        similarity ``floor``, with that similarity, in node order."""
+        found: list[tuple[str, str, float]] = []
+        for node_a, node_b in self._same_package_pairs():
+            score = layout_similarity(self.node_layout(node_a), self.node_layout(node_b))
+            if score is not None and score >= floor:
+                found.append((node_a, node_b, score))
+        return found
 
     def _in_app_members(self) -> Iterator[str]:
         for node_id, data in self.graph.nodes(data=True):
@@ -683,11 +845,13 @@ class GraphManager:
            goes to ``EXTERNAL_WEB_NODE``.
         3. ``expected_node``, the node the caller expects the screen to be, is verified
            against its member closest to the screen.
-        4. The short list's candidates are verified in order against their closest
-           members, up to ``SHORT_LIST_VERIFICATIONS``.
+        4. The short list's candidates, from image, text and layout similarity, are
+           verified in order against their closest members, up to
+           ``SHORT_LIST_VERIFICATIONS``.
 
-        The first confirmation decides. A screen every check rejects starts a new node,
-        and the step's first rejection refines the two descriptions.
+        The first confirmation decides: no similarity matches a screen on its own. A
+        screen every check rejects starts a new node, and the step's first rejection
+        refines the two descriptions.
         """
         client, page_detail = self._require_page_detail()
         self._require_embedding()
@@ -695,6 +859,9 @@ class GraphManager:
         same_package = self._same_package_nodes(observation.package)
         image_vector = self._embed_image(observation.screenshot_b64)
         self._image_vectors[observation.observation_id] = image_vector
+        self._layout_signatures[observation.observation_id] = (
+            None if observation.ui_tree is None else layout_signature(observation.ui_tree)
+        )
         exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
         if exact is not None:
             return self._record_exact_match(observation, *exact, expected_node=expected_node)
@@ -888,7 +1055,11 @@ class GraphManager:
             for node_id in self._same_package_nodes(identification.observation.package).node_ids
             if node_id not in excluded
         ]
-        query = ScreenQuery(identification.image_vector, identification.screen.embedding)
+        query = ScreenQuery(
+            identification.image_vector,
+            identification.screen.embedding,
+            self._screen_layout(identification.observation.observation_id),
+        )
         candidates = self.short_list(query, node_ids)
         identification.decision.candidates = [candidate.as_record() for candidate in candidates]
         logger.info(
@@ -1954,6 +2125,8 @@ class GraphManager:
         self.steps_dir = steps_dir
         self._image_vectors = image_vectors
         self._stored_screens = stored_screens
+        self._layout_signatures = {}
+        self._stable_layouts = {}
         self._node_aliases = {
             old: new
             for old, new in as_str_dict(data.get("node_aliases")).items()
@@ -2167,13 +2340,18 @@ class GraphManager:
 
         return result
 
-    def merge_skip_reason(self, node_a: str, node_b: str) -> str | None:
-        """Return why a merge candidate pair cannot be verified, or ``None`` when both
-        representatives can be compared.
+    def _merge_skip_reason(self, node_a: str, node_b: str) -> str | None:
+        """Return why a proposed pair cannot be verified, or ``None`` when its members can
+        be compared.
 
         An ``ext_`` node stands for every screen of another app or the web, so its
-        representative is no screen of the app to compare with.
+        members are no screens of the app to compare with.
         """
+        if node_a not in self.graph or node_b not in self.graph:
+            return "node missing"
+        # A source can name one node twice, and it would verify as "same".
+        if node_a == node_b:
+            return "same node"
         if self._is_external(node_a) or self._is_external(node_b):
             return "external node"
         pair = (node_a, node_b)
@@ -2189,8 +2367,125 @@ class GraphManager:
                 return int(num), node_id
         return 10**9, node_id
 
+    def verify_members(
+        self, existing: str, new: str, *, description: str, verdicts: MemberVerdicts
+    ) -> MemberVerdict:
+        """Ask the verifier whether member observations ``existing``, of the node
+        ``description`` describes, and ``new`` show one screen, and keep the answer in
+        ``verdicts``; a pair ``verdicts`` already holds is answered from there."""
+        pair = frozenset((existing, new))
+        known = verdicts.get(pair)
+        if known is not None:
+            logger.info("Reusing the verifier's answer on members %s and %s", existing, new)
+            return known._replace(reused=True)
+        client, page_detail = self._require_page_detail()
+        steps_dir = self._require_steps_dir()
+        reply = verify_same_node(
+            client,
+            screenshot_new_b64=observation_image_b64(steps_dir, new),
+            screenshot_existing_b64=observation_image_b64(steps_dir, existing),
+            existing_description=description,
+            settings=page_detail,
+        )
+        verdict = MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
+        verdicts[pair] = verdict
+        return verdict
+
+    def merge_proposals(
+        self,
+        text_issues: Iterable[Mapping[str, object]],
+        *,
+        sources: Sequence[MergeSource] = MERGE_SOURCES,
+    ) -> list[MergeProposal]:
+        """Return the node pairs that may be one screen, once per unordered pair, each
+        with the finding of every source that proposed it: the model's ``merge_nodes``
+        issues as ``text_audit``, then each of ``sources``.
+
+        A pair names its lower-numbered node first, the one a merge keeps.
+        """
+        proposals: dict[tuple[str, str], MergeProposal] = {}
+
+        def add(node_a: str, node_b: str, finding: dict[str, object]) -> None:
+            first, second = sorted((node_a, node_b), key=self._node_numeric_order)
+            proposal = proposals.setdefault((first, second), MergeProposal(first, second))
+            proposal.findings.append(finding)
+
+        for issue in text_issues:
+            node_a, node_b = as_str(issue.get("node_a"), ""), as_str(issue.get("node_b"), "")
+            add(node_a, node_b, {"source": "text_audit", "issue": dict(issue)})
+        for source in sources:
+            for node_a, node_b, found in source.pairs(self):
+                add(node_a, node_b, {"source": source.name, **found})
+        return list(proposals.values())
+
+    def verify_merge_proposals(
+        self, proposals: Iterable[MergeProposal], verdicts: MemberVerdicts
+    ) -> list[dict[str, object]]:
+        """Verify each proposed pair once, on its two closest members, merge the pairs
+        the verifier confirms, and return each pair's result.
+
+        A pair's nodes are followed through earlier merges. The verifier is shown the
+        member of the more-visited node, with that node's description, and the member
+        of the other; the lower-numbered node is kept. No source merges a pair alone.
+        """
+        results: list[dict[str, object]] = []
+        for proposal in proposals:
+            result: dict[str, object] = {
+                "node_a": proposal.node_a,
+                "node_b": proposal.node_b,
+                "sources": proposal.sources,
+                "findings": proposal.findings,
+            }
+            result.update(self._verify_merge(proposal, verdicts))
+            results.append(result)
+        return results
+
+    def _verify_merge(self, proposal: MergeProposal, verdicts: MemberVerdicts) -> dict[str, object]:
+        node_a = self.resolve_node_id(proposal.node_a)
+        node_b = self.resolve_node_id(proposal.node_b)
+        skip_reason = self._merge_skip_reason(node_a, node_b)
+        if skip_reason is not None:
+            logger.warning("Skipping merge %s + %s — %s", node_a, node_b, skip_reason)
+            return {"status": "skipped", "reason": skip_reason}
+        existing, new = sorted(
+            (node_a, node_b),
+            key=lambda n: (-self.graph.nodes[n].get("visit_count", 0), self._node_numeric_order(n)),
+        )
+        shown = self.closest_members(existing, new)
+        logger.info(
+            "Verifying merge of %s + %s (sources: %s) on members %s and %s",
+            node_a,
+            node_b,
+            ", ".join(proposal.sources),
+            shown.existing,
+            shown.new,
+        )
+        verdict = self.verify_members(
+            shown.existing,
+            shown.new,
+            description=self.graph.nodes[existing].get("page_description", ""),
+            verdicts=verdicts,
+        )
+        outcome: dict[str, object] = {
+            "members": {existing: shown.existing, new: shown.new},
+            "image_score": shown.score,
+            "reason": verdict.reason,
+            "reused": verdict.reused,
+        }
+        if not verdict.same:
+            logger.info("Kept separate: %s + %s — reason: %s", node_a, node_b, verdict.reason)
+            return {"status": "kept_separate", **outcome}
+        keep, remove = sorted((node_a, node_b), key=self._node_numeric_order)
+        self.merge_nodes(keep, remove)
+        logger.info("Merged %s into %s — reason: %s", remove, keep, verdict.reason)
+        return {"status": "merged", "kept": keep, "removed": remove, **outcome}
+
     def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
-        """Run a lightweight node-merge audit and merge verified duplicates."""
+        """Run a lightweight node-merge audit and merge verified duplicates.
+
+        Only the model's pairs are verified: layout proposals would bring back at every
+        checkpoint each pair an earlier one kept apart.
+        """
         page_detail = self._page_detail()
         if page_detail is None:
             logger.warning("No page_detail settings — cannot run node merge audit")
@@ -2206,84 +2501,7 @@ class GraphManager:
             settings=settings._replace(request_timeout=self.audit_timeout),
         )
         issues = audit_result.get("issues", [])
-        results = []
-
-        for issue in issues:
-            node_a = issue.get("node_a", "")
-            node_b = issue.get("node_b", "")
-            if node_a not in self.graph or node_b not in self.graph:
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "skipped",
-                        "reason": "node missing",
-                    }
-                )
-                continue
-
-            # An auditor can name one node twice, and it would verify as "same".
-            if node_a == node_b:
-                logger.warning("Skipping merge candidate %s + itself", node_a)
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "skipped",
-                        "reason": "same node",
-                    }
-                )
-                continue
-
-            skip_reason = self.merge_skip_reason(node_a, node_b)
-            if skip_reason is not None:
-                results.append({"issue": issue, "status": "skipped", "reason": skip_reason})
-                continue
-
-            data_a = self.graph.nodes[node_a]
-            data_b = self.graph.nodes[node_b]
-
-            desc_a = data_a.get("page_description", "")
-            desc_b = data_b.get("page_description", "")
-            visits_a = data_a.get("visit_count", 0)
-            visits_b = data_b.get("visit_count", 0)
-            ref_desc = desc_a if visits_a >= visits_b else desc_b
-
-            logger.info(
-                "Verifying node merge candidate: %s ('%s') + %s ('%s')",
-                node_a,
-                desc_a,
-                node_b,
-                desc_b,
-            )
-            verify_result = verify_same_node(
-                client,
-                screenshot_new_b64=self.representative_image_b64(node_b),
-                screenshot_existing_b64=self.representative_image_b64(node_a),
-                existing_description=ref_desc,
-                settings=settings,
-            )
-            if verify_result.get("same", False):
-                keep, remove = sorted(
-                    (node_a, node_b),
-                    key=self._node_numeric_order,
-                )
-                self.merge_nodes(keep, remove)
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "merged",
-                        "kept": keep,
-                        "removed": remove,
-                        "reason": verify_result.get("reason", ""),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "kept_separate",
-                        "reason": verify_result.get("reason", ""),
-                    }
-                )
+        results = self.verify_merge_proposals(self.merge_proposals(issues, sources=()), {})
 
         merged_count = sum(1 for result in results if result.get("status") == "merged")
         logger.info(

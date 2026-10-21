@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -61,6 +62,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    MergeProposal,
 )
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
@@ -70,7 +72,6 @@ from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
     token_tracker,
-    verify_same_node,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,106 +142,6 @@ def select_apps_for_audit(
         raise FileNotFoundError(msg)
 
     return [{"name": app_name, "package_name": ""}]
-
-
-def verify_and_merge_nodes(
-    graph: GraphManager,
-    merge_issues: list[dict[str, Any]],
-    client: OpenRouter,
-    page_detail: ModelSettings,
-) -> list[dict[str, Any]]:
-    """Verify merge candidates using screenshot comparison, then merge confirmed pairs.
-
-    For each merge_nodes issue, the verifier compares the representatives of the
-    two candidate nodes. If the verifier says they are the same screen, the nodes
-    are merged (the lower-numbered node is kept).
-
-    Returns a list of result dicts with status "merged" or "kept_separate".
-    """
-    results: list[dict[str, Any]] = []
-    for issue in merge_issues:
-        node_a = issue.get("node_a", "")
-        node_b = issue.get("node_b", "")
-
-        # An earlier merge in this loop may already have removed one of the pair.
-        if node_a not in graph.graph or node_b not in graph.graph:
-            logger.info("Skipping merge %s + %s — node already removed", node_a, node_b)
-            results.append({"issue": issue, "status": "skipped", "reason": "node removed"})
-            continue
-
-        # An auditor can name one node twice, and it would verify as "same".
-        if node_a == node_b:
-            logger.warning("Skipping merge %s + itself — same node", node_a)
-            results.append({"issue": issue, "status": "skipped", "reason": "same node"})
-            continue
-
-        skip_reason = graph.merge_skip_reason(node_a, node_b)
-        if skip_reason is not None:
-            logger.warning("Skipping merge %s + %s — %s", node_a, node_b, skip_reason)
-            results.append({"issue": issue, "status": "skipped", "reason": skip_reason})
-            continue
-
-        data_a = graph.graph.nodes[node_a]
-        data_b = graph.graph.nodes[node_b]
-
-        # The more-visited node has the better-established description.
-        desc_a = data_a.get("page_description", "")
-        desc_b = data_b.get("page_description", "")
-        visits_a = data_a.get("visit_count", 0)
-        visits_b = data_b.get("visit_count", 0)
-        ref_desc = desc_a if visits_a >= visits_b else desc_b
-
-        logger.info(
-            "Verifying merge: %s ('%s') + %s ('%s')",
-            node_a,
-            desc_a,
-            node_b,
-            desc_b,
-        )
-
-        verify_result = verify_same_node(
-            client=client,
-            screenshot_new_b64=graph.representative_image_b64(node_b),
-            screenshot_existing_b64=graph.representative_image_b64(node_a),
-            existing_description=ref_desc,
-            settings=page_detail,
-        )
-
-        if verify_result.get("same", False):
-            # The lower-numbered node was discovered first.
-            keep, remove = (node_a, node_b) if node_a < node_b else (node_b, node_a)
-            graph.merge_nodes(keep, remove)
-            logger.info(
-                "Merged %s into %s — reason: %s",
-                remove,
-                keep,
-                verify_result.get("reason", ""),
-            )
-            results.append(
-                {
-                    "issue": issue,
-                    "status": "merged",
-                    "kept": keep,
-                    "removed": remove,
-                    "reason": verify_result.get("reason", ""),
-                }
-            )
-        else:
-            logger.info(
-                "Kept separate: %s + %s — reason: %s",
-                node_a,
-                node_b,
-                verify_result.get("reason", ""),
-            )
-            results.append(
-                {
-                    "issue": issue,
-                    "status": "kept_separate",
-                    "reason": verify_result.get("reason", ""),
-                }
-            )
-
-    return results
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -779,12 +680,15 @@ def _write_json(path: Path, payload: object) -> None:
 
 
 def _verify_merges(
-    run: _AuditRun, graph: GraphManager, app_name: str, merge_issues: list[dict[str, Any]]
+    run: _AuditRun, graph: GraphManager, app_name: str, proposals: list[MergeProposal]
 ) -> None:
-    logger.info("Verifying %d merge candidates...", len(merge_issues))
-    merge_results = verify_and_merge_nodes(
-        graph, merge_issues, run.client, run.settings["page_detail"]
+    by_source = Counter(source for proposal in proposals for source in proposal.sources)
+    logger.info(
+        "Verifying %d merge proposal(s), by source: %s",
+        len(proposals),
+        ", ".join(f"{source} {count}" for source, count in sorted(by_source.items())),
     )
+    merge_results = graph.verify_merge_proposals(proposals, {})
     merge_path = _app_file(run.graph_dir, app_name, "_merge")
     _write_json(merge_path, merge_results)
     logger.info("Merge results saved to %s", merge_path)
@@ -886,8 +790,9 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     merge_issues = [i for i in issues if i.get("type") == "merge_nodes"]
     other_issues = [i for i in issues if i.get("type") != "merge_nodes"]
 
-    if merge_issues:
-        _verify_merges(run, graph, app_name, merge_issues)
+    proposals = graph.merge_proposals(merge_issues)
+    if proposals:
+        _verify_merges(run, graph, app_name, proposals)
 
     if run.session is not None and other_issues:
         _re_explore_app(run, run.session, graph, app, other_issues)
