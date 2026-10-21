@@ -98,49 +98,14 @@ def _adb_stdout_bytes(args: Sequence[str]) -> bytes:
     ).stdout
 
 
+# No letters, digits or "_": _type sends those with `input text`.
 _KEYCODE: dict[str, int] = {
-    "A": 29,
-    "B": 30,
-    "C": 31,
-    "D": 32,
-    "E": 33,
-    "F": 34,
-    "G": 35,
-    "H": 36,
-    "I": 37,
-    "J": 38,
-    "K": 39,
-    "L": 40,
-    "M": 41,
-    "N": 42,
-    "O": 43,
-    "P": 44,
-    "Q": 45,
-    "R": 46,
-    "S": 47,
-    "T": 48,
-    "U": 49,
-    "V": 50,
-    "W": 51,
-    "X": 52,
-    "Y": 53,
-    "Z": 54,
     "ENTER": 66,
     "BACK": 4,
     "HOME": 3,
     "ALL_APPS": 187,
-    "SPACE": 62,
+    "DEL": 67,
     " ": 62,
-    "1": 8,
-    "2": 9,
-    "3": 10,
-    "4": 11,
-    "5": 12,
-    "6": 13,
-    "7": 14,
-    "8": 15,
-    "9": 16,
-    "0": 7,
     "@": 77,
     ".": 56,
     ",": 55,
@@ -173,12 +138,9 @@ _KEYCODE: dict[str, int] = {
     "`": 68,
     "~": 152,
     "^": 161,
-    "_": 69,
-    "TAB": 61,
-    "DEL": 67,
 }
 
-# Typed with `input text`; any other character is sent as a key event from _KEYCODE.
+# Typed with `input text` after upper-casing; any other character is a key event.
 _INPUT_TEXT_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 _GESTURE_MS = 1000
@@ -430,10 +392,10 @@ class EmulatorManager:
                 "hw.cpu.arch=": f"hw.cpu.arch={host.abi}",
                 "disk.cachePartition.path=": f"disk.cachePartition.path={avd_dir / 'cache.img'}",
                 # Known defect, copied unchanged: the next four lines lose their keys.
-                "disk.dataPartition.path=": f"{avd_dir / 'userdata-qemu.img'}",
-                "disk.encryptionKeyPartition.path=": f"{avd_dir / 'encryptionkey.img'}",
-                "android.sdk.root=": f"{host.sdk_dir}",
-                "android.avd.home=": f"{host.avd_root_dir}",
+                "disk.dataPartition.path=": str(avd_dir / "userdata-qemu.img"),
+                "disk.encryptionKeyPartition.path=": str(avd_dir / "encryptionkey.img"),
+                "android.sdk.root=": str(host.sdk_dir),
+                "android.avd.home=": str(host.avd_root_dir),
             },
         )
         self._logger.info("AVD hardware file '%s' modified.", hardware_ini)

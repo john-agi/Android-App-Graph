@@ -137,13 +137,13 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     assert opened_clients[0].sdk_configuration.client is None
 
 
-def _deny_device_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+def _deny_device_work(monkeypatch: pytest.MonkeyPatch) -> None:
     def touched(*_args: object, **_kwargs: object) -> NoReturn:
         msg = "settings must be validated before any device work"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(cli, "EmulatorManager", touched)
-    monkeypatch.setattr(cli, "AdbController", touched)
+    for name in ("EmulatorManager", "check_avd", "AdbController", "launch_app", "Kobe"):
+        monkeypatch.setattr(cli, name, touched)
 
 
 def test_explorer_reports_all_missing_models_before_any_device_work(
@@ -152,7 +152,7 @@ def test_explorer_reports_all_missing_models_before_any_device_work(
     config = tmp_path / "explore.yaml"
     config.write_text("vlm: {}\n", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["app-graph", "--config", str(config)])
-    _deny_device_setup(monkeypatch)
+    _deny_device_work(monkeypatch)
     with pytest.raises(SystemExit) as caught:
         main()
     assert caught.value.code == 2
@@ -179,16 +179,9 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def touched(*_args: object, **_kwargs: object) -> NoReturn:
-        msg = "settings must be validated before any device work"
-        raise AssertionError(msg)
-
     if key is not None:
         monkeypatch.setenv("OPENROUTER_API_KEY", key)
-    monkeypatch.setattr(cli, "check_avd", touched)
-    monkeypatch.setattr(cli, "launch_app", touched)
-    monkeypatch.setattr(cli, "Kobe", touched)
-    _deny_device_setup(monkeypatch)
+    _deny_device_work(monkeypatch)
     config = tmp_path / "explore.yaml"
     config.write_text(
         json.dumps({"vlm": role_settings, "apps": [{"name": "demo", "package_name": "com.demo"}]}),

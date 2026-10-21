@@ -315,8 +315,9 @@ class _FakeAdb:
 
     ``events`` records each adb argv and each sleep in the order they happened.
     ``replies`` maps the arguments after ``adb`` to an exit status and raw stdout;
-    any other command exits 0 with no output. Stdout is decoded only when the caller
-    asks for text with an explicit encoding, as ``subprocess.run`` would.
+    any other command exits 0 with no output. Stdout stays bytes unless the caller
+    asks for text, which must name its encoding: the host's locale differs between
+    machines, and Android writes UTF-8.
     """
 
     def __init__(self) -> None:
