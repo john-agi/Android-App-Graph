@@ -8,6 +8,9 @@ SDK over the offline mock transport. No test needs a device, the network or keys
 from __future__ import annotations
 
 import base64
+import dataclasses
+import hashlib
+import io
 import json
 import logging
 import socket
@@ -22,17 +25,19 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
+from PIL import Image, ImageDraw
 
-from android_app_graph.step_log import Observation
+from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
-    DEFAULT_SIMILARITY_THRESHOLD,
     EXTERNAL_WEB_NODE,
     NORMALIZE_EVERY_N_VISITS,
+    SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
     GraphManager,
     PathToStart,
+    ScreenQuery,
     _merge_elements,
     _merge_into_schema,
 )
@@ -79,6 +84,9 @@ UNKNOWN_EMBEDDING = [0.5, 0.5, 0.5]
 FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 EMBEDDING = ModelSettings("google/gemini-embedding-2", request_timeout=4.0)
+IMAGE_EMBEDDING = ModelSettings("voyageai/voyage-multimodal-3.5", request_timeout=5.0)
+# Every screenshot FakeVlm has no vector for looks alike.
+ANY_IMAGE = [1.0, 0.0, 0.0]
 
 
 def b64(data: bytes) -> str:
@@ -89,15 +97,13 @@ SHOT_A = b64(b"screenshot-a")
 SHOT_B = b64(b"screenshot-b")
 
 
-def make_manager(
-    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD, steps_dir: Path | None = None
-) -> GraphManager:
+def make_manager(steps_dir: Path | None = None) -> GraphManager:
     """A manager whose client is a sentinel; every caller of it is patched."""
     gm = GraphManager(
         client=FAKE_CLIENT,
         page_detail=PAGE_DETAIL,
         embedding=EMBEDDING,
-        similarity_threshold=similarity_threshold,
+        image_embedding=IMAGE_EMBEDDING,
     )
     gm.steps_dir = steps_dir
     return gm
@@ -117,15 +123,24 @@ class Membership(TypedDict):
     representative_observation: str
 
 
-def members(steps_dir: Path, image: bytes = b"screenshot-a") -> Membership:
-    """The membership fields of a node whose one observation's image is in ``steps_dir``."""
-    observation_id = write_observation_image(steps_dir, image)
-    return {"observations": [observation_id], "representative_observation": observation_id}
+def members(steps_dir: Path, *images: bytes) -> Membership:
+    """The membership fields of a node whose observations' images, ``b"screenshot-a"``
+    unless given, are in ``steps_dir``; the first is the representative."""
+    observation_ids = [
+        write_observation_image(steps_dir, image) for image in images or (b"screenshot-a",)
+    ]
+    return {"observations": observation_ids, "representative_observation": observation_ids[0]}
+
+
+def fake_pixel_hash(screenshot: str) -> str:
+    """Stands in for the hash of a screenshot's pixels: equal screenshots hash alike."""
+    return hashlib.sha256(screenshot.encode("ascii")).hexdigest()
 
 
 @dataclass(frozen=True)
 class Screens:
-    """Hands out observations as a StepRecorder would, with their images in ``steps_dir``."""
+    """Hands out observations as a StepRecorder would, with their images and records in
+    ``steps_dir``."""
 
     steps_dir: Path
 
@@ -133,7 +148,15 @@ class Screens:
         self, activity: str = HOME, screenshot: str = SHOT_A, package: str = PACKAGE
     ) -> Observation:
         observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot))
-        return Observation(observation_id, screenshot, activity, package, "")
+        record = {"id": observation_id, "kind": "observation", "package": package}
+        (self.steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+        return Observation(
+            observation_id, screenshot, activity, package, fake_pixel_hash(screenshot)
+        )
+
+    def record(self, observation: Observation) -> dict[str, Any]:
+        path = self.steps_dir / f"{observation.observation_id}.json"
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -175,7 +198,20 @@ class FakeVlm:
     )
     external_web: set[str] = field(default_factory=set)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
+    images: dict[str, list[float]] = field(default_factory=dict)
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+    def get_image_embedding(
+        self,
+        client: OpenRouter | None,
+        screenshot_b64: str,
+        model: str = "",
+        request_timeout: float = 0.0,
+    ) -> list[float]:
+        call = {"client": client, "screenshot": screenshot_b64, "model": model}
+        call["timeout"] = request_timeout
+        self.calls.append(("image", call))
+        return self.images.get(screenshot_b64, ANY_IMAGE)
 
     def describe_page_and_state(
         self,
@@ -241,6 +277,7 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     monkeypatch.setattr(gm_module, "describe_page_and_state", fake.describe_page_and_state)
     monkeypatch.setattr(gm_module, "verify_same_node", fake.verify_same_node)
     monkeypatch.setattr(gm_module, "get_embedding", fake.get_embedding)
+    monkeypatch.setattr(gm_module, "get_image_embedding", fake.get_image_embedding)
     return fake
 
 
@@ -303,7 +340,7 @@ def test_construction_defaults() -> None:
     assert gm.client is None
     assert gm.page_detail is None
     assert gm.embedding is None
-    assert gm.similarity_threshold == DEFAULT_SIMILARITY_THRESHOLD
+    assert gm.image_embedding is None
     assert gm.total_steps_completed == 0
 
 
@@ -320,17 +357,29 @@ def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm, screen: 
         gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
 
+def test_identify_state_without_image_embedding_settings_raises(screen: Screens) -> None:
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, embedding=EMBEDDING)
+    gm.steps_dir = screen.steps_dir
+    with pytest.raises(RuntimeError, match="needs a client and image_embedding settings"):
+        gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+
+def test_identify_state_without_a_step_log_raises(screen: Screens) -> None:
+    with pytest.raises(RuntimeError, match="needs a steps_dir"):
+        make_manager().identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+
 def test_identify_state_creates_the_first_node(vlm: FakeVlm, screen: Screens) -> None:
     vlm.descriptions.append(
         ("Home screen", {"tab": "home"}, [{"description": "Search box", "position": "10,20"}])
     )
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     observation = screen(HOME, SHOT_A, PACKAGE)
 
     node_id = gm.identify_state(observation)
 
     assert node_id == "s0_home_screen"
-    assert vlm.kinds() == ["describe", "embed"]
+    assert vlm.kinds() == ["image", "describe", "embed"]
     node = gm.get_node(node_id)
     assert node is not None
     assert node["visit_count"] == 1
@@ -340,43 +389,148 @@ def test_identify_state_creates_the_first_node(vlm: FakeVlm, screen: Screens) ->
     assert node["interactable_elements"] == [
         {"description": "Search box", "position": "10,20", "explored": False}
     ]
+    assert gm.image_vector(observation.observation_id) == ANY_IMAGE
+
+
+def test_identify_state_records_the_describe_output_and_the_decision(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    elements = [{"description": "Search box", "position": "10,20"}]
+    vlm.descriptions.append(("Home screen", {"tab": "home"}, elements))
+    gm = make_manager(screen.steps_dir)
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    gm.identify_state(observation)
+
+    record = screen.record(observation)
+    assert (record["id"], record["kind"]) == (observation.observation_id, "observation")
+    assert record["describe"] == {
+        "page_description": "Home screen",
+        "state": {"tab": "home"},
+        "elements": elements,
+        "is_external_web": False,
+    }
+    assert record["identify"] == {
+        "stage": "new",
+        "expected_node": None,
+        "exact_match": None,
+        "candidates": [],
+        "verifications": [],
+        "refinement": None,
+        "node": "s0_home_screen",
+    }
 
 
 def test_identify_state_passes_the_configured_models_and_clients(
     vlm: FakeVlm, screen: Screens
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
 
     gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
-    assert vlm.calls[0][1]["settings"] == PAGE_DETAIL
-    assert vlm.calls[0][1]["client"] is FAKE_CLIENT
-    assert (vlm.calls[1][1]["model"], vlm.calls[1][1]["timeout"]) == (
-        EMBEDDING.model,
-        EMBEDDING.request_timeout,
+    image, describe, embed = (call for _, call in vlm.calls)
+    assert (image["client"], image["screenshot"]) == (FAKE_CLIENT, SHOT_A)
+    assert (image["model"], image["timeout"]) == (
+        IMAGE_EMBEDDING.model,
+        IMAGE_EMBEDDING.request_timeout,
     )
+    assert (describe["client"], describe["settings"]) == (FAKE_CLIENT, PAGE_DETAIL)
+    assert (embed["model"], embed["timeout"]) == (EMBEDDING.model, EMBEDDING.request_timeout)
 
 
-def test_identify_state_cache_hit_skips_the_vlm_and_adds_the_member(
+def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_or_verifying(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
+    elements = [{"description": "Search box", "position": "10,20"}]
+    vlm.descriptions.append(("Home screen", {"tab": "home"}, elements))
+    gm = make_manager(screen.steps_dir)
     first_observation = screen(HOME, SHOT_A, PACKAGE)
     first = gm.identify_state(first_observation)
-    second_observation = screen(HOME, SHOT_A, PACKAGE)
+    second_observation = screen(SETTINGS, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(second_observation)
+    second = gm.identify_state(second_observation, expected_node="s9_elsewhere")
 
     assert second == first
-    assert vlm.kinds() == ["describe", "embed"]
+    assert vlm.kinds() == ["image", "describe", "embed", "image"]
     node = gm.graph.nodes[first]
     assert node["observations"] == [
         first_observation.observation_id,
         second_observation.observation_id,
     ]
     assert node["representative_observation"] == first_observation.observation_id
+    assert node["visit_count"] == 2
+    assert node["activities"] == [HOME, SETTINGS]
+    assert node["last_detail_snapshot"] == {"tab": "home"}
+    record = screen.record(second_observation)
+    assert record["describe"] == {
+        "page_description": "Home screen",
+        "state": {"tab": "home"},
+        "elements": elements,
+        "is_external_web": False,
+        "copied_from": first_observation.observation_id,
+    }
+    assert record["identify"] == {
+        "stage": "exact",
+        "expected_node": "s9_elsewhere",
+        "exact_match": first_observation.observation_id,
+        "candidates": [],
+        "verifications": [],
+        "refinement": None,
+        "node": first,
+    }
+    assert gm.image_vector(second_observation.observation_id) == ANY_IMAGE
+
+
+def test_an_exact_match_copies_from_the_latest_member_with_the_pixels(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    copy = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(copy)
+
+    third = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(third)
+
+    assert screen.record(third)["describe"]["copied_from"] == copy.observation_id
+
+
+def test_an_observation_without_a_pixel_hash_is_never_an_exact_match(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """A state read past the recorder has no hash, which must not match another such."""
+    vlm.descriptions.extend([("Home screen", {}, [])] * 2)
+    vlm.verdicts.append({"same": True, "reason": "home"})
+    gm = make_manager(screen.steps_dir)
+    for _ in range(2):
+        unhashed = dataclasses.replace(screen(HOME, SHOT_A, PACKAGE), pixel_hash="")
+        gm.identify_state(unhashed)
+
+    assert vlm.kinds()[3:] == ["image", "describe", "embed", "verify"]
+
+
+def test_a_pixel_hash_shared_by_members_of_two_nodes_does_not_decide(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """A merge can leave identical pixels in two nodes once the audit splits them again."""
+    vlm.descriptions.extend([("Home screen", {}, []), ("Settings page", {}, [])] * 2)
+    vlm.verdicts.extend(
+        [{"same": False, "reason": "another page"}, {"same": True, "reason": "the same page"}]
+    )
+    gm = make_manager(screen.steps_dir)
+    home = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    settings = gm.identify_state(screen(SETTINGS, SHOT_B, PACKAGE))
+    gm.graph.nodes[home]["observations"].extend(gm.graph.nodes[settings]["observations"])
+    vlm.calls.clear()
+    observation = screen(SETTINGS, SHOT_B, PACKAGE)
+
+    gm.identify_state(observation)
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    identify = screen.record(observation)["identify"]
+    assert (identify["stage"], identify["exact_match"]) == ("short_list", None)
 
 
 def test_identify_state_reports_external_web_pages_as_one_shared_node(
@@ -384,7 +538,7 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(
 ) -> None:
     vlm.descriptions.extend([("News article", {"title": "x"}, []), ("Sign-in form", {}, [])])
     vlm.external_web.update({"News article", "Sign-in form"})
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     article = screen(HOME, SHOT_A, PACKAGE)
     sign_in = screen(SETTINGS, SHOT_B, PACKAGE)
 
@@ -399,22 +553,26 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(
         "observations": [article.observation_id, sign_in.observation_id],
         "representative_observation": article.observation_id,
     }
-    assert vlm.kinds() == ["describe", "describe"]
+    assert vlm.kinds() == ["image", "describe", "image", "describe"]
     assert gm.get_start_node() is None
+    assert screen.record(article)["describe"]["is_external_web"] is True
+    assert screen.record(article)["identify"]["stage"] == "external_web"
+    assert screen.record(article)["identify"]["node"] == EXTERNAL_WEB_NODE
+    assert gm.image_vector(article.observation_id) == ANY_IMAGE
 
 
-def test_identify_state_keeps_the_cached_screen_behind_an_external_web_page(
+def test_identify_state_matches_the_screen_behind_an_external_web_page_exactly(
     vlm: FakeVlm,
     screen: Screens,
 ) -> None:
     vlm.descriptions.extend([("Home screen", {}, []), ("News article", {}, [])])
     vlm.external_web.add("News article")
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     home = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
     gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
 
     assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == home
-    assert vlm.kinds() == ["describe", "embed", "describe"]
+    assert vlm.kinds() == ["image", "describe", "embed", "image", "describe", "image"]
 
 
 def test_identify_state_verified_match_merges_into_existing_node(
@@ -424,7 +582,7 @@ def test_identify_state_verified_match_merges_into_existing_node(
         [("Home screen", {"tab": "home"}, []), ("Home screen with banner", {"tab": "deals"}, [])]
     )
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
-    gm = make_manager(steps_dir=screen.steps_dir)
+    gm = make_manager(screen.steps_dir)
     home = screen(HOME, SHOT_A, PACKAGE)
     first = gm.identify_state(home)
     banner = screen(SETTINGS, SHOT_B, PACKAGE)
@@ -432,9 +590,9 @@ def test_identify_state_verified_match_merges_into_existing_node(
     second = gm.identify_state(banner)
 
     assert second == first
-    assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify"]
-    assert vlm.calls[2][1]["existing_nodes"] == ["Home screen"]
-    assert vlm.calls[2][1]["existing_keys"] == ["tab"]
+    assert vlm.kinds() == ["image", "describe", "embed", "image", "describe", "embed", "verify"]
+    assert vlm.calls[4][1]["existing_nodes"] == ["Home screen"]
+    assert vlm.calls[4][1]["existing_keys"] == ["tab"]
     node = gm.get_node(first)
     assert node is not None
     assert node["activities"] == [HOME, SETTINGS]
@@ -442,24 +600,38 @@ def test_identify_state_verified_match_merges_into_existing_node(
     assert node["state_schema"] == {"tab": ["home", "deals"]}
     assert node["observations"] == [home.observation_id, banner.observation_id]
     assert node["representative_observation"] == home.observation_id
+    identify = screen.record(banner)["identify"]
+    assert identify["stage"] == "short_list"
+    assert identify["candidates"] == [
+        {
+            "node": first,
+            "sources": {"image": pytest.approx(1.0), "text": pytest.approx(1.0)},
+            "closest_member": home.observation_id,
+            "image_score": pytest.approx(1.0),
+        }
+    ]
+    assert identify["verifications"] == [
+        {"node": first, "member": home.observation_id, "same": True, "reason": "identical layout"}
+    ]
+    assert identify["node"] == first
 
 
-def test_identify_state_verifies_against_the_representative_image_in_the_step_log(
+def test_identify_state_verifies_against_the_member_image_in_the_step_log(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    """The verifier compares the new screen with the candidate's representative image
-    as the step log holds it, not with any screenshot identify_state was given."""
+    """The verifier compares the new screen with the member's image as the step log holds
+    it, not with any screenshot identify_state was given."""
     vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
-    gm = make_manager(steps_dir=screen.steps_dir)
+    gm = make_manager(screen.steps_dir)
     home = screen(HOME, SHOT_A, PACKAGE)
     gm.identify_state(home)
-    (screen.steps_dir / f"{home.observation_id}.webp").write_bytes(b"representative-image")
+    (screen.steps_dir / f"{home.observation_id}.webp").write_bytes(b"member-image")
 
     gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
 
-    assert vlm.calls[4][1]["existing"] == b64(b"representative-image")
-    assert vlm.calls[4][1]["new"] == SHOT_B
+    assert vlm.calls[6][1]["existing"] == b64(b"member-image")
+    assert vlm.calls[6][1]["new"] == SHOT_B
 
 
 def test_identify_state_verified_match_does_not_repeat_a_known_activity(
@@ -467,7 +639,7 @@ def test_identify_state_verified_match_does_not_repeat_a_known_activity(
 ) -> None:
     vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
-    gm = make_manager(steps_dir=screen.steps_dir)
+    gm = make_manager(screen.steps_dir)
     first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
@@ -489,7 +661,7 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(
             "new_description": "Promo overlay",
         }
     )
-    gm = make_manager(steps_dir=screen.steps_dir)
+    gm = make_manager(screen.steps_dir)
     home = screen(HOME, SHOT_A, PACKAGE)
     first = gm.identify_state(home)
     overlay = screen(HOME, SHOT_B, PACKAGE)
@@ -499,7 +671,10 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(
     assert first not in gm.graph
     assert "s0_home_feed" in gm.graph
     assert second == "s1_promo_overlay"
-    assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify", "embed", "embed"]
+    assert vlm.kinds() == [
+        *("image", "describe", "embed"),
+        *("image", "describe", "embed", "verify", "embed", "embed"),
+    ]
     renamed = gm.get_node("s0_home_feed")
     assert renamed is not None
     assert renamed["page_description"] == "Home feed"
@@ -508,6 +683,14 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(
     split = gm.graph.nodes[second]
     assert split["observations"] == [overlay.observation_id]
     assert split["representative_observation"] == overlay.observation_id
+    identify = screen.record(overlay)["identify"]
+    assert (identify["stage"], identify["node"]) == ("new", second)
+    assert identify["refinement"] == {
+        "node": first,
+        "renamed_to": "s0_home_feed",
+        "existing_description": "Home feed",
+        "new_description": "Promo overlay",
+    }
 
 
 def test_identify_state_rejected_match_without_refinements_creates_new(
@@ -522,54 +705,55 @@ def test_identify_state_rejected_match_without_refinements_creates_new(
             "new_description": "",
         }
     )
-    gm = make_manager(steps_dir=screen.steps_dir)
+    gm = make_manager(screen.steps_dir)
     first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    banner = screen(HOME, SHOT_B, PACKAGE)
 
-    second = gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
+    second = gm.identify_state(banner)
 
     assert first in gm.graph  # no rename: the verifier repeated the existing description
     assert second == "s1_home_screen_with_banner"
-    assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify"]
+    assert vlm.kinds() == ["image", "describe", "embed", "image", "describe", "embed", "verify"]
+    assert screen.record(banner)["identify"]["refinement"] is None
 
 
-def test_identify_state_matches_by_embedding_when_the_candidate_has_no_representative(
-    vlm: FakeVlm,
-    screen: Screens,
-) -> None:
-    """A candidate without a representative has no image to verify against, so the
-    embedding decides alone, and the observation becomes its first member."""
+def test_a_node_without_members_is_never_a_candidate(vlm: FakeVlm, screen: Screens) -> None:
+    """A node with no member has no image for the verifier to compare with."""
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen")
-    observation = screen(HOME, SHOT_A, PACKAGE)
-
-    node_id = gm.identify_state(observation)
-
-    assert node_id == "s0_home"
-    assert vlm.kinds() == ["describe", "embed"]
-    node = gm.get_node(node_id)
-    assert node is not None
-    assert node["observations"] == [observation.observation_id]
-    assert node["representative_observation"] == observation.observation_id
-
-
-def test_identify_state_ignores_nodes_of_another_package(vlm: FakeVlm, screen: Screens) -> None:
-    vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
-    add_screen(gm, "s0_other", "Home screen", activity=OTHER_APP, package=OTHER_PACKAGE)
 
     node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_home_screen"
-    assert vlm.calls[0][1]["existing_nodes"] is None
-    assert vlm.calls[0][1]["existing_keys"] is None
+    assert vlm.kinds() == ["image", "describe", "embed"]
+
+
+def test_identify_state_ignores_nodes_of_another_package(vlm: FakeVlm, screen: Screens) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    add_screen(
+        gm,
+        "s0_other",
+        "Home screen",
+        activity=OTHER_APP,
+        package=OTHER_PACKAGE,
+        **members(screen.steps_dir),
+    )
+
+    node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    assert node_id == "s0_home_screen"
+    assert vlm.calls[1][1]["existing_nodes"] is None
+    assert vlm.calls[1][1]["existing_keys"] is None
+    assert "verify" not in vlm.kinds()
 
 
 def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(
     vlm: FakeVlm, screen: Screens
 ) -> None:
     vlm.descriptions.append(("Search results", {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", state_schema={"tab": ["home"], "sort": ["price"]})
     add_screen(
         gm, "s1_settings", "Settings page", state_schema={"tab": ["deals"], "filter": ["new"]}
@@ -577,14 +761,14 @@ def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(
 
     gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
-    assert vlm.calls[0][1]["existing_keys"] == ["tab", "sort", "filter"]
+    assert vlm.calls[1][1]["existing_keys"] == ["tab", "sort", "filter"]
 
 
 def test_identify_state_skips_candidates_without_an_embedding(
     vlm: FakeVlm, screen: Screens
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", description_embedding=None)
 
     node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
@@ -600,9 +784,10 @@ def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
     embedding, not a stale-dimension one, and must be skipped silently.
     """
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
-    add_screen(gm, "s0_empty", "Home screen", description_embedding=[])
-    add_screen(gm, "s1_home", "Home feed")
+    vlm.verdicts.append({"same": True, "reason": "same page"})
+    gm = make_manager(screen.steps_dir)
+    add_screen(gm, "s0_empty", "Home screen", description_embedding=[], **members(screen.steps_dir))
+    add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
 
     with caplog.at_level("WARNING"):
         node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
@@ -621,9 +806,12 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     here: its provenance is rejected first.
     """
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
-    add_screen(gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0])
-    add_screen(gm, "s1_home", "Home feed")
+    vlm.verdicts.append({"same": True, "reason": "same page"})
+    gm = make_manager(screen.steps_dir)
+    add_screen(
+        gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0], **members(screen.steps_dir)
+    )
+    add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
 
     with caplog.at_level("WARNING"):
         node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
@@ -637,23 +825,453 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     assert "dim(s)=[2]" in stale_warnings[0]
 
 
-def test_identify_state_below_the_threshold_creates_a_new_node(
+def test_a_node_whose_description_scores_low_is_still_verified(
     vlm: FakeVlm, screen: Screens
 ) -> None:
+    """No text score keeps a candidate from the verifier; a rejection makes a new node."""
     vlm.descriptions.append(("Settings page", {}, []))
-    gm = make_manager(steps_dir=screen.steps_dir)
+    vlm.verdicts.append({"same": False, "reason": "another page"})
+    gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir, b"screenshot-b"))
 
     node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_settings_page"
-    assert vlm.kinds() == ["describe", "embed"]
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+
+
+# Unit image vectors: one per node, so a screen is like exactly the nodes it shares one with.
+NEAR = [0.0, 1.0, 0.0]
+FAR = [0.0, 0.0, 1.0]
+
+
+def verified(vlm: FakeVlm) -> list[str]:
+    """The existing images the verifier was shown, in order."""
+    return [call["existing"] for kind, call in vlm.calls if kind == "verify"]
+
+
+def _rejection(node: str) -> dict[str, Any]:
+    """A rejection that refines both descriptions; the screen's keeps its embedding."""
+    return {
+        "same": False,
+        "reason": f"not {node}",
+        "existing_description": f"{node} refined",
+        "new_description": "Search results",
+    }
+
+
+def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """Its description scores 0, far below any text gate, and its representative looks
+    unlike the screen; its other member is the screen's look-alike."""
+    gm = make_manager(screen.steps_dir)
+    add_screen(gm, "s0_settings", "Settings page", **members(screen.steps_dir, b"rep", b"twin"))
+    vlm.images.update({b64(b"rep"): FAR, b64(b"twin"): NEAR, SHOT_A: NEAR})
+    gm.embed_missing_members()
+    vlm.calls.clear()
+    vlm.descriptions.append(("Search results", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "a scrolled list"})
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    assert gm.identify_state(observation) == "s0_settings"
+
+    assert verified(vlm) == [b64(b"twin")]
+    (candidate,) = screen.record(observation)["identify"]["candidates"]
+    assert candidate["closest_member"] == gm.graph.nodes["s0_settings"]["observations"][1]
+    assert candidate["sources"] == {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}
+
+
+def _three_image_matches_and_a_text_match(gm: GraphManager, vlm: FakeVlm, steps_dir: Path) -> None:
+    """s0-s2 look like the screen and are described otherwise; s3 is described as it is
+    and looks unlike it."""
+    for number, image in enumerate((b"a", b"b", b"c")):
+        add_screen(gm, f"s{number}_lookalike", "Settings page", **members(steps_dir, image))
+        vlm.images[b64(image)] = NEAR
+    add_screen(gm, "s3_results", "Search results", **members(steps_dir, b"d"))
+    vlm.images[b64(b"d")] = FAR
+    vlm.images[SHOT_A] = NEAR
+    gm.embed_missing_members()
+    vlm.calls.clear()
+    vlm.descriptions.append(("Search results", {}, []))
+
+
+def test_the_best_text_match_is_verified_within_the_cap_behind_three_image_matches(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = make_manager(screen.steps_dir)
+    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the results"}])
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    assert gm.identify_state(observation) == "s3_results"
+
+    assert verified(vlm) == [b64(b"a"), b64(b"d")]
+    candidates = screen.record(observation)["identify"]["candidates"]
+    assert [(c["node"], sorted(c["sources"])) for c in candidates] == [
+        ("s0_lookalike", ["image", "text"]),
+        ("s3_results", ["text"]),
+        ("s1_lookalike", ["image"]),
+        ("s2_lookalike", ["image"]),
+    ]
+
+
+def test_verification_stops_at_the_first_confirmation(vlm: FakeVlm, screen: Screens) -> None:
+    gm = make_manager(screen.steps_dir)
+    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    vlm.verdicts.append({"same": True, "reason": "the same list"})
+
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == "s0_lookalike"
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+
+
+def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = make_manager(screen.steps_dir)
+    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    vlm.verdicts.extend(_rejection(node) for node in ("s0", "s3", "s1"))
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    node_id = gm.identify_state(observation)
+
+    assert len(verified(vlm)) == SHORT_LIST_VERIFICATIONS == 3
+    assert node_id == "s0_search_results"
+    assert sorted(gm.graph) == [
+        "s0_s0_refined",
+        "s0_search_results",
+        "s1_lookalike",
+        "s2_lookalike",
+        "s3_results",
+    ]
+    identify = screen.record(observation)["identify"]
+    assert [v["node"] for v in identify["verifications"]] == [
+        "s0_lookalike",
+        "s3_results",
+        "s1_lookalike",
+    ]
+    assert identify["refinement"] == {
+        "node": "s0_lookalike",
+        "renamed_to": "s0_s0_refined",
+        "existing_description": "s0 refined",
+        "new_description": "Search results",
+    }
+
+
+def test_an_expected_node_is_verified_right_after_the_describe_call_and_skips_the_short_list(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = make_manager(screen.steps_dir)
+    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    vlm.verdicts.append({"same": True, "reason": "the page the replay leads to"})
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    assert gm.identify_state(observation, expected_node="s2_lookalike") == "s2_lookalike"
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    assert verified(vlm) == [b64(b"c")]
+    identify = screen.record(observation)["identify"]
+    assert (identify["stage"], identify["expected_node"]) == ("expected", "s2_lookalike")
+    assert identify["candidates"] == []
+
+
+def test_a_rejected_expected_node_stays_off_the_short_list(vlm: FakeVlm, screen: Screens) -> None:
+    """The order of model calls: image embedding, describe, text embedding, the expected
+    node, the short list."""
+    gm = make_manager(screen.steps_dir)
+    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the same list"}])
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    assert gm.identify_state(observation, expected_node="s0_lookalike") == "s1_lookalike"
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify", "embed", "embed", "verify"]
+    assert verified(vlm) == [b64(b"a"), b64(b"b")]
+    identify = screen.record(observation)["identify"]
+    assert [c["node"] for c in identify["candidates"]] == [
+        "s1_lookalike",
+        "s3_results",
+        "s2_lookalike",
+    ]
+    assert identify["stage"] == "short_list"
+    assert identify["refinement"]["renamed_to"] == "s0_s0_refined"
+
+
+def test_an_expected_node_adds_one_verifier_call_to_the_cap(vlm: FakeVlm, screen: Screens) -> None:
+    gm = make_manager(screen.steps_dir)
+    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    vlm.verdicts.extend(_rejection(node) for node in ("s2", "s0", "s3", "s1"))
+
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_node="s2_lookalike")
+
+    assert verified(vlm) == [b64(image) for image in (b"c", b"a", b"d", b"b")]
+
+
+@pytest.mark.parametrize(
+    "expected_node",
+    [
+        pytest.param("s9_missing", id="not in the graph"),
+        pytest.param("s1_other_app", id="of another package"),
+        pytest.param("s2_no_members", id="without members"),
+        pytest.param("ext_org.other.tool", id="external"),
+    ],
+)
+def test_an_expected_node_that_cannot_be_compared_is_not_checked(
+    expected_node: str, vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = make_manager(screen.steps_dir)
+    add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir))
+    add_screen(
+        gm, "s1_other_app", "Home screen", package=OTHER_PACKAGE, **members(screen.steps_dir)
+    )
+    add_screen(gm, "s2_no_members", "Home screen")
+    gm.record_external_app_visit(screen(OTHER_APP, SHOT_B, OTHER_PACKAGE))
+    vlm.descriptions.append(("Home screen", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "home"})
+
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_node=expected_node) == (
+        "s0_home"
+    )
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+
+
+def test_an_expected_node_is_followed_through_its_renames(vlm: FakeVlm, screen: Screens) -> None:
+    gm = make_manager(screen.steps_dir)
+    add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir))
+    renamed = gm.rename_node("s0_home", "Home feed")
+    vlm.calls.clear()
+    vlm.descriptions.append(("Home screen", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "home"})
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    assert gm.identify_state(observation, expected_node="s0_home") == renamed
+
+    assert screen.record(observation)["identify"]["stage"] == "expected"
+
+
+def _png(image: Image.Image) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return b64(buffer.getvalue())
+
+
+class _StatusBarDevice:
+    """A device that shows the screens it is given in turn, under a 10-row status bar."""
+
+    w = 64
+    h = 48
+
+    def __init__(self, *screens: Image.Image) -> None:
+        self.config: dict[str, Any] = {}
+        self._screens = list(screens)
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "screenshot": _png(self._screens.pop(0)),
+            "activity": HOME,
+            "package": PACKAGE,
+            "status_bar": [0, 0, 64, 10],
+        }
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        msg = f"No device action expected: {action}"
+        raise AssertionError(msg)
+
+
+def _screen_with_clock(minute: int) -> Image.Image:
+    image = Image.linear_gradient("L").resize((64, 48)).convert("RGB")
+    ImageDraw.Draw(image).rectangle((2, 2, 2 + minute, 6), fill=(255, 0, 0))
+    return image
+
+
+@pytest.mark.parametrize(("changed_row", "exact"), [(9, True), (10, False)])
+def test_a_screen_that_differs_only_inside_the_status_bar_is_an_exact_match(
+    changed_row: int, exact: bool, vlm: FakeVlm, tmp_path: Path
+) -> None:
+    later = _screen_with_clock(9)
+    later.putpixel((40, changed_row), (0, 0, 255))
+    recorder = StepRecorder(
+        _StatusBarDevice(_screen_with_clock(1), later),
+        tmp_path / "steps",
+        run_kind="explore",
+        source="main_loop",
+    )
+    gm = make_manager(recorder.steps)
+    vlm.descriptions.extend([("Home screen", {}, [])] * 2)
+    vlm.verdicts.append({"same": True, "reason": "home"})
+    home = gm.identify_state(Observation.from_state(recorder.get_state()))
+
+    assert gm.identify_state(Observation.from_state(recorder.get_state())) == home
+
+    assert ("describe" not in vlm.kinds()[3:]) is exact
+    assert ("verify" in vlm.kinds()) is not exact
+
+
+def test_a_reloaded_graph_matches_its_members_exactly(vlm: FakeVlm, tmp_path: Path) -> None:
+    steps_dir = tmp_path / "steps"
+    recorder = StepRecorder(
+        _StatusBarDevice(*[Image.new("RGB", (64, 48), "white")] * 2),
+        steps_dir,
+        run_kind="explore",
+        source="main_loop",
+    )
+    gm = make_manager(steps_dir)
+    vlm.descriptions.append(("Home screen", {"tab": "home"}, []))
+    first = Observation.from_state(recorder.get_state())
+    node_id = gm.identify_state(first)
+    gm.save_graph(tmp_path / "graph.json")
+    loaded = make_manager()
+    loaded.load_graph(tmp_path / "graph.json")
+    vlm.calls.clear()
+
+    second = Observation.from_state(recorder.get_state())
+
+    assert loaded.identify_state(second) == node_id
+    assert vlm.kinds() == ["image"]
+    assert loaded.graph.nodes[node_id]["last_detail_snapshot"] == {"tab": "home"}
+    record = json.loads((steps_dir / f"{second.observation_id}.json").read_text("utf-8"))
+    assert record["describe"]["copied_from"] == first.observation_id
+
+
+@pytest.mark.parametrize(
+    "describe",
+    [
+        pytest.param(None, id="none"),
+        pytest.param({"page_description": 3, "state": {}, "elements": []}, id="description"),
+        pytest.param({"page_description": "Home", "state": [], "elements": []}, id="state"),
+        pytest.param({"page_description": "Home", "state": {}, "elements": {}}, id="elements"),
+    ],
+)
+def test_a_member_whose_record_holds_no_usable_describe_output_is_never_an_exact_match(
+    describe: dict[str, object] | None, vlm: FakeVlm, tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    member = members(steps_dir)
+    record: dict[str, object] = {"pixel_hash": fake_pixel_hash(SHOT_A)}
+    if describe is not None:
+        record["describe"] = describe
+    (steps_dir / f"{member['representative_observation']}.json").write_text(
+        json.dumps(record), "utf-8"
+    )
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "package_name": PACKAGE,
+                "nodes": [{"id": "s0_home", "page_description": "Home screen", **member}],
+            }
+        ),
+        "utf-8",
+    )
+    gm = make_manager()
+    gm.load_graph(path)
+    vlm.descriptions.append(("Home screen", {}, []))
+
+    gm.identify_state(Screens(steps_dir)(HOME, SHOT_A, PACKAGE))
+
+    assert vlm.kinds()[:2] == ["image", "describe"]
+
+
+def test_embed_missing_members_embeds_each_in_app_member_once_and_saves_the_vectors(
+    vlm: FakeVlm, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir, b"home", b"home-2"))
+    gm.record_external_app_visit(Screens(steps_dir)(OTHER_APP, SHOT_B, OTHER_PACKAGE))
+    vlm.images.update({b64(b"home"): NEAR, b64(b"home-2"): FAR})
+
+    with caplog.at_level(logging.INFO, logger=gm_module.logger.name):
+        assert gm.embed_missing_members() == 2
+        assert gm.embed_missing_members() == 0
+
+    assert [call["screenshot"] for _, call in vlm.calls] == [b64(b"home"), b64(b"home-2")]
+    stored = json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8"))
+    assert stored["model"] == IMAGE_EMBEDDING.model
+    home, home_2 = gm.graph.nodes["s0_home"]["observations"]
+    assert stored["embeddings"] == {home: NEAR, home_2: FAR}
+    assert "Embedding the images of 2 member observation(s)" in caplog.text
+    assert "Embedded 2 member image(s) for $0.000000" in caplog.text
+
+
+def test_embed_missing_members_keeps_the_vectors_it_paid_for_when_one_fails(
+    vlm: FakeVlm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir, b"home", b"home-2"))
+    answers = iter([NEAR])
+
+    def embed_or_fail(*_args: object, **_kwargs: object) -> list[float]:
+        return next(answers)
+
+    monkeypatch.setattr(gm_module, "get_image_embedding", embed_or_fail)
+    del vlm
+
+    with pytest.raises(StopIteration):
+        gm.embed_missing_members()
+
+    stored = json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8"))
+    assert list(stored["embeddings"].values()) == [NEAR]
+
+
+def test_embedding_missing_members_needs_image_embedding_settings(tmp_path: Path) -> None:
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, embedding=EMBEDDING)
+    gm.steps_dir = tmp_path
+    with pytest.raises(RuntimeError, match="image_embedding settings"):
+        gm.embed_missing_members()
+
+
+def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vectors(
+    tmp_path: Path, write_image_vectors: Callable[..., None]
+) -> None:
+    path = tmp_path / "graph.json"
+    member = members(tmp_path / "steps")
+    path.write_text(json.dumps({"nodes": [{"id": "s0_home", **member}]}), "utf-8")
+    write_image_vectors(tmp_path / "steps", member["observations"])
+    gm = GraphManager()
+
+    gm.load_graph(path)
+    gm.save_graph(path)
+
+    assert gm.image_vector(member["representative_observation"]) is None
+    assert json.loads((tmp_path / "steps" / "image_emb.json").read_text("utf-8"))["embeddings"] == {
+        member["representative_observation"]: [1.0, 0.0]
+    }
+
+
+def test_closest_member_is_the_representative_when_no_member_has_a_vector() -> None:
+    gm = make_manager()
+    add_screen(
+        gm, "s0_home", "Home screen", observations=["000001"], representative_observation="000001"
+    )
+
+    assert gm.closest_member("s0_home", NEAR) == ("000001", None)
+
+
+def test_the_short_list_orders_ties_in_rank_by_image_score(vlm: FakeVlm, tmp_path: Path) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(gm, "s0_text", "Search results", **members(steps_dir, b"far"))
+    add_screen(gm, "s1_image", "Settings page", **members(steps_dir, b"near"))
+    vlm.images.update({b64(b"far"): FAR, b64(b"near"): NEAR})
+    gm.embed_missing_members()
+
+    query = ScreenQuery(image_vector=NEAR, description_embedding=EMBEDDINGS["Search results"])
+    ranked = gm.short_list(query, ["s0_text", "s1_image"])
+
+    assert [(c.node_id, c.best_rank, c.sources) for c in ranked] == [
+        ("s1_image", 0, {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}),
+        ("s0_text", 0, {"image": pytest.approx(0.0), "text": pytest.approx(1.0)}),
+    ]
 
 
 def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm, screen: Screens) -> None:
     description = "Home / dashboard screen showing every available promotion"
     vlm.descriptions.append((description, {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
 
     node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
@@ -749,15 +1367,15 @@ def test_rename_node_keeps_the_members_and_representative_under_the_new_id(
     assert gm.graph.nodes[new_id]["representative_observation"] == "000000"
 
 
-def test_rename_node_updates_the_identify_cache(vlm: FakeVlm, screen: Screens) -> None:
+def test_an_exact_match_joins_the_node_under_its_new_id(vlm: FakeVlm, screen: Screens) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
     assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == new_id
-    assert vlm.kinds() == ["describe", "embed", "embed"]
+    assert vlm.kinds() == ["image", "describe", "embed", "embed", "image"]
 
 
 @pytest.mark.usefixtures("vlm")
@@ -1198,7 +1816,7 @@ def test_merge_nodes_unites_the_members_in_step_order_and_keeps_the_representati
 def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
     screen: Screens,
 ) -> None:
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     first = screen(OTHER_APP, SHOT_A, f" {OTHER_PACKAGE} ")
     second = screen(OTHER_APP, SHOT_B, OTHER_PACKAGE)
 
@@ -2328,8 +2946,16 @@ def test_identify_state_matches_a_node_of_the_package_under_another_activity(
     vlm: FakeVlm, package: str, activity: str, other_activity: str, screen: Screens
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", activity=other_activity, package=package)
+    vlm.verdicts.append({"same": True, "reason": "same page"})
+    gm = make_manager(screen.steps_dir)
+    add_screen(
+        gm,
+        "s0_home",
+        "Home screen",
+        activity=other_activity,
+        package=package,
+        **members(screen.steps_dir),
+    )
 
     assert gm.identify_state(screen(activity, SHOT_A, package)) == "s0_home"
     assert gm.graph.nodes["s0_home"]["activities"] == [other_activity, activity]
@@ -2339,14 +2965,14 @@ def test_identify_state_keeps_apart_packages_that_share_three_segments(
     vlm: FakeVlm, screen: Screens
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_mail", "Home screen", activity=GMAIL_LIST, package=GMAIL)
 
     node_id = gm.identify_state(screen(MESSAGES_LIST, SHOT_A, MESSAGES))
 
     assert node_id == "s0_home_screen"
     assert gm.graph.nodes[node_id]["package"] == MESSAGES
-    assert vlm.calls[0][1]["existing_nodes"] is None
+    assert vlm.calls[1][1]["existing_nodes"] is None
 
 
 def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
@@ -2357,9 +2983,10 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     tmp_path: Path, vlm: FakeVlm
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
+    vlm.images[SHOT_A] = [0.0, 0.6, 0.8]
     graph_path = tmp_path / "nested" / "graph.json"
     steps_dir = graph_path.parent / "steps"
-    gm = make_manager(steps_dir=steps_dir)
+    gm = make_manager(steps_dir)
     observation = Screens(steps_dir)(HOME, SHOT_A, PACKAGE)
     node_id = gm.identify_state(observation)
 
@@ -2370,7 +2997,15 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
         "graph.json",
         "steps",
     ]
-    assert [path.name for path in steps_dir.iterdir()] == [f"{observation.observation_id}.webp"]
+    assert sorted(path.name for path in steps_dir.iterdir()) == [
+        f"{observation.observation_id}.json",
+        f"{observation.observation_id}.webp",
+        "image_emb.json",
+    ]
+    assert json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8")) == {
+        "model": IMAGE_EMBEDDING.model,
+        "embeddings": {observation.observation_id: [0.0, 0.6, 0.8]},
+    }
     saved = json.loads(graph_path.read_text(encoding="utf-8"))["nodes"][0]
     assert saved["observations"] == [observation.observation_id]
     assert saved["representative_observation"] == observation.observation_id
@@ -2386,6 +3021,7 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     assert loaded.steps_dir == steps_dir
     assert loaded.representative_image_b64(node_id) == SHOT_A
     assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
+    assert loaded.image_vector(observation.observation_id) == [0.0, 0.6, 0.8]
 
 
 def test_node_aliases_survive_save_and_load(tmp_path: Path, vlm: FakeVlm) -> None:
@@ -2413,7 +3049,7 @@ def test_node_aliases_survive_save_and_load(tmp_path: Path, vlm: FakeVlm) -> Non
 
 
 def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
-    gm = make_manager(similarity_threshold=0.5)
+    gm = make_manager()
     gm.total_steps_completed = 42
     add_screen(
         gm,
@@ -2437,7 +3073,7 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     gm.save_graph(path)
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["similarity_threshold"] == 0.5
+    assert "similarity_threshold" not in data
     assert data["total_steps_completed"] == 42
     assert data["nodes"][0]["activity"] == HOME
     assert data["nodes"][0]["visit_count"] == 3
@@ -2523,7 +3159,6 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
     assert node is not None
     assert node["description_embedding"] == [1.0, 0.0, 0.0]
     assert node["activities"] == [HOME]
-    assert gm.similarity_threshold == DEFAULT_SIMILARITY_THRESHOLD
     assert gm.total_steps_completed == 0
 
 
@@ -2552,7 +3187,7 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
         ),
         encoding="utf-8",
     )
-    gm = make_manager()
+    gm = make_manager(screen.steps_dir)
     gm.load_graph(path)
     assert gm.graph.nodes["s0_home"]["description_embedding"] == []
 
@@ -3337,19 +3972,14 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
     return {"nodes": nodes, "edges": edges}
 
 
-@given(
-    graph=graphs,
-    threshold=st.floats(min_value=0.0, max_value=1.0),
-    steps=st.integers(min_value=0, max_value=10_000),
-)
+@given(graph=graphs, steps=st.integers(min_value=0, max_value=10_000))
 def test_save_then_load_round_trips(
     tmp_path_factory: pytest.TempPathFactory,
     graph: tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]],
-    threshold: float,
     steps: int,
 ) -> None:
     nodes, edges = graph
-    gm = GraphManager(similarity_threshold=threshold)
+    gm = GraphManager()
     gm.total_steps_completed = steps
     for node_id, attrs in nodes.items():
         gm.graph.add_node(node_id, activity=attrs["activities"][0], **attrs)
@@ -3366,7 +3996,6 @@ def test_save_then_load_round_trips(
     loaded.load_graph(path)
 
     assert canonical(loaded) == canonical(gm)
-    assert loaded.similarity_threshold == threshold
     assert loaded.total_steps_completed == steps
     again = tmp_path_factory.mktemp("roundtrip") / "graph.json"
     loaded.save_graph(again)
@@ -3536,7 +4165,9 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
         client=router_client,
         page_detail=PAGE_DETAIL,
         embedding=EMBEDDING,
+        image_embedding=IMAGE_EMBEDDING,
     )
+    manager.steps_dir = screen.steps_dir
     manager.graph.add_node(
         "old",
         package="com.other" if other_package else "com.demo",
@@ -3545,13 +4176,14 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
     )
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
             httpx.Response(200, json=embedding_body),
         ]
     )
     node = manager.identify_state(screen("com.demo.Home", png_screenshot, "com.demo"))
     assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model
-    assert len(router_requests) == 2
+    assert len(router_requests) == 3
 
 
 @pytest.mark.parametrize("stored", ["inline untagged", "bare sidecar", "mismatched sidecar"])
@@ -3591,6 +4223,7 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
         client=router_client,
         page_detail=PAGE_DETAIL,
         embedding=EMBEDDING,
+        image_embedding=IMAGE_EMBEDDING,
     )
     manager.load_graph(path)
     router_responses.extend(

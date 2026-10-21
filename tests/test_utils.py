@@ -116,7 +116,6 @@ _EVERY_ACCEPTED_KEY: dict[str, object] = {
         {"name": "other", "package_name": "com.other", "launch_activity": "com.other/.Main"},
     ],
     "vlm": {
-        "similarity_threshold": 0.84,
         "page_detail": {
             "model": "m",
             "temperature": 0,

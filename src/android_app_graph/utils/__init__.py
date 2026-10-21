@@ -34,7 +34,6 @@ CONFIG_KEYS = frozenset(
         "apps[].name",
         "apps[].package_name",
         "apps[].launch_activity",
-        "vlm.similarity_threshold",
         "vlm.page_detail.audit_request_timeout",
         *(f"vlm.{role}.{key}" for role in ROLES for key in ("model", "request_timeout", "timeout")),
         *(f"vlm.{role}.temperature" for role in _CHAT_ROLES),

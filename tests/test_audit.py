@@ -403,6 +403,22 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
     return graph, graph_path
 
 
+def _identifying(
+    graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *nodes: str
+) -> list[str | None]:
+    """Make identify_state answer ``nodes`` in turn; return the list the expected node of
+    each call is appended to."""
+    expected: list[str | None] = []
+    answers = iter(nodes)
+
+    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
+        expected.append(expected_node)
+        return next(answers)
+
+    monkeypatch.setattr(graph, "identify_state", identify)
+    return expected
+
+
 def _write_representative(graph_path: Path, node_id: str) -> None:
     """Put the image of the representative a node of ``graph_path`` names in its step log."""
     steps_dir = graph_steps_dir(graph_path)
@@ -515,7 +531,7 @@ def test_a_re_exploration_step_asks_the_audited_device_whether_its_keyboard_is_u
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph, graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda _observation: "s1_detail")
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: "s1_detail")
 
     _re_explore(
         graph,
@@ -542,7 +558,7 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
     audit transition from the screen it planned on to the screen it reached."""
     graph, graph_path = _two_node_graph(tmp_path)
     reached = iter(["s1_detail", "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda _observation: next(reached))
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -619,7 +635,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
     # identify_state is faked below, so add the node it would create.
     graph.graph.add_node(EXTERNAL_WEB_NODE)
     identified = iter(["s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(identified))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(identified))
     monkeypatch.setattr(
         audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
     )
@@ -675,8 +691,7 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     # identify_state is faked below, so add the node it would create.
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
     on_the_page = [EXTERNAL_WEB_NODE] * (1 + back_presses_on_the_page)
-    identified = iter(["s1_detail", *on_the_page, "s1_detail", "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(identified))
+    expected = _identifying(graph, monkeypatch, "s1_detail", *on_the_page, "s1_detail", "s0_home")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -703,6 +718,10 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
     replay = {"action": "tap", "coordinate": [10, 20]}
     assert device_log == [*_FIRST_RESTART, replay, tap, *leaving, tap]
+    # The replay expects its target, each back press the page's opener, a restart home.
+    restarted = back_presses_on_the_page == 3
+    back = ["s1_detail"] * (back_presses_on_the_page + (0 if restarted else 1))
+    assert expected == ["s1_detail", None, *back, *(["s0_home"] if restarted else []), None]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -725,9 +744,11 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
         client=router_client,
         page_detail=ModelSettings("provider/page_detail"),
         embedding=ModelSettings("provider/embedding"),
+        image_embedding=ModelSettings("provider/embedding"),
     )
     router_responses.extend(
         [
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"Chat search page"}'),
             httpx.Response(200, json=embedding_body),
         ]
@@ -746,6 +767,9 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     }
     router_responses.extend(
         [
+            # The replay to the start node ends on its screen: an exact match.
+            httpx.Response(200, json=embedding_body),
+            httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"Chat search results"}'),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(verdict)),
@@ -858,7 +882,7 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     graph, _graph_path = _two_node_graph(tmp_path)
     graph.graph.add_node("s2_camera_permission", page_description="Camera permission dialog")
     reached = iter(["s1_detail", "s2_camera_permission"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -983,13 +1007,15 @@ def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reache
     """A flagged edge whose action reaches another node moves that action to the edge toward
     it and is removed once empty."""
     graph = _flagged_graph()
-    reached = iter(["s0_home", "s2_settings", "s0_home", "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+    expected = _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home", "s0_home")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
 
     (result,) = _re_explore(
         graph, [_retry()], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
     )
+
+    # The replays expect the source, the flagged action its edge's target.
+    assert expected == ["s0_home", "s1_detail", "s0_home", None]
 
     assert (result["status"], result["moved_to"]) == ("moved", "s2_settings")
     assert not graph.graph.has_edge("s0_home", "s1_detail")
@@ -1014,7 +1040,7 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
     around it are navigation replays."""
     graph = _flagged_graph()
     reached = iter(["s0_home", "s2_settings", "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda _observation: next(reached))
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
 
     _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
 
@@ -1062,7 +1088,7 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
         details=EdgeDetails(instruction="scroll to the detail card"),
     )
     reached = iter(["s0_home", "s1_detail", "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
     described: list[dict[str, object]] = []
 
     def describe(**kwargs: object) -> str | None:
@@ -1096,7 +1122,7 @@ def test_re_explore_leaves_the_graph_unchanged_when_the_replay_misses_the_source
     graph = _flagged_graph()
     if arrives_at is None:
         monkeypatch.setattr(graph, "find_path", lambda *_args: None)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: arrives_at)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: arrives_at)
     before = _edges(graph)
     controller = _ReplayController(device_log)
 
@@ -1127,7 +1153,7 @@ def test_re_explore_explores_from_the_source_when_the_flagged_instruction_is_not
 ) -> None:
     graph = _flagged_graph()
     graph.add_edge("s0_home", "s1_detail", [_SWIPE])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     before = _edges(graph)
 
@@ -1181,7 +1207,7 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
     graph.add_edge(
         "s0_home", "ext_com.browser", [_GEAR_TAP], details=EdgeDetails(instruction="open help")
     )
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap Help")
 
     (result,) = _re_explore(
@@ -1207,7 +1233,7 @@ def test_re_explore_identifies_the_screen_a_flagged_action_reaches_by_the_device
     reached = iter(["s0_home", "s3_camera_permission", "s0_home"])
     identified: list[tuple[str, str, str]] = []
 
-    def identify(observation: Observation) -> str:
+    def identify(observation: Observation, **_kwargs: object) -> str:
         identified.append((observation.activity, observation.screenshot_b64, observation.package))
         return next(reached)
 
@@ -1234,7 +1260,7 @@ def test_re_explore_moves_a_flagged_action_that_opens_an_outside_web_page_to_the
     # identify_state is faked below, so add the node it would create.
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
     reached = iter(["s0_home", EXTERNAL_WEB_NODE, "s0_home"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
 
     (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
 
@@ -1258,7 +1284,7 @@ def test_re_explore_skips_a_flagged_edge_out_of_an_external_node(
     graph.graph.add_edge(
         EXTERNAL_WEB_NODE, "s0_home", actions=[[_BACK]], instructions=["go home"], num_steps=[1]
     )
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: EXTERNAL_WEB_NODE)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: EXTERNAL_WEB_NODE)
     before = _edges(graph)
     issue = _retry("go home", source=EXTERNAL_WEB_NODE, target="s0_home")
 
@@ -1277,7 +1303,7 @@ def test_re_explore_does_not_explore_when_the_replay_after_a_correction_misses_t
 ) -> None:
     graph = _flagged_graph()
     reached = iter(["s0_home", "s2_settings", "s2_settings"])
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
 
     (result,) = _re_explore(
         graph, [_retry()], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
@@ -1301,7 +1327,7 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     graph.merge_nodes("s1_detail", "s4_detail_copy")
     reached = iter(["s0_start", "s1_detail", "s0_start", "s2_app_settings"])
 
-    def identify(*_args: object) -> str:
+    def identify(*_args: object, **_kwargs: object) -> str:
         if "s0_home" in graph.graph:
             graph.rename_node("s0_home", "Start")
             graph.rename_node("s2_settings", "App settings")
@@ -1349,7 +1375,7 @@ def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_re
     )
     graph = GraphManager()
     graph.load_graph(graph_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s2_detail")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s2_detail")
 
     (result,) = _re_explore(
         graph,
@@ -1371,7 +1397,7 @@ def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
         ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
     )
     graph.graph.add_edge("s0_home", "s1_detail")
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s1_detail")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
     issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
 
     (result,) = _re_explore(
@@ -1392,7 +1418,7 @@ def test_re_explore_takes_no_step_from_a_screen_the_graph_has_no_node_for(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s9_unknown")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s9_unknown")
     issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
 
     (result,) = _re_explore(
@@ -1419,7 +1445,7 @@ def test_re_explore_spends_a_step_on_an_action_model_wait_without_recording_it(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     predictions: list[dict[str, object]] = []
 
@@ -1479,7 +1505,13 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
     """Only the app's screens are identified, and the next step starts from one."""
     graph, _graph_path = _two_node_graph(tmp_path)
     nodes = {"com.demo.Home": "s0_home", "com.demo.Detail": "s1_detail"}
-    monkeypatch.setattr(graph, "identify_state", lambda observation: nodes[observation.activity])
+    expected: list[str | None] = []
+
+    def identify(observation: Observation, *, expected_node: str | None = None) -> str:
+        expected.append(expected_node)
+        return nodes[observation.activity]
+
+    monkeypatch.setattr(graph, "identify_state", identify)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -1494,6 +1526,8 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
     ]
     assert set(graph.graph.edges) == {("s0_home", "s1_detail")}
     assert device_log == [*_FIRST_RESTART, tap, *leaving, tap]
+    # Back from the other app expects the screen the step left.
+    assert expected == ["s0_home", "s0_home", None]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1522,15 +1556,16 @@ def _install_fake_adb(monkeypatch: pytest.MonkeyPatch, controller: DeviceControl
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep", "device_log")
 def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, add_representative: Callable[..., None]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    add_representative: Callable[..., None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
     graph_dir = tmp_path / "graphs"
     app_dir = graph_dir / "demo"
-    flagged = _flagged_graph()
-    flagged.steps_dir = app_dir / "steps"
-    for node_id in list(flagged.graph):
-        add_representative(flagged, node_id)
-    flagged.save_graph(app_dir / "demo.json")
+    _save_with_representatives(
+        _flagged_graph(), app_dir / "demo.json", add_representative, write_image_vectors
+    )
     config = tmp_path / "audit.yaml"
     config.write_text(
         json.dumps(
@@ -1547,7 +1582,9 @@ def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     issues = [_retry(), _retry("open settings", target="s2_settings")]
     monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": issues})
     reached = iter(["s0_home", "s2_settings", "s0_home"] * 2)
-    monkeypatch.setattr(GraphManager, "identify_state", lambda _self, *_args: next(reached))
+    monkeypatch.setattr(
+        GraphManager, "identify_state", lambda _self, *_args, **_kwargs: next(reached)
+    )
     monkeypatch.setattr(GraphManager, "normalize_node_edges", lambda _self, _node_id: 0)
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap the gear icon")
 
@@ -1652,6 +1689,7 @@ def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     write_graph_file: Callable[[Path, dict[str, Any]], None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
     """The nodes of a graph file without a ``package_name`` get the configured package,
     so re-exploration matches each screen with the nodes of its package."""
@@ -1663,6 +1701,7 @@ def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
         app_dir / "demo.json",
         {"nodes": [{"id": "s0_home", "activity": "com.demo.Home"}], "edges": []},
     )
+    write_image_vectors(app_dir / "steps", ["s0_home-observation"])
     config = _write_config(tmp_path, str(graph_dir))
     monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
 
@@ -1671,6 +1710,34 @@ def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
     audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
     assert audited["package_name"] == "com.demo"
     assert [node["package"] for node in audited["nodes"]] == ["com.demo"]
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_the_audit_embeds_the_members_the_explored_graph_has_no_image_vector_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, Any]], None],
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    app_dir = tmp_path / "graphs" / "demo"
+    app_dir.mkdir(parents=True)
+    write_graph_file(app_dir / "demo.json", {"nodes": [{"id": "s0_home"}], "edges": []})
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+    config = _write_config(tmp_path, str(tmp_path / "graphs"))
+
+    assert audit.main(["-c", str(config), "--app", "demo"]) == 0
+
+    assert [str(request.url) for request in router_requests] == [
+        "https://openrouter.ai/api/v1/embeddings"
+    ]
+    assert json.loads((app_dir / "steps" / "image_emb.json").read_text(encoding="utf-8")) == {
+        "model": "google/gemini-embedding-2",
+        "embeddings": {"s0_home-observation": [0.25, 0.75]},
+    }
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients")
@@ -1731,14 +1798,18 @@ def _graph_with_a_dead_end(dead_end: str) -> GraphManager:
 
 
 def _save_with_representatives(
-    graph: GraphManager, path: Path, add_representative: Callable[..., None]
+    graph: GraphManager,
+    path: Path,
+    add_representative: Callable[..., None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
-    """Save *graph* to *path* with a representative image for every node in the step log
-    beside it, so the audit can load it."""
+    """Save *graph* to *path* with a representative image and its vector for every node
+    in the step log beside it, so the audit can load it without embedding any."""
     graph.steps_dir = graph_steps_dir(path)
     for node_id in list(graph.graph):
         add_representative(graph, node_id)
     graph.save_graph(path)
+    write_image_vectors(graph.steps_dir, [f"{node_id}-observation" for node_id in graph.graph])
 
 
 def _no_path_to_start_line(app_dir: Path, in_app: int) -> str:
@@ -1773,11 +1844,13 @@ def test_audit_adds_the_nodes_with_no_path_to_the_start_node_to_the_model_s_repo
     caplog: pytest.LogCaptureFixture,
     router_requests: list[httpx.Request],
     add_representative: Callable[..., None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
     _save_with_representatives(
         _graph_with_a_dead_end("s2_dialog"),
         tmp_path / "graphs" / "demo" / "demo.json",
         add_representative,
+        write_image_vectors,
     )
     caplog.set_level(logging.INFO, logger=audit.logger.name)
 
@@ -1805,12 +1878,15 @@ def test_audit_reports_no_path_to_the_start_node_for_the_graph_after_its_merges(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     add_representative: Callable[..., None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
     """A dead end merged into a node with a path back is gone from the audited graph."""
     app_dir = tmp_path / "graphs" / "demo"
     explored = _graph_with_a_dead_end("s2_list")
     assert explored.nodes_without_path_to_start().in_app == ["s2_list"]
-    _save_with_representatives(explored, app_dir / "demo.json", add_representative)
+    _save_with_representatives(
+        explored, app_dir / "demo.json", add_representative, write_image_vectors
+    )
     monkeypatch.setattr(
         audit, "verify_same_node", lambda **_kwargs: {"same": True, "reason": "same list"}
     )
