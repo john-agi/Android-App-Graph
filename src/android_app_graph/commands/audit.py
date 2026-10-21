@@ -27,6 +27,8 @@ import argparse
 import json
 import logging
 import time
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -47,7 +49,19 @@ from android_app_graph.device import (
     soft_keyboard_hint,
 )
 from android_app_graph.graph_files import graph_steps_dir
-from android_app_graph.step_log import Observation, StepRecorder, Transition
+from android_app_graph.member_groups import (
+    CHECKS_PER_NODE,
+    HOME_SHARE,
+    MEMBER_SIMILARITY_FLOOR,
+    MemberCheck,
+)
+from android_app_graph.step_log import (
+    Observation,
+    StepRecorder,
+    Transition,
+    TransitionRecord,
+    read_exploration_transitions,
+)
 from android_app_graph.utils import (
     ModelSettings,
     check_config_keys,
@@ -61,6 +75,8 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    MemberVerdicts,
+    MergeProposal,
 )
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
@@ -70,7 +86,6 @@ from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
     token_tracker,
-    verify_same_node,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,104 +156,101 @@ def select_apps_for_audit(
     return [{"name": app_name, "package_name": ""}]
 
 
-def verify_and_merge_nodes(
-    graph: GraphManager,
-    merge_issues: list[dict[str, Any]],
-    client: OpenRouter,
-    page_detail: ModelSettings,
-) -> list[dict[str, Any]]:
-    """Verify merge candidates using screenshot comparison, then merge confirmed pairs.
+@dataclass(frozen=True, slots=True)
+class MemberReport:
+    """Every member check the audit made, with the change each confirmed, and the
+    diffuse nodes and the groups left unchecked."""
 
-    For each merge_nodes issue, the verifier compares the representatives of the
-    two candidate nodes. If the verifier says they are the same screen, the nodes
-    are merged (the lower-numbered node is kept).
+    checks: list[dict[str, object]]
+    diffuse: list[dict[str, object]]
+    unchecked: list[dict[str, object]]
 
-    Returns a list of result dicts with status "merged" or "kept_separate".
+    @property
+    def changes(self) -> int:
+        return sum(1 for check in self.checks if "change" in check)
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "floor": MEMBER_SIMILARITY_FLOOR,
+            "home_share": HOME_SHARE,
+            "checks_per_node": CHECKS_PER_NODE,
+            "checks": self.checks,
+            "diffuse": self.diffuse,
+            "unchecked": self.unchecked,
+        }
+
+
+def check_members(
+    graph: GraphManager, verdicts: MemberVerdicts, transitions: Sequence[TransitionRecord]
+) -> MemberReport:
+    """Check the members of every in-app node against the group that holds its
+    representative; README.md#member-checks.
+
+    Every split check of every node runs before any move check, so a moved member can
+    go to a node a split made. ``verdicts`` holds the run's verifier answers, which
+    the checks reuse and add to, and ``transitions`` the exploration's transition
+    records, by which edge actions follow the members that move.
     """
-    results: list[dict[str, Any]] = []
-    for issue in merge_issues:
-        node_a = issue.get("node_a", "")
-        node_b = issue.get("node_b", "")
+    plans = graph.member_plans()
+    checks = [(node, check) for node, plan in plans for check in plan.checks]
+    splits = [(node, check) for node, check in checks if len(check.group) > 1]
+    moves = [(node, check) for node, check in checks if len(check.group) == 1]
+    return MemberReport(
+        checks=[
+            _check_member_group(graph, node, check, verdicts, transitions)
+            for node, check in (*splits, *moves)
+        ],
+        diffuse=[{"node": node, "groups": plan.groups} for node, plan in plans if plan.diffuse],
+        unchecked=[
+            {"node": node, "groups": plan.unchecked} for node, plan in plans if plan.unchecked
+        ],
+    )
 
-        # An earlier merge in this loop may already have removed one of the pair.
-        if node_a not in graph.graph or node_b not in graph.graph:
-            logger.info("Skipping merge %s + %s — node already removed", node_a, node_b)
-            results.append({"issue": issue, "status": "skipped", "reason": "node removed"})
-            continue
 
-        # An auditor can name one node twice, and it would verify as "same".
-        if node_a == node_b:
-            logger.warning("Skipping merge %s + itself — same node", node_a)
-            results.append({"issue": issue, "status": "skipped", "reason": "same node"})
-            continue
-
-        skip_reason = graph.merge_skip_reason(node_a, node_b)
-        if skip_reason is not None:
-            logger.warning("Skipping merge %s + %s — %s", node_a, node_b, skip_reason)
-            results.append({"issue": issue, "status": "skipped", "reason": skip_reason})
-            continue
-
-        data_a = graph.graph.nodes[node_a]
-        data_b = graph.graph.nodes[node_b]
-
-        # The more-visited node has the better-established description.
-        desc_a = data_a.get("page_description", "")
-        desc_b = data_b.get("page_description", "")
-        visits_a = data_a.get("visit_count", 0)
-        visits_b = data_b.get("visit_count", 0)
-        ref_desc = desc_a if visits_a >= visits_b else desc_b
-
-        logger.info(
-            "Verifying merge: %s ('%s') + %s ('%s')",
-            node_a,
-            desc_a,
-            node_b,
-            desc_b,
-        )
-
-        verify_result = verify_same_node(
-            client=client,
-            screenshot_new_b64=graph.representative_image_b64(node_b),
-            screenshot_existing_b64=graph.representative_image_b64(node_a),
-            existing_description=ref_desc,
-            settings=page_detail,
-        )
-
-        if verify_result.get("same", False):
-            # The lower-numbered node was discovered first.
-            keep, remove = (node_a, node_b) if node_a < node_b else (node_b, node_a)
-            graph.merge_nodes(keep, remove)
-            logger.info(
-                "Merged %s into %s — reason: %s",
-                remove,
-                keep,
-                verify_result.get("reason", ""),
-            )
-            results.append(
-                {
-                    "issue": issue,
-                    "status": "merged",
-                    "kept": keep,
-                    "removed": remove,
-                    "reason": verify_result.get("reason", ""),
-                }
-            )
-        else:
-            logger.info(
-                "Kept separate: %s + %s — reason: %s",
-                node_a,
-                node_b,
-                verify_result.get("reason", ""),
-            )
-            results.append(
-                {
-                    "issue": issue,
-                    "status": "kept_separate",
-                    "reason": verify_result.get("reason", ""),
-                }
-            )
-
-    return results
+def _check_member_group(
+    graph: GraphManager,
+    node_id: str,
+    check: MemberCheck,
+    verdicts: MemberVerdicts,
+    transitions: Sequence[TransitionRecord],
+) -> dict[str, object]:
+    """Verify ``check``'s group against its node's home on the closest pair across
+    them, and split the group off or move its member when the verifier tells them
+    apart."""
+    kind = "split" if len(check.group) > 1 else "move"
+    home_member, member = check.pair.first, check.pair.second
+    verdict = graph.verify_members(
+        home_member,
+        member,
+        description=graph.graph.nodes[node_id].get("page_description", ""),
+        verdicts=verdicts,
+    )
+    logger.info(
+        "%s check of %s on members %s and %s (%.3f): %s",
+        kind.capitalize(),
+        node_id,
+        home_member,
+        member,
+        check.pair.score,
+        "same" if verdict.same else "different",
+    )
+    result: dict[str, object] = {
+        "kind": kind,
+        "node": node_id,
+        "group": check.group,
+        "members": [home_member, member],
+        "image_score": check.pair.score,
+        "same": verdict.same,
+        "reason": verdict.reason,
+        "reused": verdict.reused,
+    }
+    if verdict.same:
+        return result
+    if kind == "split":
+        change = graph.split_members(node_id, check.group, transitions)
+    else:
+        change = graph.move_member(node_id, member, verdicts=verdicts, transitions=transitions)
+    return {**result, "change": change}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -776,23 +788,52 @@ def _write_json(path: Path, payload: object) -> None:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
+def _save_audited_graph(run: _AuditRun, graph: GraphManager, app_name: str, changes: str) -> None:
+    # A separate file, so the pre-audit graph stays intact.
+    audited_graph_path = _app_file(run.graph_dir, app_name, "_audited")
+    graph.save_graph(audited_graph_path)
+    logger.info("Audited graph saved to %s (%s)", audited_graph_path, changes)
+
+
 def _verify_merges(
-    run: _AuditRun, graph: GraphManager, app_name: str, merge_issues: list[dict[str, Any]]
+    run: _AuditRun,
+    graph: GraphManager,
+    app_name: str,
+    proposals: list[MergeProposal],
+    verdicts: MemberVerdicts,
 ) -> None:
-    logger.info("Verifying %d merge candidates...", len(merge_issues))
-    merge_results = verify_and_merge_nodes(
-        graph, merge_issues, run.client, run.settings["page_detail"]
+    by_source = Counter(source for proposal in proposals for source in proposal.sources)
+    logger.info(
+        "Verifying %d merge proposal(s), by source: %s",
+        len(proposals),
+        ", ".join(f"{source} {count}" for source, count in sorted(by_source.items())),
     )
+    merge_results = graph.verify_merge_proposals(proposals, verdicts)
     merge_path = _app_file(run.graph_dir, app_name, "_merge")
     _write_json(merge_path, merge_results)
     logger.info("Merge results saved to %s", merge_path)
 
-    # A separate file, so the pre-audit graph stays intact.
     merged_count = sum(1 for r in merge_results if r["status"] == "merged")
     if merged_count:
-        audited_graph_path = _app_file(run.graph_dir, app_name, "_audited")
-        graph.save_graph(audited_graph_path)
-        logger.info("Audited graph saved to %s (%d merge(s))", audited_graph_path, merged_count)
+        _save_audited_graph(run, graph, app_name, f"{merged_count} merge(s)")
+
+
+def _check_members(
+    run: _AuditRun, graph: GraphManager, app_name: str, verdicts: MemberVerdicts
+) -> None:
+    transitions = read_exploration_transitions(graph_steps_dir(_app_file(run.graph_dir, app_name)))
+    report = check_members(graph, verdicts, transitions)
+    members_path = _app_file(run.graph_dir, app_name, "_members")
+    _write_json(members_path, report.as_record())
+    logger.info(
+        "Member checks saved to %s: %d check(s), %d change(s), %d diffuse node(s)",
+        members_path,
+        len(report.checks),
+        report.changes,
+        len(report.diffuse),
+    )
+    if report.changes:
+        _save_audited_graph(run, graph, app_name, f"{report.changes} member change(s)")
 
 
 def _re_explore_app(
@@ -884,8 +925,11 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     merge_issues = [i for i in issues if i.get("type") == "merge_nodes"]
     other_issues = [i for i in issues if i.get("type") != "merge_nodes"]
 
-    if merge_issues:
-        _verify_merges(run, graph, app_name, merge_issues)
+    verdicts: MemberVerdicts = {}
+    proposals = graph.merge_proposals(merge_issues)
+    if proposals:
+        _verify_merges(run, graph, app_name, proposals, verdicts)
+    _check_members(run, graph, app_name, verdicts)
 
     if run.session is not None and other_issues:
         _re_explore_app(run, run.session, graph, app, other_issues)

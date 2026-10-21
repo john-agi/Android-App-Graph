@@ -319,12 +319,19 @@ def png_screenshot() -> str:
 @pytest.fixture
 def write_image_vectors() -> Callable[..., None]:
     """Give observations of a step log image vectors from ``model``, by default the one
-    ``model_environment`` names, so loading the graph embeds none of them."""
+    ``model_environment`` names, so loading the graph embeds none of them.
+
+    The vectors are orthogonal, so no two of the screens look alike to the audit.
+    """
 
     def write(
         steps_dir: Path, observation_ids: list[str], model: str = "google/gemini-embedding-2"
     ) -> None:
-        vectors = {observation_id: [1.0, 0.0] for observation_id in observation_ids}
+        size = max(2, len(observation_ids))
+        vectors = {
+            observation_id: [float(index == position) for position in range(size)]
+            for index, observation_id in enumerate(observation_ids)
+        }
         save_image_embeddings(steps_dir, vectors, model=model)
 
     return write
@@ -372,6 +379,88 @@ def write_graph_file(png_screenshot: str) -> Callable[[Path, dict[str, Any]], No
                 | node
             )
         path.write_text(json.dumps({**document, "nodes": nodes}), encoding="utf-8")
+
+    return write
+
+
+type Members = dict[str, list[tuple[str, list[float]]]]
+
+
+@pytest.fixture
+def write_member_graph() -> Callable[..., None]:
+    """Write a graph file of ``com.demo`` nodes whose members have an image, an image
+    vector and a stored describe output in the step log beside it, and the exploration
+    transitions ``(before, after, action, from_node, to_node)``.
+
+    ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
+    the first its representative. Node ``n`` is described as ``Node n`` and member ``m``
+    as ``Screen m``. Each image holds its observation ID, so a fake verifier can tell
+    which members it was shown.
+    """
+
+    def write(
+        path: Path,
+        nodes: Members,
+        *,
+        edges: tuple[dict[str, object], ...] = (),
+        transitions: tuple[tuple[str, str, object, str, str], ...] = (),
+        model: str = "google/gemini-embedding-2",
+    ) -> None:
+        steps_dir = graph_steps_dir(path)
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        vectors: dict[str, list[float]] = {}
+        for members in nodes.values():
+            for observation_id, vector in members:
+                vectors[observation_id] = vector
+                observation_image_path(steps_dir, observation_id).write_bytes(
+                    observation_id.encode("ascii")
+                )
+                record = {
+                    "id": observation_id,
+                    "kind": "observation",
+                    "run_kind": "explore",
+                    "activity": f"com.demo.Activity{observation_id}",
+                    "package": "com.demo",
+                    "pixel_hash": f"hash-{observation_id}",
+                    "describe": {
+                        "page_description": f"Screen {observation_id}",
+                        "state": {"seen_in": observation_id},
+                        "elements": [{"description": f"Button {observation_id}"}],
+                        "is_external_web": False,
+                    },
+                }
+                (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+        for number, (before, after, action, from_node, to_node) in enumerate(transitions):
+            record = {
+                "id": f"{900000 + number}",
+                "kind": "transition",
+                "run_kind": "explore",
+                "before": before,
+                "after": after,
+                "action": action,
+                "from_node": from_node,
+                "to_node": to_node,
+            }
+            (steps_dir / f"{900000 + number}.json").write_text(json.dumps(record), "utf-8")
+        save_image_embeddings(steps_dir, vectors, model=model)
+        document = {
+            "package_name": "com.demo",
+            "next_id": len(nodes),
+            "nodes": [
+                {
+                    "id": node_id,
+                    "package": "com.demo",
+                    "activity": "com.demo.Main",
+                    "page_description": f"Node {node_id}",
+                    "visit_count": len(members),
+                    "observations": [observation_id for observation_id, _ in members],
+                    "representative_observation": members[0][0],
+                }
+                for node_id, members in nodes.items()
+            ],
+            "edges": list(edges),
+        }
+        path.write_text(json.dumps(document), encoding="utf-8")
 
     return write
 
