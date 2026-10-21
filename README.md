@@ -24,6 +24,7 @@ Android-App-Graph/
 │       ├── kobe.py                    # Core app explorer
 │       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
 │       ├── step_log.py                # Records every screenshot and action in steps/
+│       ├── ui_tree.py                 # The accessibility tree of a screen, parsed and compared
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
@@ -62,6 +63,7 @@ graph TD;
     cli["android_app_graph.cli"] --> dev;
     cli --> kobe;
     cli --> logging;
+    dev --> tree["android_app_graph.ui_tree"];
     kobe --> dev;
     kobe --> gf;
     kobe --> steps;
@@ -76,6 +78,7 @@ graph TD;
     steps --> gf;
     steps --> pay;
     steps --> img;
+    steps --> tree;
     utils --> pay;
     utils --> retry["android_app_graph.retrying"];
     vlm --> pay;
@@ -92,7 +95,8 @@ graph TD;
   `pyproject.toml` enforces the range `>=0.12.9,<0.13` with `required-version`;
   run `uv self update 0.12.9` if yours is outside it.
 - Android SDK with `adb` on `PATH`
-- A running emulator or a USB-debugging device on `adb devices`, with the target
+- A running emulator or a USB-debugging device on `adb devices`, on Android 11
+  (API level 30) or later, which the [step log](#step-log) needs, with the target
   app installed. `device.udid` in the config is its serial. `device.avd_name`
   is read only when `adb devices` lists nothing: exploration then copies that
   AVD to `<avd_name>_dup` and starts the copy with `emulator`, which must be on
@@ -291,13 +295,15 @@ Each command opens one OpenRouter client for the whole run, shares it across eve
 role and closes it when the run ends; each request carries its own role's model,
 temperature and timeout.
 
-Every read of the screen, in exploration and in the audit, runs three adb
-commands: the UI dump, the screenshot and `dumpsys window`. Each one that runs
-longer than 30 seconds is stopped and run once more, with a warning naming the
-command (`adb ... timed out after 30 s; retrying once`). A second timeout raises
+Every read of the screen, in exploration and in the audit, runs its adb commands
+in turn: the UI dump, the screenshot and the dump again (see [Step log](#step-log)),
+then `dumpsys window`. Each one that runs longer than 30 seconds is stopped and run
+once more, with a warning naming the command (`adb ... timed out after 30 s;
+retrying once`). A second timeout of the screenshot or of `dumpsys window` raises
 `subprocess.TimeoutExpired`, which names the command and the timeout, and the run
-fails as it does when any other adb command fails. A normal read takes at most
-about 12 seconds, when a dump gives up waiting for an idle screen.
+fails as it does when any other adb command fails. A dump that times out twice is an
+unusable dump instead, and the run goes on. A normal command takes at most about
+12 seconds, when a dump gives up waiting for an idle screen.
 
 Screenshots are embedded through OpenRouter's
 [multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings), as
@@ -471,14 +477,34 @@ and every action they send in `graphs/<app_name>/steps/`, which the explored gra
 and its `_audited` copy share. Recording is always on.
 
 Each step has a zero-padded number. Its record is `<id>.json`, and a screenshot
-also has its image, `<id>.webp`. Every screenshot is encoded once, when it is
+also has its image, `<id>.webp`, and, unless its record says why not, its
+accessibility tree, `<id>.xml`. Every screenshot is encoded once, when it is
 taken: shrunk with LANCZOS to at most one million pixels and saved as lossless
 WebP. That image is the only copy kept: the models receive it and the graph refers
-to it. The image is written before its record, so every record names an
-image that exists. A later run continues the numbering after the highest record,
-and an image a crash left without a record is ignored and its number reused.
+to it. The image and the tree are written before the record, so every record names
+files that exist. A later run continues the numbering after the highest record, and
+an image or a tree a crash left without a record is ignored and its number reused.
 `image_emb.json` beside them holds the screenshots' image vectors (see
 [Embedding caches](#embedding-caches)).
+
+The tree is what `uiautomator dump --windows` prints, without the line it adds after
+the XML, so any XML tool opens `<id>.xml`. It lists every window on the screen, top
+to bottom, such as the app, a dialog, the keyboard and the status bar, with its type,
+layer and bounds, and each window's nodes with their text, content description,
+resource ID, class, bounds and state flags. Every capture pairs the tree with the
+screenshot: it dumps the tree, takes the screenshot and dumps the tree again. When
+the two dumps show different screens, ignoring `TYPE_SYSTEM` windows such as the
+status bar, whose clock changes every minute, the screenshot and the second dump are
+taken again, at most twice, and the dump right before the kept screenshot is kept.
+A dump that is unusable (adb fails, the output is empty or not UTF-8, an `ERROR:`
+message, XML that does not parse, or a root other than `<displays>`) is retried
+once, except `ERROR: could not get idle state.`, because that dump has already
+waited about ten seconds for one quiet second and a dump right after it fails the
+same way, and a dump that timed out twice, recorded as `adb timed out twice`,
+because the timeout has already run it again. Without a usable first dump the
+screenshot is kept without a tree. Dumping every window needs Android 11 (API level
+30) or later; exploration and `app-graph-audit --re-explore` check the device's
+level when they connect to it and stop with an error naming it when it is lower.
 
 Every record has `id`, `kind`, `run_id` (one per exploration or re-exploration
 run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
@@ -486,7 +512,7 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
+| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `ui_tree_error`, `null` when `<id>.xml` exists and otherwise why there is no tree, `ui_tree_retakes`, how many times the screenshot was taken again, and `ui_tree_settled`, whether the two dumps around the kept screenshot agreed; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
 
@@ -534,10 +560,15 @@ On 139 screenshots of the Settings app from a 1280x2856 emulator, each became a
 669x1493 image of 74 KB on average (176 KB at most) and took about 0.35 s to
 encode. An action or transition record is a few hundred bytes, and an identified
 observation's record about 2 KB; each vector in `image_emb.json` adds about 14 KB.
+On 69 screenshots of a 60-step exploration of Settings on a 1080x2400 emulator, a
+tree took 37 KB on average (90 KB at most, with the keyboard up), and a capture with
+its two dumps took 5.1 to 5.3 s, about 2.2 s more than one dump of the active window
+and a screenshot, with no model call.
 The log keeps every value shown on the screen and every text typed, passwords
-included, so treat a graph directory like the app's data. Run one exploration or
-re-exploration of an app at a time: two runs writing one step log reuse each
-other's numbers.
+included, and each tree keeps every text the screen exposes, the keyboard's and the
+status bar's included, so treat a graph directory like the app's data. Run one
+exploration or re-exploration of an app at a time: two runs writing one step log
+reuse each other's numbers.
 
 ### Graph nodes
 
@@ -594,9 +625,12 @@ the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
 Loading a graph fails, naming the nodes, when a node lists no observations, its
-representative is not one of them, or the representative's image is missing from
-`steps/`. A graph whose nodes do not list their observations cannot be loaded:
-explore the app again into a new graph directory.
+representative is not one of them, the representative's image is missing from
+`steps/`, or the representative has neither its tree there nor a record whose
+`ui_tree_error` says why it has none. Only the representative is checked. A graph
+whose nodes do not list their observations, or whose representatives have no tree
+and no recorded reason, cannot be loaded: explore the app again into a new graph
+directory.
 
 ### Graph edges
 
