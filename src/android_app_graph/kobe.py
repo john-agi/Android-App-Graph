@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -819,8 +818,7 @@ class Kobe:
                     "android.intent.category.LAUNCHER",
                     "1",
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                output="discard",
                 check=False,
             )
             if relaunch.returncode != 0:

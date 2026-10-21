@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +63,21 @@ def adb_executable() -> str:
 def run_adb(
     args: Sequence[str],
     *,
-    capture_output: bool = False,
-    stdout: int | None = None,
-    stderr: int | None = None,
+    output: Literal["capture", "discard"],
     errors: str | None = None,
     timeout: float | None = None,
     check: bool,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the adb on ``PATH`` with ``args``, decoding captured output as text."""
+    """Run the adb on ``PATH`` with ``args``, capturing its stdout and stderr as text or
+    discarding both.
+    """
+    capture = output == "capture"
+    sink = None if capture else subprocess.DEVNULL
     return subprocess.run(  # noqa: S603  # argv list without a shell; adb arguments come from this package's config and constants
         [adb_executable(), *args],
-        capture_output=capture_output,
-        stdout=stdout,
-        stderr=stderr,
+        capture_output=capture,
+        stdout=sink,
+        stderr=sink,
         text=True,
         errors=errors,
         timeout=timeout,
@@ -102,7 +104,7 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
                 "-n",
                 launch_activity,
             ],
-            capture_output=True,
+            output="capture",
             check=False,
         )
         if result.returncode == 0:
@@ -126,8 +128,7 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
             "android.intent.category.LAUNCHER",
             "1",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        output="discard",
         check=True,
     )
 
@@ -156,7 +157,7 @@ def restart_app(
     """
     config = controller.config
     force_stop = ["-s", config["device"]["udid"], "shell", "am", "force-stop", package_name]
-    stopped = run_adb(force_stop, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    stopped = run_adb(force_stop, output="discard", check=False)
     if stopped.returncode != 0:
         raise ForceStopRefusedError(stopped.returncode, stopped.args)
     app = {"name": app_name, "package_name": package_name, "launch_activity": launch_activity}
@@ -173,7 +174,7 @@ def soft_keyboard_hint() -> str:
     try:
         kb_check = run_adb(
             ["shell", "dumpsys", "input_method"],
-            capture_output=True,
+            output="capture",
             # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
             # best-effort probe; replace bad bytes instead of failing to decode them.
             errors="replace",
@@ -233,12 +234,12 @@ def grant_runtime_permissions(udid: str, package_name: str) -> None:
     a refusal is only logged.
     """
     shell = ["-s", udid, "shell"]
-    dumpsys = run_adb([*shell, "dumpsys", "package", package_name], capture_output=True, check=True)
+    dumpsys = run_adb([*shell, "dumpsys", "package", package_name], output="capture", check=True)
     permissions = _requested_permissions(dumpsys.stdout)
     granted = 0
     for permission in permissions:
         grant = run_adb(
-            [*shell, "pm", "grant", package_name, permission], capture_output=True, check=False
+            [*shell, "pm", "grant", package_name, permission], output="capture", check=False
         )
         if grant.returncode == 0:
             granted += 1
