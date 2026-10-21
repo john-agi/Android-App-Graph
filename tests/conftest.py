@@ -395,7 +395,8 @@ def write_member_graph() -> Callable[..., None]:
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
     the first its representative. Node ``n`` is described as ``Node n`` and member ``m``
     as ``Screen m``. Each image holds its observation ID, so a fake verifier can tell
-    which members it was shown.
+    which members it was shown. The vectors are tagged with the model
+    ``model_environment`` names.
     """
 
     def write(
@@ -404,7 +405,6 @@ def write_member_graph() -> Callable[..., None]:
         *,
         edges: tuple[dict[str, object], ...] = (),
         transitions: tuple[tuple[str, str, object, str, str], ...] = (),
-        model: str = "google/gemini-embedding-2",
     ) -> None:
         steps_dir = graph_steps_dir(path)
         steps_dir.mkdir(parents=True, exist_ok=True)
@@ -442,7 +442,7 @@ def write_member_graph() -> Callable[..., None]:
                 "to_node": to_node,
             }
             (steps_dir / f"{900000 + number}.json").write_text(json.dumps(record), "utf-8")
-        save_image_embeddings(steps_dir, vectors, model=model)
+        save_image_embeddings(steps_dir, vectors, model="google/gemini-embedding-2")
         document = {
             "package_name": "com.demo",
             "next_id": len(nodes),
