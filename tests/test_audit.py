@@ -43,7 +43,7 @@ def client() -> OpenRouter:
     return open_client("not-a-real-key")
 
 
-def _unreachable_verifier(**_kwargs: Any) -> dict[str, Any]:
+def _unreachable_verifier(**_kwargs: object) -> dict[str, Any]:
     msg = "verify_same_node must not be called for a skipped merge candidate"
     raise AssertionError(msg)
 
@@ -178,9 +178,9 @@ def test_verify_and_merge_nodes_merges_confirmed_pair(
         ("s0_home", {"reference_screenshot": "aaa", "page_description": "Home", "visit_count": 3}),
         ("s1_home", {"reference_screenshot": "bbb", "page_description": "Start", "visit_count": 1}),
     )
-    seen: dict[str, Any] = {}
+    seen: dict[str, object] = {}
 
-    def fake_verify(**kwargs: Any) -> dict[str, Any]:
+    def fake_verify(**kwargs: object) -> dict[str, Any]:
         seen.update(kwargs)
         return {"same": True, "reason": "identical screens"}
 
@@ -829,9 +829,9 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
     graph.add_edge("s0_home", "s1_detail", [_SWIPE], instruction="scroll to the detail card")
     reached = iter(["s0_home", "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args: next(reached))
-    described: list[dict[str, Any]] = []
+    described: list[dict[str, object]] = []
 
-    def describe(**kwargs: Any) -> str | None:
+    def describe(**kwargs: object) -> str | None:
         described.append(kwargs)
         return label
 

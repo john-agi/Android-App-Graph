@@ -945,7 +945,7 @@ def test_load_all_graphs_embeds_no_screenshot_of_a_graph_it_does_not_load(
         (path.parent / f"{app}_screenshots").mkdir()
         (path.parent / f"{app}_screenshots" / "n1.png").write_bytes(_SCREENSHOT)
 
-    def _no_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+    def _no_embedding(*_args: object, **_kwargs: object) -> list[float]:
         raise AssertionError("a graph that is not loaded needs no image embedding")
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _no_embedding)
@@ -1026,7 +1026,7 @@ def test_load_all_graphs_streams_screenshot_reads_lazily(
 
     reads_at_call: list[int] = []
 
-    def fake_embedding(*_args: Any, **_kwargs: Any) -> list[float]:
+    def fake_embedding(*_args: object, **_kwargs: object) -> list[float]:
         reads_at_call.append(reads_so_far)
         return [0.1, 0.2]
 
@@ -1068,7 +1068,7 @@ def test_load_all_graphs_writes_the_sidecar_once_per_graph(
     }
 
     def _flaky(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         if screenshot_b64 == b64_by_node["n2"]:
             msg = "embedding failed"
@@ -1125,7 +1125,7 @@ def test_load_all_graphs_persists_progress_before_an_interrupt_propagates(
     }
 
     def _interrupted_at_n3(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         if screenshot_b64 == b64_by_node["n3"]:
             raise _Interrupted
@@ -1758,7 +1758,7 @@ def test_runtime_image_embedding_propagates_an_error_without_asking_again(
     calls: list[str] = []
 
     def _fails(
-        _client: OpenRouter, screenshot_b64: str, *_args: Any, **_kwargs: Any
+        _client: OpenRouter, screenshot_b64: str, *_args: object, **_kwargs: object
     ) -> list[float]:
         calls.append(screenshot_b64)
         raise RuntimeError("embedding failed")
@@ -1973,7 +1973,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
 def test_identify_node_propagates_an_embedding_failure(
     monkeypatch: pytest.MonkeyPatch, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
-    def _always_fails(*_args: Any, **_kwargs: Any) -> list[float]:
+    def _always_fails(*_args: object, **_kwargs: object) -> list[float]:
         raise RuntimeError("embedding down")
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
@@ -1984,10 +1984,10 @@ def test_identify_node_propagates_an_embedding_failure(
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    seen: dict[str, Any] = {}
+    seen: dict[str, object] = {}
 
     def _fake_predict(
-        _client: object, _shot: str, instruction: str, **kwargs: Any
+        _client: object, _shot: str, instruction: str, **kwargs: object
     ) -> tuple[dict[str, Any], str]:
         seen["instruction"] = instruction
         seen.update(kwargs)
