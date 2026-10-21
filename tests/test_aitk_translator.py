@@ -63,15 +63,15 @@ def _write_graph(
 
 
 def test_after_last_think_tag_returns_none_without_a_tag() -> None:
-    assert aitk_translator._after_last_think_tag("no tag here") is None
+    assert aitk_translator.after_last_think_tag("no tag here") is None
 
 
 def test_after_last_think_tag_is_case_insensitive() -> None:
-    assert aitk_translator._after_last_think_tag("x</THINK>  y  ") == "y"
+    assert aitk_translator.after_last_think_tag("x</THINK>  y  ") == "y"
 
 
 def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
-    assert aitk_translator._after_last_think_tag("a</think>b</think>c") == "c"
+    assert aitk_translator.after_last_think_tag("a</think>b</think>c") == "c"
 
 
 @pytest.mark.parametrize(
@@ -124,7 +124,7 @@ def test_after_last_think_tag_uses_the_last_of_two_tags() -> None:
     ],
 )
 def test_parse_model_choice(raw: str, expected: str | None) -> None:
-    assert aitk_translator._parse_model_choice(raw, "ABCD") == expected
+    assert aitk_translator.parse_model_choice(raw, "ABCD") == expected
 
 
 def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_answer() -> None:
@@ -135,7 +135,7 @@ def test_parse_model_choice_treats_a_sentence_initial_article_as_no_explicit_ans
     article as a pick. "A is the match" is a pick: an article is never followed
     by a finite verb.
     """
-    assert aitk_translator._parse_model_choice("A login form is visible", "ABCD") is None
+    assert aitk_translator.parse_model_choice("A login form is visible", "ABCD") is None
 
 
 def test_parse_model_choice_trusts_an_explicit_label_as_written() -> None:
@@ -149,16 +149,16 @@ def test_parse_model_choice_trusts_an_explicit_label_as_written() -> None:
     later contrary signal.
     """
     assert (
-        aitk_translator._parse_model_choice("Answer: A because none of the others match", "ABCD")
+        aitk_translator.parse_model_choice("Answer: A because none of the others match", "ABCD")
         == "A"
     )
     assert (
-        aitk_translator._parse_model_choice(
+        aitk_translator.parse_model_choice(
             "Answer: A login screen is shown, none of them match", "ABCD"
         )
         == "A"
     )
-    assert aitk_translator._parse_model_choice("Answer: A login form; B is closer", "ABCD") == "A"
+    assert aitk_translator.parse_model_choice("Answer: A login form; B is closer", "ABCD") == "A"
 
 
 def test_parse_model_choice_explicit_label_requires_an_uppercase_letter() -> None:
@@ -171,12 +171,10 @@ def test_parse_model_choice_explicit_label_requires_an_uppercase_letter() -> Non
     which finds the real answer stated later, or nothing at all.
     """
     assert (
-        aitk_translator._parse_model_choice(
-            "Answer: a login screen, so the best match is C", "ABCD"
-        )
+        aitk_translator.parse_model_choice("Answer: a login screen, so the best match is C", "ABCD")
         == "C"
     )
-    assert aitk_translator._parse_model_choice("Answer: a", "ABCD") is None
+    assert aitk_translator.parse_model_choice("Answer: a", "ABCD") is None
 
 
 def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change() -> None:
@@ -191,11 +189,11 @@ def test_parse_model_choice_think_tag_offset_survives_case_folding_length_change
     (adjacent letters share no word boundary, so the correct answer is ``None``).
     """
     raw = "İ" * 3 + "</think>xyzB"
-    assert aitk_translator._parse_model_choice(raw, "ABCD") is None
+    assert aitk_translator.parse_model_choice(raw, "ABCD") is None
 
 
 def test_parse_model_choice_rejects_an_empty_reply() -> None:
-    assert aitk_translator._parse_model_choice("", "ABCD") is None
+    assert aitk_translator.parse_model_choice("", "ABCD") is None
 
 
 def test_parse_model_choice_rejects_multiple_letters() -> None:
@@ -205,17 +203,17 @@ def test_parse_model_choice_rejects_multiple_letters() -> None:
     later parsing (which finds no single trailing letter here) and end as ``None``,
     which triggers the existing retry path rather than being silently used as a pick.
     """
-    assert aitk_translator._parse_model_choice("BC", "ABCD") is None
+    assert aitk_translator.parse_model_choice("BC", "ABCD") is None
 
 
 def test_parse_model_choice_rejects_letters_outside_the_valid_set() -> None:
-    assert aitk_translator._parse_model_choice("H", "ABC") is None
+    assert aitk_translator.parse_model_choice("H", "ABC") is None
 
 
 @given(st.sampled_from(_LETTERS), st.sampled_from(["", " ", "\n\t"]))
 def test_parse_model_choice_accepts_any_bare_valid_letter(letter: str, padding: str) -> None:
     raw = f"{padding}{letter.lower()}{padding}"
-    assert aitk_translator._parse_model_choice(raw, _LETTERS) == letter
+    assert aitk_translator.parse_model_choice(raw, _LETTERS) == letter
 
 
 @given(
@@ -231,7 +229,7 @@ def test_parse_model_choice_never_picks_a_letter_from_lowercase_only_prose(
     "Answer:"/"Final answer:" form can end in ``None`` or an explicit "NONE",
     but never in one of the option letters.
     """
-    result = aitk_translator._parse_model_choice(sentence, _LETTERS)
+    result = aitk_translator.parse_model_choice(sentence, _LETTERS)
     assert result is None or result == "NONE"
 
 
@@ -249,7 +247,7 @@ def test_parse_model_choice_never_picks_a_letter_from_lowercase_only_prose(
     ],
 )
 def test_parse_record_output(raw: str, expected: str) -> None:
-    assert aitk_translator._parse_record_output(raw) == expected
+    assert aitk_translator.parse_record_output(raw) == expected
 
 
 _UNREADABLE_RECORD_REPLIES = [
@@ -268,13 +266,13 @@ _UNREADABLE_RECORD_REPLIES = [
 @pytest.mark.parametrize("raw", _UNREADABLE_RECORD_REPLIES)
 def test_parse_record_output_rejects_a_reply_without_its_information(raw: str) -> None:
     with pytest.raises(aitk_translator.RecordReplyError, match=r"^\[RECORD\] "):
-        aitk_translator._parse_record_output(raw)
+        aitk_translator.parse_record_output(raw)
 
 
 def test_parse_record_output_shows_the_start_of_a_rejected_reply() -> None:
     raw = "Nothing new is shown. " * 20
     with pytest.raises(aitk_translator.RecordReplyError) as caught:
-        aitk_translator._parse_record_output(raw)
+        aitk_translator.parse_record_output(raw)
     assert str(caught.value) == (
         f"[RECORD] the reply has no JSON object (reply begins {raw[:160]!r})"
     )
@@ -289,7 +287,7 @@ _fact_without_reply_markup = st.text(
 def test_parse_record_output_returns_any_fact_as_written(fact: str) -> None:
     """The alphabet leaves out "`" and "<": a fence or a ``</think>`` inside the fact
     is read as the reply's own markup, which no JSON round-trip has to survive."""
-    assert aitk_translator._parse_record_output(json.dumps({"information": fact})) == fact
+    assert aitk_translator.parse_record_output(json.dumps({"information": fact})) == fact
 
 
 @pytest.mark.parametrize(
@@ -305,21 +303,21 @@ def test_parse_record_output_returns_any_fact_as_written(fact: str) -> None:
     ],
 )
 def test_parse_one_step_instruction(raw: str, expected: str) -> None:
-    assert aitk_translator._parse_one_step_instruction(raw) == expected
+    assert aitk_translator.parse_one_step_instruction(raw) == expected
 
 
 @pytest.mark.parametrize("instruction", ['Tap "Save"', '"Press enter"'])
 def test_parse_one_step_instruction_keeps_every_quote(instruction: str) -> None:
     """The action model reads an instruction's quotes as written, so none is removed."""
-    assert aitk_translator._parse_one_step_instruction(instruction) == instruction
+    assert aitk_translator.parse_one_step_instruction(instruction) == instruction
 
 
 def test_parse_one_step_instruction_drops_everything_before_a_closing_think_tag() -> None:
-    assert aitk_translator._parse_one_step_instruction("Tap Search </think>") == ""
+    assert aitk_translator.parse_one_step_instruction("Tap Search </think>") == ""
 
 
 def test_parse_one_step_instruction_rejects_an_overlong_plan() -> None:
-    assert aitk_translator._parse_one_step_instruction("x" * 501) == ""
+    assert aitk_translator.parse_one_step_instruction("x" * 501) == ""
 
 
 def test_parse_one_step_instruction_think_tag_offset_survives_case_folding_length_change() -> None:
@@ -328,7 +326,7 @@ def test_parse_one_step_instruction_think_tag_offset_survives_case_folding_lengt
     not the lower-cased copy used only to find the tag.
     """
     raw = "<think>İ reasoning</think>Tap the Search button"
-    assert aitk_translator._parse_one_step_instruction(raw) == "Tap the Search button"
+    assert aitk_translator.parse_one_step_instruction(raw) == "Tap the Search button"
 
 
 @pytest.mark.parametrize(
@@ -342,29 +340,29 @@ def test_parse_one_step_instruction_think_tag_offset_survives_case_folding_lengt
     ],
 )
 def test_parse_one_step_instruction_rejects_generic_restatements(raw: str) -> None:
-    assert aitk_translator._parse_one_step_instruction(raw) == ""
+    assert aitk_translator.parse_one_step_instruction(raw) == ""
 
 
 def test_extract_json_object_finds_an_embedded_object() -> None:
-    assert aitk_translator._extract_json_object('noise {"choice": "A"} tail') == {"choice": "A"}
+    assert aitk_translator.extract_json_object('noise {"choice": "A"} tail') == {"choice": "A"}
 
 
 def test_extract_json_object_skips_braces_that_do_not_decode() -> None:
     text = 'prose {not json at all} then {"choice": "B"}'
-    assert aitk_translator._extract_json_object(text) == {"choice": "B"}
+    assert aitk_translator.extract_json_object(text) == {"choice": "B"}
 
 
 def test_extract_json_object_ignores_a_leading_array() -> None:
-    assert aitk_translator._extract_json_object('[1, 2] {"choice": "C"}') == {"choice": "C"}
+    assert aitk_translator.extract_json_object('[1, 2] {"choice": "C"}') == {"choice": "C"}
 
 
 @pytest.mark.parametrize("text", ["", "no object here", "[1, 2, 3]"])
 def test_extract_json_object_without_an_object(text: str) -> None:
-    assert aitk_translator._extract_json_object(text) is None
+    assert aitk_translator.extract_json_object(text) is None
 
 
 def test_parse_json_object_rejects_a_top_level_array() -> None:
-    assert aitk_translator._parse_json_object("[1, 2]") is None
+    assert aitk_translator.parse_json_object("[1, 2]") is None
 
 
 @pytest.mark.parametrize(
@@ -378,13 +376,13 @@ def test_parse_json_object_rejects_a_top_level_array() -> None:
     ],
 )
 def test_parse_json_reply(raw: str, expected: dict[str, Any] | None) -> None:
-    assert aitk_translator._parse_json_reply(raw) == expected
+    assert aitk_translator.parse_json_reply(raw) == expected
 
 
 def test_parse_json_reply_falls_back_to_the_whole_text() -> None:
     """A </think> tag with no object after it must not hide an object before it."""
     raw = '{"choice": "A"} </think> nothing usable here'
-    assert aitk_translator._parse_json_reply(raw) == {"choice": "A"}
+    assert aitk_translator.parse_json_reply(raw) == {"choice": "A"}
 
 
 def test_parse_json_reply_finds_the_think_tag_before_stripping_fences() -> None:
@@ -400,7 +398,7 @@ def test_parse_json_reply_finds_the_think_tag_before_stripping_fences() -> None:
         "On reflection C is right.</think>\n"
         '```json\n{"choice": "C", "instruction": "final"}\n```'
     )
-    assert aitk_translator._parse_json_reply(raw) == {"choice": "C", "instruction": "final"}
+    assert aitk_translator.parse_json_reply(raw) == {"choice": "C", "instruction": "final"}
 
 
 def test_parse_json_reply_think_tag_offset_survives_case_folding_length_change() -> None:
@@ -415,7 +413,7 @@ def test_parse_json_reply_think_tag_offset_survives_case_folding_length_change()
     top-level object.
     """
     raw = "İ" * 6 + '</think>{"a": {"choice": "WRONG"}, "choice": "B"}'
-    assert aitk_translator._parse_json_reply(raw) == {
+    assert aitk_translator.parse_json_reply(raw) == {
         "a": {"choice": "WRONG"},
         "choice": "B",
     }
@@ -431,7 +429,7 @@ def test_parse_json_reply_round_trips_json_objects(payload: dict[str, int]) -> N
     A key containing two triple-backtick runs makes fence-stripping eat part of
     the serialized JSON, which is not a property of arbitrary JSON round-tripping.
     """
-    assert aitk_translator._parse_json_reply(json.dumps(payload)) == payload
+    assert aitk_translator.parse_json_reply(json.dumps(payload)) == payload
 
 
 def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
@@ -449,7 +447,7 @@ def test_load_graph_from_json_reads_nodes_and_edges(tmp_path: Path) -> None:
         ],
         edges=[{"source": "n1", "target": "n2", "instructions": ["tap"], "visit_count": 2}],
     )
-    graph = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator.load_graph_from_json(path)
 
     assert set(graph.nodes) == {"n1", "n2"}
     assert graph.nodes["n1"]["page_description"] == "home"
@@ -474,7 +472,7 @@ def test_load_graph_from_json_keeps_non_empty_schema_deltas(tmp_path: Path) -> N
             {"source": "n2", "target": "n1", "schema_deltas": []},
         ],
     )
-    graph = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator.load_graph_from_json(path)
     assert graph.edges["n1", "n2"]["schema_deltas"] == [{"cart": {"before": 0, "after": 1}}]
     assert "schema_deltas" not in graph.edges["n2", "n1"]
 
@@ -489,7 +487,7 @@ def test_load_graph_from_json_records_the_reference_screenshot_path(tmp_path: Pa
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
-    graph = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator.load_graph_from_json(path)
 
     assert graph.nodes["n1"]["reference_screenshot_path"] == screenshots / "n1.png"
     assert graph.nodes["n2"]["reference_screenshot_path"] is None
@@ -501,7 +499,7 @@ def test_load_graph_from_json_falls_back_to_the_unaudited_screenshot_dir(tmp_pat
     screenshots.mkdir()
     (screenshots / "n1.png").write_bytes(_SCREENSHOT)
 
-    graph = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator.load_graph_from_json(path)
     assert graph.nodes["n1"]["reference_screenshot_path"] is not None
 
 
@@ -513,7 +511,7 @@ def test_load_graph_from_json_rejects_a_malformed_document(tmp_path: Path, paylo
     path = tmp_path / "demo.json"
     path.write_text(payload, encoding="utf-8")
     with pytest.raises(TypeError):
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
 
 
 def test_load_graph_from_json_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
@@ -523,7 +521,7 @@ def test_load_graph_from_json_accepts_a_file_with_only_nodes(tmp_path: Path) -> 
     path = tmp_path / "demo.json"
     path.write_text(json.dumps({"nodes": [{"id": "n1"}]}), encoding="utf-8")
 
-    graph = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator.load_graph_from_json(path)
 
     assert list(graph.nodes) == ["n1"]
     assert graph.number_of_edges() == 0
@@ -560,7 +558,7 @@ def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
             }
         ],
     )
-    graph = aitk_translator._load_graph_from_json(path)
+    graph = aitk_translator.load_graph_from_json(path)
 
     assert graph.nodes["n1"]["activity"] == ""
     assert graph.nodes["n1"]["page_description"] == ""
@@ -575,7 +573,7 @@ def test_load_graph_from_json_narrows_present_but_null_node_and_edge_fields(
 def test_load_graph_from_json_rejects_a_non_string_node_id(tmp_path: Path) -> None:
     path = _write_graph(tmp_path, nodes=[{"id": None}])
     with pytest.raises(TypeError, match="node id must be a string"):
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
 
 
 def test_load_graph_from_json_rejects_a_node_without_an_id(tmp_path: Path) -> None:
@@ -585,7 +583,7 @@ def test_load_graph_from_json_rejects_a_node_without_an_id(tmp_path: Path) -> No
     """
     path = _write_graph(tmp_path, nodes=[{"page_description": "x"}])
     with pytest.raises(TypeError, match="node id must be a string") as excinfo:
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
     assert str(path) in str(excinfo.value)
 
 
@@ -598,7 +596,7 @@ def test_load_graph_from_json_rejects_a_null_nodes_field_naming_the_path(
     path = tmp_path / "demo.json"
     path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
     with pytest.raises(TypeError, match="must contain list fields 'nodes' and 'edges'") as excinfo:
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
     assert str(path) in str(excinfo.value)
 
 
@@ -614,7 +612,7 @@ def test_load_graph_from_json_rejects_a_non_string_edge_endpoint(
 ) -> None:
     path = _write_graph(tmp_path, nodes=[{"id": "n1"}, {"id": "n2"}], edges=[edge])
     with pytest.raises(TypeError, match="edge endpoint must be a string"):
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
 
 
 def test_load_graph_from_json_rejects_an_edge_to_an_undefined_node(tmp_path: Path) -> None:
@@ -628,7 +626,7 @@ def test_load_graph_from_json_rejects_an_edge_to_an_undefined_node(tmp_path: Pat
         edges=[{"source": "n1", "target": "ghost"}],
     )
     with pytest.raises(ValueError, match="ghost"):
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
 
 
 def test_load_graph_from_json_rejects_an_edge_before_adding_any_edge(tmp_path: Path) -> None:
@@ -644,7 +642,7 @@ def test_load_graph_from_json_rejects_an_edge_before_adding_any_edge(tmp_path: P
         ],
     )
     with pytest.raises(ValueError, match="ghost"):
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
 
 
 def test_load_graph_from_json_rejects_a_bad_edge_before_looking_up_any_screenshot(
@@ -670,7 +668,7 @@ def test_load_graph_from_json_rejects_a_bad_edge_before_looking_up_any_screensho
     monkeypatch.setattr(aitk_translator, "reference_screenshot_path", counting_wrapper)
 
     with pytest.raises(ValueError, match="ghost"):
-        aitk_translator._load_graph_from_json(path)
+        aitk_translator.load_graph_from_json(path)
     assert calls == 0
 
 
@@ -761,7 +759,7 @@ def test_chat_completion_content_returns_the_reply_content(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.extend([chat_response(content="first"), chat_response(content="second")])
-    content = aitk_translator._chat_completion_content(
+    content = aitk_translator.chat_completion_content(
         router_client,
         settings=ModelSettings("m"),
         messages=[{"role": "user", "content": "test"}],
@@ -779,7 +777,7 @@ def test_chat_completion_content_records_its_usage_as_v2_chat(
     tracker = vlm_utils.TokenTracker()
     monkeypatch.setattr(vlm_utils, "token_tracker", tracker)
     router_responses.append(chat_response(content="first"))
-    aitk_translator._chat_completion_content(
+    aitk_translator.chat_completion_content(
         router_client,
         settings=ModelSettings("m"),
         messages=[{"role": "user", "content": "test"}],
@@ -2402,11 +2400,11 @@ def test_last_answer_signal_finds_none_after_a_szlig_heavy_prefix() -> None:
     shift a naive offset-based scan past the token entirely.
     """
     raw = "Straße Maße Größe Füße Süße Soße Fuß: none of them match"
-    assert aitk_translator._last_answer_signal(raw, "ABCD") == "NONE"
+    assert aitk_translator.last_answer_signal(raw, "ABCD") == "NONE"
 
 
 def test_last_answer_signal_returns_the_last_valid_letter() -> None:
-    assert aitk_translator._last_answer_signal("I see A here, but B is better", "ABCD") == "B"
+    assert aitk_translator.last_answer_signal("I see A here, but B is better", "ABCD") == "B"
 
 
 def test_last_answer_signal_is_ambiguous_when_both_a_letter_and_none_are_present() -> None:
@@ -2417,12 +2415,10 @@ def test_last_answer_signal_is_ambiguous_when_both_a_letter_and_none_are_present
     be resolved by asking again, not by picking whichever came last.
     """
     assert (
-        aitk_translator._last_answer_signal("Neither A nor B match; none of them.", "ABCD") is None
+        aitk_translator.last_answer_signal("Neither A nor B match; none of them.", "ABCD") is None
     )
     assert (
-        aitk_translator._last_answer_signal(
-            "B is the best match. None of the others match.", "ABCD"
-        )
+        aitk_translator.last_answer_signal("B is the best match. None of the others match.", "ABCD")
         is None
     )
 
@@ -2432,7 +2428,7 @@ def test_last_answer_signal_skips_a_sentence_initial_article() -> None:
     start of the text, reads as the English article, not a named answer
     letter, so it is not a signal.
     """
-    assert aitk_translator._last_answer_signal("A login form is visible", "ABCD") is None
+    assert aitk_translator.last_answer_signal("A login form is visible", "ABCD") is None
 
 
 def test_last_answer_signal_skips_an_article_after_a_colon() -> None:
@@ -2440,8 +2436,7 @@ def test_last_answer_signal_skips_an_article_after_a_colon() -> None:
     standalone "A" right after one reads as the article, not a named letter.
     """
     assert (
-        aitk_translator._last_answer_signal("Candidates: A login screen looks right", "ABCD")
-        is None
+        aitk_translator.last_answer_signal("Candidates: A login screen looks right", "ABCD") is None
     )
 
 
@@ -2450,11 +2445,11 @@ def test_last_answer_signal_treats_a_mid_sentence_article_looking_letter_as_a_le
     English article/pronoun when it is sentence-initial; mid-sentence it is a
     named letter even though a lowercase word follows.
     """
-    assert aitk_translator._last_answer_signal("I think A is right", "ABCD") == "A"
+    assert aitk_translator.last_answer_signal("I think A is right", "ABCD") == "A"
 
 
 def test_last_answer_signal_returns_none_without_any_signal() -> None:
-    assert aitk_translator._last_answer_signal("no letters at all", "ABCD") is None
+    assert aitk_translator.last_answer_signal("no letters at all", "ABCD") is None
 
 
 def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(

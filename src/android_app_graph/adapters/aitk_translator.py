@@ -208,7 +208,7 @@ Think easily and briefly, under 10 sentences if needed. Reply with ONLY the \
 one-step instruction. No explanations."""
 
 
-def _load_graph_from_json(path: Path) -> nx.DiGraph:
+def load_graph_from_json(path: Path) -> nx.DiGraph:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     # Run before anything else below: a graph with one bad node or edge must
@@ -279,7 +279,7 @@ def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
     for app_name, graph_file in iter_graph_files(graph_dir):
         logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
         try:
-            graph = _load_graph_from_json(graph_file)
+            graph = load_graph_from_json(graph_file)
         except Exception:
             logger.exception("Failed to load graph %s", graph_file)
             continue
@@ -301,7 +301,7 @@ def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
     return unique
 
 
-def _after_last_think_tag(text: str) -> str | None:
+def after_last_think_tag(text: str) -> str | None:
     """Return the text after the last ``</think>`` tag, stripped, or ``None`` if absent.
 
     Found with a case-insensitive regex on the original ``text``, never on
@@ -364,7 +364,7 @@ def _reads_as_article(letter: str, text: str, start: int, end: int) -> bool:
     return not prefix or prefix[-1] in ".!?:\n"
 
 
-def _last_answer_signal(text: str, valid_letters: str) -> str | None:
+def last_answer_signal(text: str, valid_letters: str) -> str | None:
     """Return free text's one answer signal -- a named letter or "NONE" -- or
     ``None`` when the text carries no signal, or carries both kinds.
 
@@ -397,7 +397,7 @@ def _last_answer_signal(text: str, valid_letters: str) -> str | None:
     return last_letter or None
 
 
-def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
+def parse_model_choice(raw: str, valid_letters: str) -> str | None:
     text = (raw or "").strip()
     answer = text.upper()
     if answer == "NONE":
@@ -405,9 +405,9 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     if len(answer) == 1 and answer in valid_letters:
         return answer
 
-    post_think = _after_last_think_tag(text)
+    post_think = after_last_think_tag(text)
     if post_think is not None:
-        parsed = _parse_model_choice(post_think, valid_letters)
+        parsed = parse_model_choice(post_think, valid_letters)
         if parsed:
             return parsed
 
@@ -438,15 +438,15 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
             return choice
 
     # Free text beyond an explicit "Answer:"/</think> form.
-    return _last_answer_signal(text, valid_letters)
+    return last_answer_signal(text, valid_letters)
 
 
-def _parse_one_step_instruction(raw: str) -> str:
+def parse_one_step_instruction(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
         return ""
 
-    post_think = _after_last_think_tag(text)
+    post_think = after_last_think_tag(text)
     if post_think is not None:
         text = post_think
 
@@ -474,7 +474,7 @@ def _parse_one_step_instruction(raw: str) -> str:
     return text
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
+def extract_json_object(text: str) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
     for idx, char in enumerate(text):
         if char != "{":
@@ -488,16 +488,16 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_json_object(text: str) -> dict[str, Any] | None:
+def parse_json_object(text: str) -> dict[str, Any] | None:
     """Parse ``text`` as a JSON object, else scan it for the first embedded one."""
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return _extract_json_object(text)
+        return extract_json_object(text)
     return parsed if isinstance(parsed, dict) else None
 
 
-def _parse_json_reply(raw: str) -> dict[str, Any] | None:
+def parse_json_reply(raw: str) -> dict[str, Any] | None:
     """Parse a RECORD or DECIDE reply's JSON object, preferring anything after ``</think>``.
 
     ``</think>`` is located on the raw text before fences are stripped, never
@@ -507,12 +507,12 @@ def _parse_json_reply(raw: str) -> dict[str, Any] | None:
     follows the tag and return the draft instead.
     """
     text = (raw or "").strip()
-    post_think = _after_last_think_tag(text)
+    post_think = after_last_think_tag(text)
     if post_think is not None:
-        parsed = _parse_json_object(strip_json_fences(post_think))
+        parsed = parse_json_object(strip_json_fences(post_think))
         if parsed is not None:
             return parsed
-    return _parse_json_object(strip_json_fences(text))
+    return parse_json_object(strip_json_fences(text))
 
 
 class RecordReplyError(ValueError):
@@ -523,13 +523,13 @@ def _unreadable_record_reply(problem: str, raw: str) -> RecordReplyError:
     return RecordReplyError(f"[RECORD] {problem} (reply begins {raw[:160]!r})")
 
 
-def _parse_record_output(raw: str) -> str:
+def parse_record_output(raw: str) -> str:
     """Return the fact a RECORD reply states, or ``""`` when it states none.
 
     Raises instead of returning ``None``: ``_ask_with_screenshot`` asks again on
     ``None``, and RECORD is asked only once.
     """
-    reply = _parse_json_reply(raw)
+    reply = parse_json_reply(raw)
     if reply is None:
         raise _unreadable_record_reply("the reply has no JSON object", raw)
     if "information" not in reply:
@@ -544,7 +544,7 @@ def _parse_record_output(raw: str) -> str:
     return information
 
 
-def _chat_completion_content(
+def chat_completion_content(
     client: OpenRouter,
     *,
     settings: ModelSettings,
@@ -762,7 +762,7 @@ class UIKobeV2Translator(BaseTranslator):
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
             try:
-                raw = _chat_completion_content(
+                raw = chat_completion_content(
                     self.client,
                     settings=self.action,
                     messages=[{"role": "user", "content": content}],
@@ -874,7 +874,7 @@ class UIKobeV2Translator(BaseTranslator):
         answer = self._ask_with_screenshot(
             prompt,
             screenshot,
-            lambda raw: _parse_model_choice(raw, letters[: len(top_k)]),
+            lambda raw: parse_model_choice(raw, letters[: len(top_k)]),
             "[IDENTIFY]",
         )
         logger.info("[IDENTIFY] model_pick=%s", answer)
@@ -904,9 +904,9 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
         )
 
-        # _parse_record_output never returns None, so None here can only mean
+        # parse_record_output never returns None, so None here can only mean
         # that the reply hit its token limit.
-        info = self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
+        info = self._ask_with_screenshot(prompt, screenshot, parse_record_output, "[RECORD]")
         if info is None:
             raise RecordReplyError("[RECORD] the reply hit its token limit")
         logger.info("[RECORD] parsed=%r", info)
@@ -1139,7 +1139,7 @@ class UIKobeV2Translator(BaseTranslator):
             options=options_text,
         )
 
-        result = self._ask_with_screenshot(prompt, screenshot, _parse_json_reply, "[DECIDE]")
+        result = self._ask_with_screenshot(prompt, screenshot, parse_json_reply, "[DECIDE]")
         if result is None:
             return {
                 "type": "free",
@@ -1195,7 +1195,7 @@ class UIKobeV2Translator(BaseTranslator):
         instruction = self._ask_with_screenshot(
             prompt,
             screenshot,
-            lambda raw: _parse_one_step_instruction(raw) or None,
+            lambda raw: parse_one_step_instruction(raw) or None,
             "[FREE]",
         )
 
