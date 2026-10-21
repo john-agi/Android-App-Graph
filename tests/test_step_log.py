@@ -710,7 +710,7 @@ def test_a_tap_on_another_element_than_the_planned_one_is_a_mis_tap_naming_both(
     ("dump", "point", "hit"),
     [
         pytest.param("windows_dialog_compose", (672, 600), "outside_dialog", id="outside a dialog"),
-        pytest.param("windows_keyboard", (672, 2500), "keyboard", id="the keyboard"),
+        pytest.param("windows_keyboard", (72, 2228), "keyboard", id="the keyboard"),
         pytest.param("windows_plain_list", (600, 50), "system", id="the status bar"),
     ],
 )

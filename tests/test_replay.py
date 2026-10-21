@@ -27,7 +27,7 @@ _HOME = xml_document(
     (Path(__file__).parent / "data" / "uiautomator_windows_plain_list.txt").read_text("utf-8")
 )
 _NETWORK = "Network &amp; internet"
-# The keyboard over the lower part of the screen, the Apps row included.
+# The keyboard over the lower part of the screen, with a key over the Apps row.
 _KEYBOARD = (
     '<window index="0" title="" bounds="[0,1100][1344,2992]" active="false" focused="false" '
     'accessibility-focused="false" id="90" layer="2" type="TYPE_INPUT_METHOD">'
@@ -36,7 +36,11 @@ _KEYBOARD = (
     'content-desc="" checkable="false" checked="false" clickable="false" enabled="true" '
     'focusable="false" focused="false" scrollable="false" long-clickable="false" '
     'password="false" selected="false" bounds="[0,1100][1344,2992]" drawing-order="0" '
-    'hint="" /></hierarchy></window>'
+    'hint=""><node index="0" text="" resource-id="" class="android.widget.FrameLayout" '
+    'package="com.google.android.inputmethod.latin" content-desc="q" checkable="false" '
+    'checked="false" clickable="true" enabled="true" focusable="true" focused="false" '
+    'scrollable="false" long-clickable="true" password="false" selected="false" '
+    'bounds="[0,1200][1344,1400]" drawing-order="1" hint="" /></node></hierarchy></window>'
 )
 _LOGGER = logging.getLogger("test.replay")
 
