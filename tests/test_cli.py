@@ -257,7 +257,8 @@ def test_check_avd_raises_file_not_found_naming_the_emulator_when_it_is_not_on_p
     """``FileNotFoundError`` is what ``subprocess.Popen`` raises for a missing program."""
 
     def must_not_start(*_args: object, **_kwargs: object) -> NoReturn:
-        raise AssertionError("the emulator started although it is not on PATH")
+        msg = "the emulator started although it is not on PATH"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
     monkeypatch.setattr(cli.subprocess, "Popen", must_not_start)
