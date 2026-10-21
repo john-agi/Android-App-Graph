@@ -29,6 +29,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    element_locator,
 )
 from android_app_graph.utils.vlm_utils import (
     ActionRequest,
@@ -96,7 +97,9 @@ class _Move:
     """One executed action, and what the step read before it that recording it needs.
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
-    wrote, which differs when an ``end`` is recorded as a back press.
+    wrote, which differs when an ``end`` is recorded as a back press. ``planned_element``
+    is the number the planner gave the element it acts on, and ``planned_target`` that
+    element as the source node listed it, or ``None`` when it named none.
     """
 
     source: str
@@ -105,6 +108,7 @@ class _Move:
     instruction: str
     planned_instruction: str
     planned_element: int | None
+    planned_target: dict[str, Any] | None
     detail_before: dict[str, Any]
     tokens_before: dict[str, int]
 
@@ -559,6 +563,7 @@ class Kobe:
             ),
             settings=self.instruction,
         )
+        planned_target = self.graph.planned_element(position.node, planned_element)
 
         action, _history_entry = predict_next_action(
             client=self.client,
@@ -591,6 +596,7 @@ class Kobe:
             instruction=recorded_instruction,
             planned_instruction=instruction,
             planned_element=planned_element,
+            planned_target=planned_target,
             detail_before=detail_before,
             tokens_before=tokens_before,
         )
@@ -606,6 +612,7 @@ class Kobe:
                 after=Observation.from_state(after),
                 instruction=move.planned_instruction,
                 element=move.planned_element,
+                element_locator=element_locator(move.planned_target),
                 action=move.action,
                 from_node=move.source,
                 to_node=target,
@@ -671,7 +678,7 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
-        self.graph.mark_element_explored(move.source, move.planned_element)
+        self.graph.mark_element_explored(move.source, move.planned_target)
         self.graph.maybe_normalize_node_edges(move.source)
         self.graph.total_steps_completed += 1
         self._log_step(move, new_node, max_steps)

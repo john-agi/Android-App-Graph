@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -60,8 +60,16 @@ from android_app_graph.step_log import (
     read_observation_record,
     save_image_embeddings,
 )
+from android_app_graph.ui_tree import (
+    Bounds,
+    Locator,
+    TreeElement,
+    actionable_elements,
+    thin_tree_reason,
+)
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
+    DescribeRequest,
     audit_graph,
     audit_merge_nodes,
     cosine_similarity,
@@ -80,6 +88,7 @@ NORMALIZE_EVERY_N_VISITS = 10
 # The verifier calls the short list may make for one screen; a checked expected node adds one.
 SHORT_LIST_VERIFICATIONS = 3
 _FIXED_INSTRUCTION_MAX_WORDS = 6
+_BOUNDS_COORDINATES = 4
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
@@ -129,16 +138,19 @@ class _ScreenDescription:
     page_description: str
     embedding: list[float]
     detail_snapshot: dict[str, object]
-    elements: list[dict[str, str]]
+    elements: list[dict[str, object]]
 
 
 class _Described(NamedTuple):
-    """What the describe call said about a screen, as an observation's record keeps it."""
+    """What the describe call said about a screen, as an observation's record keeps it:
+    its elements as a node stores them, without ``explored``, and ``thin_tree``, why
+    the elements are the model's own, or ``None`` when they are the tree's."""
 
     page_description: str
     state: dict[str, object]
-    elements: list[dict[str, str]]
+    elements: list[dict[str, object]]
     is_external_web: bool
+    thin_tree: str | None
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -146,6 +158,7 @@ class _Described(NamedTuple):
             "state": self.state,
             "elements": self.elements,
             "is_external_web": self.is_external_web,
+            "thin_tree": self.thin_tree,
         }
 
     @classmethod
@@ -163,15 +176,9 @@ class _Described(NamedTuple):
         return cls(
             description,
             as_object_dict(state),
-            [
-                {
-                    key: value
-                    for key, value in as_object_dict(element).items()
-                    if isinstance(value, str)
-                }
-                for element in elements
-            ],
+            [stored for element in elements if (stored := _stored_element(element)) is not None],
             describe.get("is_external_web") is True,
+            as_str(describe.get("thin_tree"), "") or None,
         )
 
 
@@ -323,26 +330,87 @@ def _merge_into_schema(
     return schema
 
 
-def _merge_elements(node_data: dict[str, Any], new_elements: list[dict[str, str]]) -> None:
-    """Merge newly observed elements into a node's existing element list.
+def _tree_element(element: TreeElement, description: str) -> dict[str, object]:
+    """Return a tree element as a node stores it, with the model's ``description``, or
+    its label or short class when the model wrote none."""
+    bounds = element.bounds
+    return {
+        "locator": element.locator.as_record(),
+        "description": description
+        or element.label
+        or element.locator.class_name.rsplit(".", 1)[-1],
+        "position": element.region,
+        "bounds": [bounds.left, bounds.top, bounds.right, bounds.bottom],
+        "source": "tree",
+    }
 
-    New elements whose description doesn't already exist are appended with
-    explored=False.  Existing elements are left untouched (preserving their
-    explored status).
+
+def _model_element(element: Mapping[str, str]) -> dict[str, object]:
+    """Return an element the model found as a node stores it: no locator or bounds."""
+    return {
+        "locator": None,
+        "description": element.get("description", ""),
+        "position": element.get("position", ""),
+        "bounds": None,
+        "source": "model",
+    }
+
+
+def _stored_element(raw: object) -> dict[str, object] | None:
+    """Return ``raw``, an element read from a file, as a node stores it, without
+    ``explored``; ``None`` when it has no description."""
+    element = as_object_dict(raw)
+    description = element.get("description")
+    if not isinstance(description, str):
+        return None
+    found = Locator.from_record(element.get("locator"))
+    bounds = as_int_list(element.get("bounds"))
+    return {
+        "locator": found.as_record() if found is not None else None,
+        "description": description,
+        "position": as_str(element.get("position"), ""),
+        "bounds": bounds if len(bounds) == _BOUNDS_COORDINATES else None,
+        "source": "tree" if found is not None else "model",
+    }
+
+
+def _element_key(element: Mapping[str, object]) -> tuple[str, object]:
+    """Return what identifies an element across visits: its locator, or the lowercased
+    description of an element without one."""
+    found = Locator.from_record(element.get("locator"))
+    if found is not None:
+        return ("locator", found)
+    return ("description", as_str(element.get("description"), "").lower())
+
+
+def element_locator(element: Mapping[str, object] | None) -> Locator | None:
+    """Return the locator of ``element``, a node's element, or ``None`` when it has none."""
+    return Locator.from_record(element.get("locator")) if element is not None else None
+
+
+def _merge_elements(
+    node_data: dict[str, Any], new_elements: Sequence[Mapping[str, object]]
+) -> None:
+    """Merge elements into a node's element list.
+
+    Elements merge by locator, and elements without one by lowercased description.
+    A new element is appended as stored, unexplored unless it says it is explored;
+    an element already listed keeps its fields, and is explored when either is.
     """
     existing = node_data.get("interactable_elements", [])
-    existing_descs = {e.get("description", "").lower() for e in existing}
-    for elem in new_elements:
-        desc = elem.get("description", "")
-        if desc.lower() not in existing_descs:
-            existing.append(
-                {
-                    "description": desc,
-                    "position": elem.get("position", ""),
-                    "explored": False,
-                }
-            )
-            existing_descs.add(desc.lower())
+    listed = {_element_key(element): element for element in existing}
+    for element in new_elements:
+        explored = element.get("explored") is True
+        key = _element_key(element)
+        if key in listed:
+            listed[key]["explored"] = listed[key].get("explored") is True or explored
+            continue
+        stored = _stored_element(element)
+        if stored is None:
+            continue
+        stored["explored"] = explored
+        existing.append(stored)
+        listed[key] = stored
     node_data["interactable_elements"] = existing
 
 
@@ -485,6 +553,17 @@ def _stored_screens(nodes: list[dict[str, Any]], steps_dir: Path) -> dict[str, _
             if described is not None and pixel_hash:
                 stored[member] = _StoredScreen(pixel_hash, described)
     return stored
+
+
+def _tree_elements(observation: Observation) -> tuple[list[TreeElement], str | None]:
+    """Return the elements of the observation's tree, and why the tree is too thin to
+    list them, or ``None`` when it is not."""
+    tree = observation.ui_tree
+    if tree is None:
+        return [], f"no tree: {observation.ui_tree_error}"
+    width, height = observation.screen_size
+    elements = actionable_elements(tree, observation.package, Bounds(0, 0, width, height))
+    return elements, thin_tree_reason(tree, observation.package, elements)
 
 
 class GraphManager:
@@ -699,20 +778,34 @@ class GraphManager:
         if exact is not None:
             return self._record_exact_match(observation, *exact, expected_node=expected_node)
 
-        described = _Described(
-            *describe_page_and_state(
-                client,
-                observation.screenshot_b64,
+        tree_elements, thin_tree = _tree_elements(observation)
+        if thin_tree is not None:
+            logger.info("Thin tree (%s); the description model finds the elements", thin_tree)
+        page_description, state, elements, is_external_web = describe_page_and_state(
+            client,
+            DescribeRequest(
+                screenshot_b64=observation.screenshot_b64,
                 existing_nodes=same_package.descriptions or None,
                 existing_keys=same_package.keys or None,
-                settings=page_detail,
-            )
+                tree_elements=None if thin_tree else [e.summary() for e in tree_elements],
+            ),
+            settings=page_detail,
         )
+        stored = (
+            [_model_element(element) for element in elements]
+            if thin_tree
+            else [
+                _tree_element(element, reply["description"])
+                for element, reply in zip(tree_elements, elements, strict=True)
+            ]
+        )
+        described = _Described(page_description, state, stored, is_external_web, thin_tree)
         logger.info(
-            "Describe model output: '%s' | state keys: %s | elements: %d",
+            "Describe model output: '%s' | state keys: %s | elements: %d from the %s",
             described.page_description,
             list(described.state.keys()) if described.state else "[]",
             len(described.elements),
+            "model" if thin_tree else "tree",
         )
         screen = _ScreenDescription(
             described.page_description, [], described.state, described.elements
@@ -997,15 +1090,9 @@ class GraphManager:
         node_data["activities"] = activities
 
     def _add_screen_node(self, screen: _ScreenDescription, package: str, activity: str) -> str:
+        """Add a node for the screen, whose first visit ``_record_visit`` records, its
+        elements included."""
         node_id = self._make_node_id(screen.page_description)
-        init_elements = [
-            {
-                "description": e.get("description", ""),
-                "position": e.get("position", ""),
-                "explored": False,
-            }
-            for e in screen.elements
-        ]
         self.graph.add_node(
             node_id,
             package=package,
@@ -1013,7 +1100,7 @@ class GraphManager:
             activities=[activity],
             page_description=screen.page_description,
             state_schema={},
-            interactable_elements=init_elements,
+            interactable_elements=[],
             description_embedding=screen.embedding,
             description_embedding_model=self.embedding_model,
             last_normalized_visit_milestone=0,
@@ -1023,7 +1110,7 @@ class GraphManager:
             "Created new node %s: %s (%d elements)",
             node_id,
             screen.page_description,
-            len(init_elements),
+            len(screen.elements),
         )
         return node_id
 
@@ -1031,7 +1118,7 @@ class GraphManager:
         self,
         node_id: str,
         detail_snapshot: dict[str, object],
-        elements: list[dict[str, str]],
+        elements: list[dict[str, object]],
         observation: Observation,
     ) -> None:
         node_data = self.graph.nodes[node_id]
@@ -1142,20 +1229,40 @@ class GraphManager:
         elements = self.graph.nodes[node_id].get("interactable_elements", [])
         return [e for e in elements if not e.get("explored", False)]
 
-    def mark_element_explored(self, node_id: str, element: int | None) -> None:
-        """``element`` is the 1-based number the planner saw in ``get_unexplored_elements``."""
-        if element is None:
-            return
+    def planned_element(self, node_id: str, number: int | None) -> dict[str, Any] | None:
+        """Return a copy of the element the planner named by ``number``, its 1-based
+        number in ``get_unexplored_elements(node_id)``, or ``None`` when it names none."""
+        if number is None:
+            return None
         unexplored = self.get_unexplored_elements(node_id)
-        if not 1 <= element <= len(unexplored):
+        if not 1 <= number <= len(unexplored):
             logger.warning(
-                "Element %d is not among the %d unexplored element(s) on %s; marking none",
-                element,
+                "Element %d is not among the %d unexplored element(s) on %s",
+                number,
                 len(unexplored),
                 node_id,
             )
+            return None
+        return dict(unexplored[number - 1])
+
+    def mark_element_explored(self, node_id: str, element: Mapping[str, object] | None) -> None:
+        """Mark the element of ``node_id`` that ``element``, one ``planned_element``
+        returned, names: the one with its locator, or for an element without one, with
+        its description."""
+        if element is None:
             return
-        named = unexplored[element - 1]
+        key = _element_key(element)
+        listed = (
+            self.graph.nodes[node_id].get("interactable_elements", [])
+            if node_id in self.graph
+            else []
+        )
+        named = next((stored for stored in listed if _element_key(stored) == key), None)
+        if named is None:
+            logger.warning(
+                "Element '%s' is not on %s; marking none", element.get("description"), node_id
+            )
+            return
         named["explored"] = True
         logger.info("Element explored on %s: '%s'", node_id, named.get("description", ""))
 

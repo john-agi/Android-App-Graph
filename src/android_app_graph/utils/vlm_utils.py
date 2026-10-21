@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -331,6 +331,18 @@ State rules:
 - If a parameter exists but you cannot determine its value, set it to null.
 - Do NOT nest objects or use arrays inside "state". Keep it flat.
 
+{elements_section}
+
+4. "is_external_web": true only when this screen shows web content from outside the app, \
+such as a browser or a custom tab that displays an address bar or a URL. The app's own \
+screens are false, including screens it renders in a web view and screens that mention \
+or link to a website, a privacy policy or terms of service.
+
+Return ONLY the JSON object, nothing else.
+Example:
+{example}"""
+
+MODEL_ELEMENTS_SECTION = """\
 3. "elements": A list of INTERACTABLE elements visible on this screen. Each element is an \
 object with two keys:
 - "description": Short label for the element (e.g. "search box", "share button", "Home tab"). \
@@ -347,25 +359,48 @@ Element rules:
   group them as ONE entry (e.g. "search result items" not each individual result). \
   Only include one representative entry for the group.
 - Do NOT include non-interactable text, decorative images, status bar icons, or background areas.
-- Order roughly top-to-bottom, left-to-right as they appear on screen.
+- Order roughly top-to-bottom, left-to-right as they appear on screen."""
 
-4. "is_external_web": true only when this screen shows web content from outside the app, \
-such as a browser or a custom tab that displays an address bar or a URL. The app's own \
-screens are false, including screens it renders in a web view and screens that mention \
-or link to a website, a privacy policy or terms of service.
+MODEL_ELEMENTS_EXAMPLE = """\
+{"page_description": "product search results", "state": {"search_query": "keyboard", \
+"filter_brand": "logitech"}, \
+"elements": [{"description": "back button", "position": "top left"}, \
+{"description": "search box", "position": "top center"}, \
+{"description": "filter button", "position": "top right"}, \
+{"description": "sort dropdown", "position": "below search box"}, \
+{"description": "product result items", "position": "center list"}, \
+{"description": "Home tab", "position": "bottom navigation bar"}, \
+{"description": "Cart tab", "position": "bottom navigation bar"}, \
+{"description": "Account tab", "position": "bottom navigation bar"}], \
+"is_external_web": false}"""
 
-Return ONLY the JSON object, nothing else.
-Example:
-{{"page_description": "product search results", "state": {{"search_query": "keyboard", "filter_brand": "logitech"}}, \
-"elements": [{{"description": "back button", "position": "top left"}}, \
-{{"description": "search box", "position": "top center"}}, \
-{{"description": "filter button", "position": "top right"}}, \
-{{"description": "sort dropdown", "position": "below search box"}}, \
-{{"description": "product result items", "position": "center list"}}, \
-{{"description": "Home tab", "position": "bottom navigation bar"}}, \
-{{"description": "Cart tab", "position": "bottom navigation bar"}}, \
-{{"description": "Account tab", "position": "bottom navigation bar"}}], \
-"is_external_web": false}}"""
+TREE_ELEMENTS_SECTION = """\
+3. "element_descriptions": The INTERACTABLE elements of this screen, read from its \
+accessibility tree, are numbered below, one per line: the element's class, its label in \
+quotes when it has one, and its region on screen.
+{element_lines}
+Describe each numbered element as an object with two keys:
+- "number": the element's number.
+- "description": Short label for what the element is or does (e.g. "search box", \
+  "share button", "Home tab", "Wi-Fi toggle"). Use the screen's own text/labels when \
+  available. Keep it under 8 words.
+
+Element rules:
+- Describe every number exactly once, in order. Do NOT add elements that are not listed.
+- A "list item" stands for every row of its list: describe the rows as a group \
+  (e.g. "search result items"), not only the row whose label is shown.
+- A "scrollable" element is a container a user swipes: name what it holds \
+  (e.g. "settings list")."""
+
+TREE_ELEMENTS_EXAMPLE = """\
+{"page_description": "product search results", "state": {"search_query": "keyboard", \
+"filter_brand": "logitech"}, \
+"element_descriptions": [{"number": 1, "description": "back button"}, \
+{"number": 2, "description": "search box"}, \
+{"number": 3, "description": "product result items"}, \
+{"number": 4, "description": "results list"}, \
+{"number": 5, "description": "Home tab"}], \
+"is_external_web": false}"""
 
 NODE_VERIFY_PROMPT = """\
 You are comparing two mobile app screenshots to decide if they are the SAME screen or DIFFERENT screens.
@@ -458,47 +493,76 @@ _EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "page_description": {
-            "type": "string",
-            "description": "The screen type in under 10 words, with no user-specific content.",
-        },
-        "state": {
-            "type": "object",
-            "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
-            "description": "Flat dynamic state: snake_case keys mapped to the current value, "
-            "or null when it cannot be read.",
-        },
-        "elements": {
-            "type": "array",
-            "description": "Interactable elements, roughly top to bottom and left to right.",
-            "items": {
+
+def _page_description_schema(elements_key: str, elements: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "page_description": {
+                "type": "string",
+                "description": "The screen type in under 10 words, with no user-specific content.",
+            },
+            "state": {
                 "type": "object",
-                "properties": {
-                    "description": {
-                        "type": "string",
-                        "description": "A short label, under 8 words, using the screen's text.",
-                    },
-                    "position": {
-                        "type": "string",
-                        "description": "The general screen region, never pixel coordinates.",
-                    },
-                },
-                "required": ["description", "position"],
-                "additionalProperties": False,
+                "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
+                "description": "Flat dynamic state: snake_case keys mapped to the current value, "
+                "or null when it cannot be read.",
+            },
+            elements_key: elements,
+            "is_external_web": {
+                "type": "boolean",
+                "description": "True only for web content from outside the app, such as a "
+                "browser or custom tab showing an address bar or URL; the app's own web views "
+                "are false.",
             },
         },
-        "is_external_web": {
-            "type": "boolean",
-            "description": "True only for web content from outside the app, such as a browser "
-            "or custom tab showing an address bar or URL; the app's own web views are false.",
+        "required": ["page_description", "state", elements_key, "is_external_web"],
+        "additionalProperties": False,
+    }
+
+
+_PAGE_DESCRIPTION_SCHEMA = _page_description_schema(
+    "elements",
+    {
+        "type": "array",
+        "description": "Interactable elements, roughly top to bottom and left to right.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A short label, under 8 words, using the screen's text.",
+                },
+                "position": {
+                    "type": "string",
+                    "description": "The general screen region, never pixel coordinates.",
+                },
+            },
+            "required": ["description", "position"],
+            "additionalProperties": False,
         },
     },
-    "required": ["page_description", "state", "elements", "is_external_web"],
-    "additionalProperties": False,
-}
+)
+
+_TREE_PAGE_DESCRIPTION_SCHEMA = _page_description_schema(
+    "element_descriptions",
+    {
+        "type": "array",
+        "description": "One description per numbered element, in order.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer", "description": "The element's number."},
+                "description": {
+                    "type": "string",
+                    "description": "A short label, under 8 words, using the screen's text.",
+                },
+            },
+            "required": ["number", "description"],
+            "additionalProperties": False,
+        },
+    },
+)
 
 _NODE_VERIFICATION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -835,8 +899,49 @@ def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
     }
 
 
+def _model_elements(payload: dict[str, object]) -> list[dict[str, str]]:
+    raw_elements = payload.get("elements", [])
+    if not isinstance(raw_elements, list):
+        msg = "Expected page elements to be a JSON array"
+        raise TypeError(msg)
+    elements: list[dict[str, str]] = []
+    for raw_element in raw_elements:
+        element = as_object_dict(raw_element)
+        label, position = element.get("description"), element.get("position")
+        if not isinstance(label, str) or not isinstance(position, str):
+            msg = "Expected element description and position strings"
+            raise TypeError(msg)
+        elements.append({"description": label, "position": position})
+    return elements
+
+
+def _element_descriptions(payload: dict[str, object], count: int) -> list[dict[str, str]]:
+    """Return one ``{"description"}`` per listed element, numbered from 1 to ``count``:
+    the first the model wrote for that number, or ``""`` when it wrote none."""
+    raw_descriptions = payload.get("element_descriptions", [])
+    if not isinstance(raw_descriptions, list):
+        msg = "Expected element descriptions to be a JSON array"
+        raise TypeError(msg)
+    descriptions: dict[int, str] = {}
+    for raw_description in raw_descriptions:
+        item = as_object_dict(raw_description)
+        number, description = as_int(item.get("number")), item.get("description")
+        if number is None or not isinstance(description, str):
+            msg = "Expected an element number and description string"
+            raise TypeError(msg)
+        if 1 <= number <= count:
+            descriptions.setdefault(number, description.strip())
+    if len(descriptions) < count:
+        logger.warning(
+            "The description model described %d of the %d listed elements",
+            len(descriptions),
+            count,
+        )
+    return [{"description": descriptions.get(number, "")} for number in range(1, count + 1)]
+
+
 def _parse_page_description(
-    text: str,
+    text: str, listed_elements: int | None
 ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     result = json.loads(strip_json_fences(text))
     if not isinstance(result, dict):
@@ -851,18 +956,11 @@ def _parse_page_description(
     if not isinstance(state, dict):
         msg = "Expected page state to be a JSON object"
         raise TypeError(msg)
-    raw_elements = payload.get("elements", [])
-    if not isinstance(raw_elements, list):
-        msg = "Expected page elements to be a JSON array"
-        raise TypeError(msg)
-    elements: list[dict[str, str]] = []
-    for raw_element in raw_elements:
-        element = as_object_dict(raw_element)
-        label, position = element.get("description"), element.get("position")
-        if not isinstance(label, str) or not isinstance(position, str):
-            msg = "Expected element description and position strings"
-            raise TypeError(msg)
-        elements.append({"description": label, "position": position})
+    elements = (
+        _model_elements(payload)
+        if listed_elements is None
+        else _element_descriptions(payload, listed_elements)
+    )
     is_external_web = payload.get("is_external_web", False)
     if not isinstance(is_external_web, bool):
         msg = "Expected is_external_web to be a boolean"
@@ -870,11 +968,27 @@ def _parse_page_description(
     return description, as_object_dict(state), elements, is_external_web
 
 
+@dataclass(frozen=True, kw_only=True)
+class DescribeRequest:
+    """The screen ``describe_page_and_state`` describes.
+
+    Attributes:
+        existing_nodes: Descriptions of nodes already in the graph (same package).
+        existing_keys: State keys already seen across same-package nodes.
+        tree_elements: The screen's elements read from its accessibility tree, one
+            short summary each, which the model numbers from 1 and describes; ``None``
+            asks the model to find the elements itself.
+    """
+
+    screenshot_b64: str
+    existing_nodes: list[str] | None = None
+    existing_keys: list[str] | None = None
+    tree_elements: Sequence[str] | None = None
+
+
 def describe_page_and_state(
     client: OpenRouter,
-    screenshot_b64: str,
-    existing_nodes: list[str] | None = None,
-    existing_keys: list[str] | None = None,
+    request: DescribeRequest,
     *,
     settings: ModelSettings,
 ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
@@ -884,15 +998,16 @@ def describe_page_and_state(
     node descriptions are provided as context so the model can disambiguate
     similar-looking screens (e.g. "start location search" vs "end location search").
 
-    Args:
-        existing_nodes: Descriptions of nodes already in the graph (same package).
-        existing_keys: State keys already seen across same-package nodes.
-
     Returns:
-        (page_description, state_dict, elements_list, is_external_web)
-        where elements_list is a list of {"description": str, "position": str} dicts
-        and is_external_web is true only for web content from outside the app.
+        (page_description, state_dict, elements_list, is_external_web), where
+        is_external_web is true only for web content from outside the app.
+        elements_list holds one {"description": str} per entry of the request's
+        ``tree_elements``, in order, with "" for one the model did not describe;
+        without them it holds the {"description": str, "position": str} the model
+        found.
     """
+    existing_nodes, existing_keys = request.existing_nodes, request.existing_keys
+    tree_elements = request.tree_elements
     if existing_nodes:
         nodes_list = "\n".join(f'  - "{d}"' for d in existing_nodes)
         existing_nodes_section = (
@@ -923,17 +1038,31 @@ def describe_page_and_state(
             "dynamic parameters that define this screen's state."
         )
 
+    if tree_elements is None:
+        elements_section, example = MODEL_ELEMENTS_SECTION, MODEL_ELEMENTS_EXAMPLE
+        schema = _PAGE_DESCRIPTION_SCHEMA
+        listed: int | None = None
+    else:
+        element_lines = "\n".join(
+            f"{number}. {summary}" for number, summary in enumerate(tree_elements, start=1)
+        )
+        elements_section = TREE_ELEMENTS_SECTION.format(element_lines=element_lines)
+        example = TREE_ELEMENTS_EXAMPLE
+        schema = _TREE_PAGE_DESCRIPTION_SCHEMA
+        listed = len(tree_elements)
     prompt = PAGE_DESCRIBE_AND_STATE_PROMPT.format(
         existing_nodes_section=existing_nodes_section,
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
+        elements_section=elements_section,
+        example=example,
     )
     messages: list[ChatMessagesTypedDict] = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                build_image_message(screenshot_b64),
+                build_image_message(request.screenshot_b64),
             ],
         }
     ]
@@ -946,12 +1075,10 @@ def describe_page_and_state(
             messages=messages,
             # Not strict: "state" has free-form keys, which strict mode cannot express
             # because it needs every key listed and additionalProperties false.
-            response_format=_structured_output(
-                "page_description", _PAGE_DESCRIPTION_SCHEMA, strict=False
-            ),
+            response_format=_structured_output("page_description", schema, strict=False),
         )
         try:
-            return _parse_page_description(message_text(resp))
+            return _parse_page_description(message_text(resp), listed)
         except (TypeError, ValueError) as exc:
             msg = "Malformed page description"
             raise UnusableOutputError(msg) from exc

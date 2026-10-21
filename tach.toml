@@ -82,6 +82,7 @@ depends_on = [
     "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.step_log",
+    "android_app_graph.ui_tree",
     "android_app_graph.utils",
     "android_app_graph.utils.vlm_utils",
 ]

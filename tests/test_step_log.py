@@ -26,7 +26,7 @@ from android_app_graph.step_log import (
     read_observation_record,
     save_image_embeddings,
 )
-from android_app_graph.ui_tree import IDLE_FAILURE, UiTree, parse_tree, xml_document
+from android_app_graph.ui_tree import IDLE_FAILURE, Locator, UiTree, parse_tree, xml_document
 
 HOME = {"activity": "com.demo.Home", "package": "com.demo"}
 # The tree AdbController keeps for a settled capture: a trimmed dump of Settings' home.
@@ -128,6 +128,7 @@ def test_get_state_records_one_webp_image_one_tree_and_one_observation(
         "screenshot": base64.b64encode(webp).decode("ascii"),
         "observation_id": "000000",
         "pixel_hash": pixel_hash(webp, 0),
+        "screen_size": [40, 30],
         "ui_tree": parse_tree(DOCUMENT),
     }
     record = _record(steps, "000000")
@@ -396,8 +397,30 @@ def test_source_restores_the_outer_source_when_the_block_raises(
     assert _record(steps, "000000")["source"] == "main_loop"
 
 
+_SEARCH = Locator("com.demo:id/search", "android.widget.Button", "Search", ("android:id/content",))
+
+
+@pytest.mark.parametrize(
+    ("element_locator", "recorded"),
+    [
+        pytest.param(
+            _SEARCH,
+            {
+                "resource_id": "com.demo:id/search",
+                "class": "android.widget.Button",
+                "label": "Search",
+                "ancestor_ids": ["android:id/content"],
+            },
+            id="a tree element",
+        ),
+        pytest.param(None, None, id="an element the model found"),
+    ],
+)
 def test_record_transition_names_both_screens_the_plan_and_the_nodes(
-    device: _Device, steps: Path
+    element_locator: Locator | None,
+    recorded: dict[str, object] | None,
+    device: _Device,
+    steps: Path,
 ) -> None:
     recorder = _recorder(device, steps)
     before = Observation.from_state(recorder.get_state())
@@ -410,6 +433,7 @@ def test_record_transition_names_both_screens_the_plan_and_the_nodes(
             after=after,
             instruction="Open search",
             element=2,
+            element_locator=element_locator,
             action={"action": "tap", "x": 5, "y": 6},
             from_node="s0_home",
             to_node="s1_search",
@@ -429,6 +453,7 @@ def test_record_transition_names_both_screens_the_plan_and_the_nodes(
         "after": "000002",
         "instruction": "Open search",
         "element": 2,
+        "element_locator": recorded,
         "action": {"action": "tap", "x": 5, "y": 6},
         "from_node": "s0_home",
         "to_node": "s1_search",
@@ -453,9 +478,27 @@ def test_observation_from_state_reads_a_recorded_state_with_its_tree_or_the_reas
         activity=HOME["activity"],
         package=HOME["package"],
         pixel_hash=state["pixel_hash"],
+        screen_size=(40, 30),
         ui_tree=tree,
         ui_tree_error=reason,
     )
+
+
+def test_the_screen_size_is_the_screenshot_s_before_it_is_shrunk(steps: Path) -> None:
+    """The tree's bounds are in the device's pixels, which the WebP image no longer has."""
+    state = _recorder(_Device(_png((1344, 2992), "white")), steps).get_state()
+
+    assert state["screen_size"] == [1344, 2992]
+    assert Observation.from_state(state).screen_size == (1344, 2992)
+    assert _record(steps, "000000")["height"] < 2992
+
+
+@pytest.mark.parametrize("size", [None, [1344], ["wide", "tall"]])
+def test_a_state_without_a_screen_size_reads_as_no_area(size: object, steps: Path) -> None:
+    state = _recorder(_Device(_png((40, 30), "white")), steps).get_state()
+    state["screen_size"] = size
+
+    assert Observation.from_state(state).screen_size == (0, 0)
 
 
 def test_observation_from_state_rejects_a_state_the_recorder_did_not_return(

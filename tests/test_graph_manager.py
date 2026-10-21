@@ -28,7 +28,7 @@ from openrouter import OpenRouter
 from PIL import Image, ImageDraw
 
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
-from android_app_graph.ui_tree import parse_tree
+from android_app_graph.ui_tree import Bounds, Locator, actionable_elements, parse_tree
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
@@ -41,7 +41,9 @@ from android_app_graph.utils.graph_manager import (
     ScreenQuery,
     _merge_elements,
     _merge_into_schema,
+    element_locator,
 )
+from android_app_graph.utils.vlm_utils import DescribeRequest
 
 PACKAGE = "com.example.app"
 HOME = "com.example.app.HomeActivity"
@@ -110,17 +112,45 @@ def make_manager(steps_dir: Path | None = None) -> GraphManager:
     return gm
 
 
-# The smallest document the tree parser accepts: a dump that found no window.
+# The smallest document the tree parser accepts: a dump that found no window, so its
+# screen's elements are the description model's.
 EMPTY_TREE = "<displays />"
+# The screen of the uiautomator fixtures, a Pixel 8 Pro emulator's.
+SCREEN_SIZE = (1344, 2992)
+_DATA = Path(__file__).parent / "data"
 
 
-def write_observation_image(steps_dir: Path, image: bytes) -> str:
+def fixture_tree(name: str) -> str:
+    """A ``uiautomator dump --windows`` fixture from ``tests/data``."""
+    return (_DATA / f"uiautomator_{name}.txt").read_text(encoding="utf-8")
+
+
+def model_element(
+    description: str, position: str = "", *, explored: bool = False
+) -> dict[str, object]:
+    """An element the description model found, as a node stores it."""
+    return {
+        "locator": None,
+        "description": description,
+        "position": position,
+        "bounds": None,
+        "source": "model",
+        "explored": explored,
+    }
+
+
+def _without_explored(element: dict[str, object]) -> dict[str, object]:
+    """``element`` as an observation's describe output keeps it."""
+    return {key: value for key, value in element.items() if key != "explored"}
+
+
+def write_observation_image(steps_dir: Path, image: bytes, tree: str = EMPTY_TREE) -> str:
     """Write an observation image and its tree into ``steps_dir`` under the next free
     step ID, as a StepRecorder would, and return the ID."""
     steps_dir.mkdir(parents=True, exist_ok=True)
     observation_id = f"{len(list(steps_dir.glob('*.webp'))):06d}"
     (steps_dir / f"{observation_id}.webp").write_bytes(image)
-    (steps_dir / f"{observation_id}.xml").write_text(EMPTY_TREE, encoding="utf-8")
+    (steps_dir / f"{observation_id}.xml").write_text(tree, encoding="utf-8")
     return observation_id
 
 
@@ -151,10 +181,15 @@ class Screens:
     steps_dir: Path
 
     def __call__(
-        self, activity: str = HOME, screenshot: str = SHOT_A, package: str = PACKAGE
+        self,
+        activity: str = HOME,
+        screenshot: str = SHOT_A,
+        package: str = PACKAGE,
+        tree: str = EMPTY_TREE,
     ) -> Observation:
-        observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot))
+        observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot), tree)
         record = {"id": observation_id, "kind": "observation", "package": package}
+        record["pixel_hash"] = fake_pixel_hash(screenshot)
         (self.steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
         return Observation(
             observation_id,
@@ -162,7 +197,8 @@ class Screens:
             activity,
             package,
             fake_pixel_hash(screenshot),
-            parse_tree(EMPTY_TREE),
+            SCREEN_SIZE,
+            parse_tree(tree),
             None,
         )
 
@@ -228,13 +264,14 @@ class FakeVlm:
     def describe_page_and_state(
         self,
         client: OpenRouter | None,
-        screenshot_b64: str,
-        existing_nodes: list[str] | None = None,
-        existing_keys: list[str] | None = None,
+        request: DescribeRequest,
         settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool]:
-        call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
-        call.update(existing_nodes=existing_nodes, existing_keys=existing_keys)
+        """Return the next scripted description; given tree elements, its elements are
+        their descriptions, one ``{"description"}`` each."""
+        call = {"client": client, "screenshot": request.screenshot_b64, "settings": settings}
+        call.update(existing_nodes=request.existing_nodes, existing_keys=request.existing_keys)
+        call.update(tree_elements=request.tree_elements)
         self.calls.append(("describe", call))
         description, state, elements = self.descriptions.pop(0)
         return description, state, elements, description in self.external_web
@@ -323,9 +360,7 @@ def test_merge_into_schema_mutates_and_returns_the_same_dict() -> None:
 def test_merge_elements_appends_new_elements_as_unexplored() -> None:
     node_data: dict[str, Any] = {"interactable_elements": []}
     _merge_elements(node_data, [{"description": "Search box", "position": "10,20"}])
-    assert node_data["interactable_elements"] == [
-        {"description": "Search box", "position": "10,20", "explored": False}
-    ]
+    assert node_data["interactable_elements"] == [model_element("Search box", "10,20")]
 
 
 def test_merge_elements_deduplicates_case_insensitively() -> None:
@@ -398,9 +433,7 @@ def test_identify_state_creates_the_first_node(vlm: FakeVlm, screen: Screens) ->
     assert node["state_schema"] == {"tab": ["home"]}
     assert node["observations"] == [observation.observation_id]
     assert node["representative_observation"] == observation.observation_id
-    assert node["interactable_elements"] == [
-        {"description": "Search box", "position": "10,20", "explored": False}
-    ]
+    assert node["interactable_elements"] == [model_element("Search box", "10,20")]
     assert gm.image_vector(observation.observation_id) == ANY_IMAGE
 
 
@@ -419,8 +452,9 @@ def test_identify_state_records_the_describe_output_and_the_decision(
     assert record["describe"] == {
         "page_description": "Home screen",
         "state": {"tab": "home"},
-        "elements": elements,
+        "elements": [_without_explored(model_element("Search box", "10,20"))],
         "is_external_web": False,
+        "thin_tree": "0 actionable element(s), fewer than 1",
     }
     assert record["identify"] == {
         "stage": "new",
@@ -478,8 +512,9 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
     assert record["describe"] == {
         "page_description": "Home screen",
         "state": {"tab": "home"},
-        "elements": elements,
+        "elements": [_without_explored(model_element("Search box", "10,20"))],
         "is_external_web": False,
+        "thin_tree": "0 actionable element(s), fewer than 1",
         "copied_from": first_observation.observation_id,
     }
     assert record["identify"] == {
@@ -1533,36 +1568,61 @@ def _add_home_with_two_unexplored_elements(gm: GraphManager) -> None:
         "s0_home",
         "Home screen",
         interactable_elements=[
-            {"description": "search box", "explored": True},
-            {"description": "Turn on dark mode toggle", "explored": False},
-            {"description": "Compose FAB", "explored": False},
+            model_element("search box", explored=True),
+            model_element("Turn on dark mode toggle"),
+            model_element("Compose FAB"),
         ],
     )
 
 
-def test_mark_element_explored_counts_from_the_first_unexplored_element() -> None:
+def test_the_planned_element_counts_from_the_first_unexplored_element() -> None:
     gm = make_manager()
     _add_home_with_two_unexplored_elements(gm)
 
-    gm.mark_element_explored("s0_home", 2)
+    planned = gm.planned_element("s0_home", 2)
+    gm.mark_element_explored("s0_home", planned)
 
-    assert gm.get_unexplored_elements("s0_home") == [
-        {"description": "Turn on dark mode toggle", "explored": False}
-    ]
+    assert planned == model_element("Compose FAB")
+    assert gm.get_unexplored_elements("s0_home") == [model_element("Turn on dark mode toggle")]
 
 
 @pytest.mark.parametrize("element", [0, 3, -1])
-def test_mark_element_explored_outside_the_unexplored_list_marks_nothing_and_warns(
+def test_a_planned_element_outside_the_unexplored_list_is_none_and_warns(
     element: int, caplog: pytest.LogCaptureFixture
 ) -> None:
     gm = make_manager()
     _add_home_with_two_unexplored_elements(gm)
 
     with caplog.at_level("WARNING"):
-        gm.mark_element_explored("s0_home", element)
+        planned = gm.planned_element("s0_home", element)
+    gm.mark_element_explored("s0_home", planned)
 
+    assert planned is None
     assert len(gm.get_unexplored_elements("s0_home")) == 2
     assert f"Element {element} is not among the 2 unexplored element(s) on s0_home" in caplog.text
+
+
+def test_no_planned_element_is_none_without_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    gm = make_manager()
+    _add_home_with_two_unexplored_elements(gm)
+
+    with caplog.at_level("WARNING"):
+        assert gm.planned_element("s0_home", None) is None
+
+    assert caplog.text == ""
+
+
+def test_marking_an_element_the_node_does_not_list_marks_nothing_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gm = make_manager()
+    _add_home_with_two_unexplored_elements(gm)
+
+    with caplog.at_level("WARNING"):
+        gm.mark_element_explored("s0_home", model_element("Share button"))
+
+    assert len(gm.get_unexplored_elements("s0_home")) == 2
+    assert "Element 'Share button' is not on s0_home; marking none" in caplog.text
 
 
 def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:
@@ -4387,3 +4447,243 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
         with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):
             compare()
         assert router_requests == []
+
+
+PLAIN_LIST = fixture_tree("windows_plain_list")
+PLAIN_LIST_SUMMARIES = [
+    'LinearLayout "Search Settings" (top)',
+    "ScrollView, scrollable (center)",
+    'LinearLayout "Network & internet" (top)',
+    'LinearLayout "Apps" (center)',
+]
+PLAIN_LIST_DESCRIPTIONS = ["search bar", "settings list", "Network & internet", "Apps"]
+
+
+def described(*descriptions: str) -> list[dict[str, str]]:
+    """What the description model returns for listed tree elements."""
+    return [{"description": description} for description in descriptions]
+
+
+def plain_list_locators() -> list[dict[str, object]]:
+    tree = parse_tree(PLAIN_LIST)
+    screen_bounds = Bounds(0, 0, *SCREEN_SIZE)
+    return [
+        element.locator.as_record() for element in actionable_elements(tree, PACKAGE, screen_bounds)
+    ]
+
+
+def tree_element(label: str, description: str = "", *, explored: bool = False) -> dict[str, object]:
+    """An element read from a tree, as a node stores it, located by ``label``."""
+    return {
+        "locator": Locator("", "android.widget.Button", label, ("a:id/content",)).as_record(),
+        "description": description or label,
+        "position": "top",
+        "bounds": [0, 0, 10, 10],
+        "source": "tree",
+        "explored": explored,
+    }
+
+
+def test_identify_state_lists_the_tree_s_elements_and_the_model_only_describes_them(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, described(*PLAIN_LIST_DESCRIPTIONS)))
+    gm = make_manager(screen.steps_dir)
+    observation = screen(tree=PLAIN_LIST)
+
+    node_id = gm.identify_state(observation)
+
+    assert vlm.kinds() == ["image", "describe", "embed"]
+    assert vlm.calls[1][1]["tree_elements"] == PLAIN_LIST_SUMMARIES
+    elements = gm.graph.nodes[node_id]["interactable_elements"]
+    assert [element["description"] for element in elements] == PLAIN_LIST_DESCRIPTIONS
+    assert [element["locator"] for element in elements] == plain_list_locators()
+    assert elements[2] == {
+        "locator": plain_list_locators()[2],
+        "description": "Network & internet",
+        "position": "top",
+        "bounds": [0, 699, 1344, 917],
+        "source": "tree",
+        "explored": False,
+    }
+    describe = screen.record(observation)["describe"]
+    assert describe["elements"] == [_without_explored(element) for element in elements]
+    assert describe["thin_tree"] is None
+
+
+def test_an_element_the_model_leaves_undescribed_takes_its_label_or_class(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, described("", "", "", "Apps menu")))
+    gm = make_manager(screen.steps_dir)
+
+    node_id = gm.identify_state(screen(tree=PLAIN_LIST))
+
+    assert [e["description"] for e in gm.graph.nodes[node_id]["interactable_elements"]] == [
+        "Search Settings",
+        "ScrollView",
+        "Network & internet",
+        "Apps menu",
+    ]
+
+
+def test_two_visits_whose_descriptions_differ_keep_one_element_per_locator(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, described(*PLAIN_LIST_DESCRIPTIONS)))
+    vlm.descriptions.append(
+        ("Home screen", {}, described("search field", "main list", "Network", "Apps menu"))
+    )
+    vlm.verdicts.append({"same": True, "reason": "the same settings page"})
+    gm = make_manager(screen.steps_dir)
+    first = gm.identify_state(screen(screenshot=SHOT_A, tree=PLAIN_LIST))
+
+    second = gm.identify_state(screen(screenshot=SHOT_B, tree=PLAIN_LIST))
+
+    assert second == first
+    assert vlm.kinds().count("describe") == 2
+    elements = gm.graph.nodes[first]["interactable_elements"]
+    assert [element["description"] for element in elements] == PLAIN_LIST_DESCRIPTIONS
+    assert [element["locator"] for element in elements] == plain_list_locators()
+
+
+def test_a_thin_tree_falls_back_to_the_model_s_elements(vlm: FakeVlm, screen: Screens) -> None:
+    vlm.descriptions.append(
+        ("Article page", {}, [{"description": "article body", "position": "center"}])
+    )
+    gm = make_manager(screen.steps_dir)
+    observation = screen(tree=fixture_tree("windows_web_view"))
+
+    node_id = gm.identify_state(observation)
+
+    assert vlm.calls[1][1]["tree_elements"] is None
+    assert gm.graph.nodes[node_id]["interactable_elements"] == [
+        model_element("article body", "center")
+    ]
+    describe = screen.record(observation)["describe"]
+    assert describe["thin_tree"] == "a WebView covers most of the window"
+
+
+def test_an_observation_without_a_tree_falls_back_naming_why(vlm: FakeVlm, screen: Screens) -> None:
+    vlm.descriptions.append(("Home screen", {}, [{"description": "Menu", "position": "top"}]))
+    gm = make_manager(screen.steps_dir)
+    observation = dataclasses.replace(screen(), ui_tree=None, ui_tree_error="empty output")
+
+    gm.identify_state(observation)
+
+    assert vlm.calls[1][1]["tree_elements"] is None
+    assert screen.record(observation)["describe"]["thin_tree"] == "no tree: empty output"
+
+
+def test_an_exact_match_records_the_member_s_elements_with_their_locators_without_describing(
+    vlm: FakeVlm, screen: Screens, tmp_path: Path
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, described(*PLAIN_LIST_DESCRIPTIONS)))
+    gm = make_manager(screen.steps_dir)
+    member = screen(tree=PLAIN_LIST)
+    node_id = gm.identify_state(member)
+    gm.save_graph(tmp_path / "app.json")
+    loaded = make_manager()
+    loaded.load_graph(tmp_path / "app.json")
+
+    copy = screen(tree=PLAIN_LIST)
+    assert loaded.identify_state(copy) == node_id
+
+    assert vlm.kinds() == ["image", "describe", "embed", "image"]
+    copied = screen.record(copy)["describe"]
+    assert copied["copied_from"] == member.observation_id
+    assert copied["elements"] == screen.record(member)["describe"]["elements"]
+    assert [element["locator"] for element in copied["elements"]] == plain_list_locators()
+    assert copied["thin_tree"] is None
+
+
+def test_merge_elements_merges_tree_elements_by_locator_and_the_others_by_description() -> None:
+    node_data: dict[str, Any] = {}
+    _merge_elements(node_data, [tree_element("Search"), {"description": "Menu", "position": "top"}])
+
+    _merge_elements(
+        node_data,
+        [
+            tree_element("Search", "search field"),
+            {"description": "menu", "position": "elsewhere"},
+            {"description": "Search", "position": "top"},
+            tree_element("Share"),
+        ],
+    )
+
+    assert node_data["interactable_elements"] == [
+        tree_element("Search"),
+        model_element("Menu", "top"),
+        model_element("Search", "top"),
+        tree_element("Share"),
+    ]
+
+
+def test_merge_elements_skips_an_element_without_a_description() -> None:
+    node_data: dict[str, Any] = {}
+
+    _merge_elements(node_data, [{"position": "top"}, {"description": "Menu"}])
+
+    assert node_data["interactable_elements"] == [model_element("Menu")]
+
+
+def test_merging_two_nodes_keeps_an_element_explored_in_either() -> None:
+    gm = make_manager()
+    add_screen(
+        gm,
+        "s0_home",
+        "Home screen",
+        interactable_elements=[tree_element("Search"), model_element("Menu", explored=True)],
+    )
+    add_screen(
+        gm,
+        "s1_home_two",
+        "Home screen again",
+        interactable_elements=[
+            tree_element("Search", "search field", explored=True),
+            model_element("menu"),
+        ],
+    )
+
+    assert gm.merge_nodes("s0_home", "s1_home_two") is True
+
+    assert gm.graph.nodes["s0_home"]["interactable_elements"] == [
+        tree_element("Search", explored=True),
+        model_element("Menu", explored=True),
+    ]
+
+
+def test_marking_the_planned_element_marks_the_one_with_its_locator() -> None:
+    """The planner's number indexes the unexplored elements, which marking another
+    element renumbers."""
+    gm = make_manager()
+    add_screen(
+        gm,
+        "s0_home",
+        "Home screen",
+        interactable_elements=[tree_element("Search"), tree_element("Share"), tree_element("Help")],
+    )
+    planned = gm.planned_element("s0_home", 2)
+    gm.mark_element_explored("s0_home", tree_element("Search"))
+
+    gm.mark_element_explored("s0_home", planned)
+
+    assert planned == tree_element("Share")
+    assert gm.get_unexplored_elements("s0_home") == [tree_element("Help")]
+    assert element_locator(planned) == Locator(
+        "", "android.widget.Button", "Share", ("a:id/content",)
+    )
+
+
+def test_marking_an_element_of_a_node_no_longer_in_the_graph_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        make_manager().mark_element_explored("s9_missing", model_element("Menu"))
+
+    assert "Element 'Menu' is not on s9_missing; marking none" in caplog.text
+
+
+def test_an_element_without_a_locator_has_none() -> None:
+    assert element_locator(model_element("Menu")) is None
+    assert element_locator(None) is None
