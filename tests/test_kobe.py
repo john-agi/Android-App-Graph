@@ -344,13 +344,13 @@ def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
         ]
     )
     home = kobe.graph.identify_state(
-        Observation("000000", png_screenshot, "com.demo.Home", "com.demo")
+        Observation("000000", png_screenshot, "com.demo.Home", "com.demo", "")
     )
 
     for observation_id in ("000001", "000002"):
         with pytest.raises(OpenRouterError):
             kobe.graph.identify_state(
-                Observation(observation_id, png_screenshot, "com.demo.Settings", "com.demo")
+                Observation(observation_id, png_screenshot, "com.demo.Settings", "com.demo", "")
             )
         assert list(kobe.graph.graph) == [home]
 
@@ -379,7 +379,7 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
         )
     # The replay device reports com.demo.Home, so identifying its screen misses the cache.
     node = replaying_kobe.graph.identify_state(
-        Observation("splash", png_screenshot, "com.demo.Splash", "com.demo")
+        Observation("splash", png_screenshot, "com.demo.Splash", "com.demo", "")
     )
     # A representative would add a verify request.
     replaying_kobe.graph.graph.nodes[node].pop("representative_observation")

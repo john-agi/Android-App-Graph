@@ -136,6 +136,11 @@ def observation_image_path(steps: Path, observation_id: str) -> Path:
     return steps / f"{observation_id}.webp"
 
 
+def image_embeddings_path(steps: Path) -> Path:
+    """Return where the step log ``steps`` keeps its observations' image vectors."""
+    return steps / "image_emb.json"
+
+
 def observation_image_b64(steps: Path, observation_id: str) -> str:
     """Return the WebP image of an observation in the step log ``steps`` as base64.
 

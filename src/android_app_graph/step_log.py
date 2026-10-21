@@ -5,13 +5,15 @@ Each step has a zero-padded number. Its record is ``<id>.json``; an observation'
 image, the screenshot as ``screen_image`` encodes it, is ``<id>.webp`` beside it.
 The image is published before its record, so every record names an image that
 exists, and an image a crash left without a record is ignored and its number
-reused.
+reused. ``image_emb.json`` beside them holds the observations' image vectors.
 """
 
 from __future__ import annotations
 
 import base64
 import io
+import json
+import logging
 import secrets
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
@@ -22,18 +24,23 @@ from typing import TYPE_CHECKING, Any, Literal
 from PIL import Image
 
 from android_app_graph.graph_files import (
+    image_embeddings_path,
     observation_image_path,
     step_record_path,
     write_bytes_atomically,
     write_json_atomically,
 )
-from android_app_graph.payloads import as_str
-from android_app_graph.screen_image import encode_screenshot
+from android_app_graph.payloads import as_float_list, as_int_list, as_object_dict, as_str
+from android_app_graph.screen_image import encode_screenshot, pixel_hash, status_bar_rows
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from android_app_graph.device import DeviceController
+
+logger = logging.getLogger(__name__)
+
+_FRAME_COORDINATES = 4
 
 type RunKind = Literal["explore", "audit"]
 type StepSource = Literal[
@@ -50,12 +57,13 @@ type StepSource = Literal[
 @dataclass(frozen=True, slots=True)
 class Observation:
     """One screen as ``StepRecorder.get_state`` captured it, with its screenshot as
-    base64 WebP."""
+    base64 WebP and the ``pixel_hash`` of that image below the status bar."""
 
     observation_id: str
     screenshot_b64: str
     activity: str
     package: str
+    pixel_hash: str
 
     @classmethod
     def from_state(cls, state: Mapping[str, object]) -> Observation:
@@ -71,6 +79,7 @@ class Observation:
             screenshot_b64=as_str(state.get("screenshot"), ""),
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
+            pixel_hash=as_str(state.get("pixel_hash"), ""),
         )
 
 
@@ -91,6 +100,97 @@ class Transition:
     action: dict[str, Any] | list[dict[str, Any]]
     from_node: str
     to_node: str
+
+
+def read_observation_record(steps: Path, observation_id: str) -> dict[str, object] | None:
+    """Return the record of observation ``observation_id`` in the step log ``steps``, or
+    ``None`` when it has none."""
+    try:
+        text = step_record_path(steps, observation_id).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return as_object_dict(json.loads(text))
+
+
+def annotate_observation(steps: Path, observation_id: str, fields: Mapping[str, object]) -> None:
+    """Add ``fields`` to the record of observation ``observation_id`` in the step log
+    ``steps``, replacing the record atomically.
+
+    A missing record raises ``FileNotFoundError``: ``StepRecorder.get_state`` writes one
+    for every observation, so a missing one means the step log was changed by hand.
+    """
+    path = step_record_path(steps, observation_id)
+    record = as_object_dict(json.loads(path.read_text(encoding="utf-8")))
+    write_json_atomically(path, {**record, **fields}, ensure_ascii=False)
+
+
+def load_image_embeddings(steps: Path, *, model: str) -> dict[str, list[float]]:
+    """Return the image vectors of the step log ``steps`` by observation ID, when
+    ``model`` computed them.
+
+    The file is tagged with the model that wrote it, since a matching dimension
+    cannot prove two vectors came from one model. A file that cannot be read or
+    parsed, has no tag, or was written by another model is empty after one warning,
+    so every observation is embedded again; a malformed or non-finite vector is
+    dropped with a warning. A step log without the file has no vectors yet.
+    """
+    path = image_embeddings_path(steps)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning("Corrupt image embedding file %s; treating it as empty: %s", path, exc)
+        return {}
+    stored = as_object_dict(raw)
+    tag = stored.get("model")
+    if not isinstance(tag, str) or not isinstance(stored.get("embeddings"), dict):
+        logger.warning(
+            "Image embedding file %s is not tagged with the model that wrote it; treating it "
+            "as empty, so every observation is embedded again with %r",
+            path,
+            model,
+        )
+        return {}
+    if tag != model:
+        logger.warning(
+            "Image embedding file %s was written by model %r, not the configured %r; treating "
+            "it as empty, so every observation is embedded again",
+            path,
+            tag,
+            model,
+        )
+        return {}
+    embeddings: dict[str, list[float]] = {}
+    for observation_id, vector in as_object_dict(stored.get("embeddings")).items():
+        numbers = as_float_list(vector)
+        if numbers:
+            embeddings[observation_id] = numbers
+        else:
+            logger.warning(
+                "Dropping the malformed image vector of observation %s in %s", observation_id, path
+            )
+    return embeddings
+
+
+def save_image_embeddings(
+    steps: Path, embeddings: Mapping[str, list[float]], *, model: str
+) -> None:
+    """Write ``embeddings``, image vectors by observation ID that ``model`` computed, to
+    the step log ``steps``, replacing the file atomically."""
+    write_json_atomically(
+        image_embeddings_path(steps), {"model": model, "embeddings": dict(embeddings)}
+    )
+
+
+def _status_bar(state: Mapping[str, object]) -> list[int] | None:
+    frame = as_int_list(state.get("status_bar"))
+    return frame if len(frame) == _FRAME_COORDINATES else None
+
+
+def _image_height(image: bytes) -> int:
+    with Image.open(io.BytesIO(image)) as opened:
+        return opened.height
 
 
 def _first_free_number(steps: Path) -> int:
@@ -142,30 +242,47 @@ class StepRecorder:
             self._source = outer
 
     def get_state(self) -> dict[str, Any]:
-        """Return the wrapped controller's state with its screenshot encoded as WebP
-        and the ``observation_id`` it was recorded under."""
+        """Return the wrapped controller's state with its screenshot encoded as WebP,
+        the ``observation_id`` it was recorded under and its ``pixel_hash``.
+
+        The hash leaves out the rows of the controller's ``status_bar`` frame; a
+        controller that reports none has the whole image hashed.
+        """
         state = self._controller.get_state()
-        webp = encode_screenshot(state["screenshot"])
+        png = base64.b64decode(state["screenshot"], validate=True)
+        webp = encode_screenshot(png)
         with Image.open(io.BytesIO(webp)) as image:
             width, height = image.size
+        status_bar = _status_bar(state)
+        band_rows = status_bar_rows(
+            status_bar, screenshot_height=_image_height(png), image_height=height
+        )
         observation = Observation(
             observation_id=self._take_step_id(),
             screenshot_b64=base64.b64encode(webp).decode("ascii"),
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
+            pixel_hash=pixel_hash(webp, band_rows),
         )
         write_bytes_atomically(observation_image_path(self.steps, observation.observation_id), webp)
         self._write_record(
             observation.observation_id,
             "observation",
             observation,
-            {"width": width, "height": height},
+            {
+                "width": width,
+                "height": height,
+                "status_bar": status_bar,
+                "status_bar_rows": band_rows,
+                "pixel_hash": observation.pixel_hash,
+            },
         )
         self._last_observation = observation
         return {
             **state,
             "screenshot": observation.screenshot_b64,
             "observation_id": observation.observation_id,
+            "pixel_hash": observation.pixel_hash,
         }
 
     def exe_action(self, action: dict[str, Any]) -> None:

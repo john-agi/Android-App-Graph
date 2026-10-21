@@ -133,7 +133,7 @@ class Screens:
         self, activity: str = HOME, screenshot: str = SHOT_A, package: str = PACKAGE
     ) -> Observation:
         observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot))
-        return Observation(observation_id, screenshot, activity, package)
+        return Observation(observation_id, screenshot, activity, package, "")
 
 
 @pytest.fixture
