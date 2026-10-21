@@ -1204,14 +1204,17 @@ class GraphManager:
             "required_schema": required_schema,
         }
 
+    def _is_external(self, node_id: str) -> bool:
+        return node_id.startswith("ext_") or bool(self.graph.nodes[node_id].get("is_external"))
+
     def get_start_node(self) -> str | None:
         """Return the initial node (the app's entry point).
 
         Heuristic: the node with the lowest numeric ID suffix (s0_...).
         """
         candidates: list[tuple[int, str]] = []
-        for node_id, data in self.graph.nodes(data=True):
-            if node_id.startswith("ext_") or data.get("is_external"):
+        for node_id in self.graph:
+            if self._is_external(node_id):
                 continue
             if node_id.startswith("s") and "_" in node_id:
                 num_part = node_id.split("_", 1)[0][1:]
@@ -1221,11 +1224,7 @@ class GraphManager:
         if candidates:
             return min(candidates)[1]
 
-        nodes = sorted(
-            _node_id(n)
-            for n, data in self.graph.nodes(data=True)
-            if not n.startswith("ext_") and not data.get("is_external")
-        )
+        nodes = sorted(_node_id(n) for n in self.graph if not self._is_external(n))
         return nodes[0] if nodes else None
 
     def get_least_explored_node(self, package_name: str | None = None) -> str | None:
@@ -1244,9 +1243,7 @@ class GraphManager:
         min_out_degree = float("inf")
 
         for node in reachable:
-            if node.startswith("ext_"):
-                continue
-            if self.graph.nodes[node].get("is_external"):
+            if self._is_external(node):
                 continue
             if package_name:
                 node_pkg = self.graph.nodes[node].get("package", "")
