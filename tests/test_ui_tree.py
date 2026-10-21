@@ -1,8 +1,11 @@
-"""Tests for android_app_graph.ui_tree: parsing ``uiautomator dump --windows`` output
-and deciding whether two trees show the same screen."""
+"""Tests for android_app_graph.ui_tree: parsing ``uiautomator dump --windows`` output,
+deciding whether two trees show the same screen, and listing and locating the elements a
+user can act on."""
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import re
 from pathlib import Path
 
@@ -11,19 +14,28 @@ import pytest
 from android_app_graph.ui_tree import (
     IDLE_FAILURE,
     Bounds,
+    Locator,
+    TreeElement,
     UiNode,
     UiTree,
     UiWindow,
     UnusableDumpError,
+    acting_windows,
+    actionable_elements,
+    find_nodes,
+    locator,
     parse_tree,
+    region,
     same_screen,
+    thin_tree_reason,
     xml_document,
 )
 
 # Trimmed from `adb exec-out uiautomator dump [--windows] /dev/stdout` on a Pixel 8 Pro
 # emulator (API 37, 1344x2992): every window is kept, and in each hierarchy only a few
 # labelled nodes and their ancestors. Each file is the command's stdout, trailing line
-# included; never_idle is a running stopwatch's.
+# included; never_idle is a running stopwatch's, popup_menu Clock's overflow menu.
+# web_view is written by hand: one web view filling an app's window.
 _DATA = Path(__file__).parent / "data"
 _TRAILER = "UI hierchary dumped to: /dev/stdout"
 
@@ -374,3 +386,456 @@ def test_a_change_in_the_window_list_shows_another_screen(name: str, value: str)
     window = re.sub(rf'(?<![\w-]){name}="[^"]*"', f'{name}="{value}"', dump[start:end], count=1)
 
     assert not same_screen(parse_tree(dump), parse_tree(dump[:start] + window + dump[end:]))
+
+
+_APP = "com.example.app"
+_SCREEN = Bounds(0, 0, 1000, 2000)
+_FIXTURE_SCREEN = Bounds(0, 0, 1344, 2992)
+
+
+def _node(attributes: dict[str, str] | None = None, *children: str) -> str:
+    """One ``<node>`` of the app, enabled, visible and of ``android.view.View`` unless
+    ``attributes`` say otherwise, holding ``children``."""
+    node = {
+        "class": "android.view.View",
+        "package": _APP,
+        "enabled": "true",
+        "bounds": "[0,0][1000,2000]",
+        "drawing-order": "0",
+    } | (attributes or {})
+    rendered = " ".join(f'{name}="{value}"' for name, value in node.items())
+    if not children:
+        return f"<node {rendered} />"
+    return f"<node {rendered}>{''.join(children)}</node>"
+
+
+def _window(
+    *roots: str, kind: str = "TYPE_APPLICATION", layer: int = 0, active: bool = True
+) -> str:
+    flag = "true" if active else "false"
+    return (
+        f'<window index="0" title="" bounds="[0,0][1000,2000]" active="{flag}" '
+        f'focused="{flag}" accessibility-focused="false" id="{layer + 1}" layer="{layer}" '
+        f'type="{kind}"><hierarchy rotation="0">{"".join(roots)}</hierarchy></window>'
+    )
+
+
+def _screen(*roots: str) -> UiTree:
+    """A tree of one active application window, the whole screen, holding ``roots``."""
+    return parse_tree(f'<displays><display id="0">{_window(*roots)}</display></displays>')
+
+
+def _labels(elements: list[TreeElement]) -> list[str]:
+    return [element.label for element in elements]
+
+
+def _row(label: str, attributes: dict[str, str] | None = None) -> str:
+    """A clickable row whose title is ``label``, above a summary."""
+    return _node(
+        {"class": "android.widget.LinearLayout", "clickable": "true"} | (attributes or {}),
+        _node({"class": "android.widget.TextView", "text": label}),
+        _node({"class": "android.widget.TextView", "text": f"{label} summary"}),
+    )
+
+
+def test_a_plain_screen_lists_the_app_s_elements_with_their_locators_and_regions() -> None:
+    tree = parse_tree(_dump("windows_plain_list"))
+
+    elements = actionable_elements(tree, "com.android.settings", _FIXTURE_SCREEN)
+
+    assert [element.summary() for element in elements] == [
+        'LinearLayout "Search Settings" (top)',
+        "ScrollView, scrollable (center)",
+        'LinearLayout "Network & internet" (top)',
+        'LinearLayout "Apps" (center)',
+    ]
+    assert elements[2].locator == Locator(
+        resource_id="",
+        class_name="android.widget.LinearLayout",
+        label="Network & internet",
+        ancestor_ids=(
+            "android:id/content",
+            "com.android.settings:id/settings_homepage_container",
+            "com.android.settings:id/main_content_scrollable_container",
+            "com.android.settings:id/homepage_container",
+            "com.android.settings:id/main_content",
+            "com.android.settings:id/container_material",
+            "android:id/list_container",
+            "com.android.settings:id/recycler_view",
+        ),
+    )
+    assert elements[2].bounds == Bounds(0, 699, 1344, 917)
+    assert (elements[2].rows, elements[2].scrollable, elements[2].text_field) == (1, False, False)
+
+
+def test_with_a_dialog_open_only_the_dialog_s_nodes_become_elements() -> None:
+    tree = parse_tree(_dump("windows_dialog_compose"))
+
+    elements = actionable_elements(tree, "com.android.settings", _FIXTURE_SCREEN)
+
+    assert _labels(elements) == ["Disable app", "Cancel"]
+    windows = {
+        tree.nodes[index].window
+        for element in elements
+        for index in find_nodes(tree, element.locator)
+    }
+    assert [tree.windows[window].window_type for window in windows] == ["TYPE_APPLICATION"]
+
+
+def test_keyboard_and_system_window_nodes_never_become_elements() -> None:
+    tree = parse_tree(_dump("windows_keyboard"))
+    package = "com.google.android.settings.intelligence"
+
+    elements = actionable_elements(tree, package, _FIXTURE_SCREEN)
+
+    assert [element.summary() for element in elements] == [
+        'EditText "Search settings", text field (top)'
+    ]
+    assert acting_windows(tree, package) == [2]
+
+
+def test_clickable_nodes_of_the_keyboard_and_the_status_bar_are_left_out() -> None:
+    button = _node({"clickable": "true", "text": "Tap"})
+    tree = parse_tree(
+        '<displays><display id="0">'
+        + _window(button, kind="TYPE_SYSTEM", layer=2, active=False)
+        + _window(button, kind="TYPE_INPUT_METHOD", layer=1, active=False)
+        + _window(_node({"clickable": "true", "text": "App"}))
+        + "</display></displays>"
+    )
+
+    assert _labels(actionable_elements(tree, _APP, _SCREEN)) == ["App"]
+
+
+@pytest.mark.parametrize(
+    ("package", "labels"),
+    [
+        ("com.google.android.deskclock", ["You can find the privacy policy here", "More options"]),
+        ("com.example.other", ["More options"]),
+    ],
+)
+def test_a_popup_of_the_app_above_the_active_window_lists_its_elements_too(
+    package: str, labels: list[str]
+) -> None:
+    """A popup that does not take focus leaves the window under it in the dump."""
+    tree = parse_tree(_dump("windows_child_popup_window"))
+
+    assert _labels(actionable_elements(tree, package, _FIXTURE_SCREEN)) == labels
+
+
+def test_a_popup_menu_s_rows_are_elements_although_the_list_handles_their_taps() -> None:
+    """No row of Clock's overflow menu is clickable: its ListView takes the taps."""
+    tree = parse_tree(_dump("windows_popup_menu"))
+
+    elements = actionable_elements(tree, "com.google.android.deskclock", _FIXTURE_SCREEN)
+
+    assert _labels(elements) == [
+        "Screen saver",
+        "Settings",
+        "Privacy policy",
+        "Send feedback",
+        "Help",
+    ]
+    assert [element.region for element in elements] == ["top right"] * 4 + ["right"]
+
+
+def test_a_screen_without_an_active_application_window_has_no_elements() -> None:
+    tree = parse_tree(
+        '<displays><display id="0">'
+        + _window(_node({"clickable": "true", "text": "Tap"}), active=False)
+        + "</display></displays>"
+    )
+
+    assert acting_windows(tree, _APP) == []
+    assert actionable_elements(tree, _APP, _SCREEN) == []
+
+
+def test_a_scrollable_list_of_ten_rows_sharing_a_resource_id_is_one_list_item() -> None:
+    rows = [_row(f"Item {number}", {"resource-id": f"{_APP}:id/row"}) for number in range(10)]
+    results = _node(
+        {
+            "class": "androidx.recyclerview.widget.RecyclerView",
+            "resource-id": f"{_APP}:id/results",
+            "scrollable": "true",
+        },
+        *rows,
+    )
+    tree = _screen(results)
+
+    elements = actionable_elements(tree, _APP, _SCREEN)
+
+    assert [element.summary() for element in elements] == [
+        "RecyclerView, scrollable (center)",
+        'LinearLayout "Item 0", list item, one of 10 rows (center)',
+    ]
+    item = elements[1].locator
+    assert item == Locator(
+        f"{_APP}:id/row", "android.widget.LinearLayout", None, (f"{_APP}:id/results",)
+    )
+    assert len(find_nodes(tree, item)) == 10
+
+
+def test_rows_that_share_a_resource_id_outside_a_scrollable_container_stay_apart() -> None:
+    rows = [_row(f"Item {number}", {"resource-id": f"{_APP}:id/row"}) for number in range(3)]
+
+    elements = actionable_elements(_screen(_node({}, *rows)), _APP, _SCREEN)
+
+    assert _labels(elements) == ["Item 0", "Item 1", "Item 2"]
+    assert [element.rows for element in elements] == [1, 1, 1]
+
+
+def test_rows_without_a_resource_id_in_a_scrollable_list_stay_apart() -> None:
+    """Settings' rows have no resource ID, and each opens its own page."""
+    settings_list = _node({"scrollable": "true"}, _row("Wi-Fi"), _row("Bluetooth"))
+
+    elements = actionable_elements(_screen(settings_list), _APP, _SCREEN)
+
+    assert _labels(elements) == ["", "Wi-Fi", "Bluetooth"]
+
+
+def test_nodes_that_share_a_locator_are_one_element() -> None:
+    same = _node({"clickable": "true", "text": "More"})
+
+    assert _labels(actionable_elements(_screen(_node({}, same, same)), _APP, _SCREEN)) == ["More"]
+
+
+def test_a_toggle_inside_a_clickable_row_is_part_of_the_row() -> None:
+    switch = _node(
+        {
+            "class": "android.widget.Switch",
+            "checkable": "true",
+            "resource-id": "android:id/switch_widget",
+        }
+    )
+    row = _node(
+        {"class": "android.widget.LinearLayout", "clickable": "true"},
+        _node({"class": "android.widget.TextView", "text": "Use this SIM"}),
+        switch,
+    )
+
+    assert _labels(actionable_elements(_screen(row), _APP, _SCREEN)) == ["Use this SIM"]
+    assert _labels(actionable_elements(_screen(_node({}, switch)), _APP, _SCREEN)) == [""]
+
+
+@pytest.mark.parametrize(
+    ("label", "labels"), [("Forget", ["Forget"]), ("Share", ["Forget", "Share"])]
+)
+def test_a_clickable_node_with_the_label_of_the_clickable_node_it_is_in_is_part_of_it(
+    label: str, labels: list[str]
+) -> None:
+    button = _node({"class": "android.widget.Button", "clickable": "true", "text": label})
+    action = _node(
+        {"class": "android.widget.LinearLayout", "clickable": "true", "content-desc": "Forget"},
+        button,
+    )
+
+    assert _labels(actionable_elements(_screen(action), _APP, _SCREEN)) == labels
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        pytest.param({"clickable": "true", "enabled": "false"}, id="disabled"),
+        pytest.param({"clickable": "true", "bounds": "[10,10][10,50]"}, id="no area"),
+        pytest.param({"focusable": "true", "selected": "true"}, id="not actionable"),
+    ],
+)
+def test_a_node_the_user_cannot_act_on_is_no_element(attributes: dict[str, str]) -> None:
+    assert actionable_elements(_screen(_node(attributes)), _APP, _SCREEN) == []
+
+
+@pytest.mark.parametrize(
+    ("attributes", "summary"),
+    [
+        pytest.param(
+            {"long-clickable": "true", "text": "Photo"}, 'View "Photo" (center)', id="long-click"
+        ),
+        pytest.param(
+            {"checkable": "true", "content-desc": "Star"}, 'View "Star" (center)', id="checkable"
+        ),
+        pytest.param(
+            {"scrollable": "true", "text": "Feed"},
+            'View "Feed", scrollable (center)',
+            id="scrollable",
+        ),
+        pytest.param(
+            {"class": "android.widget.EditText", "hint": "Name", "text": "Ada"},
+            'EditText "Name", text field (center)',
+            id="text field",
+        ),
+        pytest.param(
+            {"class": "android.widget.AutoCompleteTextView", "content-desc": "To"},
+            'AutoCompleteTextView "To", text field (center)',
+            id="text field subclass",
+        ),
+    ],
+)
+def test_each_kind_of_actionable_node_is_an_element(
+    attributes: dict[str, str], summary: str
+) -> None:
+    elements = actionable_elements(_screen(_node(attributes)), _APP, _SCREEN)
+
+    assert [element.summary() for element in elements] == [summary]
+
+
+@pytest.mark.parametrize(
+    ("attributes", "children", "label"),
+    [
+        pytest.param({"text": "  Wi-Fi\n calling "}, (), "Wi-Fi calling", id="whitespace"),
+        pytest.param({"text": "Wi-Fi", "content-desc": "Wireless"}, (), "Wi-Fi", id="text"),
+        pytest.param({"content-desc": "Wireless"}, ("Wi-Fi",), "Wireless", id="description"),
+        pytest.param({}, ("", "Wi-Fi", "Connected"), "Wi-Fi", id="first descendant text"),
+        pytest.param({"scrollable": "true"}, ("Wi-Fi",), "", id="scrollable"),
+        pytest.param({"class": "android.widget.EditText", "text": "Ada"}, (), "", id="typed"),
+    ],
+)
+def test_a_locator_s_label(
+    attributes: dict[str, str], children: tuple[str, ...], label: str
+) -> None:
+    texts = [_node({"class": "android.widget.TextView", "text": text}) for text in children]
+    tree = _screen(_node({"clickable": "true"} | attributes, *texts))
+
+    assert locator(tree, 0).label == label
+
+
+def test_find_nodes_returns_every_node_a_locator_names_in_document_order() -> None:
+    row = _row("Wi-Fi", {"resource-id": f"{_APP}:id/row"})
+    other = _row("Bluetooth", {"resource-id": f"{_APP}:id/row"})
+    tree = _screen(_node({}, row, other, row))
+    wanted = locator(tree, 1)
+
+    assert find_nodes(tree, wanted) == [1, 7]
+    assert find_nodes(tree, dataclasses.replace(wanted, label=None)) == [1, 4, 7]
+    assert find_nodes(tree, dataclasses.replace(wanted, ancestor_ids=("a:id/x",))) == []
+    assert find_nodes(tree, dataclasses.replace(wanted, class_name="android.view.View")) == []
+
+
+def test_a_locator_reads_back_what_it_writes() -> None:
+    written = Locator("a:id/row", "android.widget.LinearLayout", None, ("a:id/list",))
+
+    assert written.as_record() == {
+        "resource_id": "a:id/row",
+        "class": "android.widget.LinearLayout",
+        "label": None,
+        "ancestor_ids": ["a:id/list"],
+    }
+    assert Locator.from_record(json.loads(json.dumps(written.as_record()))) == written
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param(None, id="none"),
+        pytest.param([], id="not an object"),
+        pytest.param({"class": "View", "label": "", "ancestor_ids": []}, id="no resource ID"),
+        pytest.param({"resource_id": "", "label": "", "ancestor_ids": []}, id="no class"),
+        pytest.param(
+            {"resource_id": "", "class": "View", "label": 3, "ancestor_ids": []}, id="label"
+        ),
+        pytest.param({"resource_id": "", "class": "View", "label": ""}, id="no ancestors"),
+        pytest.param(
+            {"resource_id": "", "class": "View", "label": "", "ancestor_ids": [1]}, id="ancestor"
+        ),
+    ],
+)
+def test_a_malformed_locator_record_reads_as_none(record: object) -> None:
+    assert Locator.from_record(record) is None
+
+
+@pytest.mark.parametrize(
+    ("bounds", "where"),
+    [
+        (Bounds(0, 0, 100, 100), "top left"),
+        (Bounds(0, 0, 1000, 100), "top"),
+        (Bounds(900, 0, 1000, 100), "top right"),
+        (Bounds(0, 900, 100, 1100), "left"),
+        (Bounds(0, 0, 1000, 2000), "center"),
+        (Bounds(900, 900, 1000, 1100), "right"),
+        (Bounds(0, 1900, 100, 2000), "bottom left"),
+        (Bounds(0, 1900, 1000, 2000), "bottom"),
+        (Bounds(900, 1900, 1000, 2000), "bottom right"),
+    ],
+)
+def test_a_region_is_where_the_centre_lies_in_thirds_of_the_screen(
+    bounds: Bounds, where: str
+) -> None:
+    assert region(bounds, _SCREEN) == where
+
+
+def test_a_screen_without_area_has_no_regions() -> None:
+    assert region(Bounds(0, 0, 10, 10), Bounds(0, 0, 0, 0)) == ""
+
+
+def test_a_summary_shortens_a_long_label() -> None:
+    tree = _screen(_node({"clickable": "true", "text": "x" * 80}))
+
+    assert actionable_elements(tree, _APP, _SCREEN)[0].summary() == f'View "{"x" * 59}…" (center)'
+
+
+def test_a_summary_names_no_region_on_a_screen_without_area() -> None:
+    tree = _screen(_node({"clickable": "true", "text": "Save"}))
+
+    assert actionable_elements(tree, _APP, Bounds(0, 0, 0, 0))[0].summary() == 'View "Save"'
+
+
+_MENU = _node({"clickable": "true", "text": "Menu", "bounds": "[0,0][100,100]"})
+
+
+@pytest.mark.parametrize(
+    ("roots", "reason"),
+    [
+        pytest.param((), "0 actionable element(s), fewer than 1", id="no element"),
+        pytest.param(
+            (_node({"class": "android.webkit.WebView"}, _MENU),),
+            "a WebView covers most of the window",
+            id="web view",
+        ),
+        pytest.param(
+            (
+                _node(
+                    {},
+                    _MENU,
+                    _node({"class": "android.view.SurfaceView", "bounds": "[0,100][1000,2000]"}),
+                ),
+            ),
+            "a SurfaceView covers most of the window",
+            id="canvas",
+        ),
+    ],
+)
+def test_a_thin_tree_says_why(roots: tuple[str, ...], reason: str) -> None:
+    tree = _screen(*roots)
+
+    assert thin_tree_reason(tree, _APP, actionable_elements(tree, _APP, _SCREEN)) == reason
+
+
+def test_a_screen_that_one_web_view_fills_is_thin() -> None:
+    tree = parse_tree(_dump("windows_web_view"))
+    elements = actionable_elements(tree, "com.example.app", _FIXTURE_SCREEN)
+
+    assert [element.summary() for element in elements] == ["WebView, scrollable (center)"]
+    assert thin_tree_reason(tree, "com.example.app", elements) == (
+        "a WebView covers most of the window"
+    )
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [
+        pytest.param(
+            (
+                _node(
+                    {},
+                    _MENU,
+                    _node({"class": "android.webkit.WebView", "bounds": "[0,0][1000,500]"}),
+                ),
+            ),
+            id="a small web view",
+        ),
+        pytest.param((_node({}, _MENU),), id="a view with children"),
+    ],
+)
+def test_a_tree_with_elements_and_no_large_drawn_node_is_not_thin(roots: tuple[str, ...]) -> None:
+    tree = _screen(*roots)
+
+    assert thin_tree_reason(tree, _APP, actionable_elements(tree, _APP, _SCREEN)) is None
