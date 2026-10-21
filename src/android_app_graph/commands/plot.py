@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import webbrowser
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -284,27 +285,30 @@ def _prepare_paper_graph(
     return filtered
 
 
+@dataclass(frozen=True, kw_only=True)
+class PaperStyle:
+    """How the paper renderers shorten labels and, without Graphviz, lay out the graph."""
+
+    max_node_words: int = 5
+    max_edge_words: int = 5
+    layout: str = "circular"
+    show_edge_labels: bool = True
+
+
+_DEFAULT_PAPER_STYLE = PaperStyle()
+
+
 def plot_paper_graphviz(
     graph: nx.DiGraph,
     output_path: str,
     *,
-    max_node_words: int = 5,
-    max_edge_words: int = 5,
-    layout: str = "circular",
-    show_edge_labels: bool = True,
+    style: PaperStyle = _DEFAULT_PAPER_STYLE,
 ) -> None:
     """Create a paper-friendly static graph using Graphviz."""
     dot_bin = shutil.which("dot")
     if not dot_bin:
         logger.warning("Graphviz 'dot' command not found; using matplotlib paper fallback.")
-        plot_paper_matplotlib(
-            graph,
-            output_path,
-            max_node_words=max_node_words,
-            max_edge_words=max_edge_words,
-            layout=layout,
-            show_edge_labels=show_edge_labels,
-        )
+        plot_paper_matplotlib(graph, output_path, style=style)
         return
 
     def q(value: str) -> str:
@@ -344,7 +348,7 @@ def plot_paper_graphviz(
         category = _node_category(desc)
         fill, border = palette[category]
         visits = data.get("visit_count", 0)
-        short_desc = _wrap_label(_shorten_words(desc, max_node_words, 38), width=16)
+        short_desc = _wrap_label(_shorten_words(desc, style.max_node_words, 38), width=16)
         node_attrs = {
             "label": f"{node_id}\\n{short_desc}",
             "fillcolor": fill,
@@ -356,7 +360,7 @@ def plot_paper_graphviz(
     edge_seen: Counter[tuple[str, str]] = Counter()
     for src, tgt, data in graph.edges(data=True):
         label = data.get("label", "")
-        short = _wrap_label(_shorten_words(label, max_edge_words, 34), width=14)
+        short = _wrap_label(_shorten_words(label, style.max_edge_words, 34), width=14)
         visits = data.get("visit_count", 0)
         edge_attrs = {
             "label": f" {short} " if short else "",
@@ -394,10 +398,7 @@ def plot_paper_matplotlib(
     graph: nx.DiGraph,
     output_path: str,
     *,
-    max_node_words: int = 5,
-    max_edge_words: int = 5,
-    layout: str = "circular",
-    show_edge_labels: bool = True,
+    style: PaperStyle = _DEFAULT_PAPER_STYLE,
 ) -> None:
     """Paper-style fallback renderer that does not require Graphviz."""
     import matplotlib.pyplot as plt
@@ -407,9 +408,9 @@ def plot_paper_matplotlib(
     fig_h = min(24, max(11, n_nodes * 0.24))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=220)
 
-    if layout == "circular":
+    if style.layout == "circular":
         pos = nx.circular_layout(graph, scale=1.0)
-    elif layout == "kamada":
+    elif style.layout == "kamada":
         pos = nx.kamada_kawai_layout(graph, scale=1.0)
     else:
         pos = nx.spring_layout(
@@ -485,7 +486,7 @@ def plot_paper_matplotlib(
         )
 
     node_labels = {
-        node: f"{node}\n{_shorten_words(data.get('page_description', node), max_node_words, 34)}"
+        node: f"{node}\n{_shorten_words(data.get('page_description', node), style.max_node_words, 34)}"
         for node, data in graph.nodes(data=True)
     }
     nx.draw_networkx_labels(
@@ -503,9 +504,9 @@ def plot_paper_matplotlib(
         },
     )
 
-    if show_edge_labels:
+    if style.show_edge_labels:
         edge_labels = {
-            (s, t): _shorten_words(data.get("label", ""), max_edge_words, 24)
+            (s, t): _shorten_words(data.get("label", ""), style.max_edge_words, 24)
             for s, t, data in graph.edges(data=True)
             if data.get("label") and s != t
         }
@@ -921,14 +922,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.backend == "matplotlib":
         plot_matplotlib(graph, output_path)
     elif args.backend == "paper":
-        plot_paper_graphviz(
-            graph,
-            output_path,
+        paper_style = PaperStyle(
             max_node_words=args.max_node_words,
             max_edge_words=args.max_edge_words,
             layout=args.paper_layout,
             show_edge_labels=not args.hide_edge_labels,
         )
+        plot_paper_graphviz(graph, output_path, style=paper_style)
 
     if not args.no_open:
         webbrowser.open(Path(output_path).resolve().as_uri())

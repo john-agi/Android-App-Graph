@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -483,8 +484,8 @@ def test_plot_main_passes_the_paper_options_to_the_renderer(
 ) -> None:
     received: list[tuple[str, dict[str, object]]] = []
 
-    def record(_graph: nx.DiGraph, output_path: str, **kwargs: object) -> None:
-        received.append((output_path, kwargs))
+    def record(_graph: nx.DiGraph, output_path: str, *, style: plot.PaperStyle) -> None:
+        received.append((output_path, dataclasses.asdict(style)))
 
     monkeypatch.setattr(plot, "plot_paper_graphviz", record)
     monkeypatch.setattr(plot, "setup_logging", lambda **_kwargs: None)
@@ -511,7 +512,7 @@ def test_plot_paper_matplotlib_writes_an_image(tmp_path: Path) -> None:
     mpl.use("agg")
     _data, graph = plot.load_graph(str(_write_graph(tmp_path)))
     output = tmp_path / "paper.png"
-    plot.plot_paper_matplotlib(graph, str(output), layout="spring")
+    plot.plot_paper_matplotlib(graph, str(output), style=plot.PaperStyle(layout="spring"))
     assert output.stat().st_size > 0
 
 
