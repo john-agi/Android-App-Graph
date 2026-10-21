@@ -373,6 +373,13 @@ through its `launch_activity` when the config sets one. Whatever the app holds o
 in memory, such as an unsaved form, is lost at each replay; data it has stored
 survives.
 
+`--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
+first, without a model call. The ranking favours nodes with many unexplored
+elements, few outgoing edges and few visits. Each checkpoint lets the model choose
+among the `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also
+offers the app's start screen while it has unexplored elements, in the last of
+those places when it ranks below them.
+
 ### External apps and web pages
 
 A step that opens another app records an edge to an `ext_<package>` node. A step

@@ -1387,6 +1387,8 @@ You are helping a mobile app exploration agent decide where to continue explorin
 Pick exactly one node that is most urgent to continue exploring from.
 Prefer nodes with many unexplored elements, low outgoing edge count, important UI surfaces \
 such as settings/search/menus/tabs, and nodes that look under-covered.
+A candidate marked start screen is the app's entry screen; its unexplored elements usually \
+open top-level sections.
 
 Return ONLY a JSON object:
 {{
@@ -1427,7 +1429,7 @@ def select_exploration_target(
     for i, candidate in enumerate(candidates, 1):
         unexplored_desc = candidate.get("unexplored_element_descriptions", [])
         unexplored_text = ", ".join(d for d in unexplored_desc if d) or "none listed"
-        candidate_lines.append(
+        line = (
             f"{i}. node_id={candidate.get('node_id', '')} | "
             f'description="{candidate.get("page_description", "")}" | '
             f"visits={candidate.get('visit_count', 0)} | "
@@ -1437,6 +1439,9 @@ def select_exploration_target(
             f"score={candidate.get('score', 0)} | "
             f"unexplored_elements=[{unexplored_text}]"
         )
+        if candidate.get("is_start_node"):
+            line += " | start screen"
+        candidate_lines.append(line)
 
     prompt = EXPLORATION_TARGET_PROMPT.format(
         app_name=app_name,

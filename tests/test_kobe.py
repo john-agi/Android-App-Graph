@@ -258,6 +258,50 @@ def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packag
     assert replayed == ["s1_conversation"]
 
 
+def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``auto`` resumes at the form with unexplored fields, not at the dialog with no
+    out-edges and nothing left to explore."""
+    fields = [
+        {"description": description, "explored": False} for description in ("Name", "APN", "Proxy")
+    ]
+    document = {
+        "nodes": [
+            {"id": "s0_home", "activity": "com.demo.Home"},
+            {"id": "s1_form", "activity": "com.demo.Form", "interactable_elements": fields},
+            {"id": "s2_dialog", "activity": "com.demo.Form"},
+        ],
+        "edges": [
+            {"source": "s0_home", "target": "s1_form"},
+            {"source": "s0_home", "target": "s2_dialog"},
+            {"source": "s1_form", "target": "s0_home"},
+        ],
+    }
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    graph_path.write_text(json.dumps(document), encoding="utf-8")
+    explorer = _explorer(
+        _Device(AssertionError("the replay must start before the device is read")),
+        tmp_path,
+        router_client,
+    )
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> str:
+        replayed.append(node_id)
+        raise _ReplayedError
+
+    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+
+    with pytest.raises(_ReplayedError):
+        explorer.explore(max_steps=1, resume_from="auto")
+
+    assert replayed == ["s1_form"]
+
+
 def test_a_rejected_page_description_leaves_no_node_or_cached_identity(
     kobe: Kobe,
     png_screenshot: str,
@@ -984,6 +1028,52 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     ] * 2
 
 
+def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three forms with more unexplored fields outrank the start screen, which the model
+    is offered anyway while it has unexplored sections."""
+    graph = kobe.graph.graph
+    graph.add_node(
+        "s0_home",
+        visit_count=5,
+        interactable_elements=[
+            {"description": description, "explored": False}
+            for description in ("Display", "Storage")
+        ],
+    )
+    for node_id in ("s1_form", "s2_form", "s3_form"):
+        graph.add_node(
+            node_id,
+            interactable_elements=[
+                {"description": description, "explored": False}
+                for description in ("Name", "Address", "Port", "Username", "Password")
+            ],
+        )
+        graph.add_edge("s0_home", node_id)
+    kobe.coverage_checkpoint_top_k = 2
+    router_responses.extend(
+        [
+            chat_response(content='{"issues":[],"summary":"no duplicates"}'),
+            chat_response(content='{"node_id":"s0_home","reason":"top-level sections"}'),
+        ]
+    )
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
+
+    assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s1_form") == "s0_home"
+
+    bodies = [json.loads(request.content) for request in router_requests]
+    assert [body["response_format"]["json_schema"]["name"] for body in bodies] == [
+        "node_merge_audit",
+        "exploration_target",
+    ]
+    assert "node_id=s0_home" in bodies[1]["messages"][0]["content"]
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     replaying_kobe: Kobe,
@@ -1373,7 +1463,7 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A replay from the start screen cannot land on a dialog. The dialog node's own
-    package keeps it out of both targets although it is the least explored node."""
+    package keeps it out of both targets although it would rank first."""
     _explore_into_a_permission_dialog(
         kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
     )
@@ -1382,7 +1472,8 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
     nodes = {data["package"]: node for node, data in graph.graph.nodes(data=True)}
     assert set(nodes) == {"com.demo", "com.google.android.permissioncontroller"}
     home = nodes["com.demo"]
-    assert graph.get_least_explored_node(package_name="com.demo") == home
+    assert graph.get_resume_target() == nodes["com.google.android.permissioncontroller"]
+    assert graph.get_resume_target(package_name="com.demo") == home
     checkpoint = graph.get_exploration_target_candidates(package_name="com.demo")
     assert [candidate["node_id"] for candidate in checkpoint] == [home]
     described_without_known_screens = [

@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-r",
         type=str,
         default=None,
-        help='Node ID to resume from, or "auto" for least-explored node.',
+        help='Node ID to resume from, or "auto" for the top-ranked exploration target.',
     )
     return parser
 

@@ -247,6 +247,7 @@ class Kobe:
         candidates = self.graph.get_exploration_target_candidates(
             package_name=self.package_name,
             top_k=self.coverage_checkpoint_top_k,
+            always_offer_start=True,
         )
         return [c for c in candidates if c.get("node_id") != current_node]
 
@@ -429,7 +430,7 @@ class Kobe:
                 replays saved edges to reach this node first (no VLM calls),
                 then continues exploring from there.
                 Special values:
-                  - "auto": picks the least-explored node automatically.
+                  - "auto": the top-ranked exploration target, chosen without a model call.
 
         The graph is auto-saved after every step so crashes lose at most one step.
         """
@@ -485,8 +486,8 @@ class Kobe:
     ) -> _Position:
         if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
             if resume_from == "auto":
-                resume_from = self.graph.get_least_explored_node(package_name=self.package_name)
-                self.logger.info("Auto-selected least-explored node: %s", resume_from)
+                resume_from = self.graph.get_resume_target(package_name=self.package_name)
+                self.logger.info("Auto-selected resume target: %s", resume_from)
 
             if resume_from and resume_from in self.graph.graph:
                 node = self.navigate_to_node(resume_from)
