@@ -88,19 +88,19 @@ def test_android_world_steps_share_one_client_and_preserve_task_memory(
     def runtime_step(_task: str, state: dict[str, object], history: dict[str, object]) -> str:
         assert state["screenshot"] == png_screenshot
         assert state["package"] == "com.demo"
-        assert history["actions"] == ["acted"] * len(runtime._memory.actions)
+        assert history["actions"] == ["acted"] * len(runtime.memory.actions)
         response = vlm_utils.send_chat(
             runtime.client,
             call_type="v2_chat",
             settings=runtime.action,
             messages=[{"role": "user", "content": "inspect"}],
         )
-        runtime._memory.add_action(vlm_utils.message_text(response))
+        runtime.memory.add_action(vlm_utils.message_text(response))
         return json.dumps({"message": "acted", "aitk_action": {"action": "wait", "time": 1}})
 
     monkeypatch.setattr(runtime, "_step", runtime_step)
     # Only to_agent clears what an earlier task left; an adapter calling _step would keep it.
-    runtime._memory.add_action("earlier task")
+    runtime.memory.add_action("earlier task")
     assert isinstance(agent, _SteppingAgent)
     for _ in range(2):
         result = agent.step("Inspect the screen")
@@ -109,6 +109,6 @@ def test_android_world_steps_share_one_client_and_preserve_task_memory(
         assert as_object_dict(result.data)["aitk_action"] == {"action": "wait", "time": 1}
         assert runtime.client.sdk_configuration.client is router_http
     assert opened_clients == [runtime.client]
-    assert len(runtime._memory.actions) == 2
+    assert len(runtime.memory.actions) == 2
     assert len(router_requests) == 2
     assert no_sleep == []

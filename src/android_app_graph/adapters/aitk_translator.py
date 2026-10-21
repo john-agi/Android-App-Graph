@@ -6,9 +6,10 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, override
 
 import networkx as nx
@@ -64,22 +65,22 @@ V2_PARSE_RETRY_HINT = (
 
 RUNTIME_ROLES = ("action", "image_embedding")
 
-_OptionType = Literal["done", "self_loop", "neighbor", "free"]
+OptionType = Literal["done", "self_loop", "neighbor", "free"]
 
 
-class _Option(TypedDict):
+class Option(TypedDict):
     """One DECIDE menu entry; the keys present depend on ``type``."""
 
     letter: str
-    type: _OptionType
+    type: OptionType
     instruction: NotRequired[str]
 
 
-class _Decision(TypedDict):
-    """The outcome of ``_decide``, read by ``_step`` for ``type`` and ``instruction``;
+class Decision(TypedDict):
+    """The outcome of ``decide``, read by ``_step`` for ``type`` and ``instruction``;
     a "free" fallback additionally carries ``reason``."""
 
-    type: _OptionType
+    type: OptionType
     instruction: str
     reason: NotRequired[str]
 
@@ -208,7 +209,7 @@ Think easily and briefly, under 10 sentences if needed. Reply with ONLY the \
 one-step instruction. No explanations."""
 
 
-def _load_graph_from_json(path: Path) -> nx.DiGraph:
+def load_graph_from_json(path: Path) -> nx.DiGraph:
     with path.open(encoding="utf-8") as f:
         raw = json.load(f)
     # Run before anything else below: a graph with one bad node or edge must
@@ -279,7 +280,7 @@ def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
     for app_name, graph_file in iter_graph_files(graph_dir):
         logger.info("[GRAPH] %s: selected %s", app_name, graph_file.name)
         try:
-            graph = _load_graph_from_json(graph_file)
+            graph = load_graph_from_json(graph_file)
         except Exception:
             logger.exception("Failed to load graph %s", graph_file)
             continue
@@ -301,7 +302,7 @@ def _parse_graphs_by_package(graph_dir: Path) -> dict[str, _ParsedGraph]:
     return unique
 
 
-def _after_last_think_tag(text: str) -> str | None:
+def after_last_think_tag(text: str) -> str | None:
     """Return the text after the last ``</think>`` tag, stripped, or ``None`` if absent.
 
     Found with a case-insensitive regex on the original ``text``, never on
@@ -364,7 +365,7 @@ def _reads_as_article(letter: str, text: str, start: int, end: int) -> bool:
     return not prefix or prefix[-1] in ".!?:\n"
 
 
-def _last_answer_signal(text: str, valid_letters: str) -> str | None:
+def last_answer_signal(text: str, valid_letters: str) -> str | None:
     """Return free text's one answer signal -- a named letter or "NONE" -- or
     ``None`` when the text carries no signal, or carries both kinds.
 
@@ -397,7 +398,7 @@ def _last_answer_signal(text: str, valid_letters: str) -> str | None:
     return last_letter or None
 
 
-def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
+def parse_model_choice(raw: str, valid_letters: str) -> str | None:
     text = (raw or "").strip()
     answer = text.upper()
     if answer == "NONE":
@@ -405,9 +406,9 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
     if len(answer) == 1 and answer in valid_letters:
         return answer
 
-    post_think = _after_last_think_tag(text)
+    post_think = after_last_think_tag(text)
     if post_think is not None:
-        parsed = _parse_model_choice(post_think, valid_letters)
+        parsed = parse_model_choice(post_think, valid_letters)
         if parsed:
             return parsed
 
@@ -438,15 +439,15 @@ def _parse_model_choice(raw: str, valid_letters: str) -> str | None:
             return choice
 
     # Free text beyond an explicit "Answer:"/</think> form.
-    return _last_answer_signal(text, valid_letters)
+    return last_answer_signal(text, valid_letters)
 
 
-def _parse_one_step_instruction(raw: str) -> str:
+def parse_one_step_instruction(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
         return ""
 
-    post_think = _after_last_think_tag(text)
+    post_think = after_last_think_tag(text)
     if post_think is not None:
         text = post_think
 
@@ -474,7 +475,7 @@ def _parse_one_step_instruction(raw: str) -> str:
     return text
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
+def extract_json_object(text: str) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
     for idx, char in enumerate(text):
         if char != "{":
@@ -488,16 +489,16 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_json_object(text: str) -> dict[str, Any] | None:
+def parse_json_object(text: str) -> dict[str, Any] | None:
     """Parse ``text`` as a JSON object, else scan it for the first embedded one."""
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return _extract_json_object(text)
+        return extract_json_object(text)
     return parsed if isinstance(parsed, dict) else None
 
 
-def _parse_json_reply(raw: str) -> dict[str, Any] | None:
+def parse_json_reply(raw: str) -> dict[str, Any] | None:
     """Parse a RECORD or DECIDE reply's JSON object, preferring anything after ``</think>``.
 
     ``</think>`` is located on the raw text before fences are stripped, never
@@ -507,12 +508,12 @@ def _parse_json_reply(raw: str) -> dict[str, Any] | None:
     follows the tag and return the draft instead.
     """
     text = (raw or "").strip()
-    post_think = _after_last_think_tag(text)
+    post_think = after_last_think_tag(text)
     if post_think is not None:
-        parsed = _parse_json_object(strip_json_fences(post_think))
+        parsed = parse_json_object(strip_json_fences(post_think))
         if parsed is not None:
             return parsed
-    return _parse_json_object(strip_json_fences(text))
+    return parse_json_object(strip_json_fences(text))
 
 
 class RecordReplyError(ValueError):
@@ -523,13 +524,13 @@ def _unreadable_record_reply(problem: str, raw: str) -> RecordReplyError:
     return RecordReplyError(f"[RECORD] {problem} (reply begins {raw[:160]!r})")
 
 
-def _parse_record_output(raw: str) -> str:
+def parse_record_output(raw: str) -> str:
     """Return the fact a RECORD reply states, or ``""`` when it states none.
 
     Raises instead of returning ``None``: ``_ask_with_screenshot`` asks again on
     ``None``, and RECORD is asked only once.
     """
-    reply = _parse_json_reply(raw)
+    reply = parse_json_reply(raw)
     if reply is None:
         msg = "the reply has no JSON object"
         raise _unreadable_record_reply(msg, raw)
@@ -548,7 +549,7 @@ def _parse_record_output(raw: str) -> str:
     return information
 
 
-def _chat_completion_content(
+def chat_completion_content(
     client: OpenRouter,
     *,
     settings: ModelSettings,
@@ -557,6 +558,211 @@ def _chat_completion_content(
     """Run a typed completion, account for usage and return assistant text."""
     return message_text(
         send_chat(client, call_type="v2_chat", settings=settings, messages=messages)
+    )
+
+
+def unpack_template(tmpl: dict[str, Any] | str) -> tuple[str, str]:
+    """Extract (instruction_text, observation_text) from a template entry."""
+    if isinstance(tmpl, dict):
+        return (
+            as_str(tmpl.get("template", ""), ""),
+            as_str(tmpl.get("observation_template", ""), ""),
+        )
+    return str(tmpl), ""
+
+
+def format_schema_delta(delta: dict[str, Any] | None) -> str:
+    """Format a state transition hint for the small runtime model."""
+    if not isinstance(delta, dict) or not delta:
+        return ""
+
+    parts: list[str] = []
+    for key, change in delta.items():
+        if isinstance(change, dict):
+            before = change.get("before", "?")
+            after = change.get("after", "?")
+            parts.append(f"{key}: {before} -> {after}")
+        else:
+            parts.append(f"{key}: {change}")
+    return ", ".join(parts)
+
+
+def edge_effect_hint(edge_data: dict[str, Any], index: int | None = None) -> str:
+    """Return a concise effect hint from schema deltas, if available."""
+    deltas = edge_data.get("schema_deltas", [])
+    if not deltas:
+        return ""
+
+    if index is not None:
+        return format_schema_delta(deltas[index]) if index < len(deltas) else ""
+
+    merged: dict[str, Any] = {}
+    for delta in deltas:
+        if isinstance(delta, dict):
+            for key, change in delta.items():
+                merged.setdefault(key, change)
+    return format_schema_delta(merged)
+
+
+def _build_self_loop_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[Option, str]]:
+    """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
+    if not graph.has_edge(node_id, node_id):
+        return []
+    edge_data = graph[node_id][node_id]
+    templates = edge_data.get("instruction_templates", [])
+    observations = edge_data.get("target_observations", [])
+    candidates: list[tuple[Option, str]] = []
+
+    if templates:
+        for tmpl in templates:
+            tmpl_text, obs_text = unpack_template(tmpl)
+            effect = edge_effect_hint(edge_data)
+            option: Option = {
+                "letter": "",
+                "type": "self_loop",
+                "instruction": tmpl_text,
+            }
+            hint = f'Stay here — "{tmpl_text}"'
+            if obs_text:
+                hint += f" → {obs_text}"
+            if effect:
+                hint += f" | changes: {effect}"
+            candidates.append((option, hint))
+    else:
+        for i, raw_instr in enumerate(edge_data.get("instructions", [])):
+            instr = as_str(raw_instr, "")
+            if not instr:
+                continue
+            effect = edge_effect_hint(edge_data, i)
+            option: Option = {
+                "letter": "",
+                "type": "self_loop",
+                "instruction": instr,
+            }
+            hint = f'Stay here — "{instr}"'
+            if i < len(observations) and observations[i]:
+                hint += f" → {observations[i]}"
+            if effect:
+                hint += f" | changes: {effect}"
+            candidates.append((option, hint))
+
+    return candidates
+
+
+def _build_neighbor_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[int, Option, str]]:
+    """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
+    candidates: list[tuple[int, Option, str]] = []
+    for _, raw_neighbor, edge_data in graph.out_edges(node_id, data=True):
+        neighbor = str(raw_neighbor)
+        if neighbor == node_id:
+            continue
+        neighbor_desc = graph.nodes[neighbor].get("page_description", neighbor)
+        templates = edge_data.get("instruction_templates", [])
+        observations = edge_data.get("target_observations", [])
+
+        instr = ""
+        obs = ""
+        if templates:
+            instr, obs = unpack_template(templates[0])
+        else:
+            instrs = edge_data.get("instructions", [])
+            if instrs:
+                instr = as_str(instrs[0], "")
+            if observations:
+                obs = as_str(observations[0], "")
+
+        effect = edge_effect_hint(edge_data, 0)
+        option: Option = {
+            "letter": "",
+            "type": "neighbor",
+            "instruction": instr,
+        }
+        edge_hint = f' — "{instr}"' if instr else ""
+        if obs:
+            edge_hint += f" → {obs}"
+        if effect:
+            edge_hint += f" | changes: {effect}"
+        line = f'Go to "{neighbor_desc}"{edge_hint}'
+        visit_count = as_int(edge_data.get("visit_count")) or 0
+        candidates.append((visit_count, option, line))
+    return candidates
+
+
+def build_options(graph: nx.DiGraph, node_id: str) -> tuple[str, list[Option]]:
+    """Build the option list for the DECIDE prompt.
+
+    A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
+    between self-loop instructions and neighbours. Neighbours are the only way
+    to navigate the graph (GraphManager adds one self-loop instruction per
+    distinct self-loop action, e.g. each typed query on a search screen, so
+    self-loop instructions alone can otherwise fill every slot), so when both
+    would overflow the 24 slots, neighbours keep at least half of them
+    (ranked by visit_count, the only usefulness signal) and self-loop
+    instructions take the rest.
+    """
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    max_middle_options = len(letters) - 2  # reserve DONE and FREE
+
+    self_loop_candidates = _build_self_loop_candidates(graph, node_id)
+    neighbor_candidates = _build_neighbor_candidates(graph, node_id)
+
+    kept_self_loop = self_loop_candidates
+    kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
+    total_middle = len(self_loop_candidates) + len(neighbor_candidates)
+
+    if total_middle > max_middle_options:
+        neighbor_reserve = min(len(neighbor_candidates), max_middle_options // 2)
+        self_loop_budget = min(len(self_loop_candidates), max_middle_options - neighbor_reserve)
+        neighbor_budget = max_middle_options - self_loop_budget
+        kept_self_loop = self_loop_candidates[:self_loop_budget]
+        ranked = sorted(
+            range(len(neighbor_candidates)),
+            key=lambda i: (-neighbor_candidates[i][0], i),
+        )
+        keep_indices = sorted(ranked[:neighbor_budget])
+        kept_neighbors = [
+            (neighbor_candidates[i][1], neighbor_candidates[i][2]) for i in keep_indices
+        ]
+        logger.warning(
+            "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
+            "dropped %d least-useful self-loop instruction(s)/neighbour(s), "
+            "keeping neighbours to at least half the menu.",
+            node_id,
+            total_middle,
+            max_middle_options,
+            total_middle - len(kept_self_loop) - len(kept_neighbors),
+        )
+
+    options: list[Option] = []
+    lines: list[str] = []
+    idx = 0
+
+    letter = letters[idx]
+    options.append({"letter": letter, "type": "done"})
+    lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
+    idx += 1
+
+    for option, line in (*kept_self_loop, *kept_neighbors):
+        letter = letters[idx]
+        option["letter"] = letter
+        options.append(option)
+        lines.append(f"{letter}) {line}")
+        idx += 1
+
+    letter = letters[idx]
+    options.append({"letter": letter, "type": "free"})
+    lines.append(f"{letter}) FREE — do something not listed above (describe it)")
+    idx += 1
+
+    return "\n".join(lines), options
+
+
+def make_response(message: str, aitk_action: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "message": f"[Android-App-Graph] {message}",
+            "aitk_action": aitk_action,
+        }
     )
 
 
@@ -632,11 +838,19 @@ class UIKobeV2Translator(BaseTranslator):
         # A device property: only to_device updates it, and a task reset must not.
         self._screen_w = 1080
         self._screen_h = 1920
-        self._reset_task_state()
+        self.reset_task_state()
 
-    def _reset_task_state(self) -> None:
-        self._current_graph: nx.DiGraph | None = None
-        self._app_name: str = ""
+    @property
+    def graphs(self) -> Mapping[str, nx.DiGraph]:
+        """The loaded graphs by app name, as a read-only view."""
+        return MappingProxyType(self._graphs)
+
+    @property
+    def memory(self) -> Memory:
+        """The current task's memory; ``reset_task_state`` starts a new one."""
+        return self._memory
+
+    def reset_task_state(self) -> None:
         self._app_opened = False
         self._memory = Memory()
         self._step_count = 0
@@ -737,9 +951,12 @@ class UIKobeV2Translator(BaseTranslator):
                 return app_name
         return None
 
-    def _select_graph(self, package: str) -> None:
-        self._app_name = self._app_by_package.get(package, "")
-        self._current_graph = self._graphs.get(self._app_name)
+    def _graph_for_package(self, package: str) -> tuple[str, nx.DiGraph] | None:
+        """Return the app name and graph whose ``package_name`` is ``package``, if any."""
+        app_name = self._app_by_package.get(package)
+        if app_name is None:
+            return None
+        return app_name, self._graphs[app_name]
 
     def _ask_with_screenshot[T](
         self,
@@ -766,7 +983,7 @@ class UIKobeV2Translator(BaseTranslator):
                 content = [{"type": "text", "text": text}, build_image_message(screenshot)]
 
             try:
-                raw = _chat_completion_content(
+                raw = chat_completion_content(
                     self.client,
                     settings=self.action,
                     messages=[{"role": "user", "content": content}],
@@ -784,7 +1001,7 @@ class UIKobeV2Translator(BaseTranslator):
         )
         return None
 
-    def _identify_node(self, activity: str, screenshot: str, package: str) -> str | None:
+    def identify_node(self, activity: str, screenshot: str, package: str) -> str | None:
         """Match the current screen to a graph node, or return ``None`` when none matches.
 
         1. Embed the screenshot and score it against the cached screenshot embeddings
@@ -795,16 +1012,17 @@ class UIKobeV2Translator(BaseTranslator):
         No page description is generated: the paper's runtime identifies nodes by
         screenshot, and upstream UI-KOBE's describe call here never fed a decision.
         """
-        graph = self._current_graph
-        if graph is None:
+        selected = self._graph_for_package(package)
+        if selected is None:
             logger.warning("[IDENTIFY] No current graph is loaded")
             return None
+        app_name, graph = selected
 
         logger.info(
             "[IDENTIFY] activity=%s package=%s graph_app=%s graph_package=%s",
             activity,
             package,
-            self._app_name or "(unknown)",
+            app_name,
             _graph_package(graph),
         )
 
@@ -817,7 +1035,7 @@ class UIKobeV2Translator(BaseTranslator):
             started = time.perf_counter()
             query_image_emb = self._compute_runtime_image_embedding_with_retry(
                 screenshot,
-                self._app_name or "(current)",
+                app_name,
                 "(current screenshot)",
             )
             logger.info(
@@ -854,7 +1072,7 @@ class UIKobeV2Translator(BaseTranslator):
                 logger.warning(
                     "[IDENTIFY] no candidates: current package %s has no nodes in selected graph %s",
                     package,
-                    self._app_name or "(unknown)",
+                    app_name,
                 )
             else:
                 logger.warning(
@@ -878,7 +1096,7 @@ class UIKobeV2Translator(BaseTranslator):
         answer = self._ask_with_screenshot(
             prompt,
             screenshot,
-            lambda raw: _parse_model_choice(raw, letters[: len(top_k)]),
+            lambda raw: parse_model_choice(raw, letters[: len(top_k)]),
             "[IDENTIFY]",
         )
         logger.info("[IDENTIFY] model_pick=%s", answer)
@@ -895,7 +1113,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[IDENTIFY] identified node=%s", chosen_node)
         return chosen_node
 
-    def _record_info(self, task: str, screenshot: str) -> None:
+    def record_info(self, task: str, screenshot: str) -> None:
         """Store the task-relevant fact the current screen shows, if it shows one.
 
         Raises ``RecordReplyError`` for a reply it cannot read or one cut off at
@@ -908,212 +1126,16 @@ class UIKobeV2Translator(BaseTranslator):
             memory=self._memory.format(),
         )
 
-        # _parse_record_output never returns None, so None here can only mean
+        # parse_record_output never returns None, so None here can only mean
         # that the reply hit its token limit.
-        info = self._ask_with_screenshot(prompt, screenshot, _parse_record_output, "[RECORD]")
+        info = self._ask_with_screenshot(prompt, screenshot, parse_record_output, "[RECORD]")
         if info is None:
             msg = "[RECORD] the reply hit its token limit"
             raise RecordReplyError(msg)
         logger.info("[RECORD] parsed=%r", info)
         self._memory.add_info(info)
 
-    @staticmethod
-    def _unpack_template(tmpl: dict[str, Any] | str) -> tuple[str, str]:
-        """Extract (instruction_text, observation_text) from a template entry."""
-        if isinstance(tmpl, dict):
-            return (
-                as_str(tmpl.get("template", ""), ""),
-                as_str(tmpl.get("observation_template", ""), ""),
-            )
-        return str(tmpl), ""
-
-    @staticmethod
-    def _format_schema_delta(delta: dict[str, Any] | None) -> str:
-        """Format a state transition hint for the small runtime model."""
-        if not isinstance(delta, dict) or not delta:
-            return ""
-
-        parts: list[str] = []
-        for key, change in delta.items():
-            if isinstance(change, dict):
-                before = change.get("before", "?")
-                after = change.get("after", "?")
-                parts.append(f"{key}: {before} -> {after}")
-            else:
-                parts.append(f"{key}: {change}")
-        return ", ".join(parts)
-
-    def _edge_effect_hint(self, edge_data: dict[str, Any], index: int | None = None) -> str:
-        """Return a concise effect hint from schema deltas, if available."""
-        deltas = edge_data.get("schema_deltas", [])
-        if not deltas:
-            return ""
-
-        if index is not None:
-            return self._format_schema_delta(deltas[index]) if index < len(deltas) else ""
-
-        merged: dict[str, Any] = {}
-        for delta in deltas:
-            if isinstance(delta, dict):
-                for key, change in delta.items():
-                    merged.setdefault(key, change)
-        return self._format_schema_delta(merged)
-
-    def _build_self_loop_candidates(
-        self, graph: nx.DiGraph, node_id: str
-    ) -> list[tuple[_Option, str]]:
-        """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
-        if not graph.has_edge(node_id, node_id):
-            return []
-        edge_data = graph[node_id][node_id]
-        templates = edge_data.get("instruction_templates", [])
-        observations = edge_data.get("target_observations", [])
-        candidates: list[tuple[_Option, str]] = []
-
-        if templates:
-            for tmpl in templates:
-                tmpl_text, obs_text = self._unpack_template(tmpl)
-                effect = self._edge_effect_hint(edge_data)
-                option: _Option = {
-                    "letter": "",
-                    "type": "self_loop",
-                    "instruction": tmpl_text,
-                }
-                hint = f'Stay here — "{tmpl_text}"'
-                if obs_text:
-                    hint += f" → {obs_text}"
-                if effect:
-                    hint += f" | changes: {effect}"
-                candidates.append((option, hint))
-        else:
-            for i, raw_instr in enumerate(edge_data.get("instructions", [])):
-                instr = as_str(raw_instr, "")
-                if not instr:
-                    continue
-                effect = self._edge_effect_hint(edge_data, i)
-                option: _Option = {
-                    "letter": "",
-                    "type": "self_loop",
-                    "instruction": instr,
-                }
-                hint = f'Stay here — "{instr}"'
-                if i < len(observations) and observations[i]:
-                    hint += f" → {observations[i]}"
-                if effect:
-                    hint += f" | changes: {effect}"
-                candidates.append((option, hint))
-
-        return candidates
-
-    def _build_neighbor_candidates(
-        self, graph: nx.DiGraph, node_id: str
-    ) -> list[tuple[int, _Option, str]]:
-        """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
-        candidates: list[tuple[int, _Option, str]] = []
-        for _, raw_neighbor, edge_data in graph.out_edges(node_id, data=True):
-            neighbor = str(raw_neighbor)
-            if neighbor == node_id:
-                continue
-            neighbor_desc = graph.nodes[neighbor].get("page_description", neighbor)
-            templates = edge_data.get("instruction_templates", [])
-            observations = edge_data.get("target_observations", [])
-
-            instr = ""
-            obs = ""
-            if templates:
-                instr, obs = self._unpack_template(templates[0])
-            else:
-                instrs = edge_data.get("instructions", [])
-                if instrs:
-                    instr = as_str(instrs[0], "")
-                if observations:
-                    obs = as_str(observations[0], "")
-
-            effect = self._edge_effect_hint(edge_data, 0)
-            option: _Option = {
-                "letter": "",
-                "type": "neighbor",
-                "instruction": instr,
-            }
-            edge_hint = f' — "{instr}"' if instr else ""
-            if obs:
-                edge_hint += f" → {obs}"
-            if effect:
-                edge_hint += f" | changes: {effect}"
-            line = f'Go to "{neighbor_desc}"{edge_hint}'
-            visit_count = as_int(edge_data.get("visit_count")) or 0
-            candidates.append((visit_count, option, line))
-        return candidates
-
-    def _build_options(self, graph: nx.DiGraph, node_id: str) -> tuple[str, list[_Option]]:
-        """Build the option list for the DECIDE prompt.
-
-        A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
-        between self-loop instructions and neighbours. Neighbours are the only way
-        to navigate the graph (GraphManager adds one self-loop instruction per
-        distinct self-loop action, e.g. each typed query on a search screen, so
-        self-loop instructions alone can otherwise fill every slot), so when both
-        would overflow the 24 slots, neighbours keep at least half of them
-        (ranked by visit_count, the only usefulness signal) and self-loop
-        instructions take the rest.
-        """
-        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        max_middle_options = len(letters) - 2  # reserve DONE and FREE
-
-        self_loop_candidates = self._build_self_loop_candidates(graph, node_id)
-        neighbor_candidates = self._build_neighbor_candidates(graph, node_id)
-
-        kept_self_loop = self_loop_candidates
-        kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
-        total_middle = len(self_loop_candidates) + len(neighbor_candidates)
-
-        if total_middle > max_middle_options:
-            neighbor_reserve = min(len(neighbor_candidates), max_middle_options // 2)
-            self_loop_budget = min(len(self_loop_candidates), max_middle_options - neighbor_reserve)
-            neighbor_budget = max_middle_options - self_loop_budget
-            kept_self_loop = self_loop_candidates[:self_loop_budget]
-            ranked = sorted(
-                range(len(neighbor_candidates)),
-                key=lambda i: (-neighbor_candidates[i][0], i),
-            )
-            keep_indices = sorted(ranked[:neighbor_budget])
-            kept_neighbors = [
-                (neighbor_candidates[i][1], neighbor_candidates[i][2]) for i in keep_indices
-            ]
-            logger.warning(
-                "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
-                "dropped %d least-useful self-loop instruction(s)/neighbour(s), "
-                "keeping neighbours to at least half the menu.",
-                node_id,
-                total_middle,
-                max_middle_options,
-                total_middle - len(kept_self_loop) - len(kept_neighbors),
-            )
-
-        options: list[_Option] = []
-        lines: list[str] = []
-        idx = 0
-
-        letter = letters[idx]
-        options.append({"letter": letter, "type": "done"})
-        lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
-        idx += 1
-
-        for option, line in (*kept_self_loop, *kept_neighbors):
-            letter = letters[idx]
-            option["letter"] = letter
-            options.append(option)
-            lines.append(f"{letter}) {line}")
-            idx += 1
-
-        letter = letters[idx]
-        options.append({"letter": letter, "type": "free"})
-        lines.append(f"{letter}) FREE — do something not listed above (describe it)")
-        idx += 1
-
-        return "\n".join(lines), options
-
-    def _decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> _Decision:
+    def decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> Decision:
         """Ask the model to pick the next action.
 
         Returns the chosen option's type together with its resolved
@@ -1132,7 +1154,7 @@ class UIKobeV2Translator(BaseTranslator):
         else:
             state_context = ""
 
-        options_text, options_list = self._build_options(graph, node_id)
+        options_text, options_list = build_options(graph, node_id)
 
         prompt = DECIDE_PROMPT.format(
             task=task,
@@ -1144,7 +1166,7 @@ class UIKobeV2Translator(BaseTranslator):
             options=options_text,
         )
 
-        result = self._ask_with_screenshot(prompt, screenshot, _parse_json_reply, "[DECIDE]")
+        result = self._ask_with_screenshot(prompt, screenshot, parse_json_reply, "[DECIDE]")
         if result is None:
             return {
                 "type": "free",
@@ -1163,9 +1185,9 @@ class UIKobeV2Translator(BaseTranslator):
         for opt in options_list:
             if opt["letter"] == choice_letter:
                 if opt["type"] == "free":
-                    # An empty instruction is what makes _step re-plan a FREE pick; the
-                    # task-text fallback would hide that. Graph-built options may be empty
-                    # by construction, so they keep it.
+                    # An empty instruction is what makes _choose_action re-plan a FREE pick;
+                    # the task-text fallback would hide that. Graph-built options may be
+                    # empty by construction, so they keep it.
                     resolved_instruction = instruction
                 else:
                     resolved_instruction = instruction or opt.get("instruction") or task
@@ -1181,7 +1203,7 @@ class UIKobeV2Translator(BaseTranslator):
             "reason": f"DECIDE returned unrecognized choice {choice_letter!r}",
         }
 
-    def _plan_free_action(
+    def plan_free_action(
         self,
         task: str,
         screenshot: str,
@@ -1200,7 +1222,7 @@ class UIKobeV2Translator(BaseTranslator):
         instruction = self._ask_with_screenshot(
             prompt,
             screenshot,
-            lambda raw: _parse_one_step_instruction(raw) or None,
+            lambda raw: parse_one_step_instruction(raw) or None,
             "[FREE]",
         )
 
@@ -1211,7 +1233,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.warning("[FREE] planner failed; using conservative concrete fallback")
         return "Wait briefly for the current screen to finish loading."
 
-    def _call_action_agent(
+    def call_action_agent(
         self,
         task: str,
         action_history: list[str],
@@ -1233,7 +1255,7 @@ class UIKobeV2Translator(BaseTranslator):
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
 
-    def _generate_answer(self, task: str) -> str:
+    def generate_answer(self, task: str) -> str:
         prompt = DONE_PROMPT.format(
             task=task,
             memory=self._memory.format(),
@@ -1241,42 +1263,33 @@ class UIKobeV2Translator(BaseTranslator):
         answer = self._ask_with_screenshot(prompt, None, lambda raw: raw.strip() or None, "[DONE]")
         return answer or ""
 
-    def _step(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
-        screenshot = as_str(state.get("screenshot", ""), "")
-        activity = as_str(state.get("activity", ""), "")
-        package = as_str(state.get("package", ""), "")
+    def _open_named_app(self, task: str) -> str | None:
+        """Return the response that opens the app ``task`` names, or ``None`` when it names none."""
+        app_name = self._resolve_app_from_task(task)
+        if app_name:
+            logger.info(_SEP_THICK)
+            logger.info("[OPEN] Launching %s", app_name)
+            logger.info(_SEP_THICK)
+            return make_response(
+                f"Opening app: {app_name}",
+                {"action": "open", "app": app_name},
+            )
+        logger.warning("[OPEN] Could not resolve app from task: %s", task)
+        return None
 
-        if not self._app_opened:
-            self._app_opened = True
-            app_name = self._resolve_app_from_task(task)
-            if app_name:
-                self._app_name = app_name
-                logger.info(_SEP_THICK)
-                logger.info("[OPEN] Launching %s", app_name)
-                logger.info(_SEP_THICK)
-                return self._make_response(
-                    f"Opening app: {app_name}",
-                    {"action": "open", "app": app_name},
-                )
-            logger.warning("[OPEN] Could not resolve app from task: %s", task)
-
-        self._select_graph(package)
-        graph = self._current_graph
-
-        self._step_count += 1
-        logger.info(_SEP_THICK)
-        logger.info("[LOOP] Step %d", self._step_count)
-        logger.info(_SEP_THICK)
-
-        node_id = self._identify_node(activity, screenshot, package)
-        logger.info("[IDENTIFY] Node: %s", node_id)
-
-        self._record_info(task, screenshot)
-        logger.info("[RECORD] Memory: %s", self._memory.format())
-
-        decision: _Decision
+    def _choose_action(
+        self,
+        task: str,
+        graph: nx.DiGraph | None,
+        node_id: str | None,
+        screenshot: str,
+        action_history: list[Any],
+    ) -> Decision:
+        """Run DECIDE on a matched node or plan a free action, then plan again for a
+        FREE pick that has no instruction."""
+        decision: Decision
         if node_id is not None and graph is not None:
-            decision = self._decide(graph, task, node_id, screenshot)
+            decision = self.decide(graph, task, node_id, screenshot)
         else:
             reason = (
                 "no graph is loaded"
@@ -1284,11 +1297,11 @@ class UIKobeV2Translator(BaseTranslator):
                 else "the current screen did not match any graph node"
             )
             logger.warning("[DECIDE] Falling back to free action: %s", reason)
-            fallback_instruction = self._plan_free_action(
+            fallback_instruction = self.plan_free_action(
                 task,
                 screenshot,
                 reason,
-                history.get("actions", []),
+                action_history,
             )
             decision = {"type": "free", "instruction": fallback_instruction}
 
@@ -1298,36 +1311,31 @@ class UIKobeV2Translator(BaseTranslator):
             reason = decision.get(
                 "reason", "graph guidance did not produce an executable instruction"
             )
-            instruction = self._plan_free_action(
+            instruction = self.plan_free_action(
                 task,
                 screenshot,
                 reason,
-                history.get("actions", []),
+                action_history,
             )
             decision["instruction"] = instruction
+        return decision
 
-        logger.info(
-            '[DECIDE] type=%s node=%s instruction="%s"',
-            decision_type,
-            node_id,
-            instruction,
+    def _finish(self, task: str) -> str:
+        answer = self.generate_answer(task)
+        logger.info(_SEP_THICK)
+        logger.info("[DONE] Answer: %s", answer)
+        logger.info("[DONE] Memory: %s", self._memory.format())
+        logger.info(_SEP_THICK)
+        return make_response(
+            f"Task complete. Answer: {answer}",
+            {"action": "end", "answer": answer},
         )
 
-        if decision_type == "done":
-            answer = self._generate_answer(task)
-            logger.info(_SEP_THICK)
-            logger.info("[DONE] Answer: %s", answer)
-            logger.info("[DONE] Memory: %s", self._memory.format())
-            logger.info(_SEP_THICK)
-            return self._make_response(
-                f"Task complete. Answer: {answer}",
-                {"action": "end", "answer": answer},
-            )
-
+    def _act(self, task: str, instruction: str, screenshot: str) -> str:
         logger.info(_SEP)
         logger.info('ACTION AGENT one-step instruction: "%s"', instruction)
         logger.info(_SEP)
-        aitk_action, obs, history_entry = self._call_action_agent(
+        aitk_action, obs, history_entry = self.call_action_agent(
             instruction,
             [],
             screenshot,
@@ -1348,21 +1356,49 @@ class UIKobeV2Translator(BaseTranslator):
             )
             aitk_action = {"action": "wait", "time": 1}
 
-        return self._make_response(f"Action: {history_entry}", aitk_action)
+        return make_response(f"Action: {history_entry}", aitk_action)
 
-    @staticmethod
-    def _make_response(message: str, aitk_action: dict[str, Any]) -> str:
-        return json.dumps(
-            {
-                "message": f"[Android-App-Graph] {message}",
-                "aitk_action": aitk_action,
-            }
+    def _step(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
+        screenshot = as_str(state.get("screenshot", ""), "")
+        activity = as_str(state.get("activity", ""), "")
+        package = as_str(state.get("package", ""), "")
+
+        if not self._app_opened:
+            self._app_opened = True
+            opening = self._open_named_app(task)
+            if opening is not None:
+                return opening
+
+        selected = self._graph_for_package(package)
+        graph = None if selected is None else selected[1]
+
+        self._step_count += 1
+        logger.info(_SEP_THICK)
+        logger.info("[LOOP] Step %d", self._step_count)
+        logger.info(_SEP_THICK)
+
+        node_id = self.identify_node(activity, screenshot, package)
+        logger.info("[IDENTIFY] Node: %s", node_id)
+
+        self.record_info(task, screenshot)
+        logger.info("[RECORD] Memory: %s", self._memory.format())
+
+        decision = self._choose_action(task, graph, node_id, screenshot, history.get("actions", []))
+        logger.info(
+            '[DECIDE] type=%s node=%s instruction="%s"',
+            decision["type"],
+            node_id,
+            decision["instruction"],
         )
+
+        if decision["type"] == "done":
+            return self._finish(task)
+        return self._act(task, decision["instruction"], screenshot)
 
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
         if not history.get("actions", []):
-            self._reset_task_state()
+            self.reset_task_state()
         return self._step(task, state, history)
 
     @override
