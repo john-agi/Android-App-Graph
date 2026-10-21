@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import logging
 import math
@@ -24,10 +22,10 @@ from openrouter.components.chatusage import (
 from openrouter.components.costdetails import CostDetails
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
-from PIL import Image
 
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
 from android_app_graph.retrying import UnusableOutputError, call_with_retry, capped_retries
+from android_app_graph.screen_image import MEDIA_TYPE
 from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
 if TYPE_CHECKING:
@@ -41,7 +39,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_PIXELS = 1_000_000
 _COORDINATE_AXES = 2
 
 
@@ -236,40 +233,6 @@ class TokenTracker:
 
 
 token_tracker = TokenTracker()
-
-
-def _resize_screenshot(
-    screenshot_b64: str, max_pixels: int = MAX_PIXELS
-) -> tuple[str, int, int, float]:
-    """Resize a base64 screenshot so total pixels <= max_pixels, preserving aspect ratio.
-
-    Returns:
-        (resized_b64, new_width, new_height, scale_factor)
-        scale_factor is orig/new, i.e. multiply resized coords by this to get original coords.
-        If no resize needed, scale_factor is 1.0.
-    """
-    img = Image.open(io.BytesIO(base64.b64decode(screenshot_b64)))
-    w, h = img.size
-    total = w * h
-    if total <= max_pixels:
-        return screenshot_b64, w, h, 1.0
-
-    scale = math.sqrt(max_pixels / total)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    logger.debug(
-        "Screenshot resized: %dx%d -> %dx%d (scale_back=%.3f)",
-        w,
-        h,
-        new_w,
-        new_h,
-        1.0 / scale,
-    )
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii"), new_w, new_h, 1.0 / scale
 
 
 def strip_json_fences(text: str) -> str:
@@ -862,11 +825,12 @@ def message_text(resp: ChatResult) -> str:
 
 
 def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
-    """Build an OpenRouter image_url message part from a base64 screenshot."""
+    """Build an OpenRouter image_url message part from a base64 screenshot, which
+    ``screen_image`` encoded when it was captured."""
     return {
         "type": "image_url",
         "image_url": {
-            "url": f"data:image/png;base64,{screenshot_b64}",
+            "url": f"data:{MEDIA_TYPE};base64,{screenshot_b64}",
         },
     }
 
@@ -929,8 +893,6 @@ def describe_page_and_state(
         where elements_list is a list of {"description": str, "position": str} dicts
         and is_external_web is true only for web content from outside the app.
     """
-    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
-
     if existing_nodes:
         nodes_list = "\n".join(f'  - "{d}"' for d in existing_nodes)
         existing_nodes_section = (
@@ -1024,9 +986,6 @@ def verify_same_node(
         - "existing_description": str (only when same=False) — refined name for existing node
         - "new_description": str (only when same=False) — refined name for new screen
     """
-    screenshot_new_b64, *_ = _resize_screenshot(screenshot_new_b64)
-    screenshot_existing_b64, *_ = _resize_screenshot(screenshot_existing_b64)
-
     prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
     try:
         resp = send_chat(
@@ -1776,7 +1735,6 @@ def plan_next_action(
         ``(instruction, element)``, where ``element`` is the number of the listed
         unexplored element the instruction acts on, or None.
     """
-    screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)
 
     if request.explored_edges:
         lines = []
@@ -1823,7 +1781,7 @@ def plan_next_action(
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                build_image_message(screenshot_b64),
+                build_image_message(request.screenshot_b64),
             ],
         }
     ]
@@ -1898,7 +1856,6 @@ def describe_executed_action(
     object or has a blank instruction, or when the request still times out after the
     SDK's retries.
     """
-    screenshot_b64, *_ = _resize_screenshot(screenshot_b64)
     screen_w, screen_h = screen_size
     prompt = ACTION_DESCRIPTION_PROMPT.format(
         screen_w=screen_w, screen_h=screen_h, action=json.dumps(action)
@@ -2075,7 +2032,6 @@ def predict_next_action(
         - device_action: device action dict (may be {"action": "end"})
         - history_entry: NL description for the agent's action history
     """
-    screenshot_b64, *_ = _resize_screenshot(request.screenshot_b64)
 
     system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format()
 
@@ -2102,7 +2058,7 @@ def predict_next_action(
             "role": "user",
             "content": [
                 {"type": "text", "text": user_prompt},
-                build_image_message(screenshot_b64),
+                build_image_message(request.screenshot_b64),
             ],
         },
     ]

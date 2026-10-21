@@ -14,7 +14,7 @@ import socket
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import IO, Any, TypedDict, cast
 
 import httpx
 import networkx as nx
@@ -23,6 +23,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
 
+from android_app_graph.step_log import Observation
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
@@ -88,14 +89,56 @@ SHOT_A = b64(b"screenshot-a")
 SHOT_B = b64(b"screenshot-b")
 
 
-def make_manager(similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> GraphManager:
+def make_manager(
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD, steps_dir: Path | None = None
+) -> GraphManager:
     """A manager whose client is a sentinel; every caller of it is patched."""
-    return GraphManager(
+    gm = GraphManager(
         client=FAKE_CLIENT,
         page_detail=PAGE_DETAIL,
         embedding=EMBEDDING,
         similarity_threshold=similarity_threshold,
     )
+    gm.steps_dir = steps_dir
+    return gm
+
+
+def write_observation_image(steps_dir: Path, image: bytes) -> str:
+    """Write an observation image into ``steps_dir`` under the next free step ID, as a
+    StepRecorder would, and return the ID."""
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    observation_id = f"{len(list(steps_dir.glob('*.webp'))):06d}"
+    (steps_dir / f"{observation_id}.webp").write_bytes(image)
+    return observation_id
+
+
+class Membership(TypedDict):
+    observations: list[str]
+    representative_observation: str
+
+
+def members(steps_dir: Path, image: bytes = b"screenshot-a") -> Membership:
+    """The membership fields of a node whose one observation's image is in ``steps_dir``."""
+    observation_id = write_observation_image(steps_dir, image)
+    return {"observations": [observation_id], "representative_observation": observation_id}
+
+
+@dataclass(frozen=True)
+class Screens:
+    """Hands out observations as a StepRecorder would, with their images in ``steps_dir``."""
+
+    steps_dir: Path
+
+    def __call__(
+        self, activity: str = HOME, screenshot: str = SHOT_A, package: str = PACKAGE
+    ) -> Observation:
+        observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot))
+        return Observation(observation_id, screenshot, activity, package)
+
+
+@pytest.fixture
+def screen(tmp_path: Path) -> Screens:
+    return Screens(tmp_path / "steps")
 
 
 def add_screen(
@@ -116,7 +159,6 @@ def add_screen(
         "interactable_elements": [],
         "description_embedding": EMBEDDINGS.get(description, UNKNOWN_EMBEDDING),
         "description_embedding_model": gm.embedding_model,
-        "reference_screenshot": None,
         "last_normalized_visit_milestone": 0,
         "visit_count": 0,
     }
@@ -265,26 +307,27 @@ def test_construction_defaults() -> None:
     assert gm.total_steps_completed == 0
 
 
-def test_identify_state_without_page_detail_settings_raises() -> None:
+def test_identify_state_without_page_detail_settings_raises(screen: Screens) -> None:
     gm = GraphManager(embedding=EMBEDDING)
     with pytest.raises(RuntimeError, match="needs a client and page_detail settings"):
-        gm.identify_state(HOME, SHOT_A, PACKAGE)
+        gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
 
-def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm) -> None:
+def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm, screen: Screens) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL)
     with pytest.raises(RuntimeError, match="needs a client and embedding settings"):
-        gm.identify_state(HOME, SHOT_A, PACKAGE)
+        gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
 
-def test_identify_state_creates_the_first_node(vlm: FakeVlm) -> None:
+def test_identify_state_creates_the_first_node(vlm: FakeVlm, screen: Screens) -> None:
     vlm.descriptions.append(
         ("Home screen", {"tab": "home"}, [{"description": "Search box", "position": "10,20"}])
     )
     gm = make_manager()
+    observation = screen(HOME, SHOT_A, PACKAGE)
 
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(observation)
 
     assert node_id == "s0_home_screen"
     assert vlm.kinds() == ["describe", "embed"]
@@ -292,17 +335,20 @@ def test_identify_state_creates_the_first_node(vlm: FakeVlm) -> None:
     assert node is not None
     assert node["visit_count"] == 1
     assert node["state_schema"] == {"tab": ["home"]}
-    assert node["reference_screenshot"] == SHOT_A
+    assert node["observations"] == [observation.observation_id]
+    assert node["representative_observation"] == observation.observation_id
     assert node["interactable_elements"] == [
         {"description": "Search box", "position": "10,20", "explored": False}
     ]
 
 
-def test_identify_state_passes_the_configured_models_and_clients(vlm: FakeVlm) -> None:
+def test_identify_state_passes_the_configured_models_and_clients(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
 
-    gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert vlm.calls[0][1]["settings"] == PAGE_DETAIL
     assert vlm.calls[0][1]["client"] is FAKE_CLIENT
@@ -312,30 +358,46 @@ def test_identify_state_passes_the_configured_models_and_clients(vlm: FakeVlm) -
     )
 
 
-def test_identify_state_cache_hit_skips_the_vlm(vlm: FakeVlm) -> None:
+def test_identify_state_cache_hit_skips_the_vlm_and_adds_the_member(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    first_observation = screen(HOME, SHOT_A, PACKAGE)
+    first = gm.identify_state(first_observation)
+    second_observation = screen(HOME, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    second = gm.identify_state(second_observation)
 
     assert second == first
     assert vlm.kinds() == ["describe", "embed"]
+    node = gm.graph.nodes[first]
+    assert node["observations"] == [
+        first_observation.observation_id,
+        second_observation.observation_id,
+    ]
+    assert node["representative_observation"] == first_observation.observation_id
 
 
-def test_identify_state_reports_external_web_pages_as_one_shared_node(vlm: FakeVlm) -> None:
+def test_identify_state_reports_external_web_pages_as_one_shared_node(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.extend([("News article", {"title": "x"}, []), ("Sign-in form", {}, [])])
     vlm.external_web.update({"News article", "Sign-in form"})
     gm = make_manager()
+    article = screen(HOME, SHOT_A, PACKAGE)
+    sign_in = screen(SETTINGS, SHOT_B, PACKAGE)
 
-    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
-    second = gm.identify_state(SETTINGS, SHOT_B, PACKAGE)
+    first = gm.identify_state(article)
+    second = gm.identify_state(sign_in)
 
     assert first == second == EXTERNAL_WEB_NODE
     assert list(gm.graph) == [EXTERNAL_WEB_NODE]
     assert gm.get_node(EXTERNAL_WEB_NODE) == {
         "page_description": "[external web page]",
         "visit_count": 2,
+        "observations": [article.observation_id, sign_in.observation_id],
+        "representative_observation": article.observation_id,
     }
     assert vlm.kinds() == ["describe", "describe"]
     assert gm.get_start_node() is None
@@ -343,26 +405,31 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(vlm: FakeV
 
 def test_identify_state_keeps_the_cached_screen_behind_an_external_web_page(
     vlm: FakeVlm,
+    screen: Screens,
 ) -> None:
     vlm.descriptions.extend([("Home screen", {}, []), ("News article", {}, [])])
     vlm.external_web.add("News article")
     gm = make_manager()
-    home = gm.identify_state(HOME, SHOT_A, PACKAGE)
-    gm.identify_state(HOME, SHOT_B, PACKAGE)
+    home = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
 
-    assert gm.identify_state(HOME, SHOT_A, PACKAGE) == home
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == home
     assert vlm.kinds() == ["describe", "embed", "describe"]
 
 
-def test_identify_state_verified_match_merges_into_existing_node(vlm: FakeVlm) -> None:
+def test_identify_state_verified_match_merges_into_existing_node(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.extend(
         [("Home screen", {"tab": "home"}, []), ("Home screen with banner", {"tab": "deals"}, [])]
     )
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
-    gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm = make_manager(steps_dir=screen.steps_dir)
+    home = screen(HOME, SHOT_A, PACKAGE)
+    first = gm.identify_state(home)
+    banner = screen(SETTINGS, SHOT_B, PACKAGE)
 
-    second = gm.identify_state(SETTINGS, SHOT_B, PACKAGE)
+    second = gm.identify_state(banner)
 
     assert second == first
     assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify"]
@@ -373,23 +440,46 @@ def test_identify_state_verified_match_merges_into_existing_node(vlm: FakeVlm) -
     assert node["activities"] == [HOME, SETTINGS]
     assert node["visit_count"] == 2
     assert node["state_schema"] == {"tab": ["home", "deals"]}
-    assert node["reference_screenshot"] == SHOT_A  # kept on a confirmed match
+    assert node["observations"] == [home.observation_id, banner.observation_id]
+    assert node["representative_observation"] == home.observation_id
 
 
-def test_identify_state_verified_match_does_not_repeat_a_known_activity(vlm: FakeVlm) -> None:
+def test_identify_state_verifies_against_the_representative_image_in_the_step_log(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """The verifier compares the new screen with the candidate's representative image
+    as the step log holds it, not with any screenshot identify_state was given."""
     vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
     vlm.verdicts.append({"same": True, "reason": "identical layout"})
-    gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm = make_manager(steps_dir=screen.steps_dir)
+    home = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(home)
+    (screen.steps_dir / f"{home.observation_id}.webp").write_bytes(b"representative-image")
 
-    gm.identify_state(HOME, SHOT_B, PACKAGE)
+    gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
+
+    assert vlm.calls[4][1]["existing"] == b64(b"representative-image")
+    assert vlm.calls[4][1]["new"] == SHOT_B
+
+
+def test_identify_state_verified_match_does_not_repeat_a_known_activity(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
+    vlm.verdicts.append({"same": True, "reason": "identical layout"})
+    gm = make_manager(steps_dir=screen.steps_dir)
+    first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
 
     node = gm.get_node(first)
     assert node is not None
     assert node["activities"] == [HOME]
 
 
-def test_identify_state_rejected_match_renames_existing_and_creates_new(vlm: FakeVlm) -> None:
+def test_identify_state_rejected_match_renames_existing_and_creates_new(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
     vlm.verdicts.append(
         {
@@ -399,10 +489,12 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(vlm: Fak
             "new_description": "Promo overlay",
         }
     )
-    gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm = make_manager(steps_dir=screen.steps_dir)
+    home = screen(HOME, SHOT_A, PACKAGE)
+    first = gm.identify_state(home)
+    overlay = screen(HOME, SHOT_B, PACKAGE)
 
-    second = gm.identify_state(HOME, SHOT_B, PACKAGE)
+    second = gm.identify_state(overlay)
 
     assert first not in gm.graph
     assert "s0_home_feed" in gm.graph
@@ -411,9 +503,16 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(vlm: Fak
     renamed = gm.get_node("s0_home_feed")
     assert renamed is not None
     assert renamed["page_description"] == "Home feed"
+    assert renamed["observations"] == [home.observation_id]
+    assert renamed["representative_observation"] == home.observation_id
+    split = gm.graph.nodes[second]
+    assert split["observations"] == [overlay.observation_id]
+    assert split["representative_observation"] == overlay.observation_id
 
 
-def test_identify_state_rejected_match_without_refinements_creates_new(vlm: FakeVlm) -> None:
+def test_identify_state_rejected_match_without_refinements_creates_new(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
     vlm.verdicts.append(
         {
@@ -423,45 +522,52 @@ def test_identify_state_rejected_match_without_refinements_creates_new(vlm: Fake
             "new_description": "",
         }
     )
-    gm = make_manager()
-    first = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm = make_manager(steps_dir=screen.steps_dir)
+    first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
-    second = gm.identify_state(HOME, SHOT_B, PACKAGE)
+    second = gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
 
     assert first in gm.graph  # no rename: the verifier repeated the existing description
     assert second == "s1_home_screen_with_banner"
     assert vlm.kinds() == ["describe", "embed", "describe", "embed", "verify"]
 
 
-def test_identify_state_matches_by_embedding_when_the_candidate_has_no_screenshot(
+def test_identify_state_matches_by_embedding_when_the_candidate_has_no_representative(
     vlm: FakeVlm,
+    screen: Screens,
 ) -> None:
+    """A candidate without a representative has no image to verify against, so the
+    embedding decides alone, and the observation becomes its first member."""
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
+    observation = screen(HOME, SHOT_A, PACKAGE)
 
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(observation)
 
     assert node_id == "s0_home"
     assert vlm.kinds() == ["describe", "embed"]
     node = gm.get_node(node_id)
     assert node is not None
-    assert node["reference_screenshot"] is None  # only new nodes store a screenshot
+    assert node["observations"] == [observation.observation_id]
+    assert node["representative_observation"] == observation.observation_id
 
 
-def test_identify_state_ignores_nodes_of_another_package(vlm: FakeVlm) -> None:
+def test_identify_state_ignores_nodes_of_another_package(vlm: FakeVlm, screen: Screens) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
     add_screen(gm, "s0_other", "Home screen", activity=OTHER_APP, package=OTHER_PACKAGE)
 
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_home_screen"
     assert vlm.calls[0][1]["existing_nodes"] is None
     assert vlm.calls[0][1]["existing_keys"] is None
 
 
-def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(vlm: FakeVlm) -> None:
+def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.append(("Search results", {}, []))
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", state_schema={"tab": ["home"], "sort": ["price"]})
@@ -469,23 +575,25 @@ def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(vlm: FakeVlm)
         gm, "s1_settings", "Settings page", state_schema={"tab": ["deals"], "filter": ["new"]}
     )
 
-    gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert vlm.calls[0][1]["existing_keys"] == ["tab", "sort", "filter"]
 
 
-def test_identify_state_skips_candidates_without_an_embedding(vlm: FakeVlm) -> None:
+def test_identify_state_skips_candidates_without_an_embedding(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", description_embedding=None)
 
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_home_screen"
 
 
 def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
 ) -> None:
     """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
     companion ``_embeddings.json`` nor an inline vector; that is a missing
@@ -497,14 +605,14 @@ def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
     add_screen(gm, "s1_home", "Home feed")
 
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+        node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s1_home"
     assert "stale" not in caplog.text
 
 
 def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
 ) -> None:
     """A vector tagged with the configured embedding model but of a different
     dimension must never be scored against the fresh query vector (see
@@ -518,7 +626,7 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     add_screen(gm, "s1_home", "Home feed")
 
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+        node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s1_home"
     stale_warnings = [
@@ -529,23 +637,25 @@ def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
     assert "dim(s)=[2]" in stale_warnings[0]
 
 
-def test_identify_state_below_the_threshold_creates_a_new_node(vlm: FakeVlm) -> None:
+def test_identify_state_below_the_threshold_creates_a_new_node(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.append(("Settings page", {}, []))
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_B)
+    gm = make_manager(steps_dir=screen.steps_dir)
+    add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir, b"screenshot-b"))
 
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_settings_page"
     assert vlm.kinds() == ["describe", "embed"]
 
 
-def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm) -> None:
+def test_identify_state_sanitizes_and_truncates_the_node_id(vlm: FakeVlm, screen: Screens) -> None:
     description = "Home / dashboard screen showing every available promotion"
     vlm.descriptions.append((description, {}, []))
     gm = make_manager()
 
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_home___dashboard_screen_showing_every_av"
     assert len(node_id.split("_", 1)[1]) == 40
@@ -601,40 +711,52 @@ def test_rename_node_without_an_underscore_uses_the_whole_id_as_prefix(vlm: Fake
     assert vlm.kinds() == ["embed"]
 
 
-def test_rename_node_to_the_same_id_keeps_the_screenshot_dirty(
-    tmp_path: Path, vlm: FakeVlm
-) -> None:
+def test_rename_node_to_the_same_id_only_refreshes_the_embedding(vlm: FakeVlm) -> None:
     gm = make_manager()
-    add_screen(gm, "s0_home_screen", "Home screen", reference_screenshot=SHOT_A)
+    add_screen(
+        gm,
+        "s0_home_screen",
+        "Home screen",
+        observations=["000000"],
+        representative_observation="000000",
+    )
 
     assert gm.rename_node("s0_home_screen", "Home screen") == "s0_home_screen"
+
     assert vlm.kinds() == ["embed"]
+    assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
+    assert gm.graph.nodes["s0_home_screen"]["observations"] == ["000000"]
+    assert gm.graph.nodes["s0_home_screen"]["representative_observation"] == "000000"
 
-    gm.save_graph(tmp_path / "graph.json")
-    assert (tmp_path / "graph_screenshots" / "s0_home_screen.png").read_bytes() == b"screenshot-a"
 
-
-def test_rename_node_moves_the_screenshot_to_the_new_id(tmp_path: Path, vlm: FakeVlm) -> None:
-    vlm.descriptions.append(("Home screen", {}, []))
+def test_rename_node_keeps_the_members_and_representative_under_the_new_id(
+    vlm: FakeVlm,
+) -> None:
     gm = make_manager()
-    gm.identify_state(HOME, SHOT_A, PACKAGE)
+    add_screen(
+        gm,
+        "s0_home_screen",
+        "Home screen",
+        observations=["000000", "000004"],
+        representative_observation="000000",
+    )
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
-    gm.save_graph(tmp_path / "graph.json")
-    screenshots = tmp_path / "graph_screenshots"
-    assert (screenshots / f"{new_id}.png").is_file()
-    assert not (screenshots / "s0_home_screen.png").exists()
+    assert vlm.kinds() == ["embed"]
+    assert new_id == "s0_home_feed"
+    assert gm.graph.nodes[new_id]["observations"] == ["000000", "000004"]
+    assert gm.graph.nodes[new_id]["representative_observation"] == "000000"
 
 
-def test_rename_node_updates_the_identify_cache(vlm: FakeVlm) -> None:
+def test_rename_node_updates_the_identify_cache(vlm: FakeVlm, screen: Screens) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
-    gm.identify_state(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
-    assert gm.identify_state(HOME, SHOT_A, PACKAGE) == new_id
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == new_id
     assert vlm.kinds() == ["describe", "embed", "embed"]
 
 
@@ -1046,6 +1168,70 @@ def test_merge_nodes_unions_activities_schemas_elements_and_visits() -> None:
     assert [e["description"] for e in node["interactable_elements"]] == ["Search box", "Menu"]
     assert node["page_description"] == "Home screen"
     assert "s1_home_two" not in gm.graph
+
+
+def test_merge_nodes_unites_the_members_in_step_order_and_keeps_the_representative() -> None:
+    """Step IDs are zero-padded integers, so a longer ID sorts after every shorter one."""
+    gm = make_manager()
+    add_screen(
+        gm,
+        "s0_home",
+        "Home screen",
+        observations=["000003", "000010", "1000000"],
+        representative_observation="000010",
+    )
+    add_screen(
+        gm,
+        "s1_home_two",
+        "Home screen again",
+        observations=["000001", "000010", "000012"],
+        representative_observation="000001",
+    )
+
+    assert gm.merge_nodes("s0_home", "s1_home_two") is True
+
+    kept = gm.graph.nodes["s0_home"]
+    assert kept["observations"] == ["000001", "000003", "000010", "000012", "1000000"]
+    assert kept["representative_observation"] == "000010"
+
+
+def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
+    screen: Screens,
+) -> None:
+    gm = make_manager()
+    first = screen(OTHER_APP, SHOT_A, f" {OTHER_PACKAGE} ")
+    second = screen(OTHER_APP, SHOT_B, OTHER_PACKAGE)
+
+    assert gm.record_external_app_visit(first) == f"ext_{OTHER_PACKAGE}"
+    assert gm.record_external_app_visit(second) == f"ext_{OTHER_PACKAGE}"
+
+    assert list(gm.graph) == [f"ext_{OTHER_PACKAGE}"]
+    assert gm.get_node(f"ext_{OTHER_PACKAGE}") == {
+        "activity": OTHER_APP,
+        "page_description": f"[external app: {OTHER_PACKAGE}]",
+        "state_schema": {},
+        "visit_count": 2,
+        "is_external": True,
+        "observations": [first.observation_id, second.observation_id],
+        "representative_observation": first.observation_id,
+    }
+
+
+def test_representative_image_needs_a_step_log() -> None:
+    gm = make_manager()
+    add_screen(
+        gm, "s0_home", "Home screen", observations=["000000"], representative_observation="000000"
+    )
+
+    with pytest.raises(RuntimeError, match="needs a steps_dir"):
+        gm.representative_image_b64("s0_home")
+
+
+def test_representative_image_is_read_from_the_step_log(tmp_path: Path) -> None:
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps", b"home-image"))
+
+    assert gm.representative_image_b64("s0_home") == b64(b"home-image")
 
 
 def test_merge_nodes_adds_only_the_schema_values_the_kept_node_lacks() -> None:
@@ -2139,22 +2325,24 @@ def test_get_exploration_target_candidates_are_the_nodes_of_a_package_of_any_len
 
 @any_package_length
 def test_identify_state_matches_a_node_of_the_package_under_another_activity(
-    vlm: FakeVlm, package: str, activity: str, other_activity: str
+    vlm: FakeVlm, package: str, activity: str, other_activity: str, screen: Screens
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", activity=other_activity, package=package)
 
-    assert gm.identify_state(activity, SHOT_A, package) == "s0_home"
+    assert gm.identify_state(screen(activity, SHOT_A, package)) == "s0_home"
     assert gm.graph.nodes["s0_home"]["activities"] == [other_activity, activity]
 
 
-def test_identify_state_keeps_apart_packages_that_share_three_segments(vlm: FakeVlm) -> None:
+def test_identify_state_keeps_apart_packages_that_share_three_segments(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
     gm = make_manager()
     add_screen(gm, "s0_mail", "Home screen", activity=GMAIL_LIST, package=GMAIL)
 
-    node_id = gm.identify_state(MESSAGES_LIST, SHOT_A, MESSAGES)
+    node_id = gm.identify_state(screen(MESSAGES_LIST, SHOT_A, MESSAGES))
 
     assert node_id == "s0_home_screen"
     assert gm.graph.nodes[node_id]["package"] == MESSAGES
@@ -2165,38 +2353,76 @@ def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
     assert GraphManager.embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
 
 
-def test_save_writes_dirty_screenshots_once_and_load_restores_them(
+def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     tmp_path: Path, vlm: FakeVlm
 ) -> None:
     vlm.descriptions.append(("Home screen", {}, []))
-    gm = make_manager()
-    node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
     graph_path = tmp_path / "nested" / "graph.json"
+    steps_dir = graph_path.parent / "steps"
+    gm = make_manager(steps_dir=steps_dir)
+    observation = Screens(steps_dir)(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(observation)
 
     gm.save_graph(graph_path)
 
-    png = graph_path.parent / "graph_screenshots" / f"{node_id}.png"
-    assert png.read_bytes() == b"screenshot-a"
-    assert (graph_path.parent / "graph.emb.json").is_file()
+    assert sorted(path.name for path in graph_path.parent.iterdir()) == [
+        "graph.emb.json",
+        "graph.json",
+        "steps",
+    ]
+    assert [path.name for path in steps_dir.iterdir()] == [f"{observation.observation_id}.webp"]
+    saved = json.loads(graph_path.read_text(encoding="utf-8"))["nodes"][0]
+    assert saved["observations"] == [observation.observation_id]
+    assert saved["representative_observation"] == observation.observation_id
 
     loaded = make_manager()
     loaded.load_graph(graph_path)
     restored = loaded.get_node(node_id)
     assert restored is not None
-    assert restored["reference_screenshot"] == SHOT_A
+    assert restored["observations"] == [observation.observation_id]
+    assert restored["representative_observation"] == observation.observation_id
     assert restored["description_embedding"] == EMBEDDINGS["Home screen"]
     assert restored["description_embedding_model"] == gm.embedding_model
+    assert loaded.steps_dir == steps_dir
+    assert loaded.representative_image_b64(node_id) == SHOT_A
     assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
 
-    png.unlink()
-    gm.save_graph(graph_path)
-    assert not png.exists()  # the dirty set was cleared by the first save
+
+def test_node_aliases_survive_save_and_load(tmp_path: Path, vlm: FakeVlm) -> None:
+    """A node ID recorded before a rename and a merge still resolves after a reload."""
+    steps_dir = tmp_path / "steps"
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir))
+    add_screen(gm, "s1_home", "Home screen", **members(steps_dir))
+    renamed = gm.rename_node("s1_home", "Home feed")
+    assert gm.merge_nodes("s0_home", renamed) is True
+    kept = gm.rename_node("s0_home", "Settings page")
+    path = tmp_path / "graph.json"
+
+    gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    assert vlm.kinds() == ["embed", "embed"]
+    assert json.loads(path.read_text(encoding="utf-8"))["node_aliases"] == {
+        "s1_home": renamed,
+        renamed: "s0_home",
+        "s0_home": kept,
+    }
+    assert {loaded.resolve_node_id(node) for node in ("s1_home", renamed, "s0_home")} == {kept}
 
 
 def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     gm = make_manager(similarity_threshold=0.5)
     gm.total_steps_completed = 42
-    add_screen(gm, "s0_home", "Home screen", visit_count=3)
+    add_screen(
+        gm,
+        "s0_home",
+        "Home screen",
+        visit_count=3,
+        observations=["000000", "000002"],
+        representative_observation="000000",
+    )
     add_screen(gm, "s1_settings", "Settings page")
     gm.add_edge(
         "s0_home",
@@ -2215,6 +2441,9 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     assert data["total_steps_completed"] == 42
     assert data["nodes"][0]["activity"] == HOME
     assert data["nodes"][0]["visit_count"] == 3
+    assert data["nodes"][0]["observations"] == ["000000", "000002"]
+    assert data["nodes"][0]["representative_observation"] == "000000"
+    assert data["node_aliases"] == {}
     assert data["edges"][0]["schema_deltas"] == [{"tab": {"after": "settings"}}]
     embeddings = json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8"))
     assert embeddings["s0_home"] == {
@@ -2278,6 +2507,7 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
                         "activity": HOME,
                         "page_description": "Home screen",
                         "description_embedding": [1.0, 0.0, 0.0],
+                        **members(tmp_path / "steps"),
                     }
                 ],
                 "edges": [],
@@ -2293,13 +2523,12 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
     assert node is not None
     assert node["description_embedding"] == [1.0, 0.0, 0.0]
     assert node["activities"] == [HOME]
-    assert node["reference_screenshot"] is None
     assert gm.similarity_threshold == DEFAULT_SIMILARITY_THRESHOLD
     assert gm.total_steps_completed == 0
 
 
 def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
-    tmp_path: Path, vlm: FakeVlm, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
 ) -> None:
     """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
     companion ``_embeddings.json`` nor an inline vector; ``identify_state`` must
@@ -2310,7 +2539,14 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
         json.dumps(
             {
                 "package_name": PACKAGE,
-                "nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}],
+                "nodes": [
+                    {
+                        "id": "s0_home",
+                        "activity": HOME,
+                        "page_description": "Home screen",
+                        **members(tmp_path / "steps"),
+                    }
+                ],
                 "edges": [],
             }
         ),
@@ -2322,7 +2558,7 @@ def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
 
     vlm.descriptions.append(("Home screen", {}, []))
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(HOME, SHOT_A, PACKAGE)
+        node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s0_home_screen"
     assert "stale" not in caplog.text
@@ -2343,8 +2579,18 @@ def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -
 
 def test_save_graph_and_load_graph_round_trip_each_node_package(tmp_path: Path) -> None:
     source = make_manager()
-    add_screen(source, "s0_list", "Home screen", activity=MESSAGES_LIST, package=MESSAGES)
-    add_screen(source, "s1_mail", "Settings page", activity=GMAIL_LIST, package=GMAIL)
+    steps_dir = tmp_path / "steps"
+    add_screen(
+        source,
+        "s0_list",
+        "Home screen",
+        activity=MESSAGES_LIST,
+        package=MESSAGES,
+        **members(steps_dir),
+    )
+    add_screen(
+        source, "s1_mail", "Settings page", activity=GMAIL_LIST, package=GMAIL, **members(steps_dir)
+    )
     path = tmp_path / "graph.json"
     source.save_graph(path)
 
@@ -2364,13 +2610,14 @@ def test_load_graph_gives_the_app_package_to_each_screen_saved_without_one(
 ) -> None:
     """Every node saved without a package but the ``ext_`` placeholders gets the app's
     package, including one whose activity class lives outside the package."""
+    steps_dir = tmp_path / "steps"
     document: dict[str, Any] = {
         "nodes": [
-            {"id": "s0_home", "activity": WHATSAPP_HOME},
-            {"id": "s1_group_info", "activity": WHATSAPP_GROUP_INFO},
-            {"id": "s2_sign_in", "activity": GOOGLE_SIGN_IN},
-            {"id": "ext_com.google.android.gm", "activity": GMAIL_LIST},
-            {"id": EXTERNAL_WEB_NODE},
+            {"id": "s0_home", "activity": WHATSAPP_HOME, **members(steps_dir)},
+            {"id": "s1_group_info", "activity": WHATSAPP_GROUP_INFO, **members(steps_dir)},
+            {"id": "s2_sign_in", "activity": GOOGLE_SIGN_IN, **members(steps_dir)},
+            {"id": "ext_com.google.android.gm", "activity": GMAIL_LIST, **members(steps_dir)},
+            {"id": EXTERNAL_WEB_NODE, **members(steps_dir)},
         ],
         "edges": [
             *(
@@ -2400,7 +2647,7 @@ def test_load_graph_gives_the_app_package_to_each_screen_saved_without_one(
 
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     source = make_manager()
-    add_screen(source, "s0_home", "Home screen")
+    add_screen(source, "s0_home", "Home screen", **members(tmp_path / "steps"))
     path = tmp_path / "graph.json"
     source.save_graph(path)
 
@@ -2416,12 +2663,13 @@ def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
     "edges" key loads; only a present non-list value is rejected.
     """
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {"nodes": [{"id": "s0_home", "activity": HOME, "page_description": "Home screen"}]}
-        ),
-        encoding="utf-8",
-    )
+    node = {
+        "id": "s0_home",
+        "activity": HOME,
+        "page_description": "Home screen",
+        **members(tmp_path / "steps"),
+    }
+    path.write_text(json.dumps({"nodes": [node]}), encoding="utf-8")
     gm = make_manager()
 
     gm.load_graph(path)
@@ -2430,38 +2678,120 @@ def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
     assert gm.graph.number_of_edges() == 0
 
 
-def test_load_graph_finds_screenshots_split_across_the_stem_and_app_directories(
+def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     tmp_path: Path,
 ) -> None:
-    """save_graph writes only re-explored nodes into ``<stem>_screenshots``, so an
-    audited graph's screenshots are split between that directory and the app
-    directory's own; a node must be found in either.
-    """
     app_dir = tmp_path / "demo"
-    app_dir.mkdir()
+    node = {"id": "s0_home", "activity": HOME, **members(app_dir / "steps", b"home-image")}
     path = app_dir / "demo_audited.json"
-    path.write_text(
-        json.dumps(
-            {
-                "nodes": [
-                    {"id": "s0_home", "activity": HOME, "page_description": "Home screen"},
-                    {"id": "s1_cart", "activity": HOME, "page_description": "Cart"},
-                ],
-                "edges": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (app_dir / "demo_screenshots").mkdir()
-    (app_dir / "demo_screenshots" / "s0_home.png").write_bytes(b"screenshot-a")
-    (app_dir / "demo_audited_screenshots").mkdir()
-    (app_dir / "demo_audited_screenshots" / "s1_cart.png").write_bytes(b"screenshot-b")
-
+    path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
     gm = make_manager()
+
     gm.load_graph(path)
 
-    assert gm.graph.nodes["s0_home"]["reference_screenshot"] == SHOT_A
-    assert gm.graph.nodes["s1_cart"]["reference_screenshot"] == SHOT_B
+    assert gm.steps_dir == app_dir / "steps"
+    assert gm.representative_image_b64("s0_home") == b64(b"home-image")
+
+
+def write_graph(path: Path, nodes: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps({"nodes": nodes, "edges": []}), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "membership",
+    [
+        {},
+        {"observations": [], "representative_observation": None},
+        {"observations": "000000", "representative_observation": "000000"},
+        {"observations": ["000000", 1], "representative_observation": "000000"},
+        {"observations": ["000000"]},
+        {"observations": ["000000"], "representative_observation": "000001"},
+    ],
+    ids=[
+        "no-members",
+        "empty-members",
+        "members-not-a-list",
+        "a-member-not-a-string",
+        "no-representative",
+        "representative-not-a-member",
+    ],
+)
+def test_load_graph_rejects_a_node_without_members_naming_it(
+    tmp_path: Path, membership: dict[str, object]
+) -> None:
+    write_observation_image(tmp_path / "steps", b"image")
+    write_observation_image(tmp_path / "steps", b"image")
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", **members(tmp_path / "steps")},
+            {"id": "s1_settings", **membership},
+        ],
+    )
+    gm = make_manager()
+
+    with pytest.raises(ValueError, match="no member observations") as excinfo:
+        gm.load_graph(path)
+
+    message = str(excinfo.value)
+    assert "['s1_settings']" in message
+    assert "s0_home" not in message
+    assert str(path) in message
+    assert "explore the app again" in message
+
+
+def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", **members(tmp_path / "steps")},
+            {
+                "id": "s1_settings",
+                "observations": ["000007"],
+                "representative_observation": "000007",
+            },
+        ],
+    )
+    gm = make_manager()
+
+    with pytest.raises(ValueError, match="without an image") as excinfo:
+        gm.load_graph(path)
+
+    assert "['s1_settings']" in str(excinfo.value)
+    assert str(tmp_path / "steps") in str(excinfo.value)
+    assert "no member observations" not in str(excinfo.value)
+
+
+def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
+    tmp_path: Path,
+) -> None:
+    previous = tmp_path / "previous" / "graph.json"
+    previous.parent.mkdir()
+    write_graph(previous, [{"id": "s9_stale", **members(previous.parent / "steps")}])
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home"},
+            {
+                "id": "s1_settings",
+                "observations": ["000007"],
+                "representative_observation": "000007",
+            },
+        ],
+    )
+    gm = make_manager()
+    gm.load_graph(previous)
+
+    with pytest.raises(ValueError, match=r"\['s0_home'\].*\['s1_settings'\]"):
+        gm.load_graph(path)
+
+    assert list(gm.graph.nodes) == ["s9_stale"]
+    assert gm.steps_dir == previous.parent / "steps"
 
 
 def test_load_graph_rejects_an_edge_whose_endpoint_is_not_in_the_file(tmp_path: Path) -> None:
@@ -2499,7 +2829,13 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
     )
     previous = tmp_path / "previous.json"
     previous.write_text(
-        json.dumps({"next_id": 7, "nodes": [{"id": "s9_stale"}], "edges": []}),
+        json.dumps(
+            {
+                "next_id": 7,
+                "nodes": [{"id": "s9_stale", **members(tmp_path / "steps")}],
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
     gm = make_manager()
@@ -2781,7 +3117,7 @@ def test_run_node_merge_audit_skips_a_self_pair(
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_A, visit_count=3)
+    add_screen(gm, "s0_home", "Home screen", visit_count=3)
 
     result = gm.run_node_merge_audit()
 
@@ -2793,14 +3129,16 @@ def test_run_node_merge_audit_skips_a_self_pair(
     assert vlm.kinds() == []
 
 
-def test_run_node_merge_audit_skips_a_missing_screenshot(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+@pytest.mark.parametrize("without_representative", ["s0_home", "s1_home_two"])
+def test_run_node_merge_audit_skips_a_node_without_a_representative(
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, without_representative: str
 ) -> None:
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s1_home_two"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_A)
-    add_screen(gm, "s1_home_two", "Home screen again")
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
+    add_screen(gm, "s1_home_two", "Home screen again", **members(tmp_path / "steps"))
+    del gm.graph.nodes[without_representative]["representative_observation"]
 
     result = gm.run_node_merge_audit()
 
@@ -2808,17 +3146,46 @@ def test_run_node_merge_audit_skips_a_missing_screenshot(
     assert vlm.kinds() == []
 
 
+@pytest.mark.parametrize("external_side", ["node_a", "node_b"])
+def test_run_node_merge_audit_never_verifies_an_external_node(
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, external_side: str
+) -> None:
+    """An ``ext_`` node stands for every screen of another app or the web, so its
+    representative is no screen of the app to compare with."""
+    pair = {"node_a": "s0_home", "node_b": "s1_home_two", external_side: EXTERNAL_WEB_NODE}
+    fake = FakeAudit(result={"issues": [pair]})
+    monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    for node_id in pair.values():
+        add_screen(gm, node_id, "Home screen", **members(tmp_path / "steps"))
+
+    result = gm.run_node_merge_audit()
+
+    assert result["results"][0]["status"] == "skipped"
+    assert result["results"][0]["reason"] == "external node"
+    assert result["merged_count"] == 0
+    assert vlm.kinds() == []
+
+
 def test_run_node_merge_audit_merges_a_confirmed_duplicate(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
     fake = FakeAudit(
         result={"issues": [{"node_a": "s2_home_two", "node_b": "s0_home"}], "summary": "one pair"}
     )
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": True, "reason": "same screen"})
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_A, visit_count=1)
-    add_screen(gm, "s2_home_two", "Home screen again", reference_screenshot=SHOT_B, visit_count=5)
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir=steps_dir)
+    add_screen(gm, "s0_home", "Home screen", visit_count=1, **members(steps_dir, b"home-image"))
+    add_screen(
+        gm,
+        "s2_home_two",
+        "Home screen again",
+        visit_count=5,
+        **members(steps_dir, b"home-two-image"),
+    )
+    removed_members = gm.graph.nodes["s2_home_two"]["observations"]
 
     result = gm.run_node_merge_audit()
 
@@ -2827,19 +3194,24 @@ def test_run_node_merge_audit_merges_a_confirmed_duplicate(
     assert result["results"][0]["kept"] == "s0_home"
     assert result["results"][0]["removed"] == "s2_home_two"
     assert list(gm.graph.nodes) == ["s0_home"]
+    assert gm.graph.nodes["s0_home"]["observations"][1:] == removed_members
     # The description of the more-visited node is the verifier's reference.
     assert vlm.calls[0][1]["existing_description"] == "Home screen again"
+    # Each side's representative image comes from the step log.
+    assert vlm.calls[0][1]["existing"] == b64(b"home-two-image")
+    assert vlm.calls[0][1]["new"] == b64(b"home-image")
 
 
+@pytest.mark.parametrize("other", ["search_results", "browser"])
 def test_run_node_merge_audit_orders_non_numeric_ids_last(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, other: str
 ) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": "ext_browser", "node_b": "s0_home"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": other, "node_b": "s0_home"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": True, "reason": "same screen"})
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_A)
-    add_screen(gm, "ext_browser", "Browser", reference_screenshot=SHOT_B)
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
+    add_screen(gm, other, "Search results", **members(tmp_path / "steps"))
 
     result = gm.run_node_merge_audit()
 
@@ -2847,14 +3219,14 @@ def test_run_node_merge_audit_orders_non_numeric_ids_last(
 
 
 def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s1_home_two"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": False, "reason": "different banner"})
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", reference_screenshot=SHOT_A)
-    add_screen(gm, "s1_home_two", "Home screen again", reference_screenshot=SHOT_B)
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
+    add_screen(gm, "s1_home_two", "Home screen again", **members(tmp_path / "steps"))
 
     result = gm.run_node_merge_audit()
 
@@ -2875,7 +3247,15 @@ json_scalars = (
 )
 actions = st.dictionaries(st.text(min_size=1, max_size=8), json_scalars, max_size=3)
 small_dicts = st.lists(st.dictionaries(st.text(max_size=6), json_scalars, max_size=2), max_size=2)
-node_attrs = st.fixed_dictionaries(
+step_ids = st.lists(
+    st.integers(min_value=0, max_value=10_000_000), min_size=1, max_size=4, unique=True
+).map(lambda numbers: [f"{number:06d}" for number in numbers])
+memberships = step_ids.flatmap(
+    lambda ids: st.fixed_dictionaries(
+        {"observations": st.just(ids), "representative_observation": st.sampled_from(ids)}
+    )
+)
+screen_attrs = st.fixed_dictionaries(
     {
         "activities": st.lists(st.text(min_size=1, max_size=30), min_size=1, max_size=3),
         "page_description": st.text(max_size=40),
@@ -2901,6 +3281,7 @@ node_attrs = st.fixed_dictionaries(
         "visit_count": st.integers(min_value=0, max_value=100),
     }
 )
+node_attrs = st.tuples(screen_attrs, memberships).map(lambda parts: {**parts[0], **parts[1]})
 edge_attrs = st.fixed_dictionaries(
     {
         "actions": st.lists(actions | st.lists(actions, max_size=3), max_size=3),
@@ -2936,6 +3317,8 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             else None,
             "last_normalized_visit_milestone": d.get("last_normalized_visit_milestone", 0),
             "visit_count": d.get("visit_count", 0),
+            "observations": d.get("observations", []),
+            "representative_observation": d.get("representative_observation"),
         }
         for node_id, d in gm.graph.nodes(data=True)
     }
@@ -2974,6 +3357,9 @@ def test_save_then_load_round_trips(
         if u in nodes and v in nodes:
             gm.graph.add_edge(u, v, **attrs)
     path = tmp_path_factory.mktemp("roundtrip") / "graph.json"
+    (path.parent / "steps").mkdir()
+    for attrs in nodes.values():
+        (path.parent / "steps" / f"{attrs['representative_observation']}.webp").write_bytes(b"x")
 
     gm.save_graph(path)
     loaded = GraphManager()
@@ -3100,9 +3486,10 @@ def test_every_per_action_list_has_one_entry_per_action(
         ]
     ],
 ) -> None:
+    path = tmp_path_factory.mktemp("aligned") / "graph.json"
     gm = make_manager()
     for node_id in POOL:
-        add_screen(gm, node_id, f"screen {node_id}")
+        add_screen(gm, node_id, f"screen {node_id}", **members(path.parent / "steps"))
     for kind, a, b, action, instruction, observation, delta in ops:
         if kind == "edge":
             gm.add_edge(
@@ -3116,7 +3503,6 @@ def test_every_per_action_list_has_one_entry_per_action(
         else:
             gm.merge_nodes(a, b)
         assert misaligned_lists(gm) == []
-    path = tmp_path_factory.mktemp("aligned") / "graph.json"
 
     gm.save_graph(path)
     loaded = GraphManager()
@@ -3144,6 +3530,7 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
     embedding_body: dict[str, object],
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
+    screen: Screens,
 ) -> None:
     manager = GraphManager(
         client=router_client,
@@ -3162,7 +3549,7 @@ def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    node = manager.identify_state("com.demo.Home", png_screenshot, "com.demo")
+    node = manager.identify_state(screen("com.demo.Home", png_screenshot, "com.demo"))
     assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model
     assert len(router_requests) == 2
 
@@ -3179,12 +3566,14 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
     embedding_body: dict[str, object],
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
+    screen: Screens,
 ) -> None:
     path = tmp_path / "demo.json"
     node: dict[str, object] = {
         "id": "home",
         "activity": "com.demo.Home",
         "page_description": "home",
+        **members(tmp_path / "steps"),
     }
     if stored == "inline untagged":
         node["description_embedding"] = [0.25, 0.75]
@@ -3217,7 +3606,7 @@ def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
         if operation == "find":
             manager.find_node_by_description("home")
         else:
-            manager.identify_state("com.demo.Home", png_screenshot, "com.demo")
+            manager.identify_state(screen("com.demo.Home", png_screenshot, "com.demo"))
 
     for _ in range(2):
         with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):

@@ -22,6 +22,8 @@ Android-App-Graph/
 │       ├── cli.py                     # app-graph command
 │       ├── commands/                  # app-graph-audit, app-graph-plot
 │       ├── kobe.py                    # Core app explorer
+│       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
+│       ├── step_log.py                # Records every screenshot and action in steps/
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
@@ -50,6 +52,9 @@ Arrows point from importer to imported module; anything not drawn is forbidden.
 graph TD;
     pkg["android_app_graph"] --> kobe["android_app_graph.kobe"];
     cmd["android_app_graph.commands"] --> dev["android_app_graph.device"];
+    cmd --> gf["android_app_graph.graph_files"];
+    cmd --> img["android_app_graph.screen_image"];
+    cmd --> steps["android_app_graph.step_log"];
     cmd --> utils["android_app_graph.utils"];
     cmd --> gm["android_app_graph.utils.graph_manager"];
     cmd --> logging["android_app_graph.utils.logging"];
@@ -58,17 +63,24 @@ graph TD;
     cli --> kobe;
     cli --> logging;
     kobe --> dev;
+    kobe --> gf;
+    kobe --> steps;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
     gm --> pkgs["android_app_graph.android_packages"];
-    gm --> gf["android_app_graph.graph_files"];
+    gm --> gf;
     gm --> pay["android_app_graph.payloads"];
+    gm --> steps;
     gm --> vlm;
+    steps --> gf;
+    steps --> pay;
+    steps --> img;
     utils --> pay;
     utils --> retry["android_app_graph.retrying"];
     vlm --> pay;
     vlm --> retry;
+    vlm --> img;
     vlm --> utils;
 ```
 
@@ -293,9 +305,10 @@ Rebuild or re-explore into a new graph directory with the configured embedding
 model before resuming text matching; do not relabel old vectors. Newly generated
 or renamed descriptions carry their model metadata through save/load.
 
-Exploration and the audit match screens by these text vectors and by comparing
-screenshots, never by screenshot embeddings. A screenshot-embedding sidecar left
-in a graph directory is not read; it can be deleted.
+Exploration and the audit match screens by these text vectors and by comparing a
+screenshot with a node's representative (see [Graph nodes](#graph-nodes)), never
+by screenshot embeddings. A screenshot-embedding sidecar left in a graph
+directory is not read; it can be deleted.
 
 ### Action responses
 
@@ -352,7 +365,8 @@ uv run app-graph -c configs/explore.yaml --max-steps 100
 uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 ```
 
-Exploration writes graph files under `graphs/<app_name>/`.
+Exploration writes graph files under `graphs/<app_name>/` and records every
+screenshot and action in its [step log](#step-log).
 
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
 every permission it requests with `adb shell pm grant`, so no permission prompt
@@ -419,6 +433,75 @@ screen. A node without a recorded package, other than an `ext_` one, takes the
 graph file's `package_name`, or the app's configured `package_name` when the file
 has none, so a graph file whose nodes record no package still loads and resumes.
 
+### Step log
+
+Exploration and `app-graph-audit --re-explore` record every screenshot they take
+and every action they send in `graphs/<app_name>/steps/`, which the explored graph
+and its `_audited` copy share. Recording is always on.
+
+Each step has a zero-padded number. Its record is `<id>.json`, and a screenshot
+also has its image, `<id>.webp`. Every screenshot is encoded once, when it is
+taken: shrunk with LANCZOS to at most one million pixels and saved as lossless
+WebP. That image is the one the models receive and the one the graph refers to;
+no PNG is kept. The image is written before its record, so every record names an
+image that exists. A later run continues the numbering after the highest record,
+and an image a crash left without a record is ignored and its number reused.
+
+Every record has `id`, `kind`, `run_id` (one per exploration or re-exploration
+run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
+`activity` and `package` of its screen:
+
+| `kind` | Written for | Also holds |
+|---|---|---|
+| `observation` | each screenshot | `width` and `height` of its image |
+| `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
+
+An action or transition record takes `activity` and `package` from the screenshot
+it was taken from. A replay acts without looking, so a replayed action names the
+last screenshot before it, which can predate the app restart. The planner's
+instruction can differ from the edge's: an action-model `end` is recorded on the
+edge as "Press back".
+
+`source` names the part of the run that took the step: `main_loop`,
+`navigation_replay`, `coverage_checkpoint`, `external_app_recovery`,
+`external_web_recovery`, `re_explore` (the audit's exploration steps) or
+`edge_retry` (the audit's replay of a flagged edge). A retried edge has no
+planner, so its transition holds the flagged instruction and a `null` element.
+
+On 139 screenshots of the Settings app from a 1280x2856 emulator, each became a
+669x1493 image of 74 KB on average (176 KB at most), 57% smaller than the
+device's PNG, and took about 0.35 s to encode. A record is a few hundred bytes.
+The log keeps every value shown on the screen and every text typed, passwords
+included, so treat a graph directory like the app's data. Run one exploration or
+re-exploration of an app at a time: two runs writing one step log reuse each
+other's numbers.
+
+### Graph nodes
+
+Each node lists the observations assigned to it in `observations`, in step
+order, and names one of them `representative_observation`:
+
+- a new node's representative is its first observation;
+- a later visit matched to the node joins the list and keeps the representative;
+- a screen the verifier rejects starts a new node with itself as representative;
+- a merge unites both lists in step order and keeps the kept node's representative.
+
+The explorer's verifier and the audit's merge checks compare a screen with the
+representative's image in `steps/`, and `app-graph-plot` shows it as the node's
+thumbnail. `ext_web` and `ext_<package>` nodes list the screens that reached them
+as well; the merge checks never compare them.
+
+The graph file's `node_aliases` maps each node ID a rename or merge retired to
+the ID that replaced it, so a node ID recorded in the step log by an earlier run
+still resolves.
+
+Loading a graph fails, naming the nodes, when a node lists no observations, its
+representative is not one of them, or the representative's image is missing from
+`steps/`. A graph whose nodes do not list their observations, such as one that
+keeps PNG screenshots in `<app_name>_screenshots/`, cannot be loaded: explore the
+app again into a new graph directory.
+
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
@@ -449,9 +532,10 @@ uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 
 The audit asks the page-detail model for issues in a text dump of the graph and
 saves them to `graphs/<app_name>/<app_name>_audit.json`. It merges the duplicate
-nodes that a screenshot comparison confirms, normalizes edge templates and saves
-the result to `<app_name>_audited.json`; the explored graph file is never
-changed. Without `--re-explore`, no flagged edge is replayed or corrected.
+nodes that a comparison of their representatives confirms, normalizes edge
+templates and saves the result to `<app_name>_audited.json`; the explored graph
+file is never changed. Without `--re-explore`, no flagged edge is replayed or
+corrected.
 
 Last, without a model call or a device, the audit adds `no_path_to_start` to
 `<app_name>_audit.json`: the nodes of the final audited graph from which no
@@ -524,9 +608,12 @@ model usage. Android-App-Graph is a Python package and does not produce an APK.
    uv run --locked app-graph -c /tmp/app-graph-smoke.yaml --resume-from auto --max-steps 4
    ```
 
-   Expect model-selected actions on the emulator, saved graph nodes and
-   screenshots under the scratch directory, and model-tagged text vectors in
-   the `.emb.json` sidecar. The second run should continue the saved graph.
+   Expect model-selected actions on the emulator, saved graph nodes that each
+   list their `observations`, a `.webp` image and an `observation` record in
+   `<app_name>/steps/` for every screenshot, and model-tagged text vectors in the
+   `.emb.json` sidecar. The second run should continue the saved graph and the
+   step numbering. The models receive every screenshot as `image/webp`, so a
+   provider that rejects it fails the first screen description.
 
 ## Development
 

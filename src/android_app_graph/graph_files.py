@@ -1,17 +1,19 @@
-"""Graph files on disk: per-node reference-screenshot lookup, atomic JSON
-writing, and graph-structure validation.
+"""Graph files on disk: atomic writes, the step log's layout, and graph-structure
+validation.
 """
 
 from __future__ import annotations
 
 import base64
 import errno
+import io
 import json
 import os
 import secrets
 import shutil
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 
 def write_json_atomically(
@@ -21,10 +23,27 @@ def write_json_atomically(
     indent: int | None = None,
     ensure_ascii: bool = True,
 ) -> None:
-    """Write ``payload`` as JSON to ``path``, replacing it atomically.
+    """Write ``payload`` as JSON to ``path``, replacing it atomically as
+    ``write_bytes_atomically`` does.
+    """
 
-    Dumped to a temporary file in the same directory and moved into place with
-    ``os.replace``, so a crash mid-dump -- or a failed rename -- leaves ``path``
+    def dump(f: IO[bytes]) -> None:
+        text = io.TextIOWrapper(f, encoding="utf-8")
+        try:
+            json.dump(payload, text, indent=indent, ensure_ascii=ensure_ascii)
+            text.flush()
+        finally:
+            # Leaves f open for the fsync that follows; closing the wrapper would close it.
+            text.detach()
+
+    _write_atomically(path, dump)
+
+
+def write_bytes_atomically(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path``, replacing it atomically.
+
+    Written to a temporary file in the same directory and moved into place with
+    ``os.replace``, so a crash mid-write -- or a failed rename -- leaves ``path``
     as either the previous complete file or the new one, never a truncated mix
     of both and never an orphaned temp file: the replace runs inside the same
     cleanup that unlinks the temp file on any other failure. The temp file is
@@ -56,6 +75,11 @@ def write_json_atomically(
     at it did, so without this a power loss right after the rename could
     still resurrect the old file.
     """
+    _write_atomically(path, lambda f: f.write(data))
+
+
+def _write_atomically(path: Path, write: Callable[[IO[bytes]], object]) -> None:
+    """Replace ``path`` with what ``write`` writes, as ``write_bytes_atomically`` describes."""
     if path.is_symlink():
         path = path.resolve()
     if path.exists() and not os.access(path, os.W_OK):
@@ -71,8 +95,8 @@ def write_json_atomically(
     # os.umask, which is process-global state.
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=indent, ensure_ascii=ensure_ascii)
+        with os.fdopen(fd, "wb") as f:
+            write(f)
             f.flush()
             os.fsync(f.fileno())
         if path.exists():
@@ -88,39 +112,38 @@ def write_json_atomically(
         os.close(dir_fd)
 
 
-def reference_screenshot_path(graph_path: Path, node_id: str) -> Path | None:
-    """Return one node's reference screenshot path, or ``None`` when it has none.
+def app_graph_path(graph_dir: Path, app_name: str) -> Path:
+    """Return where exploration saves the graph of ``app_name`` under ``graph_dir``."""
+    return graph_dir / app_name / f"{app_name}.json"
 
-    ``GraphManager.save_graph`` writes only the nodes it re-explored into
-    ``<stem>_screenshots`` (``demo_audited_screenshots`` for an audited graph);
-    every other node's screenshot stays where it always was, under the app
-    directory's own name (``<parent.name>_screenshots``). An audited graph is
-    thus split across both directories, so each node is looked up on its own
-    rather than picking one directory for the whole graph.
 
-    The app-directory fallback only ever applies to that plain/audited pair:
-    a graph with any other stem (an operator's ``demo_v1.json`` kept next to
-    ``demo.json``) never falls back to it, or it would silently borrow a
-    sibling graph's screenshot for a colliding node id.
+def graph_steps_dir(graph_path: Path) -> Path:
+    """Return the step log directory of the graph at ``graph_path``.
+
+    It sits beside the graph file, so an app's explored graph and its audited copy
+    share one step log, and each names its nodes' observations by ID in it.
     """
-    stem_path = graph_path.parent / f"{graph_path.stem}_screenshots" / f"{node_id}.png"
-    if stem_path.exists():
-        return stem_path
-    app_name = graph_path.parent.name
-    if graph_path.stem not in (app_name, f"{app_name}_audited"):
-        return None
-    app_path = graph_path.parent / f"{app_name}_screenshots" / f"{node_id}.png"
-    if app_path.exists():
-        return app_path
-    return None
+    return graph_path.parent / "steps"
 
 
-def reference_screenshot_b64(graph_path: Path, node_id: str) -> str | None:
-    """Return one node's reference screenshot as base64, or ``None`` when it has none."""
-    screenshot_path = reference_screenshot_path(graph_path, node_id)
-    if screenshot_path is None:
-        return None
-    return base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+def step_record_path(steps: Path, step_id: str) -> Path:
+    """Return where the step log ``steps`` keeps the record of step ``step_id``."""
+    return steps / f"{step_id}.json"
+
+
+def observation_image_path(steps: Path, observation_id: str) -> Path:
+    """Return where the step log ``steps`` keeps the WebP image of an observation."""
+    return steps / f"{observation_id}.webp"
+
+
+def observation_image_b64(steps: Path, observation_id: str) -> str:
+    """Return the WebP image of an observation in the step log ``steps`` as base64.
+
+    A missing image raises ``FileNotFoundError``: every node names observations
+    whose images exist, so a missing one means the step log was changed by hand.
+    """
+    image = observation_image_path(steps, observation_id).read_bytes()
+    return base64.b64encode(image).decode("ascii")
 
 
 def require_graph_shape(data: object, path: Path) -> dict[str, Any]:

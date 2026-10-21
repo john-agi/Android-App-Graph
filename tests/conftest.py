@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import socket
 import subprocess
 import time
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, NoReturn
 
 import httpx
@@ -22,7 +24,10 @@ from PIL import Image
 from android_app_graph import cli, device
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
+from android_app_graph.graph_files import graph_steps_dir, observation_image_path
+from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.utils import open_client
+from android_app_graph.utils.graph_manager import GraphManager
 
 # Hypothesis's built-in "ci" profile, its own choice when CI is set, is deterministic,
 # keeps no example database and has no deadline; CI runs it with more examples.
@@ -291,6 +296,65 @@ def png_screenshot() -> str:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.fixture
+def add_representative(png_screenshot: str) -> Callable[..., None]:
+    """Give a node of a manager one member observation, its representative, with an image
+    in the manager's step log; ``image`` defaults to ``png_screenshot`` as WebP.
+
+    The observation ID is not a step number, so a StepRecorder on the same step log
+    never reuses it.
+    """
+
+    def add(graph: GraphManager, node_id: str, image: bytes | None = None) -> None:
+        steps_dir = graph.steps_dir
+        assert steps_dir is not None, "set the manager's steps_dir first"
+        observation_id = f"{node_id}-observation"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        observation_image_path(steps_dir, observation_id).write_bytes(
+            encode_screenshot(png_screenshot) if image is None else image
+        )
+        graph.graph.nodes[node_id]["observations"] = [observation_id]
+        graph.graph.nodes[node_id]["representative_observation"] = observation_id
+
+    return add
+
+
+@pytest.fixture
+def write_graph_file(png_screenshot: str) -> Callable[[Path, dict[str, Any]], None]:
+    """Write ``document`` as a graph file that ``load_graph`` accepts: every node gets one
+    member observation, its representative, with an image in the step log beside it."""
+
+    def write(path: Path, document: dict[str, Any]) -> None:
+        steps_dir = graph_steps_dir(path)
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        nodes: list[dict[str, Any]] = []
+        for node in document.get("nodes", []):
+            observation_id = f"{node['id']}-observation"
+            observation_image_path(steps_dir, observation_id).write_bytes(
+                encode_screenshot(png_screenshot)
+            )
+            nodes.append(
+                {"observations": [observation_id], "representative_observation": observation_id}
+                | node
+            )
+        path.write_text(json.dumps({**document, "nodes": nodes}), encoding="utf-8")
+
+    return write
+
+
+@pytest.fixture
+def step_records() -> Callable[[Path], list[dict[str, Any]]]:
+    """Read every record of a step log, in step order."""
+
+    def read(steps_dir: Path) -> list[dict[str, Any]]:
+        return [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(steps_dir.glob("*.json"))
+        ]
+
+    return read
 
 
 class _ScreenSequence:

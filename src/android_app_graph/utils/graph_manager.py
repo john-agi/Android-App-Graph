@@ -17,11 +17,14 @@ single node; the node stores all observed activities.
 Every time a node is visited (whether new or existing), the VLM detail JSON is
 used to update the node's state schema — discovering new keys and accumulating
 observed values.
+
+A node holds no image. It lists the step-log observations assigned to it, in
+order, and names one of them its representative: the screen the verifier and the
+merge audit compare against, read from the step log when they need it.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from dataclasses import dataclass, replace
@@ -33,11 +36,14 @@ from openrouter import OpenRouter
 
 from android_app_graph.android_packages import saved_node_package
 from android_app_graph.graph_files import (
-    reference_screenshot_b64,
+    graph_steps_dir,
+    observation_image_b64,
+    observation_image_path,
     require_known_edge_endpoints,
     write_json_atomically,
 )
 from android_app_graph.payloads import as_float_list, as_int_list, as_str, as_str_dict
+from android_app_graph.step_log import Observation
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -190,12 +196,22 @@ def _merge_schema_values(keep_data: dict[str, Any], remove_data: dict[str, Any])
     keep_data["state_schema"] = keep_schema
 
 
-def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
-    """Fold a removed node's visits, activities, state schema and elements into the kept one.
+def _add_member(node_data: dict[str, Any], observation_id: str) -> None:
+    """Append an observation to a node's members; the first member becomes its representative."""
+    node_data.setdefault("observations", []).append(observation_id)
+    node_data.setdefault("representative_observation", observation_id)
 
-    The kept node's description, screenshot and embedding stay as they are.
+
+def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
+    """Fold a removed node's visits, members, activities, state schema and elements into
+    the kept one.
+
+    The kept node's description, representative and embedding stay as they are.
     """
     keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
+    members = {*keep_data.get("observations", []), *remove_data.get("observations", [])}
+    # Step IDs are zero-padded integers, so a longer ID is a later step.
+    keep_data["observations"] = sorted(members, key=lambda step_id: (len(step_id), step_id))
     _merge_activities(keep_data, remove_data)
     _merge_schema_values(keep_data, remove_data)
     _merge_elements(keep_data, remove_data.get("interactable_elements", []))
@@ -222,6 +238,42 @@ def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
     return aligned
 
 
+def _member_observations(node: dict[str, Any]) -> list[str]:
+    """Return a saved node's member observation IDs, or ``[]`` when it has none or
+    they are not a list of strings."""
+    observations = node.get("observations")
+    if not isinstance(observations, list):
+        return []
+    members: list[str] = [o for o in observations if isinstance(o, str)]
+    return members if len(members) == len(observations) else []
+
+
+def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Path) -> None:
+    """Raise ``ValueError`` naming every saved node without member observations, or
+    whose representative is not one of them or has no image in ``steps_dir``.
+    """
+    without_members: list[str] = []
+    without_image: list[str] = []
+    for node in nodes:
+        representative = node.get("representative_observation")
+        if not isinstance(representative, str) or representative not in _member_observations(node):
+            without_members.append(node["id"])
+        elif not observation_image_path(steps_dir, representative).is_file():
+            without_image.append(node["id"])
+    problems = []
+    if without_members:
+        problems.append(f"no member observations with a representative: {without_members}")
+    if without_image:
+        problems.append(f"a representative without an image in {steps_dir}: {without_image}")
+    if problems:
+        msg = (
+            f"{path}: node(s) with {'; '.join(problems)}. Graphs saved before nodes listed "
+            "their member observations cannot be loaded: explore the app again into a new "
+            "graph directory."
+        )
+        raise ValueError(msg)
+
+
 class GraphManager:
     """Manages a directed graph of app UI states and transitions."""
 
@@ -240,8 +292,10 @@ class GraphManager:
         self.embedding = embedding
         self.similarity_threshold = similarity_threshold
         self.audit_timeout = audit_timeout
+        # The step log the nodes' observations are in: load_graph sets the one beside
+        # the file it loads, and the owner of a new graph sets it before identify_state.
+        self.steps_dir: Path | None = None
         self._next_id = 0
-        self._dirty_screenshots: set[str] = set()
         self._last_identify_cache: _IdentifyCacheEntry | None = None
         self._node_aliases: dict[str, str] = {}
         self.total_steps_completed = 0
@@ -289,8 +343,18 @@ class GraphManager:
             raise ValueError(msg)
         return as_float_list(vector)
 
-    def identify_state(self, activity: str, screenshot_b64: str, package: str) -> str:
-        """Identify which node the current screen belongs to, or create a new one.
+    def representative_image_b64(self, node_id: str) -> str:
+        """Return the WebP image of a node's representative observation as base64."""
+        if self.steps_dir is None:
+            msg = "GraphManager needs a steps_dir to read observation images"
+            raise RuntimeError(msg)
+        return observation_image_b64(
+            self.steps_dir, self.graph.nodes[node_id]["representative_observation"]
+        )
+
+    def identify_state(self, observation: Observation) -> str:
+        """Identify which node the current screen belongs to, or create a new one, and
+        add ``observation`` to that node's members.
 
         Process:
         1. Collect existing same-package node descriptions and state keys.
@@ -302,6 +366,7 @@ class GraphManager:
         5. If verified → update existing node; if rejected → create new node.
         6. Merge state snapshot into the node's schema.
 
+        The verifier compares the screen with the candidate's representative.
         Matching uses the ``package`` the device reports (not exact activity) so that
         the same visual screen reached via different Android activities is merged
         into one node.
@@ -310,16 +375,17 @@ class GraphManager:
             The node ID (str) for this state, or ``EXTERNAL_WEB_NODE`` for any web
             content from outside the app.
         """
-        screen_hash = hash(screenshot_b64)
-        cached_node_id = self._cached_node_id(screen_hash, activity)
+        screen_hash = hash(observation.screenshot_b64)
+        cached_node_id = self._cached_node_id(screen_hash, observation.activity)
         if cached_node_id is not None:
+            _add_member(self.graph.nodes[cached_node_id], observation.observation_id)
             return cached_node_id
 
-        same_package = self._same_package_nodes(package)
+        same_package = self._same_package_nodes(observation.package)
         client, page_detail = self._require_page_detail()
         page_description, detail_snapshot, elements, is_external_web = describe_page_and_state(
             client,
-            screenshot_b64,
+            observation.screenshot_b64,
             existing_nodes=same_package.descriptions or None,
             existing_keys=same_package.keys or None,
             settings=page_detail,
@@ -333,22 +399,22 @@ class GraphManager:
         if is_external_web:
             # Returning before the cache update leaves the cache on the screen behind the
             # page, where a back press usually lands.
-            return self._record_external_web_visit()
+            return self._record_external_web_visit(observation)
 
         screen = _ScreenDescription(
             page_description, self._embed(page_description), detail_snapshot, elements
         )
         matched_node_id, screen = self._match_screen(
-            screen, same_package.candidates, screenshot_b64
+            screen, same_package.candidates, observation.screenshot_b64
         )
         if matched_node_id is not None:
             node_id = matched_node_id
-            self._add_activity(node_id, activity)
+            self._add_activity(node_id, observation.activity)
         else:
-            node_id = self._add_screen_node(screen, package, activity, screenshot_b64)
+            node_id = self._add_screen_node(screen, observation.package, observation.activity)
 
-        self._record_visit(node_id, screen, screenshot_b64, is_new=matched_node_id is None)
-        self._last_identify_cache = _IdentifyCacheEntry(screen_hash, activity, node_id)
+        self._record_visit(node_id, screen, observation)
+        self._last_identify_cache = _IdentifyCacheEntry(screen_hash, observation.activity, node_id)
         return node_id
 
     def _cached_node_id(self, screen_hash: int, activity: str) -> str | None:
@@ -386,11 +452,32 @@ class GraphManager:
                         keys.append(k)
         return _SamePackageNodes(candidates, descriptions, keys)
 
-    def _record_external_web_visit(self) -> str:
+    def _record_external_web_visit(self, observation: Observation) -> str:
         self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
         node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+        _add_member(node_data, observation.observation_id)
         return EXTERNAL_WEB_NODE
+
+    def record_external_app_visit(self, observation: Observation) -> str:
+        """Record a visit to the screen of another app in ``observation`` and return the
+        ``ext_<package>`` node that stands for every screen of that app.
+        """
+        package = observation.package.strip()
+        node_id = f"ext_{package}"
+        if node_id not in self.graph:
+            self.graph.add_node(
+                node_id,
+                activity=observation.activity,
+                page_description=f"[external app: {package}]",
+                state_schema={},
+                visit_count=0,
+                is_external=True,
+            )
+        node_data = self.graph.nodes[node_id]
+        node_data["visit_count"] = node_data.get("visit_count", 0) + 1
+        _add_member(node_data, observation.observation_id)
+        return node_id
 
     def _match_screen(
         self,
@@ -422,10 +509,10 @@ class GraphManager:
         )
 
         if best_similarity >= self.similarity_threshold:
-            if candidate_data.get("reference_screenshot"):
+            if candidate_data.get("representative_observation"):
                 return self._verify_match(screen, best_node_id, best_similarity, screenshot_b64)
             logger.info(
-                "Matched node %s by embedding (sim=%.3f, no ref screenshot): %s",
+                "Matched node %s by embedding (sim=%.3f, no representative): %s",
                 best_node_id,
                 best_similarity,
                 candidate_data.get("page_description"),
@@ -450,7 +537,7 @@ class GraphManager:
         verify_result = verify_same_node(
             client,
             screenshot_new_b64=screenshot_b64,
-            screenshot_existing_b64=candidate_data.get("reference_screenshot"),
+            screenshot_existing_b64=self.representative_image_b64(node_id),
             existing_description=candidate_data.get("page_description", ""),
             settings=page_detail,
         )
@@ -489,9 +576,7 @@ class GraphManager:
             logger.info("  Node %s: added activity %s (now %d)", node_id, activity, len(activities))
         node_data["activities"] = activities
 
-    def _add_screen_node(
-        self, screen: _ScreenDescription, package: str, activity: str, screenshot_b64: str
-    ) -> str:
+    def _add_screen_node(self, screen: _ScreenDescription, package: str, activity: str) -> str:
         node_id = self._make_node_id(screen.page_description)
         init_elements = [
             {
@@ -511,7 +596,6 @@ class GraphManager:
             interactable_elements=init_elements,
             description_embedding=screen.embedding,
             description_embedding_model=self.embedding_model,
-            reference_screenshot=screenshot_b64,
             last_normalized_visit_milestone=0,
             visit_count=0,
         )
@@ -524,7 +608,7 @@ class GraphManager:
         return node_id
 
     def _record_visit(
-        self, node_id: str, screen: _ScreenDescription, screenshot_b64: str, *, is_new: bool
+        self, node_id: str, screen: _ScreenDescription, observation: Observation
     ) -> None:
         node_data = self.graph.nodes[node_id]
         schema = node_data.get("state_schema", {})
@@ -534,11 +618,9 @@ class GraphManager:
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         # Structural elements accumulate across visits, so merge rather than replace.
         _merge_elements(node_data, screen.elements)
-        # Only update reference screenshot for new nodes or verifier-rejected splits;
-        # keep the existing screenshot when verifier confirmed a match.
-        if is_new:
-            node_data["reference_screenshot"] = screenshot_b64
-            self._dirty_screenshots.add(node_id)
+        # A confirmed match keeps the node's representative; a new node, including a
+        # verifier-rejected split, takes this observation as its own.
+        _add_member(node_data, observation.observation_id)
 
         logger.info(
             "Node %s schema updated: %d keys, visit #%d",
@@ -593,15 +675,9 @@ class GraphManager:
         if new_node_id != node_id:
             nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
             self._record_alias(node_id, new_node_id)
-            if node_id in self._dirty_screenshots:
-                self._dirty_screenshots.discard(node_id)
-            if self.graph.nodes[new_node_id].get("reference_screenshot"):
-                self._dirty_screenshots.add(new_node_id)
             cached = self._last_identify_cache
             if cached is not None and cached.node_id == node_id:
                 self._last_identify_cache = cached._replace(node_id=new_node_id)
-        elif node_data.get("reference_screenshot"):
-            self._dirty_screenshots.add(node_id)
 
         logger.info(
             "Renamed node %s → %s: '%s' → '%s'",
@@ -668,8 +744,8 @@ class GraphManager:
         - Incoming edges to *remove_id* are rewired to *keep_id*.
         - Outgoing edges from *remove_id* are rewired from *keep_id*.
         - State schemas are merged (union of keys and values).
-        - Visit counts are summed.
-        - The kept node retains its description, screenshot, and embedding.
+        - Visit counts are summed, and member observations are united in step order.
+        - The kept node retains its description, representative, and embedding.
         - The removed node is deleted from the graph, and its ID resolves to *keep_id*.
 
         Returns True if the merge was performed, False if either node is missing
@@ -1351,6 +1427,7 @@ class GraphManager:
             "next_id": self._next_id,
             "similarity_threshold": self.similarity_threshold,
             "total_steps_completed": self.total_steps_completed,
+            "node_aliases": dict(self._node_aliases),
             "nodes": [],
             "edges": [],
         }
@@ -1370,6 +1447,8 @@ class GraphManager:
                 "interactable_elements": attrs.get("interactable_elements", []),
                 "last_normalized_visit_milestone": attrs.get("last_normalized_visit_milestone", 0),
                 "visit_count": attrs.get("visit_count", 0),
+                "observations": attrs.get("observations", []),
+                "representative_observation": attrs.get("representative_observation"),
             }
             data["nodes"].append(node_data)
 
@@ -1401,26 +1480,17 @@ class GraphManager:
         emb_path = self.embeddings_path(path)
         write_json_atomically(emb_path, embeddings, ensure_ascii=False)
 
-        if self._dirty_screenshots:
-            screenshots_dir = path.parent / (path.stem + "_screenshots")
-            screenshots_dir.mkdir(parents=True, exist_ok=True)
-            for node_id in self._dirty_screenshots:
-                if node_id in self.graph:
-                    ref_b64 = self.graph.nodes[node_id].get("reference_screenshot")
-                    if ref_b64:
-                        img_path = screenshots_dir / f"{node_id}.png"
-                        img_path.write_bytes(base64.b64decode(ref_b64))
-            self._dirty_screenshots.clear()
-
         logger.info(
             "Graph saved to %s (%d nodes, %d edges)", path, len(data["nodes"]), len(data["edges"])
         )
 
     def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
-        """Load graph from a JSON file (and companion embeddings file).
+        """Load graph from a JSON file (and companion embeddings file), with the step
+        log beside it as the manager's ``steps_dir``.
 
         ``default_package_name`` stands in for the ``package_name`` of a file that has
-        none.
+        none. A node without member observations, or whose representative has no image
+        in the step log, raises ``ValueError`` naming it.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -1429,6 +1499,8 @@ class GraphManager:
         # corrupt file must leave the previously loaded graph and counters
         # untouched, not wipe them partway through the node loop.
         data = require_known_edge_endpoints(raw, path)
+        steps_dir = graph_steps_dir(path)
+        _require_node_members(data["nodes"], path, steps_dir)
 
         # Old graphs stored embeddings inline; newer ones keep them in a companion file.
         emb_path = self.embeddings_path(path)
@@ -1448,6 +1520,12 @@ class GraphManager:
         self._next_id = data.get("next_id", 0)
         self.similarity_threshold = data.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
         self.total_steps_completed = data.get("total_steps_completed", 0)
+        self.steps_dir = steps_dir
+        self._node_aliases = {
+            old: new
+            for old, new in as_str_dict(data.get("node_aliases")).items()
+            if isinstance(new, str)
+        }
         self.graph.clear()
 
         for node_data in data.get("nodes", []):
@@ -1456,7 +1534,6 @@ class GraphManager:
             emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             # Backwards compat: old graphs have "activity" only, new ones have "activities" list
             activities = node_data.get("activities", [node_data.get("activity", "")])
-            ref_screenshot = reference_screenshot_b64(path, node_id)
             self.graph.add_node(
                 node_id,
                 package=saved_node_package(node_data, self.package_name),
@@ -1472,9 +1549,10 @@ class GraphManager:
                     if node_id in embeddings
                     else as_str(node_data.get("description_embedding_model"), "")
                 ),
-                reference_screenshot=ref_screenshot,
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
+                observations=_member_observations(node_data),
+                representative_observation=node_data["representative_observation"],
             )
 
         for edge_data in data.get("edges", []):
@@ -1658,6 +1736,20 @@ class GraphManager:
 
         return result
 
+    def merge_skip_reason(self, node_a: str, node_b: str) -> str | None:
+        """Return why a merge candidate pair cannot be verified, or ``None`` when both
+        representatives can be compared.
+
+        An ``ext_`` node stands for every screen of another app or the web, so its
+        representative is no screen of the app to compare with.
+        """
+        if self._is_external(node_a) or self._is_external(node_b):
+            return "external node"
+        pair = (node_a, node_b)
+        if not all(self.graph.nodes[n].get("representative_observation") for n in pair):
+            return "missing screenshot"
+        return None
+
     @staticmethod
     def _node_numeric_order(node_id: str) -> tuple[int, str]:
         if node_id.startswith("s") and "_" in node_id:
@@ -1710,19 +1802,13 @@ class GraphManager:
                 )
                 continue
 
+            skip_reason = self.merge_skip_reason(node_a, node_b)
+            if skip_reason is not None:
+                results.append({"issue": issue, "status": "skipped", "reason": skip_reason})
+                continue
+
             data_a = self.graph.nodes[node_a]
             data_b = self.graph.nodes[node_b]
-            screenshot_a = data_a.get("reference_screenshot")
-            screenshot_b = data_b.get("reference_screenshot")
-            if not screenshot_a or not screenshot_b:
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "skipped",
-                        "reason": "missing screenshot",
-                    }
-                )
-                continue
 
             desc_a = data_a.get("page_description", "")
             desc_b = data_b.get("page_description", "")
@@ -1739,8 +1825,8 @@ class GraphManager:
             )
             verify_result = verify_same_node(
                 client,
-                screenshot_new_b64=screenshot_b,
-                screenshot_existing_b64=screenshot_a,
+                screenshot_new_b64=self.representative_image_b64(node_b),
+                screenshot_existing_b64=self.representative_image_b64(node_a),
                 existing_description=ref_desc,
                 settings=settings,
             )

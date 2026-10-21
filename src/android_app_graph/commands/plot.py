@@ -24,6 +24,8 @@ from typing import Any
 
 import networkx as nx
 
+from android_app_graph.graph_files import graph_steps_dir, observation_image_path
+from android_app_graph.screen_image import MEDIA_TYPE
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -58,13 +60,17 @@ def as_digraph(graph: object) -> nx.DiGraph:
     raise TypeError(msg)
 
 
-def _load_screenshot_b64(screenshots_dir: Path, node_id: str) -> str | None:
-    """Load a node's reference screenshot as a base64 data URI."""
-    img_path = screenshots_dir / f"{node_id}.png"
-    if img_path.exists():
-        b64 = base64.b64encode(img_path.read_bytes()).decode("ascii")
-        return f"data:image/png;base64,{b64}"
-    return None
+def _representative_image_uri(steps_dir: Path, node: dict[str, Any]) -> str | None:
+    """Return a node's representative image as a data URI, or ``None`` when the node
+    names none or the step log has no image for it."""
+    representative = node.get("representative_observation")
+    if not isinstance(representative, str):
+        return None
+    image_path = observation_image_path(steps_dir, representative)
+    if not image_path.is_file():
+        return None
+    b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{MEDIA_TYPE};base64,{b64}"
 
 
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
@@ -73,16 +79,11 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
-    screenshots_dir = path.parent / (path.stem + "_screenshots")
-    if not screenshots_dir.exists():
-        # An audited graph reuses the screenshots of the graph it was derived from.
-        base_stem = path.stem.removesuffix("_audited")
-        screenshots_dir = path.parent / (base_stem + "_screenshots")
-
+    steps_dir = graph_steps_dir(path)
     graph = nx.DiGraph()
 
     for node in data["nodes"]:
-        screenshot_uri = _load_screenshot_b64(screenshots_dir, node["id"])
+        screenshot_uri = _representative_image_uri(steps_dir, node)
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
         graph.add_node(

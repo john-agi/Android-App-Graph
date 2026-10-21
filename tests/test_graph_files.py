@@ -1,6 +1,6 @@
 """Tests for android_app_graph.graph_files.
 
-Per-node reference-screenshot lookup, atomic JSON writing, and graph-structure
+Atomic JSON and byte writing, the step log's layout, and graph-structure
 validation.
 """
 
@@ -217,96 +217,64 @@ def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
     assert json.loads(target.read_text(encoding="utf-8")) == {"new": 2}
 
 
-def test_reference_screenshot_path_finds_the_node_in_the_app_directory(tmp_path: Path) -> None:
-    """Only the app directory exists (a plain, never-audited graph)."""
-    app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    app_screenshots = app_dir / "demo_screenshots"
-    app_screenshots.mkdir()
-    (app_screenshots / "n1.png").write_bytes(b"shot")
-    graph_path = app_dir / "demo.json"
-    assert graph_files.reference_screenshot_path(graph_path, "n1") == app_screenshots / "n1.png"
+def test_write_bytes_atomically_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "000000.webp"
+    graph_files.write_bytes_atomically(path, b"RIFF....WEBP")
+    assert path.read_bytes() == b"RIFF....WEBP"
+    assert list(tmp_path.iterdir()) == [path]
 
 
-def test_reference_screenshot_path_prefers_the_stem_directory_for_a_reexplored_node(
-    tmp_path: Path,
+def test_write_bytes_atomically_replaces_an_existing_file(tmp_path: Path) -> None:
+    """An image left by a crash before its record is overwritten when its number is reused."""
+    path = tmp_path / "000000.webp"
+    path.write_bytes(b"left by a crash")
+    graph_files.write_bytes_atomically(path, b"new image")
+    assert path.read_bytes() == b"new image"
+
+
+def test_write_bytes_atomically_unlinks_the_temp_file_when_the_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``GraphManager.save_graph`` writes a re-explored node's screenshot into
-    ``<stem>_screenshots``; when the node is there it must win over the older
-    copy that may still sit under the app-name directory.
-    """
+    """A failed ``os.replace`` leaves neither the target nor a stray temp file."""
+
+    def _raise_replace(_src: object, _dst: object) -> None:
+        msg = "Device or resource busy"
+        raise OSError(msg)
+
+    monkeypatch.setattr(graph_files.os, "replace", _raise_replace)
+
+    with pytest.raises(OSError, match="Device or resource busy"):
+        graph_files.write_bytes_atomically(tmp_path / "000000.webp", b"image")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_app_graph_path_is_the_app_directory_named_after_the_app(tmp_path: Path) -> None:
+    assert graph_files.app_graph_path(tmp_path, "demo") == tmp_path / "demo" / "demo.json"
+
+
+def test_an_explored_graph_and_its_audited_copy_share_one_step_log(tmp_path: Path) -> None:
     app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    app_screenshots = app_dir / "demo_screenshots"
-    app_screenshots.mkdir()
-    (app_screenshots / "n1.png").write_bytes(b"stale")
-    stem_screenshots = app_dir / "demo_audited_screenshots"
-    stem_screenshots.mkdir()
-    (stem_screenshots / "n1.png").write_bytes(b"fresh")
-    graph_path = app_dir / "demo_audited.json"
-    assert graph_files.reference_screenshot_path(graph_path, "n1") == stem_screenshots / "n1.png"
+    steps = graph_files.graph_steps_dir(app_dir / "demo.json")
+    assert steps == app_dir / "steps"
+    assert graph_files.graph_steps_dir(app_dir / "demo_audited.json") == steps
 
 
-def test_reference_screenshot_path_falls_back_when_the_node_is_only_in_the_app_directory(
-    tmp_path: Path,
-) -> None:
-    """Both directories exist (some nodes were re-explored, this one was not),
-    so a node missing from ``<stem>_screenshots`` must still resolve to its
-    screenshot under the app-name directory rather than being reported missing.
-    """
-    app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    app_screenshots = app_dir / "demo_screenshots"
-    app_screenshots.mkdir()
-    (app_screenshots / "n2.png").write_bytes(b"shot")
-    (app_dir / "demo_audited_screenshots").mkdir()
-    graph_path = app_dir / "demo_audited.json"
-    assert graph_files.reference_screenshot_path(graph_path, "n2") == app_screenshots / "n2.png"
+def test_a_step_keeps_its_record_and_image_under_its_id(tmp_path: Path) -> None:
+    assert graph_files.step_record_path(tmp_path, "000007") == tmp_path / "000007.json"
+    assert graph_files.observation_image_path(tmp_path, "000007") == tmp_path / "000007.webp"
 
 
-def test_reference_screenshot_path_does_not_fall_back_for_a_sibling_graph(
-    tmp_path: Path,
-) -> None:
-    """A sibling graph in the same app directory (an operator's ``demo_v1.json``
-    kept next to ``demo.json``) must never borrow another graph's screenshot for
-    a colliding node id. Only the plain graph and its audited pair produce the
-    split layout the app-directory fallback exists for.
-    """
-    app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    app_screenshots = app_dir / "demo_screenshots"
-    app_screenshots.mkdir()
-    (app_screenshots / "s0.png").write_bytes(b"shot")
-    graph_path = app_dir / "demo_v1.json"
-    assert graph_files.reference_screenshot_path(graph_path, "s0") is None
-
-
-def test_reference_screenshot_path_returns_none_when_neither_directory_has_the_node(
-    tmp_path: Path,
-) -> None:
-    app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    graph_path = app_dir / "demo_audited.json"
-    assert graph_files.reference_screenshot_path(graph_path, "n1") is None
-
-
-def test_reference_screenshot_b64_reads_and_encodes_the_file(tmp_path: Path) -> None:
-    app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    screenshots = app_dir / "demo_screenshots"
-    screenshots.mkdir()
-    (screenshots / "n1.png").write_bytes(b"shot-bytes")
-    graph_path = app_dir / "demo.json"
-    assert graph_files.reference_screenshot_b64(graph_path, "n1") == base64.b64encode(
-        b"shot-bytes"
+def test_observation_image_b64_reads_and_encodes_the_image(tmp_path: Path) -> None:
+    (tmp_path / "000003.webp").write_bytes(b"webp-bytes")
+    assert graph_files.observation_image_b64(tmp_path, "000003") == base64.b64encode(
+        b"webp-bytes"
     ).decode("ascii")
 
 
-def test_reference_screenshot_b64_is_none_without_a_screenshot(tmp_path: Path) -> None:
-    app_dir = tmp_path / "demo"
-    app_dir.mkdir()
-    graph_path = app_dir / "demo.json"
-    assert graph_files.reference_screenshot_b64(graph_path, "n1") is None
+def test_observation_image_b64_raises_for_a_missing_image(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match=r"000003\.webp"):
+        graph_files.observation_image_b64(tmp_path, "000003")
 
 
 def test_require_known_edge_endpoints_accepts_a_graph_without_edges() -> None:

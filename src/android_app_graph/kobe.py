@@ -20,6 +20,8 @@ from android_app_graph.device import (
     return_to_app,
     soft_keyboard_hint,
 )
+from android_app_graph.graph_files import app_graph_path, graph_steps_dir
+from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
@@ -83,11 +85,17 @@ class _Position:
 
 @dataclass(frozen=True, slots=True)
 class _Move:
-    """One executed action, and what the step read before it that recording it needs."""
+    """One executed action, and what the step read before it that recording it needs.
+
+    ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
+    wrote, which differs when an ``end`` is recorded as a back press.
+    """
 
     source: str
+    before: Observation
     action: dict[str, Any]
     instruction: str
+    planned_instruction: str
     planned_element: int | None
     detail_before: dict[str, Any]
     tokens_before: dict[str, int]
@@ -131,7 +139,6 @@ class Kobe:
         client: OpenRouter,
         logger: logging.Logger,
     ) -> None:
-        self.controller = controller
         self.app_name = config.app_name
         self.package_name = config.package_name
         self.launch_activity = config.launch_activity
@@ -153,6 +160,11 @@ class Kobe:
         self.instruction = settings["instruction"]
         self.action = settings["action"]
 
+        graph_dir = config.graph_dir
+        base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
+        self.graph_path = app_graph_path(base_graph_dir, self.app_name)
+        steps_dir = graph_steps_dir(self.graph_path)
+
         self.graph = GraphManager(
             client=client,
             page_detail=self.page_detail,
@@ -160,10 +172,7 @@ class Kobe:
             similarity_threshold=vlm_config.get("similarity_threshold", 0.85),
             audit_timeout=resolve_audit_timeout(vlm_config),
         )
-
-        graph_dir = config.graph_dir
-        base_graph_dir = Path(graph_dir) if graph_dir is not None else Path.cwd() / "graphs"
-        self.graph_path = base_graph_dir / self.app_name / f"{self.app_name}.json"
+        self.graph.steps_dir = steps_dir
 
         if self.graph_path.exists():
             self.graph.load_graph(self.graph_path, default_package_name=self.package_name)
@@ -171,6 +180,9 @@ class Kobe:
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
         self.graph.package_name = self.package_name
+        self.controller = StepRecorder(
+            controller, steps_dir, run_kind="explore", source="main_loop"
+        )
 
     def maybe_continue_from_coverage_checkpoint(
         self,
@@ -304,16 +316,17 @@ class Kobe:
         device_state: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         """Apply periodic coverage continuation after any completed step."""
-        checkpoint_node = self.maybe_continue_from_coverage_checkpoint(
-            step,
-            max_steps,
-            current_node,
-        )
-        if not checkpoint_node:
-            # The checkpoint's merge audit can merge the caller's node away without navigating.
-            return self.graph.resolve_node_id(current_node), device_state
+        with self.controller.source("coverage_checkpoint"):
+            checkpoint_node = self.maybe_continue_from_coverage_checkpoint(
+                step,
+                max_steps,
+                current_node,
+            )
+            if not checkpoint_node:
+                # The checkpoint's merge audit can merge the caller's node away without navigating.
+                return self.graph.resolve_node_id(current_node), device_state
 
-        return checkpoint_node, self.controller.get_state()
+            return checkpoint_node, self.controller.get_state()
 
     def navigate_to_node(self, target_node: str) -> str:
         """Navigate to a target node by replaying saved edges from the start node.
@@ -327,6 +340,10 @@ class Kobe:
         Returns:
             The node ID actually reached (verified via identify_state).
         """
+        with self.controller.source("navigation_replay"):
+            return self._replay_to(target_node)
+
+    def _replay_to(self, target_node: str) -> str:
         start_node = self.graph.get_start_node()
         if start_node is None:
             msg = "Graph is empty — cannot navigate."
@@ -499,13 +516,13 @@ class Kobe:
         device_state = self.controller.get_state()
         package = device_state.get("package", "").strip()
         if is_outside_app(package, self.package_name):
-            return self._record_external_app_step(move, package, device_state, max_steps)
+            return self._record_external_app_step(move, device_state, max_steps)
 
         new_node, device_state = self._identify(device_state)
         move = replace(move, source=self.graph.resolve_node_id(move.source))
         new_node_data = self._require_node(new_node)
         if new_node == EXTERNAL_WEB_NODE:
-            return self._record_external_web_step(move, new_node_data, max_steps)
+            return self._record_external_web_step(move, new_node_data, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
 
     def _plan_and_act(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
@@ -562,23 +579,36 @@ class Kobe:
         self.controller.exe_action(action)
         return _Move(
             source=position.node,
+            before=Observation.from_state(position.device_state),
             action=action,
             instruction=recorded_instruction,
+            planned_instruction=instruction,
             planned_element=planned_element,
             detail_before=detail_before,
             tokens_before=tokens_before,
         )
 
-    def _record_external_app_step(
-        self, move: _Move, package: str, device_state: dict[str, Any], max_steps: int
-    ) -> _Position:
-        device_state = self._handle_external_app(
-            move.source,
-            move.action_sequence,
-            package,
-            device_state,
-            instruction=move.instruction,
+    def _record_edge(
+        self, move: _Move, target: str, after: dict[str, Any], details: EdgeDetails
+    ) -> None:
+        """Add the edge ``move`` took to ``target`` and its transition to the step log."""
+        self.graph.add_edge(move.source, target, action=move.action_sequence, details=details)
+        self.controller.record_transition(
+            Transition(
+                before=move.before,
+                after=Observation.from_state(after),
+                instruction=move.planned_instruction,
+                element=move.planned_element,
+                action=move.action,
+                from_node=move.source,
+                to_node=target,
+            )
         )
+
+    def _record_external_app_step(
+        self, move: _Move, device_state: dict[str, Any], max_steps: int
+    ) -> _Position:
+        device_state = self._handle_external_app(move, device_state)
         self.graph.total_steps_completed += 1
         self.graph.maybe_normalize_node_edges(move.source)
         self.save_graph()
@@ -586,17 +616,21 @@ class Kobe:
         return self._continue_after(node, device_state, max_steps)
 
     def _record_external_web_step(
-        self, move: _Move, web_node_data: dict[str, Any], max_steps: int
+        self,
+        move: _Move,
+        web_node_data: dict[str, Any],
+        device_state: dict[str, Any],
+        max_steps: int,
     ) -> _Position:
         self.logger.warning(
             "External web page opened from %s. Recording the edge and pressing back.",
             move.source,
         )
-        self.graph.add_edge(
-            move.source,
+        self._record_edge(
+            move,
             EXTERNAL_WEB_NODE,
-            action=move.action_sequence,
-            details=EdgeDetails(
+            device_state,
+            EdgeDetails(
                 instruction=move.instruction,
                 target_observation=web_node_data.get("page_description", ""),
             ),
@@ -617,11 +651,11 @@ class Kobe:
             if schema_delta:
                 self.logger.info("  Schema delta: %s", dict(schema_delta))
 
-        self.graph.add_edge(
-            move.source,
+        self._record_edge(
+            move,
             new_node,
-            action=move.action_sequence,
-            details=EdgeDetails(
+            device_state,
+            EdgeDetails(
                 instruction=move.instruction,
                 target_observation=_target_observation(
                     new_node_data.get("page_description", ""), detail_after
@@ -679,12 +713,15 @@ class Kobe:
             self.logger.warning(
                 "%s is in front of %s. Restarting %s.", package, self.package_name, self.app_name
             )
-            device_state = restart_into_app(
-                self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
-            )
-        node = self.graph.identify_state(
-            device_state["activity"], device_state["screenshot"], device_state["package"]
-        )
+            with self.controller.source("external_app_recovery"):
+                device_state = restart_into_app(
+                    self.controller,
+                    self.app_name,
+                    self.package_name,
+                    self.launch_activity,
+                    self.logger,
+                )
+        node = self.graph.identify_state(Observation.from_state(device_state))
         return node, device_state
 
     def _continue_after(self, node: str, device_state: dict[str, Any], max_steps: int) -> _Position:
@@ -703,6 +740,10 @@ class Kobe:
         A step from the shared ``ext_web`` node would act on a page outside the app, and
         ``add_edge`` would refuse its edge.
         """
+        with self.controller.source("external_web_recovery"):
+            return self._press_back_off_external_web()
+
+    def _press_back_off_external_web(self) -> tuple[str, dict[str, Any]]:
         for _ in range(EXTERNAL_WEB_BACK_PRESSES):
             self.controller.exe_action({"action": "back"})
             time.sleep(1)
@@ -719,70 +760,43 @@ class Kobe:
         )
         return self._identify(self.controller.get_state())
 
-    def _handle_external_app(
-        self,
-        source_node: str,
-        action: dict[str, Any] | list[dict[str, Any]],
-        external_package: str,
-        device_state: dict[str, Any],
-        instruction: str | None = None,
-    ) -> dict[str, Any]:
+    def _handle_external_app(self, move: _Move, device_state: dict[str, Any]) -> dict[str, Any]:
         """Handle navigation to an external app.
 
-        Creates a special node for the external app (no VLM calls), records the
-        edge, and returns to the app with ``return_to_app``.
+        Records the screen in the external app's node (no VLM calls) and the edge, and
+        returns to the app with ``return_to_app``.
 
         Returns:
             The state of the app's screen that ``return_to_app`` returned to.
         """
-        ext_activity = device_state.get("activity", "unknown")
-        ext_node_id = f"ext_{external_package}"
-
+        observation = Observation.from_state(device_state)
+        external_package = observation.package.strip()
         self.logger.warning(
             "Left target app! Current package: %s (expected: %s). "
             "Creating external node and pressing back.",
             external_package,
             self.package_name,
         )
-
-        if ext_node_id not in self.graph.graph:
-            self.graph.graph.add_node(
-                ext_node_id,
-                activity=ext_activity,
-                page_description=f"[external app: {external_package}]",
-                state_schema={},
-                visit_count=0,
-                is_external=True,
-            )
-
-        self.graph.graph.nodes[ext_node_id]["visit_count"] = (
-            self.graph.graph.nodes[ext_node_id].get("visit_count", 0) + 1
-        )
-
-        self.graph.add_edge(
-            source_node,
+        ext_node_id = self.graph.record_external_app_visit(observation)
+        self._record_edge(
+            move,
             ext_node_id,
-            action=action,
-            details=EdgeDetails(
-                instruction=instruction,
+            device_state,
+            EdgeDetails(
+                instruction=move.instruction,
                 target_observation=f"[left app to {external_package}]",
             ),
         )
-
-        if isinstance(action, list):
-            action_summary = "+".join(a.get("action", "?") for a in action)
-        else:
-            action_summary = action.get("action", "?")
         self.logger.info(
             "Step: %s --[%s]--> %s (external)",
-            source_node,
-            action_summary,
+            move.source,
+            move.action.get("action", "?"),
             ext_node_id,
         )
-
-        return return_to_app(
-            self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
-        )
+        with self.controller.source("external_app_recovery"):
+            return return_to_app(
+                self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
+            )
 
     def save_graph(self) -> None:
         """Persist the graph to disk."""
