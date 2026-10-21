@@ -108,6 +108,7 @@ def normalize_and_save_audited_graph(graph: GraphManager, audited_graph_path: Pa
 def select_apps_for_audit(
     config: dict[str, Any],
     graph_dir: Path,
+    *,
     app_name: str | None = None,
     re_explore: bool = False,
 ) -> list[dict[str, Any]]:

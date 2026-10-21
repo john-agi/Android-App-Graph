@@ -7,7 +7,7 @@ import io
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import yaml
 from android_world.agents import base_agent
@@ -132,6 +132,7 @@ class UIKobeAndroidWorldAgent(base_agent.EnvironmentInteractingAgent):
             transition_pause=transition_pause,
         )
 
+    @override
     def reset(self, go_home: bool = False) -> None:
         super().reset(go_home=go_home)
         self.env.hide_automation_ui()
