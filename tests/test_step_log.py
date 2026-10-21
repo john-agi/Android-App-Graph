@@ -18,15 +18,28 @@ from android_app_graph import step_log
 from android_app_graph.device import DeviceController
 from android_app_graph.screen_image import encode_screenshot, pixel_hash
 from android_app_graph.step_log import (
+    ActionEffect,
+    ActionHit,
+    MisTap,
     Observation,
     StepRecorder,
     Transition,
+    action_effect,
     annotate_observation,
     load_image_embeddings,
     read_observation_record,
     save_image_embeddings,
 )
-from android_app_graph.ui_tree import IDLE_FAILURE, Locator, UiTree, parse_tree, xml_document
+from android_app_graph.ui_tree import (
+    IDLE_FAILURE,
+    Anchor,
+    Bounds,
+    Locator,
+    UiTree,
+    actionable_elements,
+    parse_tree,
+    xml_document,
+)
 
 HOME = {"activity": "com.demo.Home", "package": "com.demo"}
 # The tree AdbController keeps for a settled capture: a trimmed dump of Settings' home.
@@ -398,6 +411,7 @@ def test_source_restores_the_outer_source_when_the_block_raises(
 
 
 _SEARCH = Locator("com.demo:id/search", "android.widget.Button", "Search", ("android:id/content",))
+_MENU = Locator("com.demo:id/menu", "android.widget.ImageButton", "More", ("android:id/content",))
 
 
 @pytest.mark.parametrize(
@@ -435,6 +449,11 @@ def test_record_transition_names_both_screens_the_plan_and_the_nodes(
             element=2,
             element_locator=element_locator,
             action={"action": "tap", "x": 5, "y": 6},
+            effect=ActionEffect(
+                (ActionHit("element", Anchor(_MENU, Bounds(0, 0, 10, 12))),),
+                MisTap(_SEARCH, _MENU),
+                no_visible_effect=False,
+            ),
             from_node="s0_home",
             to_node="s1_search",
         )
@@ -455,20 +474,29 @@ def test_record_transition_names_both_screens_the_plan_and_the_nodes(
         "element": 2,
         "element_locator": recorded,
         "action": {"action": "tap", "x": 5, "y": 6},
+        "anchors": [{"locator": _MENU.as_record(), "bounds": [0, 0, 10, 12]}],
+        "hits": ["element"],
+        "action_flags": [{"mis_tap": {"planned": _SEARCH.as_record(), "hit": _MENU.as_record()}}],
         "from_node": "s0_home",
         "to_node": "s1_search",
     }
 
 
 @pytest.mark.parametrize(
-    ("capture", "tree", "reason"),
+    ("capture", "tree", "reason", "settled"),
     [
-        pytest.param(CAPTURED, parse_tree(DOCUMENT), None, id="a tree"),
-        pytest.param({"xml": None, "ui_tree_error": IDLE_FAILURE}, None, IDLE_FAILURE, id="none"),
+        pytest.param(CAPTURED, parse_tree(DOCUMENT), None, True, id="a tree"),
+        pytest.param(
+            {"xml": None, "ui_tree_error": IDLE_FAILURE}, None, IDLE_FAILURE, False, id="none"
+        ),
     ],
 )
 def test_observation_from_state_reads_a_recorded_state_with_its_tree_or_the_reason(
-    capture: dict[str, object], tree: UiTree | None, reason: str | None, steps: Path
+    capture: dict[str, object],
+    tree: UiTree | None,
+    reason: str | None,
+    settled: bool,
+    steps: Path,
 ) -> None:
     state = _recorder(_Device(_png((40, 30), "white"), capture=capture), steps).get_state()
 
@@ -481,6 +509,7 @@ def test_observation_from_state_reads_a_recorded_state_with_its_tree_or_the_reas
         screen_size=(40, 30),
         ui_tree=tree,
         ui_tree_error=reason,
+        ui_tree_settled=settled,
     )
 
 
@@ -596,3 +625,256 @@ def test_a_malformed_vector_is_dropped_with_a_warning(
 
     dropped = [message.split("observation ")[1].split()[0] for message in caplog.messages]
     assert dropped == ["000001", "000002", "000003"]
+
+
+def _fixture(name: str) -> str:
+    return (Path(__file__).parent / "data" / f"uiautomator_{name}.txt").read_text("utf-8")
+
+
+_SETTINGS = "com.android.settings"
+_SEARCH_APP = "com.google.android.settings.intelligence"
+# The screen of the uiautomator fixtures, a Pixel 8 Pro emulator's.
+_FIXTURE_SIZE = (1344, 2992)
+
+
+def _observed(
+    dump: str | None = "windows_plain_list",
+    *,
+    settled: bool = True,
+    pixels: str = "pixels-before",
+    package: str = _SETTINGS,
+) -> Observation:
+    """An observation of a fixture's screen, or of a screen without a tree."""
+    return Observation(
+        observation_id="000000",
+        screenshot_b64="",
+        activity="",
+        package=package,
+        pixel_hash=pixels,
+        screen_size=_FIXTURE_SIZE,
+        ui_tree=parse_tree(_fixture(dump)) if dump is not None else None,
+        ui_tree_error=None if dump is not None else IDLE_FAILURE,
+        ui_tree_settled=settled,
+    )
+
+
+def _settings_row(label: str) -> Locator:
+    """The locator of a row of Settings' home fixture."""
+    tree = parse_tree(_fixture("windows_plain_list"))
+    return next(
+        element.locator
+        for element in actionable_elements(tree, _SETTINGS, Bounds(0, 0, *_FIXTURE_SIZE))
+        if element.label == label
+    )
+
+
+_NETWORK_TITLE: dict[str, object] = {"action": "tap", "x": 400, "y": 780}
+_AFTER = _observed(pixels="pixels-after")
+
+
+def _tap_effect(
+    before: Observation, action: dict[str, object], planned: Locator | None
+) -> ActionEffect:
+    return action_effect(before, _AFTER, [action], planned=planned, self_loop=False)
+
+
+@pytest.mark.parametrize("kind", ["tap", "long_press"])
+def test_a_tap_on_the_planned_element_records_its_anchor_and_no_flag(kind: str) -> None:
+    network = _settings_row("Network & internet")
+
+    effect = _tap_effect(_observed(), {**_NETWORK_TITLE, "action": kind}, network)
+
+    assert effect == ActionEffect(
+        (ActionHit("element", Anchor(network, Bounds(0, 699, 1344, 917))),),
+        mis_tap=None,
+        no_visible_effect=False,
+    )
+    assert effect.anchor_records() == [
+        {"locator": network.as_record(), "bounds": [0, 699, 1344, 917]}
+    ]
+    assert effect.flag_records() == [None]
+
+
+def test_a_tap_on_another_element_than_the_planned_one_is_a_mis_tap_naming_both() -> None:
+    apps, network = _settings_row("Apps"), _settings_row("Network & internet")
+
+    effect = _tap_effect(_observed(), _NETWORK_TITLE, apps)
+
+    assert effect.mis_tap == MisTap(apps, network)
+    assert effect.flag_records() == [
+        {"mis_tap": {"planned": apps.as_record(), "hit": network.as_record()}}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("dump", "point", "hit"),
+    [
+        pytest.param("windows_dialog_compose", (672, 600), "outside_dialog", id="outside a dialog"),
+        pytest.param("windows_keyboard", (672, 2500), "keyboard", id="the keyboard"),
+        pytest.param("windows_plain_list", (600, 50), "system", id="the status bar"),
+    ],
+)
+def test_a_tap_that_lands_on_no_app_element_is_a_mis_tap_naming_what_it_hit(
+    dump: str, point: tuple[int, int], hit: str
+) -> None:
+    planned = _settings_row("Apps")
+
+    effect = _tap_effect(_observed(dump), {"action": "tap", "x": point[0], "y": point[1]}, planned)
+
+    assert effect.hits == (ActionHit(hit),)
+    assert effect.flag_records() == [{"mis_tap": {"planned": planned.as_record(), "hit": hit}}]
+
+
+def test_a_tap_on_a_row_of_the_planned_list_item_is_no_mis_tap() -> None:
+    network = _settings_row("Network & internet")
+    rows = Locator(network.resource_id, network.class_name, None, network.ancestor_ids)
+
+    assert _tap_effect(_observed(), _NETWORK_TITLE, rows).mis_tap is None
+
+
+def test_a_tap_on_an_element_inside_the_planned_one_is_no_mis_tap() -> None:
+    """Tapping a row of the settings list the planner chose acts on that list."""
+    settings_list = _settings_row("")
+    assert settings_list.class_name == "android.widget.ScrollView"
+
+    effect = _tap_effect(_observed(), _NETWORK_TITLE, settings_list)
+
+    (hit,) = effect.hits
+    assert hit.anchor is not None
+    assert hit.anchor.locator == _settings_row("Network & internet")
+    assert effect.mis_tap is None
+
+
+def test_an_action_without_sub_actions_acted_on_nothing() -> None:
+    effect = action_effect(_observed(), _observed(), [], planned=None, self_loop=True)
+
+    assert effect == ActionEffect((), mis_tap=None, no_visible_effect=True)
+    assert (effect.anchor_records(), effect.flag_records()) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ("before", "outcome"),
+    [
+        pytest.param(_observed(settled=False), "unsettled_tree", id="a tree that never settled"),
+        pytest.param(_observed(None), "no_tree", id="no tree"),
+    ],
+)
+def test_a_screen_whose_tree_never_settled_or_is_missing_gives_no_anchor_and_no_mis_tap(
+    before: Observation, outcome: str
+) -> None:
+    effect = _tap_effect(before, _NETWORK_TITLE, _settings_row("Apps"))
+
+    assert effect == ActionEffect((ActionHit(outcome),), mis_tap=None, no_visible_effect=False)
+    assert effect.anchor_records() == [None]
+
+
+def test_typing_is_anchored_to_the_focused_text_field_and_is_never_a_mis_tap() -> None:
+    before = _observed("windows_keyboard", package=_SEARCH_APP)
+
+    effect = _tap_effect(before, {"action": "type", "text": "wifi"}, _settings_row("Apps"))
+
+    (hit,) = effect.hits
+    assert hit.outcome == "element"
+    assert hit.anchor is not None
+    assert hit.anchor.locator.label == "Search settings"
+    assert effect.mis_tap is None
+
+
+def test_typing_with_no_focused_text_field_gives_no_anchor() -> None:
+    effect = _tap_effect(_observed(), {"action": "type", "text": "wifi"}, None)
+
+    assert effect.hits == (ActionHit("no_focused_field"),)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4, "duration": 300},
+        {"action": "back"},
+        {"action": "enter"},
+        {"action": "tap"},
+    ],
+    ids=["swipe", "back", "enter", "tap without a point"],
+)
+def test_an_action_on_no_element_has_no_anchor_and_is_never_a_mis_tap(
+    action: dict[str, object],
+) -> None:
+    effect = _tap_effect(_observed(), action, _settings_row("Apps"))
+
+    assert effect == ActionEffect((ActionHit(None),), mis_tap=None, no_visible_effect=False)
+
+
+def test_only_the_first_sub_action_of_a_compound_action_is_anchored() -> None:
+    """The screen a later sub-action acts on is one no tree shows."""
+    effect = action_effect(
+        _observed(),
+        _AFTER,
+        [_NETWORK_TITLE, {"action": "type", "text": "x"}],
+        planned=None,
+        self_loop=True,
+    )
+
+    assert [hit.outcome for hit in effect.hits] == ["element", None]
+    assert effect.anchor_records()[1] is None
+
+
+def _self_loop(before: Observation, after: Observation) -> bool:
+    return action_effect(
+        before, after, [_NETWORK_TITLE], planned=None, self_loop=True
+    ).no_visible_effect
+
+
+def test_a_self_loop_whose_screens_have_one_pixel_hash_had_no_visible_effect() -> None:
+    """The pixel hash decides alone, whatever the trees are."""
+    assert _self_loop(_observed(None), _observed(None))
+    assert _self_loop(_observed(settled=False), _observed("windows_dialog_compose"))
+
+
+def test_a_self_loop_whose_settled_trees_show_the_same_screen_had_no_visible_effect() -> None:
+    """A blinking cursor or an animation changes pixels and not the tree."""
+    assert _self_loop(_observed(), _AFTER)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param(
+            _observed(), _observed(settled=False, pixels="later"), id="after never settled"
+        ),
+        pytest.param(_observed(settled=False), _AFTER, id="before never settled"),
+        pytest.param(_observed(), _observed(None, pixels="later"), id="no tree after"),
+        pytest.param(
+            _observed("windows_web_view", package="com.example.app"),
+            _observed("windows_web_view", package="com.example.app", pixels="later"),
+            id="thin trees",
+        ),
+        pytest.param(
+            _observed(), _observed("windows_keyboard", pixels="later"), id="another screen"
+        ),
+    ],
+)
+def test_a_self_loop_with_different_pixels_and_no_settled_equal_full_trees_changed_something(
+    before: Observation, after: Observation
+) -> None:
+    assert not _self_loop(before, after)
+
+
+def test_an_action_to_another_node_is_never_flagged_as_having_no_visible_effect() -> None:
+    effect = action_effect(
+        _observed(), _observed(), [_NETWORK_TITLE], planned=None, self_loop=False
+    )
+
+    assert not effect.no_visible_effect
+
+
+def test_a_mis_tap_that_changed_nothing_carries_both_flags() -> None:
+    apps, network = _settings_row("Apps"), _settings_row("Network & internet")
+
+    effect = action_effect(_observed(), _observed(), [_NETWORK_TITLE], planned=apps, self_loop=True)
+
+    assert effect.flag_records() == [
+        {
+            "mis_tap": {"planned": apps.as_record(), "hit": network.as_record()},
+            "no_visible_effect": True,
+        }
+    ]

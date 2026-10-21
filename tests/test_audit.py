@@ -527,31 +527,13 @@ def test_re_explore_issues_records_an_action_model_end_as_press_back(
     edge = graph.graph["s0_home"]["s0_home"]
     assert edge["actions"] == [[{"action": "back"}]]
     assert edge["instructions"] == ["Press back"]
+    assert edge["anchors"] == [[None]]
+    assert edge["action_flags"] == [[{"no_visible_effect": True}]]
     assert [step["instruction"] for step in result["steps"]] == ["Press back"]
     assert '"tap the first button"' in caplog.text
 
 
 _STEP_FIELDS = ("before", "after", "instruction", "element", "action", "from_node", "to_node")
-
-
-@pytest.mark.usefixtures("_fake_device")
-def test_a_re_exploration_step_asks_the_audited_device_whether_its_keyboard_is_up(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
-) -> None:
-    graph, graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: "s1_detail")
-
-    _re_explore(
-        graph,
-        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
-        _LoggingController("com.demo", device_log),
-        client,
-        graph_path.parent,
-        steps_per_issue=1,
-    )
-
-    probes = [entry for entry in device_log if isinstance(entry, list) and "input_method" in entry]
-    assert probes == [["adb", "-s", "test-device", "shell", "dumpsys", "input_method"]]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -567,7 +549,6 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
     graph, graph_path = _two_node_graph(tmp_path)
     reached = iter(["s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
 
@@ -600,6 +581,65 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         "from_node": "s1_detail",
         "to_node": "s0_home",
     }
+    assert (records[5]["anchors"], records[5]["hits"], records[5]["action_flags"]) == (
+        [None],
+        ["no_tree"],
+        [None],
+    )
+
+
+class _SettingsHome(FakeController):
+    """Settings' home fixture, settled, on a screen of the fixture's size."""
+
+    w = 1344
+    h = 2992
+
+    @override
+    def get_state(self) -> dict[str, Any]:
+        buffer = io.BytesIO()
+        Image.new("RGB", (self.w, self.h), "white").save(buffer, format="PNG")
+        return {
+            **super().get_state(),
+            "screenshot": base64.b64encode(buffer.getvalue()).decode("ascii"),
+            "xml": (
+                Path(__file__).parent / "data" / "uiautomator_windows_plain_list.txt"
+            ).read_text("utf-8"),
+            "ui_tree_settled": True,
+        }
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_a_re_exploration_step_records_the_element_its_tap_hit_and_no_mis_tap(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The audit's planner names no element, so no tap is a mis-tap."""
+    graph, graph_path = _two_node_graph(tmp_path)
+    reached = iter(["s1_detail", "s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
+    tap = {"action": "tap", "x": 400, "y": 780}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+
+    _re_explore(
+        graph,
+        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        _SettingsHome("com.demo"),
+        client,
+        graph_path.parent,
+        steps_per_issue=1,
+    )
+
+    edge = graph.graph["s1_detail"]["s0_home"]
+    ((anchor,),) = edge["anchors"][-1:]
+    assert anchor["locator"]["label"] == "Network & internet"
+    assert anchor["bounds"] == [0, 699, 1344, 917]
+    assert edge["action_flags"][-1] == [None]
+    (transition,) = [
+        r for r in step_records(graph_path.parent / "steps") if r["kind"] == "transition"
+    ]
+    assert (transition["anchors"], transition["hits"]) == ([anchor], ["element"])
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -700,7 +740,6 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
     on_the_page = [EXTERNAL_WEB_NODE] * (1 + back_presses_on_the_page)
     expected = _identifying(graph, monkeypatch, "s1_detail", *on_the_page, "s1_detail", "s0_home")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
 
@@ -851,7 +890,6 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
     and the run asks the device for the launcher activity once."""
     graph, _graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
 
     results = audit.re_explore_issues(
         graph,
@@ -891,7 +929,6 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     graph.graph.add_node("s2_camera_permission", page_description="Camera permission dialog")
     reached = iter(["s1_detail", "s2_camera_permission"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
 
@@ -1016,7 +1053,6 @@ def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reache
     it and is removed once empty."""
     graph = _flagged_graph()
     expected = _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home", "s0_home")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
 
     (result,) = _re_explore(
         graph, [_retry()], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
@@ -1070,6 +1106,11 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
         "from_node": "s0_home",
         "to_node": "s2_settings",
     }
+    assert (records[4]["anchors"], records[4]["hits"], records[4]["action_flags"]) == (
+        [None],
+        ["no_tree"],
+        [None],
+    )
 
 
 @pytest.mark.parametrize(
@@ -1162,7 +1203,6 @@ def test_re_explore_explores_from_the_source_when_the_flagged_instruction_is_not
     graph = _flagged_graph()
     graph.add_edge("s0_home", "s1_detail", [_SWIPE])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     before = _edges(graph)
 
     (result,) = _re_explore(
@@ -1454,7 +1494,6 @@ def test_re_explore_spends_a_step_on_an_action_model_wait_without_recording_it(
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     predictions: list[dict[str, object]] = []
 
     def wait(**kwargs: object) -> tuple[dict[str, str], str]:
@@ -1520,7 +1559,6 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
         return nodes[observation.activity]
 
     monkeypatch.setattr(graph, "identify_state", identify)
-    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
     issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}

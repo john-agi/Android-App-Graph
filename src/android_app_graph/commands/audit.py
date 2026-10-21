@@ -40,14 +40,14 @@ from android_app_graph.device import (
     DeviceController,
     grant_runtime_permissions,
     is_outside_app,
+    keyboard_hint,
     keyboard_status,
     launch_app,
     restart_app,
     return_to_app,
-    soft_keyboard_hint,
 )
 from android_app_graph.graph_files import graph_steps_dir
-from android_app_graph.step_log import Observation, StepRecorder, Transition
+from android_app_graph.step_log import Observation, StepRecorder, Transition, action_effect
 from android_app_graph.utils import (
     ModelSettings,
     check_config_keys,
@@ -359,10 +359,6 @@ def _plan_and_act(
     before = Observation.from_state(device_state)
     explored_edges = run.graph.get_all_edges_from_node(node)
 
-    # Check before planning so the planner can choose type vs tap.
-    keyboard_hint = soft_keyboard_hint(run.recorder.config["device"]["udid"])
-    input_status = keyboard_status(keyboard_hint)
-
     planned_instruction, element = plan_next_action(
         client=run.client,
         request=PlanRequest(
@@ -370,7 +366,7 @@ def _plan_and_act(
             page_description=page_description,
             explored_edges=explored_edges,
             app_name=run.target.app_name,
-            input_status=input_status,
+            input_status=keyboard_status(before.ui_tree),
         ),
         settings=run.session.instruction,
     )
@@ -379,7 +375,7 @@ def _plan_and_act(
         client=run.client,
         request=ActionRequest(
             screenshot_b64=before.screenshot_b64,
-            instruction=planned_instruction + keyboard_hint,
+            instruction=planned_instruction + keyboard_hint(before.ui_tree),
             screen_w=run.recorder.w,
             screen_h=run.recorder.h,
             action_history=[],
@@ -428,11 +424,14 @@ def _record_step(
     new_node_data = run.graph.get_node(new_node)
     target_obs = new_node_data.get("page_description", "") if new_node_data else ""
 
+    effect = action_effect(step.before, after, [action], planned=None, self_loop=new_node == source)
     run.graph.add_edge(
         source,
         new_node,
         action=[action],
-        details=EdgeDetails(instruction=instruction, target_observation=target_obs, num_steps=1),
+        details=EdgeDetails(
+            instruction=instruction, target_observation=target_obs, num_steps=1, effect=effect
+        ),
     )
     run.recorder.record_transition(
         Transition(
@@ -442,6 +441,7 @@ def _record_step(
             element=step.element,
             element_locator=None,
             action=action,
+            effect=effect,
             from_node=source,
             to_node=new_node,
         )
@@ -535,14 +535,25 @@ def _correct_flagged_edge(
         else _identify(run, after, expected_node=target)
     )
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
+    before_observation, after_observation = (
+        Observation.from_state(before),
+        Observation.from_state(after),
+    )
     run.recorder.record_transition(
         Transition(
-            before=Observation.from_state(before),
-            after=Observation.from_state(after),
+            before=before_observation,
+            after=after_observation,
             instruction=instruction,
             element=None,
             element_locator=None,
             action=action,
+            effect=action_effect(
+                before_observation,
+                after_observation,
+                action if isinstance(action, list) else [action],
+                planned=None,
+                self_loop=reached == source,
+            ),
             from_node=source,
             to_node=reached,
         )

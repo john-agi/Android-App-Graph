@@ -27,8 +27,15 @@ from hypothesis import strategies as st
 from openrouter import OpenRouter
 from PIL import Image, ImageDraw
 
-from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
-from android_app_graph.ui_tree import Bounds, Locator, actionable_elements, parse_tree
+from android_app_graph.step_log import (
+    ActionEffect,
+    ActionHit,
+    MisTap,
+    Observation,
+    StepRecorder,
+    save_image_embeddings,
+)
+from android_app_graph.ui_tree import Anchor, Bounds, Locator, actionable_elements, parse_tree
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
@@ -200,6 +207,7 @@ class Screens:
             SCREEN_SIZE,
             parse_tree(tree),
             None,
+            ui_tree_settled=True,
         )
 
     def record(self, observation: Observation) -> dict[str, Any]:
@@ -1691,6 +1699,147 @@ def test_get_all_edges_from_node_is_empty_for_a_missing_node() -> None:
     assert make_manager().get_all_edges_from_node("s9_missing") == []
 
 
+_ROW = Locator("", "android.widget.LinearLayout", "Network & internet", ("android:id/content",))
+_OTHER_ROW = dataclasses.replace(_ROW, label="Apps")
+_ROW_ANCHOR = {"locator": _ROW.as_record(), "bounds": [0, 699, 1344, 917]}
+
+
+def tap_effect(*, mis_tap: bool = False, unchanged: bool = False) -> ActionEffect:
+    """What a tap on the network row did: a mis-tap when the planner chose the apps row."""
+    return ActionEffect(
+        (ActionHit("element", Anchor(_ROW, Bounds(0, 699, 1344, 917))),),
+        MisTap(_OTHER_ROW, _ROW) if mis_tap else None,
+        no_visible_effect=unchanged,
+    )
+
+
+def test_add_edge_stores_the_anchor_and_the_flag_of_each_sub_action() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        [{"action": "tap", "x": 400, "y": 780}],
+        details=EdgeDetails(
+            instruction="Tap the network row", effect=tap_effect(mis_tap=True, unchanged=True)
+        ),
+    )
+
+    data = gm.graph["s0_home"]["s0_home"]
+    assert data["anchors"] == [[_ROW_ANCHOR]]
+    assert data["action_flags"] == [
+        [
+            {
+                "mis_tap": {"planned": _OTHER_ROW.as_record(), "hit": _ROW.as_record()},
+                "no_visible_effect": True,
+            }
+        ]
+    ]
+
+
+def test_get_all_edges_from_node_marks_each_instruction_whose_action_changed_nothing() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "tap", "x": 1},
+        details=EdgeDetails(instruction="Tap the logo", effect=tap_effect(unchanged=True)),
+    )
+    gm.add_edge("s0_home", "s0_home", {"action": "swipe"}, details=EdgeDetails(effect=tap_effect()))
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "tap", "x": 2},
+        details=EdgeDetails(instruction="Sort by price", effect=tap_effect(mis_tap=True)),
+    )
+
+    (edge,) = gm.get_all_edges_from_node("s0_home")
+
+    assert edge["instructions"] == ["Tap the logo", "Sort by price"]
+    assert edge["no_visible_change"] == [True, False]
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        pytest.param(None, id="no list"),
+        pytest.param([], id="shorter than the instructions"),
+        pytest.param(["unchanged"], id="an entry that is no list"),
+        pytest.param([["unchanged"]], id="a flag that is no object"),
+        pytest.param([[{"no_visible_effect": "yes"}]], id="a flag that is not true"),
+    ],
+)
+def test_an_edge_without_a_usable_flag_marks_no_instruction_as_unchanged(flags: object) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    edge: dict[str, object] = {"actions": [{"action": "tap"}], "instructions": ["Tap the logo"]}
+    if flags is not None:
+        edge["action_flags"] = flags
+    gm.graph.add_edge("s0_home", "s0_home", **edge)
+
+    assert gm.get_all_edges_from_node("s0_home")[0]["no_visible_change"] == [False]
+
+
+def test_save_graph_and_load_graph_keep_each_action_s_anchor_and_flag(tmp_path: Path) -> None:
+    path = tmp_path / "graph.json"
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "tap", "x": 400, "y": 780},
+        details=EdgeDetails(instruction="Tap the network row", effect=tap_effect(unchanged=True)),
+    )
+    gm.save_graph(path)
+
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    data = loaded.graph["s0_home"]["s0_home"]
+    assert data["anchors"] == [[_ROW_ANCHOR]]
+    assert data["action_flags"] == [[{"no_visible_effect": True}]]
+
+
+def test_moving_an_action_takes_its_anchor_and_flag_with_it() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s0_home", {"action": "back"})
+    gm.add_edge(
+        "s0_home",
+        "s0_home",
+        {"action": "tap"},
+        details=EdgeDetails(effect=tap_effect(mis_tap=True)),
+    )
+
+    assert gm.move_edge_action("s0_home", "s0_home", 1, "s1_settings") is True
+
+    moved = gm.graph["s0_home"]["s1_settings"]
+    assert moved["anchors"] == [[_ROW_ANCHOR]]
+    assert moved["action_flags"] == [tap_effect(mis_tap=True).flag_records()]
+    assert gm.graph["s0_home"]["s0_home"]["anchors"] == [[None]]
+
+
+def test_element_with_locator_finds_the_element_or_the_list_item_a_node_names() -> None:
+    gm = make_manager()
+    rows = Locator("a:id/row", "android.widget.LinearLayout", None, ("a:id/list",))
+    elements = [
+        model_element("Search"),
+        {**model_element("Network & internet"), "locator": _ROW.as_record(), "source": "tree"},
+        {**model_element("Results"), "locator": rows.as_record(), "source": "tree"},
+    ]
+    add_screen(gm, "s0_home", "Home screen", interactable_elements=elements)
+
+    assert gm.element_with_locator("s0_home", _ROW) == elements[1]
+    assert (
+        gm.element_with_locator("s0_home", dataclasses.replace(rows, label="Milk")) == (elements[2])
+    )
+    assert gm.element_with_locator("s0_home", _OTHER_ROW) is None
+    assert gm.element_with_locator("s9_missing", _ROW) is None
+
+
 def test_get_explored_actions_from_node_flattens_every_outgoing_edge() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -1723,6 +1872,8 @@ def test_add_edge_creates_an_edge_with_defaults() -> None:
     assert data["instructions"] == [""]
     assert data["target_observations"] == [""]
     assert data["schema_deltas"] == [None]
+    assert data["anchors"] == [[None]]
+    assert data["action_flags"] == [[None]]
 
 
 def test_add_edge_derives_num_steps_from_a_compound_action() -> None:
@@ -1790,6 +1941,8 @@ def test_add_edge_pads_an_edge_whose_lists_are_missing_before_appending() -> Non
     assert data["instructions"] == ["", "", "scroll"]
     assert data["target_observations"] == ["", "", ""]
     assert data["schema_deltas"] == [None, None, None]
+    assert data["anchors"] == [[None], [None, None], [None]]
+    assert data["action_flags"] == [[None], [None, None], [None]]
 
 
 def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
@@ -2074,7 +2227,7 @@ def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> No
 def edge_rows(gm: GraphManager, source: str, target: str) -> list[tuple[Any, ...]]:
     """One (action, num_steps, instruction, observation, schema_delta) row per action."""
     data = gm.graph[source][target]
-    return list(zip(*(data[key] for key in ("actions", *PER_ACTION_LISTS)), strict=True))
+    return list(zip(*(data[key] for key in ("actions", *DESCRIBING_LISTS)), strict=True))
 
 
 def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_other_edge() -> None:
@@ -4270,7 +4423,8 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
                 assert "page_description" in gm.graph.nodes[v]
 
 
-PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas")
+DESCRIBING_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas")
+PER_ACTION_LISTS = (*DESCRIBING_LISTS, "anchors", "action_flags")
 
 edge_and_merge_operations = st.lists(
     st.tuples(

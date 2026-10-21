@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -15,14 +16,21 @@ from android_app_graph.device import (
     DeviceController,
     ForceStopRefusedError,
     is_outside_app,
+    keyboard_hint,
     keyboard_status,
     restart_app,
     restart_into_app,
     return_to_app,
-    soft_keyboard_hint,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir
-from android_app_graph.step_log import Observation, StepRecorder, Transition
+from android_app_graph.step_log import (
+    ActionEffect,
+    MisTap,
+    Observation,
+    StepRecorder,
+    Transition,
+    action_effect,
+)
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
@@ -34,6 +42,7 @@ from android_app_graph.utils.graph_manager import (
 from android_app_graph.utils.vlm_utils import (
     ActionRequest,
     PlanRequest,
+    describe_executed_action,
     plan_next_action,
     predict_next_action,
     select_exploration_target,
@@ -539,27 +548,23 @@ class Kobe:
     def _plan_and_act(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
         """Plan an action from ``position`` and execute it; ``None`` when the action
         model asks to wait, which executes nothing."""
-        screenshot = position.device_state["screenshot"]
+        before = Observation.from_state(position.device_state)
         node_data = self._require_node(position.node)
 
         detail_before = dict(node_data.get("last_detail_snapshot", {}))
 
         explored_edges = self.graph.get_all_edges_from_node(position.node)
 
-        # Check before planning so the planner can choose type vs tap.
-        keyboard_hint = soft_keyboard_hint(self.controller.config["device"]["udid"])
-        input_status = keyboard_status(keyboard_hint)
-
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(
             client=self.client,
             request=PlanRequest(
-                screenshot_b64=screenshot,
+                screenshot_b64=before.screenshot_b64,
                 page_description=node_data["page_description"],
                 explored_edges=explored_edges,
                 app_name=self.app_name,
                 unexplored_elements=unexplored_elements,
-                input_status=input_status,
+                input_status=keyboard_status(before.ui_tree),
             ),
             settings=self.instruction,
         )
@@ -568,8 +573,8 @@ class Kobe:
         action, _history_entry = predict_next_action(
             client=self.client,
             request=ActionRequest(
-                screenshot_b64=screenshot,
-                instruction=instruction + keyboard_hint,
+                screenshot_b64=before.screenshot_b64,
+                instruction=instruction + keyboard_hint(before.ui_tree),
                 screen_w=self.controller.w,
                 screen_h=self.controller.h,
                 action_history=[],
@@ -591,7 +596,7 @@ class Kobe:
         self.controller.exe_action(action)
         return _Move(
             source=position.node,
-            before=Observation.from_state(position.device_state),
+            before=before,
             action=action,
             instruction=recorded_instruction,
             planned_instruction=instruction,
@@ -603,21 +608,67 @@ class Kobe:
 
     def _record_edge(
         self, move: _Move, target: str, after: dict[str, Any], details: EdgeDetails
-    ) -> None:
-        """Add the edge ``move`` took to ``target`` and its transition to the step log."""
-        self.graph.add_edge(move.source, target, action=move.action_sequence, details=details)
+    ) -> ActionEffect:
+        """Add the edge ``move`` took to ``target`` and its transition to the step log,
+        and return what the action did.
+
+        A tap that missed the element the planner chose reached ``target`` all the
+        same, so only its instruction is wrong: the edge takes the one the instruction
+        model writes from the screenshot and the action, as the audit does when it
+        relabels an edge, and keeps the planner's when the model writes none.
+        """
+        after_observation = Observation.from_state(after)
+        planned = element_locator(move.planned_target)
+        effect = action_effect(
+            move.before,
+            after_observation,
+            move.action_sequence,
+            planned=planned,
+            self_loop=target == move.source,
+        )
+        if effect.mis_tap is not None:
+            details = replace(details, instruction=self._relabel_mis_tap(move, effect.mis_tap))
+        if effect.no_visible_effect:
+            self.logger.info("  No visible effect: %s", details.instruction)
+        self.graph.add_edge(
+            move.source,
+            target,
+            action=move.action_sequence,
+            details=replace(details, effect=effect),
+        )
         self.controller.record_transition(
             Transition(
                 before=move.before,
-                after=Observation.from_state(after),
+                after=after_observation,
                 instruction=move.planned_instruction,
                 element=move.planned_element,
-                element_locator=element_locator(move.planned_target),
+                element_locator=planned,
                 action=move.action,
+                effect=effect,
                 from_node=move.source,
                 to_node=target,
             )
         )
+        return effect
+
+    def _relabel_mis_tap(self, move: _Move, mis_tap: MisTap) -> str:
+        """Return the instruction an edge records for a tap that missed its element."""
+        label = describe_executed_action(
+            self.client,
+            move.before.screenshot_b64,
+            move.action,
+            (self.controller.w, self.controller.h),
+            settings=self.instruction,
+        )
+        self.logger.warning(
+            "  Mis-tap on %s: planned %s, hit %s; recording %r instead of %r",
+            move.source,
+            json.dumps(mis_tap.as_record()["planned"], ensure_ascii=False),
+            json.dumps(mis_tap.as_record()["hit"], ensure_ascii=False),
+            label or move.instruction,
+            move.instruction,
+        )
+        return label or move.instruction
 
     def _record_external_app_step(
         self, move: _Move, device_state: dict[str, Any], max_steps: int
@@ -665,7 +716,7 @@ class Kobe:
             if schema_delta:
                 self.logger.info("  Schema delta: %s", dict(schema_delta))
 
-        self._record_edge(
+        effect = self._record_edge(
             move,
             new_node,
             device_state,
@@ -678,12 +729,20 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
-        self.graph.mark_element_explored(move.source, move.planned_target)
+        self.graph.mark_element_explored(move.source, self._acted_on(move, effect))
         self.graph.maybe_normalize_node_edges(move.source)
         self.graph.total_steps_completed += 1
         self._log_step(move, new_node, max_steps)
         self.save_graph()
         return self._continue_after(new_node, device_state, max_steps)
+
+    def _acted_on(self, move: _Move, effect: ActionEffect) -> dict[str, Any] | None:
+        """Return the element of the step's source the action acted on: the planned one,
+        or after a mis-tap the one it hit, when the source lists it."""
+        if effect.mis_tap is None:
+            return move.planned_target
+        hit = effect.mis_tap.hit
+        return None if isinstance(hit, str) else self.graph.element_with_locator(move.source, hit)
 
     def _log_step(self, move: _Move, new_node: str, max_steps: int) -> None:
         tokens_after = token_tracker.snapshot_by_type()

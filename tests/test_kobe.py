@@ -73,7 +73,7 @@ class _Screens:
     h = 200
 
     def __init__(self, *screens: dict[str, object]) -> None:
-        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
+        self.config: dict[str, object] = {}
         self._screens = screens
         self.actions: list[dict[str, object]] = []
 
@@ -91,7 +91,7 @@ class _Device:
     h = 200
 
     def __init__(self, state: dict[str, object] | Exception) -> None:
-        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
+        self.config: dict[str, object] = {}
         self._state = state
 
     def get_state(self) -> dict[str, object]:
@@ -107,6 +107,7 @@ class _Device:
 class _ReplayDevice(_Device):
     def __init__(self, state: dict[str, object], log: list[object]) -> None:
         super().__init__(state)
+        self.config = {"device": {"udid": "test-device"}}
         self._log = log
 
     @override
@@ -487,9 +488,7 @@ def test_exploration_wait_recovery_respects_step_limit(
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
     no_sleep: list[float],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
@@ -519,37 +518,14 @@ def test_exploration_wait_recovery_respects_step_limit(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_an_exploration_step_asks_the_explored_device_whether_its_keyboard_is_up(
-    kobe: Kobe,
-    router_responses: list[httpx.Response],
-    chat_response: Callable[..., httpx.Response],
-    embedding_body: dict[str, object],
-    device_log: list[object],
-) -> None:
-    router_responses.extend(
-        [
-            httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
-            httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap Search"),
-            chat_response(content='{"action":"wait"}'),
-        ]
-    )
-    kobe.explore(max_steps=1)
-    assert device_log == [["adb", "-s", "test-device", "shell", "dumpsys", "input_method"]]
-
-
-@pytest.mark.usefixtures("no_sleep")
 def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge(
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A "privacy policy" keyword in a description does not make the app's own page external."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     about = _screen("com.demo.SettingsActivity", "gray")
     device = _Screens(HOME_SCREEN, about)
     explorer = _explorer(device, tmp_path, router_client)
@@ -590,13 +566,11 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     """Each screen read is a WebP image and an observation record, an action names the
     observation before it, and the step's edge is a transition naming both screens, the
     planner's instruction and element, the action and the nodes the screens became."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     explorer = _explorer(
         _Screens(HOME_SCREEN, _screen("com.demo.SettingsActivity", "gray")),
         tmp_path,
@@ -651,57 +625,317 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
 _PLAIN_LIST = xml_document(
     (Path(__file__).parent / "data" / "uiautomator_windows_plain_list.txt").read_text("utf-8")
 )
+_KEYBOARD_TREE = xml_document(
+    (Path(__file__).parent / "data" / "uiautomator_windows_keyboard.txt").read_text("utf-8")
+)
+# The screen of the uiautomator fixtures, a Pixel 8 Pro emulator's.
+_FIXTURE_W, _FIXTURE_H = 1344, 2992
 
 
-@pytest.mark.usefixtures("no_sleep")
-def test_a_step_marks_the_planned_tree_element_and_its_transition_names_the_locator(
+class _FixtureScreens(_Screens):
+    """``_Screens`` on a device as large as the one the uiautomator fixtures come from."""
+
+    w = _FIXTURE_W
+    h = _FIXTURE_H
+
+
+def _fixture_screen(xml: str) -> dict[str, object]:
+    """A settled capture of a fixture's tree, with a screenshot of the fixture's size."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (_FIXTURE_W, _FIXTURE_H), "white").save(buffer, format="PNG")
+    screenshot = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return {
+        "activity": "com.demo.Home",
+        "screenshot": screenshot,
+        "package": "com.demo",
+        "xml": xml,
+        "ui_tree_settled": True,
+    }
+
+
+def _settings_home_described() -> str:
+    return json.dumps(
+        {
+            "page_description": "home",
+            "element_descriptions": [
+                {"number": number, "description": description}
+                for number, description in enumerate(
+                    ["search bar", "settings list", "Network & internet", "Apps"], start=1
+                )
+            ],
+        }
+    )
+
+
+# The title of the "Network & internet" row, on the action model's 0-1000 scale.
+_NETWORK_TITLE_TAP = '{"action":"click","coordinate":[298,261]}'
+_NETWORK_ROW_BOUNDS = [0, 699, 1344, 917]
+
+
+def _tap_the_network_row(
+    planned: str,
+    *,
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
-    step_records: Callable[[Path], list[dict[str, Any]]],
-) -> None:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    relabel: list[httpx.Response],
+) -> Kobe:
+    """Explore one step from Settings' home fixture, where the planner names its
+    ``planned`` element and the grounding taps the title of "Network & internet"."""
     explorer = _explorer(
-        _Screens({**HOME_SCREEN, "xml": _PLAIN_LIST}, _screen("com.demo.SettingsActivity", "gray")),
+        _FixtureScreens(_fixture_screen(_PLAIN_LIST), _screen("com.demo.SettingsActivity", "gray")),
         tmp_path,
         router_client,
     )
-    home = {
-        "page_description": "home",
-        "element_descriptions": [
-            {"number": number, "description": description}
-            for number, description in enumerate(
-                ["search bar", "settings list", "Network & internet", "Apps"], start=1
-            )
-        ],
-    }
+    number = ["search bar", "settings list", "Network & internet", "Apps"].index(planned) + 1
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=_settings_home_described()),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps({"element": number, "instruction": f"Tap {planned}"})),
+            chat_response(content=_NETWORK_TITLE_TAP),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"network"}'),
+            httpx.Response(200, json={**embedding_body, "data": [_ORTHOGONAL]}),
+            chat_response(content=_DIFFERENT),
+            *relabel,
+        ]
+    )
+    explorer.explore(max_steps=1)
+    return explorer
+
+
+def _explored(explorer: Kobe, node: str) -> list[str]:
+    elements = explorer.graph.graph.nodes[node]["interactable_elements"]
+    return [element["description"] for element in elements if element["explored"]]
+
+
+def _transition(
+    step_records: Callable[[Path], list[dict[str, Any]]], tmp_path: Path
+) -> dict[str, Any]:
+    (transition,) = [
+        r for r in step_records(tmp_path / "demo" / "steps") if r["kind"] == "transition"
+    ]
+    return transition
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_tap_on_the_planned_element_records_its_anchor_and_marks_it_explored(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    explorer = _tap_the_network_row(
+        "Network & internet",
+        tmp_path=tmp_path,
+        router_client=router_client,
+        router_responses=router_responses,
+        chat_response=chat_response,
+        embedding_body=embedding_body,
+        relabel=[],
+    )
+
+    assert _explored(explorer, "s0_home") == ["Network & internet"]
+    network = explorer.graph.graph.nodes["s0_home"]["interactable_elements"][2]
+    anchor = {"locator": network["locator"], "bounds": _NETWORK_ROW_BOUNDS}
+    edge = explorer.graph.graph.edges["s0_home", "s1_network"]
+    assert (edge["instructions"], edge["anchors"], edge["action_flags"]) == (
+        ["Tap Network & internet"],
+        [[anchor]],
+        [[None]],
+    )
+    transition = _transition(step_records, tmp_path)
+    assert transition["element"] == 3
+    assert transition["element_locator"] == network["locator"]
+    assert transition["element_locator"]["label"] == "Network & internet"
+    assert (transition["anchors"], transition["hits"], transition["action_flags"]) == (
+        [anchor],
+        ["element"],
+        [None],
+    )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_mis_tap_is_relabelled_from_what_it_did_and_marks_the_element_it_hit(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    step_records: Callable[[Path], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The planner chose Apps; the grounding tapped the Network & internet row."""
+    described = chat_response(content='{"instruction": "Tap the Network & internet row"}')
+
+    with caplog.at_level(logging.WARNING):
+        explorer = _tap_the_network_row(
+            "Apps",
+            tmp_path=tmp_path,
+            router_client=router_client,
+            router_responses=router_responses,
+            chat_response=chat_response,
+            embedding_body=embedding_body,
+            relabel=[described],
+        )
+
+    elements = explorer.graph.graph.nodes["s0_home"]["interactable_elements"]
+    apps, network = elements[3]["locator"], elements[2]["locator"]
+    mis_tap = {"mis_tap": {"planned": apps, "hit": network}}
+    edge = explorer.graph.graph.edges["s0_home", "s1_network"]
+    assert (edge["instructions"], edge["anchors"], edge["action_flags"]) == (
+        ["Tap the Network & internet row"],
+        [[{"locator": network, "bounds": _NETWORK_ROW_BOUNDS}]],
+        [[mis_tap]],
+    )
+    assert _explored(explorer, "s0_home") == ["Network & internet"]
+    transition = _transition(step_records, tmp_path)
+    assert (transition["instruction"], transition["element_locator"]) == ("Tap Apps", apps)
+    assert transition["action_flags"] == [mis_tap]
+    relabel = json.loads(router_requests[-1].content)
+    assert relabel["model"] == "provider/instruction"
+    assert '"x": 400, "y": 780' in relabel["messages"][0]["content"][0]["text"]
+    assert "Mis-tap on s0_home" in caplog.text
+    assert '"label": "Apps"' in caplog.text
+    assert '"label": "Network & internet"' in caplog.text
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_mis_tap_the_instruction_model_cannot_describe_keeps_the_planner_s_instruction(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    explorer = _tap_the_network_row(
+        "Apps",
+        tmp_path=tmp_path,
+        router_client=router_client,
+        router_responses=router_responses,
+        chat_response=chat_response,
+        embedding_body=embedding_body,
+        relabel=[chat_response(content='{"instruction": " "}')],
+    )
+
+    edge = explorer.graph.graph.edges["s0_home", "s1_network"]
+    assert edge["instructions"] == ["Tap Apps"]
+    assert "mis_tap" in edge["action_flags"][0][0]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_self_loop_with_no_visible_effect_is_flagged_and_the_planner_is_told(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    """The screen after each tap has the pixel hash of the one before it."""
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+    home = {"page_description": "home", "elements": [{"description": "Logo", "position": "top"}]}
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(home)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":3,"instruction":"Tap Network & internet"}'),
+            chat_response(content='{"element":1,"instruction":"Tap the logo"}'),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"network"}'),
-            httpx.Response(200, json={**embedding_body, "data": [_ORTHOGONAL]}),
-            chat_response(content=_DIFFERENT),
+            chat_response(content='{"element":null,"instruction":"Press back"}'),
+            chat_response(content='{"action":"system_button","button":"Back"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"is_template":false}'),
+        ]
+    )
+
+    explorer.explore(max_steps=2)
+
+    edge = explorer.graph.graph.edges["s0_home", "s0_home"]
+    assert edge["instructions"] == ["Tap the logo", "Press back"]
+    assert edge["action_flags"] == [[{"no_visible_effect": True}]] * 2
+    assert _explored(explorer, "s0_home") == ["Logo"]
+    second_plan = json.loads(router_requests[6].content)["messages"][-1]["content"][0]["text"]
+    assert '- "Tap the logo" → led to: "home" (no visible change)\n' in second_plan
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_the_keyboard_is_read_from_the_tree_and_typing_is_anchored_to_the_focused_field(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+) -> None:
+    """No adb call asks whether the keyboard is up: the tree has its window."""
+    explorer = _explorer(_FixtureScreens(_fixture_screen(_KEYBOARD_TREE)), tmp_path, router_client)
+    search = {
+        "page_description": "search",
+        "element_descriptions": [{"number": 1, "description": "search field"}],
+    }
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(search)),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":1,"instruction":"Type wifi"}'),
+            chat_response(content='{"action":"type","text":"wifi"}'),
+            httpx.Response(200, json=embedding_body),
         ]
     )
 
     explorer.explore(max_steps=1)
 
-    elements = explorer.graph.graph.nodes["s0_home"]["interactable_elements"]
-    assert [e["description"] for e in elements if e["explored"]] == ["Network & internet"]
-    (transition,) = [
-        r for r in step_records(tmp_path / "demo" / "steps") if r["kind"] == "transition"
-    ]
-    assert transition["element"] == 3
-    assert transition["element_locator"] == elements[2]["locator"]
-    assert transition["element_locator"]["label"] == "Network & internet"
+    plan = json.loads(router_requests[3].content)["messages"][-1]["content"][0]["text"]
+    assert (
+        "Current input status: Soft keyboard is visible; a text field is focused and ready "
+        "for typing." in plan
+    )
+    assert "the soft keyboard is currently visible" in router_requests[4].content.decode()
+    assert device_log == []
+    edge = explorer.graph.graph.edges["s0_search", "s0_search"]
+    (field,) = explorer.graph.graph.nodes["s0_search"]["interactable_elements"]
+    assert edge["anchors"] == [[{"locator": field["locator"], "bounds": [144, 151, 1344, 367]}]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_without_a_tree_the_planner_gets_no_keyboard_signal(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+) -> None:
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":null,"instruction":"Press back"}'),
+            chat_response(content='{"action":"system_button","button":"Back"}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    plan = json.loads(router_requests[3].content)["messages"][-1]["content"][0]["text"]
+    assert "Current input status: No OS keyboard signal detected." in plan
+    assert "soft keyboard" not in router_requests[4].content.decode()
+    assert device_log == []
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -711,12 +945,10 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     """The page's screen becomes a member of ext_web, the transition leads there, and the
     back press off the page and the screen read after it are external-web recovery."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     browser = _screen("com.demo.ArticleActivity", "blue")
     explorer = _explorer(_Screens(HOME_SCREEN, browser, HOME_SCREEN), tmp_path, router_client)
     router_responses.extend(
@@ -765,9 +997,7 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     browser = _screen("com.demo.ArticleActivity", "blue")
     device = _Screens(HOME_SCREEN, browser, HOME_SCREEN)
     explorer = _explorer(device, tmp_path, router_client)
@@ -810,12 +1040,10 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     embedding_body: dict[str, object],
     device_log: list[object],
     screens_by_log: Callable[..., DeviceController],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The explorer keeps pressing back while the page still shows, so the next step acts
     from an app screen and no edge out of the shared ext_web node gives find_path a
     shortcut between unrelated screens."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     web_page = _screen("com.demo.ArticleActivity", "blue")
     settings = _screen("com.demo.Settings", "gray")
     device = screens_by_log(HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings)
@@ -886,7 +1114,6 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     screens = iter(["s0_home", "s1_compose"])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     instruction = "Tap the floating action button in the bottom right"
     router_responses.extend(
         [
@@ -915,7 +1142,6 @@ def test_a_crash_mid_exploration_is_logged_with_its_traceback(
 
     kobe.graph.graph.add_node("s0_home", page_description="home", interactable_elements=[])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _crash)
 
     with caplog.at_level(logging.ERROR, logger="test"), pytest.raises(RuntimeError):
@@ -932,7 +1158,7 @@ class _ScriptedDevice:
     h = 200
 
     def __init__(self, *screens: dict[str, object]) -> None:
-        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
+        self.config: dict[str, object] = {}
         self._screens = screens
         self.actions: list[dict[str, object]] = []
 
@@ -957,7 +1183,6 @@ def _explore_one_step_the_action_model_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     page = {
         "page_description": "home",
         "elements": [
@@ -1107,12 +1332,10 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The explorer acts from the node's new ID after identify_state renames it, so the
     step's edge is recorded and its element marked explored."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     agent = Kobe(
         two_screen_device,
         ExplorerConfig(
@@ -1199,7 +1422,6 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
     planned_from: list[object] = []
     monkeypatch.setattr(kobe, "navigate_to_node", replay)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
 
     kobe.explore(max_steps=1, resume_from="s1_settings")
@@ -1220,7 +1442,6 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
     planned_from: list[object] = []
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
 
     kobe.explore(max_steps=1, resume_from="s9_removed")
@@ -1246,7 +1467,6 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
 
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", stop_planning)
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     caplog.set_level(logging.INFO, logger="test")
 
     with pytest.raises(interruption, match="planning stopped"):
@@ -1288,7 +1508,6 @@ def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
 
     monkeypatch.setattr(explorer.graph, "identify_state", identify)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Sort by price", []))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_TAP_REPLY))
 
     explorer.explore(max_steps=1)
@@ -1312,7 +1531,6 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     explorer.coverage_checkpoint_steps = 0
     explorer.graph.graph.add_node("s0_home", page_description="home")
     monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     for _ in range(2):
         router_responses.extend(
             [
@@ -1565,7 +1783,6 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     """A replay that fails after the app restart continues from the screen the device is
     on: the next step plans from that screen's node and screenshot. The step log tells
     the replay's actions from the checkpoint's own screen reads."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     open_list = {"action": "tap", "coordinate": [10, 20]}
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
     home, settings = _in_app("Home", "white"), _in_app("Settings", "gray")
@@ -1737,7 +1954,6 @@ def _explore_into_a_permission_dialog(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> _ScriptedDevice:
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     home: dict[str, object] = {
         "activity": "com.demo.Home",
         "screenshot": png_screenshot,
@@ -1846,7 +2062,6 @@ def _explore_from_home_into_another_app(
     first step ends on makes. Returns the page description each step planned from."""
     planned_from: list[object] = []
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", planned_from))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
@@ -2037,7 +2252,6 @@ def test_leaving_a_web_page_expects_the_screen_that_opened_it_and_a_restart_the_
     _list_reached_from_home(explorer, EXTERNAL_WEB_NODE)
     identified = _identifying(explorer, monkeypatch, "s1_list", EXTERNAL_WEB_NODE, *answers)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Open the link", []))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_TAP_REPLY))
 
     explorer.explore(max_steps=1)
@@ -2060,7 +2274,6 @@ def test_back_from_another_app_expects_the_screen_the_step_left(
     _list_reached_from_home(explorer)
     identified = _identifying(explorer, monkeypatch, "s1_list", "s1_list")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", []))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_TAP_REPLY))
 
     explorer.explore(max_steps=1)
@@ -2120,12 +2333,10 @@ def test_every_screen_identify_state_takes_is_embedded_and_annotated(
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     embedding_body: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     """The home screen is described, the step's screen matched exactly, and the vectors of
     both are saved with the graph, under the image-embedding model."""
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     router_responses.extend(
         [

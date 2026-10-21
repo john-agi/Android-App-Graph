@@ -1868,7 +1868,8 @@ class PlanRequest:
 
     Attributes:
         explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
-            each with "target_description", "instructions", "actions", "visit_count".
+            each with "target_description", "instructions", "actions", "visit_count",
+            and "no_visible_change", which marks the instructions that changed nothing.
         unexplored_elements: List of element dicts not yet interacted with.
         input_status: Runtime hint about whether a text field/keyboard is active.
     """
@@ -1902,8 +1903,17 @@ def plan_next_action(
         for edge in request.explored_edges:
             target_desc = edge.get("target_description", "unknown")
             instructions = edge.get("instructions", [])
+            unchanged = edge.get("no_visible_change", [])
             if instructions:
-                lines.extend(f'- "{instr}" → led to: "{target_desc}"' for instr in instructions)
+                lines.extend(
+                    f'- "{instr}" → led to: "{target_desc}"'
+                    + (
+                        " (no visible change)"
+                        if index < len(unchanged) and unchanged[index]
+                        else ""
+                    )
+                    for index, instr in enumerate(instructions)
+                )
             else:
                 lines.extend(
                     f'- {json.dumps(action)} → led to: "{target_desc}"'
