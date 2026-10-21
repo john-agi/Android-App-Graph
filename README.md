@@ -22,6 +22,7 @@ Android-App-Graph/
 │       ├── cli.py                     # app-graph command
 │       ├── commands/                  # app-graph-audit, app-graph-plot
 │       ├── kobe.py                    # Core app explorer
+│       ├── replay.py                  # Replays a recorded action, each tap on the element it recorded
 │       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
 │       ├── step_log.py                # Records every screenshot and action in steps/
 │       ├── ui_tree.py                 # A screen's accessibility tree: parsed, compared, its elements located, its taps hit-tested
@@ -54,6 +55,7 @@ graph TD;
     pkg["android_app_graph"] --> kobe["android_app_graph.kobe"];
     cmd["android_app_graph.commands"] --> dev["android_app_graph.device"];
     cmd --> gf["android_app_graph.graph_files"];
+    cmd --> replay["android_app_graph.replay"];
     cmd --> img["android_app_graph.screen_image"];
     cmd --> steps["android_app_graph.step_log"];
     cmd --> utils["android_app_graph.utils"];
@@ -66,6 +68,7 @@ graph TD;
     dev --> tree["android_app_graph.ui_tree"];
     kobe --> dev;
     kobe --> gf;
+    kobe --> replay;
     kobe --> steps;
     kobe --> utils;
     kobe --> gm;
@@ -76,6 +79,8 @@ graph TD;
     gm --> steps;
     gm --> tree;
     gm --> vlm;
+    replay --> steps;
+    replay --> tree;
     steps --> gf;
     steps --> pay;
     steps --> img;
@@ -427,6 +432,21 @@ otherwise the package's launcher activity, looked up once per run; of several, t
 first is used and a warning names the others. Whatever the app holds only in memory,
 such as an unsaved form, is lost at each replay; data it has stored survives.
 
+A replayed tap or long press goes to the element it recorded, its
+[anchor](#what-an-action-acted-on), where the screen shows that element now, so a
+list that loaded more items or stopped at another scroll position does not move the
+tap onto a neighbour. The replay reads the screen first, a [capture](#step-log) like
+any other, and looks for the anchor's locator among the visible, enabled nodes of
+the windows the user can act on, counting only the nodes that take taps when some
+do. When it finds exactly one, and a tap at the centre of that node's current bounds
+reaches it, the action goes to that centre; a long press keeps its duration.
+Otherwise the action goes to its recorded coordinates. The log says which way each
+tap went: `anchor`, or `recorded coordinates:` and the reason, `no_anchor` (the edge
+recorded none), `no_tree`, `no_match`, `ambiguous` (more than one element) or
+`covered` (a dialog, the keyboard or another element lies over its centre). Typing,
+swipes, Back, Home, Enter and waits replay as recorded, without a look. Each
+anchored tap makes a replay one capture longer.
+
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
 elements, few outgoing edges and few visits. Each checkpoint lets the model choose
@@ -518,10 +538,11 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, [what it acted on](#what-an-action-acted-on) as `anchors`, `hits` and `action_flags`, one entry per sub-action, and `from_node` and `to_node` as they were then |
 
 An action or transition record takes `activity` and `package` from the screenshot
-it was taken from. A replay acts without looking, so a replayed action names the
-last screenshot before it, which can predate the app restart. The planner's
-instruction can differ from the edge's: an action-model `end` is recorded on the
-edge as "Press back".
+it was taken from. A [replay](#replaying-to-a-node) reads the screen before each tap
+or long press that has an anchor, and that action names that screenshot; any other
+replayed action is sent without a look and names the last screenshot before it,
+which can predate the app restart. The planner's instruction can differ from the
+edge's: an action-model `end` is recorded on the edge as "Press back".
 
 The status bar's clock and icons change on their own, so `pixel_hash` leaves them
 out. It is the SHA-256 of the image's decoded pixels, mode and size below its top
@@ -718,7 +739,8 @@ with the action:
   `outside_dialog`: the tap dismisses it. Typing is anchored to the focused text
   field. A swipe, Back, Home, Enter, a later sub-action of a compound action, and an
   action planned from a screen with no tree or whose tree never settled have no
-  anchor.
+  anchor. A [replay](#replaying-to-a-node) taps the anchor's element where the
+  screen shows it when the replay runs.
 - **Mis-tap.** When the planner named an element with a locator and a tap landed
   neither on it nor on an element inside it, the tap is a mis-tap. The edge still
   leads where the tap went; only its instruction is wrong, so the instruction model
@@ -813,7 +835,9 @@ instruction looks wrong for where it leads, it:
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action
    recorded at the same position (see [Graph edges](#graph-edges));
-3. executes that action once and corrects the edge by the screen it reaches:
+3. executes that action once, a tap on the element it recorded as a
+   [replay](#replaying-to-a-node) finds it in the screen read before it, and
+   corrects the edge by the screen it reaches:
    - another node: the action moves, with its entry in every per-action list, to
      the edge toward that node, which is created if needed, and its observation
      becomes that node's description. The flagged edge is removed once no action
