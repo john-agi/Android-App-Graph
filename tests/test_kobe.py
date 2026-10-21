@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -1353,6 +1354,30 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
     assert "at step 3" in caplog.text
 
 
+@pytest.mark.parametrize("resume_from", ["auto", "s0_home"])
+def test_a_run_resumed_from_a_node_logs_the_step_it_starts_from_before_the_replay(
+    resume_from: str,
+    kobe: Kobe,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    kobe.graph.graph.add_node("s0_home", page_description="home", package="com.demo")
+    kobe.graph.total_steps_completed = 3
+    logged_before_the_replay: list[str] = []
+
+    def replay(_node_id: str) -> str:
+        logged_before_the_replay.extend(caplog.messages)
+        raise _ReplayedError
+
+    monkeypatch.setattr(kobe, "navigate_to_node", replay)
+    caplog.set_level(logging.INFO, logger="test")
+
+    with pytest.raises(_ReplayedError):
+        kobe.explore(max_steps=5, resume_from=resume_from)
+
+    assert "Resuming exploration from step 3 (target: 5 steps total)" in logged_before_the_replay
+
+
 @pytest.mark.parametrize(
     ("detail_after", "delta", "observation"),
     [
@@ -2224,6 +2249,45 @@ def test_back_from_another_app_expects_the_screen_the_step_left(
     assert identified == [None, "s1_list"]
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_every_counted_step_logs_its_number_and_then_its_tokens(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A step that stays in the app, one into another app, one onto an outside web page and
+    a wait each log ``Step N/M``, so counting those lines counts the steps a run took."""
+    list_screen = _screen("com.demo.List", "gray")
+    web_page = _screen("com.demo.ArticleActivity", "blue")
+    screens = (HOME_SCREEN, list_screen, _SEARCH_SCREEN, list_screen, web_page, list_screen)
+    explorer = _explorer(screens_by_log(*screens), tmp_path, router_client)
+    _list_reached_from_home(explorer, EXTERNAL_WEB_NODE)
+    _identifying(
+        explorer, monkeypatch, "s0_home", "s1_list", "s1_list", EXTERNAL_WEB_NODE, "s1_list"
+    )
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Open it", []))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(3))
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=4)
+
+    messages = caplog.messages
+    numbered = [i for i, message in enumerate(messages) if re.search(r"Step [0-9]*/", message)]
+    assert [messages[i].split(" | ")[0] for i in numbered] == [
+        "Step 1/4: s0_home --[tap]--> s1_list",
+        f"Step 2/4: s1_list --[tap]--> ext_{_SEARCH}",
+        f"Step 3/4: s1_list --[tap]--> {EXTERNAL_WEB_NODE}",
+        "Step 4/4: s1_list --[wait]--> s1_list",
+    ]
+    assert [messages[i + 1].split(":")[0] for i in numbered] == ["  Tokens this step"] * 4
+
+
 @pytest.mark.usefixtures("no_sleep", "device_log")
 def test_a_replay_expects_the_node_it_replays_to(
     replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
@@ -2257,6 +2321,11 @@ def _requested_models(router_requests: list[httpx.Request]) -> list[str]:
     return [json.loads(request.content)["model"] for request in router_requests]
 
 
+def _numbered_steps(messages: list[str]) -> list[str]:
+    """Return the logged lines ``grep 'Step [0-9]*/'`` counts, without their graph summary."""
+    return [message.split(" | ")[0] for message in messages if re.search(r"Step [0-9]*/", message)]
+
+
 @pytest.mark.parametrize("action_reply", [_BACK_REPLY, '{"action":"end"}'], ids=["back", "end"])
 @pytest.mark.usefixtures("no_sleep")
 def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
@@ -2275,7 +2344,8 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     """Back on the start screen would leave the app, which then restarts onto the same
     screen. The Back is not sent: the coverage checkpoint's target choice runs at once,
     without its merge audit, its replay reaches the target, and the next step plans from
-    there. The step counts, so two planned steps end a two-step run."""
+    there. The step counts, and its numbered line shows ``continue`` to the target, so two
+    planned steps end a two-step run with two numbered lines."""
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
@@ -2305,9 +2375,13 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     assert "node_id=s0_home" not in target_choice["messages"][0]["content"]
     assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list")]
     assert (
-        "Step 1/2: Back on s0_home leaves the app; continuing from ranked target s1_list "
-        "instead." in caplog.text
+        "Back on s0_home leaves the app; continuing from ranked target s1_list instead."
+        in caplog.text
     )
+    assert _numbered_steps(caplog.messages) == [
+        "Step 1/2: s0_home --[continue]--> s1_list",
+        "Step 2/2: s1_list --[wait]--> s1_list",
+    ]
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
         ("action", "navigation_replay"),
@@ -2356,10 +2430,11 @@ def test_back_on_the_start_screen_whose_replay_cannot_restart_the_app_stays_ther
     device_log: list[object],
     screens_by_log: Callable[..., DeviceController],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A refused force-stop leaves the start screen showing, as at a coverage checkpoint:
-    Back is still not pressed, the step counts, and the next step plans from the start
-    screen."""
+    Back is still not pressed, the step counts with the start screen as the node it
+    continues from, and the next step plans from the start screen."""
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
@@ -2373,6 +2448,7 @@ def test_back_on_the_start_screen_whose_replay_cannot_restart_the_app_stays_ther
             chat_response(content=_WAIT_REPLY),
         ]
     )
+    caplog.set_level(logging.INFO, logger="test")
 
     explorer.explore(max_steps=2)
 
@@ -2380,6 +2456,10 @@ def test_back_on_the_start_screen_whose_replay_cannot_restart_the_app_stays_ther
     assert expected == [None]
     assert planned_from == ["s0_home", "s0_home"]
     assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list")]
+    assert _numbered_steps(caplog.messages) == [
+        "Step 1/2: s0_home --[continue]--> s0_home",
+        "Step 2/2: s0_home --[wait]--> s0_home",
+    ]
 
 
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
