@@ -1188,16 +1188,6 @@ def test_load_all_graphs_survives_a_sidecar_write_failure(
 
 
 @pytest.mark.parametrize(
-    ("task", "expected"),
-    [("Open Demo and search for shoes", "demo"), ("Check the weather", None)],
-)
-def test_resolve_app_from_task(
-    translator: aitk_translator.UIKobeV2Translator, task: str, expected: str | None
-) -> None:
-    assert translator._resolve_app_from_task(task) == expected
-
-
-@pytest.mark.parametrize(
     "package",
     ["com.demo.app.free", "com.demo", "com.demo.app/.HomeActivity", "org.other.thing", ""],
 )
@@ -1210,22 +1200,50 @@ def test_identify_node_matches_no_graph_for_another_package(
     assert completions.calls == []
 
 
+def _loop_steps(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [message for message in caplog.messages if message.startswith("[LOOP] Step")]
+
+
 def test_reset_task_state_clears_the_previous_task(
-    translator: aitk_translator.UIKobeV2Translator,
+    use_model: _UseModel,
+    stepping: aitk_translator.UIKobeV2Translator,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    translator._app_opened = True
-    translator._step_count = 7
-    translator._memory.add_action("tapped Search")
+    caplog.set_level(logging.INFO, logger=aitk_translator.logger.name)
+    turn_replies = ("A", _NO_INFORMATION, '{"choice": "C", "instruction": "tap the shoes result"}')
+    use_model(stepping, *turn_replies, *turn_replies)
+    state, history = _step_payload()
+    task = "Open demo and buy shoes"
+    stepping.to_agent(task, state, history)
+    stepping.to_agent(task, state, history)
+    assert stepping.memory.actions == ["tap the shoes result"]
 
-    translator.reset_task_state()
+    stepping.reset_task_state()
 
-    assert translator._app_opened is False
-    assert translator._step_count == 0
-    assert translator._memory.actions == []
+    assert stepping.memory.actions == []
+    reopened = json.loads(stepping.to_agent(task, state, history))
+    assert reopened["aitk_action"] == {"action": "open", "app": "demo"}
+    stepping.to_agent(task, state, history)
+    assert _loop_steps(caplog) == ["[LOOP] Step 1", "[LOOP] Step 1"]
+
+
+def _record_screen_sizes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Fake the action agent and return the screen size each of its calls is given."""
+    screen_sizes: list[tuple[int, int]] = []
+
+    def _fake_predict(
+        *_args: object, screen_w: int, screen_h: int, **_kwargs: object
+    ) -> tuple[dict[str, Any], str]:
+        screen_sizes.append((screen_w, screen_h))
+        return {"action": "back"}, "went back"
+
+    monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr(aitk_translator, "predict_next_action", _fake_predict)
+    return screen_sizes
 
 
 def test_reset_task_state_keeps_the_screen_size_aitk_reported(
-    translator: aitk_translator.UIKobeV2Translator,
+    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     """Screen size is a device property that survives task boundaries.
 
@@ -1233,11 +1251,13 @@ def test_reset_task_state_keeps_the_screen_size_aitk_reported(
     a new task, so a task reset must not silently reset it back to the 1080x1920
     default while call_action_agent keeps using it for grounding.
     """
+    screen_sizes = _record_screen_sizes(monkeypatch)
     translator.to_device(json.dumps({"aitk_action": {"action": "wait", "time": 1}}), 1440, 3120)
 
     translator.reset_task_state()
 
-    assert (translator._screen_w, translator._screen_h) == (1440, 3120)
+    translator.call_action_agent("go back", [], "shot")
+    assert screen_sizes == [(1440, 3120)]
 
 
 @pytest.mark.parametrize(
@@ -2082,13 +2102,15 @@ def test_make_response_wraps_the_action() -> None:
 
 
 def test_to_device_records_the_screen_size(
-    translator: aitk_translator.UIKobeV2Translator,
+    monkeypatch: pytest.MonkeyPatch, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
+    screen_sizes = _record_screen_sizes(monkeypatch)
     action = translator.to_device(
         json.dumps({"aitk_action": {"action": "tap", "x": 1, "y": 2}}), 1440, 3120
     )
     assert action == {"action": "tap", "x": 1, "y": 2}
-    assert (translator._screen_w, translator._screen_h) == (1440, 3120)
+    translator.call_action_agent("go back", [], "shot")
+    assert screen_sizes == [(1440, 3120)]
 
 
 def test_to_device_on_unparseable_json(translator: aitk_translator.UIKobeV2Translator) -> None:
@@ -2137,11 +2159,12 @@ def _step_payload() -> tuple[dict[str, Any], dict[str, Any]]:
     return state, {"actions": ["earlier"]}
 
 
+@pytest.mark.parametrize("task", ["Open demo and buy shoes", "Open Demo and search for shoes"])
 def test_to_agent_opens_the_app_on_the_first_turn(
-    translator: aitk_translator.UIKobeV2Translator,
+    translator: aitk_translator.UIKobeV2Translator, task: str
 ) -> None:
     state, _ = _step_payload()
-    response = json.loads(translator.to_agent("Open demo and buy shoes", state, {"actions": []}))
+    response = json.loads(translator.to_agent(task, state, {"actions": []}))
     assert response["aitk_action"] == {"action": "open", "app": "demo"}
 
 
@@ -2158,22 +2181,24 @@ def test_to_agent_without_an_actions_key_resets_state(
 
 
 def test_to_agent_runs_the_loop(
-    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel,
+    stepping: aitk_translator.UIKobeV2Translator,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger=aitk_translator.logger.name)
     turn_replies = (
         "A",
         '{"information": "The total is 9 EUR"}',
         '{"choice": "C", "instruction": "tap the shoes result"}',
     )
     use_model(stepping, *turn_replies, *turn_replies)
-    stepping._app_opened = True
     state, history = _step_payload()
 
     for turn in range(1, 3):
         response = json.loads(stepping.to_agent("buy shoes", state, history))
         assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
         assert response["message"] == "[Android-App-Graph] Action: tapped the result | on home"
-        assert stepping._step_count == turn
+        assert _loop_steps(caplog) == [f"[LOOP] Step {step}" for step in range(1, turn + 1)]
     assert stepping.memory.actions == ["tap the shoes result"] * 2
     assert stepping.memory.info == ["The total is 9 EUR"] * 2
     assert stepping.memory.observations == ["tapped the result"] * 2
@@ -2183,7 +2208,6 @@ def test_to_agent_stops_the_run_on_an_unreadable_record_reply(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(stepping, "A", "nothing", '{"choice": "C"}')
-    stepping._app_opened = True
     state, history = _step_payload()
 
     with pytest.raises(aitk_translator.RecordReplyError):
@@ -2196,10 +2220,9 @@ def test_step_ends_the_task_on_a_done_decision(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(stepping, "A", _NO_INFORMATION, '{"choice": "A"}', "9 EUR")
-    stepping._app_opened = True
     state, history = _step_payload()
 
-    response = json.loads(stepping._step("buy shoes", state, history))
+    response = json.loads(stepping.to_agent("buy shoes", state, history))
     assert response["aitk_action"] == {"action": "end", "answer": "9 EUR"}
 
 
@@ -2215,10 +2238,9 @@ def test_step_downgrades_an_early_end_to_a_wait(
         lambda *_a, **_k: ({"action": "end", "answer": "guessed"}, "gave up | on home"),
     )
     use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
-    stepping._app_opened = True
     state, history = _step_payload()
 
-    response = json.loads(stepping._step("buy shoes", state, history))
+    response = json.loads(stepping.to_agent("buy shoes", state, history))
     assert response["aitk_action"] == {"action": "wait", "time": 1}
 
 
@@ -2226,10 +2248,9 @@ def test_step_plans_a_free_action_when_no_node_matches(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(stepping, "none", _NO_INFORMATION, "Tap the cart icon")
-    stepping._app_opened = True
     state, history = _step_payload()
 
-    json.loads(stepping._step("buy shoes", state, history))
+    json.loads(stepping.to_agent("buy shoes", state, history))
     assert stepping.memory.actions == ["Tap the cart icon"]
 
 
@@ -2246,10 +2267,9 @@ def test_step_replans_when_decide_produces_no_instruction(
         "still not json",  # DECIDE attempt 2: fails to parse -> type="free", instruction=""
         "Tap the search bar",  # free-action fallback plan
     )
-    stepping._app_opened = True
     state, history = _step_payload()
 
-    json.loads(stepping._step("buy shoes", state, history))
+    json.loads(stepping.to_agent("buy shoes", state, history))
     assert stepping.memory.actions == ["Tap the search bar"]
 
 
@@ -2268,10 +2288,9 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
         '{"choice": "D"}',  # DECIDE picks FREE, writes no instruction
         "Tap the search bar",  # free-action fallback plan
     )
-    stepping._app_opened = True
     state, history = _step_payload()
 
-    json.loads(stepping._step("buy shoes", state, history))
+    json.loads(stepping.to_agent("buy shoes", state, history))
     assert stepping.memory.actions == ["Tap the search bar"]
 
 
@@ -2279,10 +2298,9 @@ def test_step_resolves_the_graph_from_the_package(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
-    stepping._app_opened = True
     state, history = _step_payload()
 
-    json.loads(stepping._step("buy shoes", state, history))
+    json.loads(stepping.to_agent("buy shoes", state, history))
     assert "Node: home" in completions.prompt_text(2)
 
 
@@ -2291,11 +2309,13 @@ def test_step_uses_no_graph_while_no_graph_matches_the_foreground_package(
 ) -> None:
     """The app the task named only decides what to open; the foreground decides the graph."""
     completions = use_model(stepping, _NO_INFORMATION, "Tap the Demo icon")
-    stepping._app_opened = True
     state, history = _step_payload()
+    launcher = {**state, "package": "com.launcher"}
 
-    stepping._step("Open demo", {**state, "package": "com.launcher"}, history)
+    opening = json.loads(stepping.to_agent("Open demo", launcher, history))
+    stepping.to_agent("Open demo", launcher, history)
 
+    assert opening["aitk_action"] == {"action": "open", "app": "demo"}
     assert "no graph is loaded" in completions.prompt_text(1)
     assert stepping.memory.actions == ["Tap the Demo icon"]
 
@@ -2323,7 +2343,6 @@ def two_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> aitk_translator
         "predict_next_action",
         lambda *_a, **_k: ({"action": "tap", "x": 5, "y": 6}, "tapped | on screen"),
     )
-    built._app_opened = True
     return built
 
 
@@ -2337,15 +2356,19 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
         *("A", _NO_INFORMATION, '{"choice": "B", "instruction": "Tap checkout"}'),
     )
     history = {"actions": ["earlier"]}
+    demo = {
+        "screenshot": "shot",
+        "activity": "com.demo.app/.HomeActivity",
+        "package": "com.demo.app",
+    }
 
-    two_apps._step(
-        "buy shoes in shop",
-        {"screenshot": "shot", "activity": "com.demo.app/.HomeActivity", "package": "com.demo.app"},
-        history,
-    )
+    opening = json.loads(two_apps.to_agent("buy shoes in shop", demo, history))
+    assert opening["aitk_action"] == {"action": "open", "app": "shop"}
+
+    two_apps.to_agent("buy shoes in shop", demo, history)
     assert "Node: home" in completions.prompt_text(2)
 
-    two_apps._step(
+    two_apps.to_agent(
         "buy shoes in shop",
         {"screenshot": "shot", "activity": "com.shop.app/.CartActivity", "package": "com.shop.app"},
         history,
@@ -2376,7 +2399,6 @@ def _stepping_over_one_graph(
         "predict_next_action",
         lambda *_a, **_k: ({"action": "tap", "x": 5, "y": 6}, "tapped | on screen"),
     )
-    built._app_opened = True
     return built
 
 
@@ -2405,7 +2427,7 @@ def test_step_offers_only_the_nodes_of_the_foreground_package(
     state = {"screenshot": "shot", "activity": conversations, "package": messages}
 
     with caplog.at_level(logging.INFO, logger=aitk_translator.logger.name):
-        stepping._step("Read the latest message", state, {"actions": []})
+        stepping.to_agent("Read the latest message", state, {"actions": ["earlier"]})
 
     assert "[IDENTIFY] identified node=inbox" in caplog.messages
 
@@ -2432,21 +2454,31 @@ def test_step_identifies_an_android_world_screen_in_a_graph_saved_without_node_p
     state = {"screenshot": "shot", "activity": f"{chrome}/{tabbed}", "package": chrome}
 
     with caplog.at_level(logging.INFO, logger=aitk_translator.logger.name):
-        stepping._step("Open a new tab", state, {"actions": []})
+        stepping.to_agent("Open a new tab", state, {"actions": ["earlier"]})
 
     assert "[IDENTIFY] identified node=tabs" in caplog.messages
 
 
+@pytest.mark.parametrize("task", ["do something unrelated", "Check the weather"])
 def test_step_warns_when_the_task_names_no_known_app(
-    use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
+    use_model: _UseModel,
+    stepping: aitk_translator.UIKobeV2Translator,
+    caplog: pytest.LogCaptureFixture,
+    task: str,
 ) -> None:
-    """An unresolvable app falls straight through to the reactive loop."""
-    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
+    """An unresolvable app falls straight through to the reactive loop, and only
+    the task's first turn looks for one."""
+    turn_replies = ("A", _NO_INFORMATION, '{"choice": "C"}')
+    use_model(stepping, *turn_replies, *turn_replies)
     state, history = _step_payload()
 
-    response = json.loads(stepping._step("do something unrelated", state, history))
-    assert response["aitk_action"] == {"action": "tap", "x": 5, "y": 6}
-    assert stepping._app_opened is True
+    with caplog.at_level(logging.WARNING, logger=aitk_translator.logger.name):
+        responses = [json.loads(stepping.to_agent(task, state, history)) for _ in range(2)]
+
+    assert [response["aitk_action"] for response in responses] == [
+        {"action": "tap", "x": 5, "y": 6}
+    ] * 2
+    assert caplog.messages.count(f"[OPEN] Could not resolve app from task: {task}") == 1
 
 
 def test_last_answer_signal_finds_none_after_a_szlig_heavy_prefix() -> None:
@@ -2741,7 +2773,6 @@ def test_v2_turn_distinguishes_bad_actions_from_broken_endpoint_and_can_resume(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: "")
     runtime = aitk_translator.UIKobeV2Translator(graph_dir=str(tmp_path))
-    runtime._app_opened = True
     state: dict[str, object] = {"screenshot": png_screenshot, "activity": "com.demo.Home"}
     history: dict[str, object] = {"actions": ["started"]}
     for turn in range(2):
