@@ -166,7 +166,7 @@ or container; a physical `.env` file is not required or loaded automatically.
 
 The template's model selections were approved from OpenRouter's catalog based on
 documented capabilities, the chat models on 2026-10-12 and the embedding model on
-2026-10-21; Android-task improvements have not been measured.
+2026-10-21; their performance on Android tasks has not been measured.
 Check a replacement model's supported input modalities and parameters in the
 [chat catalog](https://openrouter.ai/api/v1/models) or
 [embedding catalog](https://openrouter.ai/api/v1/embeddings/models).
@@ -187,9 +187,9 @@ It is omitted by default. Only set it when the selected model and provider
 support it; check the model's supported parameters and
 [OpenRouter's parameter guidance](https://openrouter.ai/docs/api_reference/parameters).
 The sample `configs/explore.yaml` sets `temperature: 0.0` on `action` only:
-`qwen/qwen3.8-flash` supports it and upstream UI-KOBE used it, while Sol, the
-sample's page-detail and instruction model, rejects temperature, so those blocks
-leave it out. Zero temperature does not guarantee deterministic output.
+`qwen/qwen3.8-flash` supports it, while Sol, the sample's page-detail and
+instruction model, rejects temperature, so those blocks leave it out. Zero
+temperature does not guarantee deterministic output.
 
 ### Requests and recovery
 
@@ -264,8 +264,8 @@ a JSON schema with a description of every property, plus OpenRouter's
 plugin. The schemas are strict except for screen descriptions and edge templates,
 whose `state` and `params` objects have free-form keys that strict mode cannot
 express. OpenRouter routes a `response_format` only to providers that support it,
-and not every provider enforces strict schemas, so every reply is still validated
-as before. The action model keeps its text format.
+and not every provider enforces strict schemas, so the application validates every
+reply itself. The action model replies in its own text format.
 
 Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. A broken endpoint
@@ -297,7 +297,7 @@ about 12 seconds, when a dump gives up waiting for an idle screen.
 ### Embedding caches
 
 Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
-as `{node_id: {"model": model_id, "embedding": vector}}`. Legacy bare vectors
+as `{node_id: {"model": model_id, "embedding": vector}}`. Bare vectors
 and inline vectors without model metadata have unknown provenance. Graphs
 can still be loaded for inspection, but text comparisons reject unknown or
 mismatched models even when dimensions match. These checks run before description
@@ -307,9 +307,7 @@ model before resuming text matching; do not relabel old vectors. Newly generated
 or renamed descriptions carry their model metadata through save/load.
 
 Exploration and the audit match screens by these text vectors and by comparing a
-screenshot with a node's representative (see [Graph nodes](#graph-nodes)), never
-by screenshot embeddings. A screenshot-embedding sidecar left in a graph
-directory is not read; it can be deleted.
+screenshot with a node's representative (see [Graph nodes](#graph-nodes)).
 
 ### Action responses
 
@@ -317,8 +315,7 @@ The action prompt declares the `mobile_use` function in its text format and give
 the screen resolution as 999x999 whatever the device or screenshot size; the
 screenshot itself is still downscaled to at most one million pixels.
 On ScreenSpot-v2 mobile (501 screenshots, temperature 0), `qwen/qwen3.8-flash`
-hit the target in 94.2% of taps with that screen line, against 91.0% when the
-prompt stated the resized screenshot size.
+hit the target in 94.2% of taps with that screen line.
 
 A `<tool_call>` block holds one JSON object, `{"name": ..., "arguments": {...}}`
 or the arguments alone. A reply that ends before `</tool_call>` is still read when
@@ -435,7 +432,7 @@ package. A dialog's node is therefore never a target of
 `--resume-from auto` or the coverage checkpoint, which replay from the app's start
 screen. A node without a recorded package, other than an `ext_` one, takes the
 graph file's `package_name`, or the app's configured `package_name` when the file
-has none, so a graph file whose nodes record no package still loads and resumes.
+has none, so a graph file whose nodes record no package loads and resumes too.
 
 ### Step log
 
@@ -446,8 +443,8 @@ and its `_audited` copy share. Recording is always on.
 Each step has a zero-padded number. Its record is `<id>.json`, and a screenshot
 also has its image, `<id>.webp`. Every screenshot is encoded once, when it is
 taken: shrunk with LANCZOS to at most one million pixels and saved as lossless
-WebP. That image is the one the models receive and the one the graph refers to;
-no PNG is kept. The image is written before its record, so every record names an
+WebP. That image is the only copy kept: the models receive it and the graph refers
+to it. The image is written before its record, so every record names an
 image that exists. A later run continues the numbering after the highest record,
 and an image a crash left without a record is ignored and its number reused.
 
@@ -474,8 +471,8 @@ edge as "Press back".
 planner, so its transition holds the flagged instruction and a `null` element.
 
 On 139 screenshots of the Settings app from a 1280x2856 emulator, each became a
-669x1493 image of 74 KB on average (176 KB at most), 57% smaller than the
-device's PNG, and took about 0.35 s to encode. A record is a few hundred bytes.
+669x1493 image of 74 KB on average (176 KB at most) and took about 0.35 s to
+encode. A record is a few hundred bytes.
 The log keeps every value shown on the screen and every text typed, passwords
 included, so treat a graph directory like the app's data. Run one exploration or
 re-exploration of an app at a time: two runs writing one step log reuse each
@@ -502,9 +499,8 @@ still resolves.
 
 Loading a graph fails, naming the nodes, when a node lists no observations, its
 representative is not one of them, or the representative's image is missing from
-`steps/`. A graph whose nodes do not list their observations, such as one that
-keeps PNG screenshots in `<app_name>_screenshots/`, cannot be loaded: explore the
-app again into a new graph directory.
+`steps/`. A graph whose nodes do not list their observations cannot be loaded:
+explore the app again into a new graph directory.
 
 ### Graph edges
 

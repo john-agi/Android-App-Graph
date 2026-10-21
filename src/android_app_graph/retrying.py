@@ -19,7 +19,8 @@ from openrouter.utils import BackoffStrategy, RetryConfig
 
 logger = logging.getLogger(__name__)
 
-# Upstream UI-KOBE's V2_PARSE_RETRIES = 1: one more attempt after the first.
+# The first request and one more: every reply is billed, and each caller falls back or
+# raises once both are unusable. capped_retries gives a timed-out attempt the same one more.
 UNUSABLE_OUTPUT_ATTEMPTS = 2
 _SUCCESS_STATUS_CODES = range(200, 300)
 

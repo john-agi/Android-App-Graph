@@ -668,7 +668,7 @@ def test_the_verifier_treats_keyboard_focus_and_scroll_as_the_same_screen(
         ),
     ],
 )
-def test_parsers_still_reject_replies_that_violate_the_schema(
+def test_parsers_reject_replies_that_violate_the_schema(
     operation: str,
     reply: str,
     expected: object,
