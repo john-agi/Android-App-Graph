@@ -337,6 +337,8 @@ addresses, dates, prices, usernames, etc.). Think of it as the screen's class na
 Good: "search results page", "route planning page", "location search page" \
 Bad: "search results for Big Ben", "route from home to work", "John's profile page" \
 All user-specific data belongs in "state", never in "page_description". \
+The on-screen keyboard, which input field has focus, and how far a list is scrolled \
+never change "page_description"; record them in "state". \
 Always describe what you actually see. \
 {description_hint}
 
@@ -346,6 +348,8 @@ that change through user interaction. This is where ALL user-specific content go
 For the "state" object, focus on:
 - "first_visible_item": the first list/menu item visible on screen (scroll position)
 - "last_visible_item": the last list/menu item visible on screen
+- "focused_field": the input field that has focus, or null when none has
+- "keyboard_visible": whether the on-screen keyboard is shown
 - User-controlled state: active tab, search query, applied filters, sort order, toggle states, \
   selected items, input field contents
 - Navigation state: which sub-section or category is currently shown
@@ -406,12 +410,13 @@ Both screens were given this description: "{existing_description}"
 
 Two screenshots are the SAME screen if they serve the same purpose and a user would consider \
 them the same page — even if the content (list items, search results, text in fields) differs. \
-For example, a search results page showing different queries is still the same screen.
+For example, a search results page showing different queries is still the same screen. \
+They are also the SAME screen when they differ only in whether the on-screen keyboard is shown, \
+which input field has focus, or how far a list is scrolled.
 
 Two screenshots are DIFFERENT screens if they serve different purposes in the app's workflow, \
 even if they look visually similar. Pay close attention to:
 - Screen titles, headers, or labels (e.g. "Choose start location" vs "Choose destination")
-- Which input field is active or being filled
 - The stage in a multi-step flow (e.g. step 1 vs step 2 of a booking)
 - Different form sections or tabs that change the screen's function
 - Any dropdown menu, overflow menu, popup menu, context menu, sort/filter menu, \
@@ -926,10 +931,10 @@ def describe_page_and_state(
         )
         description_hint = (
             "If this screen is clearly the same type as one in the list, output the same "
-            "description. If it is similar but serves a different purpose (e.g. different "
-            "step in a flow, different input field focused), write a description that "
-            "clearly distinguishes it. Pay attention to screen titles, headers, labels, "
-            "which field is active, and what stage of a multi-step flow this is."
+            "description. If it is similar but serves a different purpose (e.g. a different "
+            "step in a flow), write a description that clearly distinguishes it. Pay "
+            "attention to screen titles, headers, labels, and what stage of a multi-step "
+            "flow this is."
         )
     else:
         existing_nodes_section = "No screens have been discovered yet in this app."
