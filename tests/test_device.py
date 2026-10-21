@@ -460,9 +460,9 @@ def test_get_state_raises_when_a_read_fails(
             {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4},
             [[*_INPUT, "swipe", "1", "2", "3", "4", "1000"]],
         ),
-        ({"action": "enter"}, [[*_INPUT, "keyevent", "66"], 1]),
-        ({"action": "back"}, [[*_INPUT, "keyevent", "4"], 1]),
-        ({"action": "home"}, [[*_INPUT, "keyevent", "3"], 1]),
+        ({"action": "enter"}, [[*_INPUT, "keyevent", "KEYCODE_ENTER"], 1]),
+        ({"action": "back"}, [[*_INPUT, "keyevent", "KEYCODE_BACK"], 1]),
+        ({"action": "home"}, [[*_INPUT, "keyevent", "KEYCODE_HOME"], 1]),
         ({"action": "wait", "duration": 2}, [2]),
         ({"action": "wait", "time": 5}, [5]),
         ({"action": "wait"}, [3]),
@@ -479,23 +479,42 @@ def test_each_action_sends_its_adb_command_and_pause(
     assert adb.events == events
 
 
-def test_type_clears_the_field_then_types_runs_of_letters_and_presses_other_keys(
+_CLEAR_FIELD = [[*_INPUT, "keyevent", "KEYCODE_DEL"], 0.2] * 20
+
+
+@pytest.mark.parametrize(
+    ("text", "typed"),
+    [
+        pytest.param("Hi there!", [[*_INPUT, "text", "'Hi there!'"], 1], id="one quoted call"),
+        pytest.param(
+            '!?:;"&%$<>{}[]|~^', [[*_INPUT, "text", "'!?:;\"&%$<>{}[]|~^'"], 1], id="punctuation"
+        ),
+        pytest.param("it's", [[*_INPUT, "text", "'it'\"'\"'s'"], 1], id="single quote"),
+        pytest.param(
+            "50%sale", [[*_INPUT, "text", "50%"], 1, [*_INPUT, "text", "sale"], 1], id="%s split"
+        ),
+        pytest.param("%%s", [[*_INPUT, "text", "%%"], 1, [*_INPUT, "text", "s"], 1], id="%%s"),
+        pytest.param("", [], id="empty"),
+    ],
+)
+def test_type_clears_the_field_then_types_the_text_quoted_for_the_device_shell(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    text: str,
+    typed: list[list[str] | float],
+) -> None:
+    controller.exe_action({"action": "type", "text": text})
+    assert adb.events == [*_CLEAR_FIELD, *typed]
+
+
+def test_type_raises_when_adb_cannot_type_a_character(
     controller: device.AdbController, adb: _FakeAdb
 ) -> None:
-    controller.exe_action({"action": "type", "text": "Hi there!"})
-
-    delete = [[*_INPUT, "keyevent", "67"], 0.2] * 20
-    assert adb.events == [
-        *delete,
-        [*_INPUT, "text", "Hi"],
-        1,
-        [*_INPUT, "keyevent", "62"],
-        1,
-        [*_INPUT, "text", "there"],
-        1,
-        [*_INPUT, "keyevent", "161"],
-        1,
-    ]
+    """``input text`` exits non-zero for a character outside the virtual keyboard map."""
+    adb.replies[("-s", _UDID, "shell", "input", "text", "'é'")] = (255, b"")
+    with pytest.raises(subprocess.CalledProcessError):
+        controller.exe_action({"action": "type", "text": "é"})
+    assert adb.events == [*_CLEAR_FIELD, [*_INPUT, "text", "'é'"]]
 
 
 def test_end_logs_that_the_task_finished(
@@ -520,7 +539,7 @@ def test_terminate_all_apps_opens_recents_swipes_and_taps_at_scaled_coordinates(
 ) -> None:
     controller.terminate_all_apps()
     assert adb.events == [
-        [*_INPUT, "keyevent", "187"],
+        [*_INPUT, "keyevent", "KEYCODE_APP_SWITCH"],
         1,
         [*_INPUT, "swipe", "108", "1200", "972", "1200", "100"],
         1,

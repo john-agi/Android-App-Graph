@@ -7,9 +7,9 @@ developed by Yuxiang Chai and licensed under the Apache License, Version 2.0
 this repository.
 
 The device controller and AVD manager in src/android_app_graph/device.py
-(AdbController, EmulatorManager and their key-code table) are adapted from
-AITK (https://github.com/YuxiangChai/AITK), developed by Yuxiang Chai and
-licensed under the Apache License, Version 2.0: aitk/utils/adb_controller.py,
-aitk/utils/avd_manager.py, aitk/utils/keycode.py and aitk/__init__.py at
-commit fd06a28e2286cbc1ae699401c1a6f894ba926c44. They have been modified in
-this repository.
+(AdbController and EmulatorManager) are adapted from AITK
+(https://github.com/YuxiangChai/AITK), developed by Yuxiang Chai and licensed
+under the Apache License, Version 2.0: aitk/utils/adb_controller.py,
+aitk/utils/avd_manager.py and aitk/__init__.py at commit
+fd06a28e2286cbc1ae699401c1a6f894ba926c44. They have been modified in this
+repository.

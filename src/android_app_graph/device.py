@@ -12,6 +12,7 @@ import base64
 import logging
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -98,52 +99,6 @@ def _adb_stdout_bytes(args: Sequence[str]) -> bytes:
     ).stdout
 
 
-# No letters, digits or "_": _type sends those with `input text`.
-# Known defect, copied unchanged: a code with a comment is the KeyEvent constant named
-# there, so typing that character sends another character or nothing.
-_KEYCODE: dict[str, int] = {
-    "ENTER": 66,
-    "BACK": 4,
-    "HOME": 3,
-    "APP_SWITCH": 187,
-    "DEL": 67,
-    " ": 62,
-    "@": 77,
-    ".": 56,
-    ",": 55,
-    "/": 76,
-    "-": 69,
-    "+": 81,
-    "*": 17,
-    "#": 18,
-    "(": 162,
-    ")": 163,
-    "!": 161,  # KEYCODE_NUMPAD_EQUALS
-    "?": 166,  # KEYCODE_CHANNEL_UP
-    ":": 74,  # KEYCODE_SEMICOLON
-    ";": 186,  # KEYCODE_PROG_BLUE
-    "=": 70,
-    "'": 75,
-    '"': 140,  # KEYCODE_F10
-    "&": 150,  # KEYCODE_NUMPAD_6
-    "%": 129,  # KEYCODE_MEDIA_EJECT
-    "$": 128,  # KEYCODE_MEDIA_CLOSE
-    "<": 153,  # KEYCODE_NUMPAD_9
-    ">": 154,  # KEYCODE_NUMPAD_DIVIDE
-    "{": 145,  # KEYCODE_NUMPAD_1
-    "}": 146,  # KEYCODE_NUMPAD_2
-    "[": 47,  # KEYCODE_S
-    "]": 48,  # KEYCODE_T
-    "|": 124,  # KEYCODE_INSERT
-    "\\": 73,
-    "`": 68,
-    "~": 152,  # KEYCODE_NUMPAD_8
-    "^": 161,  # KEYCODE_NUMPAD_EQUALS
-}
-
-# Typed with `input text` after upper-casing; any other character is a key event.
-_INPUT_TEXT_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
-
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
 _CLEAR_KEY_PRESSES = 20
@@ -200,7 +155,7 @@ class AdbController:
                 self._clear()
                 self._type(action["text"])
             case "enter" | "back" | "home" as key:
-                self._press(key.upper())
+                self._press(f"KEYCODE_{key.upper()}")
             case "wait":
                 time.sleep(action.get("duration", action.get("time", _DEFAULT_WAIT_SECONDS)))
             case "end":
@@ -213,7 +168,7 @@ class AdbController:
         """Open recent apps, swipe the list to its left end and tap where the launcher
         shows Clear all.
         """
-        self._press("APP_SWITCH")
+        self._press("KEYCODE_APP_SWITCH")
         self._swipe(int(0.1 * self.w), int(0.5 * self.h), int(0.9 * self.w), int(0.5 * self.h), 100)
         time.sleep(1)
         self._tap(int(0.2 * self.w), int(0.48 * self.h))
@@ -237,8 +192,8 @@ class AdbController:
                 return package, activity
         return "unknown", "unknown"
 
-    def _input(self, *args: str) -> None:
-        run_adb([*self._serial, "shell", "input", *args], output="discard", check=False)
+    def _input(self, *args: str, check: bool = False) -> None:
+        run_adb([*self._serial, "shell", "input", *args], output="discard", check=check)
 
     def _tap(self, x: int, y: int) -> None:
         self._input("tap", str(x), str(y))
@@ -246,31 +201,29 @@ class AdbController:
     def _swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int) -> None:
         self._input("swipe", str(x1), str(y1), str(x2), str(y2), str(duration))
 
-    def _keyevent(self, key: str) -> None:
-        self._input("keyevent", str(_KEYCODE[key]))
-
-    def _press(self, key: str) -> None:
-        self._keyevent(key)
+    def _press(self, keycode: str) -> None:
+        self._input("keyevent", keycode)
         time.sleep(1)
 
     def _clear(self) -> None:
         for _ in range(_CLEAR_KEY_PRESSES):
-            self._keyevent("DEL")
+            self._input("keyevent", "KEYCODE_DEL")
             time.sleep(0.2)
 
     def _type(self, text: str) -> None:
-        start = 0
-        while start < len(text):
-            end = start
-            while end < len(text) and text[end].upper() in _INPUT_TEXT_CHARACTERS:
-                end += 1
-            if end == start:
-                self._keyevent(text[start])
-                end += 1
-            else:
-                self._input("text", text[start:end])
-            start = end
-            time.sleep(1)
+        """Type ``text`` with ``input text``, which turns each character into key events
+        with the device's virtual keyboard map, adding Shift where one is needed.
+
+        adb joins its arguments into one command line for the device's shell, so the
+        text is quoted for that shell. ``input text`` reads ``%s`` as a space, so a
+        ``%`` followed by ``s`` ends one call and the ``s`` starts the next. A character
+        the map cannot type, such as ``é``, makes adb exit non-zero, which raises
+        ``CalledProcessError``.
+        """
+        for chunk in re.split(r"(?<=%)(?=s)", text):
+            if chunk:
+                self._input("text", shlex.quote(chunk), check=True)
+                time.sleep(1)
 
 
 class _AvdHost(NamedTuple):
