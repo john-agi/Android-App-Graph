@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Auto-restart exploration on crash (e.g. API failures).
-# Uses --resume-from auto so it picks up from the least-explored node.
+# Uses --resume-from auto so it picks up from the top-ranked exploration target.
 # Logs are saved to logs/ with a timestamp, and also printed to the terminal.
 #
 # Usage:

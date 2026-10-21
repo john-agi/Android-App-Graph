@@ -1931,27 +1931,33 @@ def test_nodes_without_path_to_start_of_a_graph_of_external_nodes_lists_nothing(
     assert gm.nodes_without_path_to_start() == PathToStart(None, [], [])
 
 
-def test_get_least_explored_node_returns_none_without_a_start_node() -> None:
-    assert make_manager().get_least_explored_node() is None
+def _unexplored(*descriptions: str) -> list[dict[str, object]]:
+    return [{"description": description, "explored": False} for description in descriptions]
 
 
-def test_get_least_explored_node_prefers_the_fewest_outgoing_edges() -> None:
+def test_get_resume_target_returns_none_without_a_start_node() -> None:
+    assert make_manager().get_resume_target() is None
+
+
+def test_get_resume_target_is_the_top_ranked_exploration_target() -> None:
+    """The node with unexplored elements wins over the one with the fewest out-edges,
+    and a node no path from the start node reaches is never a target."""
     gm = make_manager()
-    for node_id, description in (
-        ("s0_home", "Home screen"),
-        ("s1_settings", "Settings page"),
-        ("s2_results", "Search results"),
-    ):
-        add_screen(gm, node_id, description)
-    add_screen(gm, "s3_unreachable", "Unreachable screen")
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    add_screen(gm, "s2_results", "Search results", interactable_elements=_unexplored("Filter"))
+    add_screen(
+        gm, "s3_unreachable", "Unreachable screen", interactable_elements=_unexplored("A", "B")
+    )
     gm.add_edge("s0_home", "s1_settings", {"action": "a"})
     gm.add_edge("s0_home", "s2_results", {"action": "b"})
     gm.add_edge("s2_results", "s0_home", {"action": "c"})
 
-    assert gm.get_least_explored_node() == "s1_settings"
+    assert gm.get_resume_target() == "s2_results"
+    assert gm.get_exploration_target_candidates(top_k=1)[0]["node_id"] == "s2_results"
 
 
-def test_get_least_explored_node_skips_external_nodes() -> None:
+def test_get_resume_target_skips_external_nodes() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "ext_browser", "Browser")
@@ -1962,10 +1968,10 @@ def test_get_least_explored_node_skips_external_nodes() -> None:
     gm.add_edge("s0_home", "s2_results", {"action": "c"})
     gm.add_edge("s2_results", "s0_home", {"action": "d"})
 
-    assert gm.get_least_explored_node() == "s2_results"
+    assert gm.get_resume_target() == "s2_results"
 
 
-def test_get_least_explored_node_filters_by_package() -> None:
+def test_get_resume_target_filters_by_package() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_other", "Other app screen", activity=OTHER_APP, package=OTHER_PACKAGE)
@@ -1974,7 +1980,7 @@ def test_get_least_explored_node_filters_by_package() -> None:
     gm.add_edge("s0_home", "s2_results", {"action": "b"})
     gm.add_edge("s2_results", "s0_home", {"action": "c"})
 
-    assert gm.get_least_explored_node(package_name="com.example.app") == "s2_results"
+    assert gm.get_resume_target(package_name="com.example.app") == "s2_results"
 
 
 def test_get_exploration_target_candidates_is_empty_without_a_start_node() -> None:
@@ -2036,6 +2042,70 @@ def test_get_exploration_target_candidates_skips_external_and_other_packages() -
     assert [c["node_id"] for c in candidates] == ["s0_home"]
 
 
+def _start_screen_ranked_below_three_forms(*, sections_explored: bool) -> GraphManager:
+    """A start node with two sections that ranks below three forms of five unexplored fields."""
+    gm = make_manager()
+    sections = [
+        {"description": description, "explored": sections_explored}
+        for description in ("Display", "Storage")
+    ]
+    add_screen(gm, "s0_home", "Home screen", visit_count=5, interactable_elements=sections)
+    for node_id in ("s1_form", "s2_form", "s3_form"):
+        fields = _unexplored("Name", "Address", "Port", "Username", "Password")
+        add_screen(gm, node_id, "Form", interactable_elements=fields)
+        gm.add_edge("s0_home", node_id, {"action": node_id})
+    return gm
+
+
+def test_get_exploration_target_candidates_leaves_out_a_start_node_ranked_below_top_k() -> None:
+    gm = _start_screen_ranked_below_three_forms(sections_explored=False)
+
+    candidates = gm.get_exploration_target_candidates(top_k=2)
+
+    assert len(candidates) == 2
+    assert "s0_home" not in [c["node_id"] for c in candidates]
+
+
+def test_always_offer_start_puts_a_start_node_with_unexplored_elements_last() -> None:
+    """The start node takes the place of the last of the ``top_k``, so the list keeps its
+    length."""
+    gm = _start_screen_ranked_below_three_forms(sections_explored=False)
+
+    candidates = gm.get_exploration_target_candidates(top_k=2, always_offer_start=True)
+
+    assert len(candidates) == 2
+    assert candidates[0]["node_id"] in {"s1_form", "s2_form", "s3_form"}
+    assert candidates[0]["is_start_node"] is False
+    assert candidates[-1]["node_id"] == "s0_home"
+    assert candidates[-1]["is_start_node"] is True
+
+
+def test_always_offer_start_leaves_out_a_start_node_without_unexplored_elements() -> None:
+    gm = _start_screen_ranked_below_three_forms(sections_explored=True)
+
+    candidates = gm.get_exploration_target_candidates(top_k=2, always_offer_start=True)
+
+    assert len(candidates) == 2
+    assert "s0_home" not in [c["node_id"] for c in candidates]
+
+
+def test_always_offer_start_keeps_a_start_node_ranked_within_top_k_in_its_place() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", interactable_elements=_unexplored("Display"))
+    add_screen(gm, "s1_about", "About page", visit_count=5)
+    gm.add_edge("s0_home", "s1_about", {"action": "a"})
+
+    candidates = gm.get_exploration_target_candidates(top_k=2, always_offer_start=True)
+
+    assert [c["node_id"] for c in candidates] == ["s0_home", "s1_about"]
+
+
+def test_always_offer_start_offers_nothing_when_top_k_is_zero() -> None:
+    gm = _start_screen_ranked_below_three_forms(sections_explored=False)
+
+    assert gm.get_exploration_target_candidates(top_k=0, always_offer_start=True) == []
+
+
 def _app_with_a_gmail_screen(package: str, activity: str, other_activity: str) -> GraphManager:
     gm = make_manager()
     add_screen(gm, "s0_list", "Home screen", activity=activity, package=package)
@@ -2048,12 +2118,12 @@ def _app_with_a_gmail_screen(package: str, activity: str, other_activity: str) -
 
 
 @any_package_length
-def test_get_least_explored_node_finds_the_nodes_of_a_package_of_any_length(
+def test_get_resume_target_finds_the_nodes_of_a_package_of_any_length(
     package: str, activity: str, other_activity: str
 ) -> None:
     gm = _app_with_a_gmail_screen(package, activity, other_activity)
 
-    assert gm.get_least_explored_node(package_name=package) == "s1_detail"
+    assert gm.get_resume_target(package_name=package) == "s1_detail"
 
 
 @any_package_length
@@ -2325,7 +2395,7 @@ def test_load_graph_gives_the_app_package_to_each_screen_saved_without_one(
         "ext_com.google.android.gm": "",
         EXTERNAL_WEB_NODE: "",
     }
-    assert gm.get_least_explored_node(package_name=WHATSAPP) == "s1_group_info"
+    assert gm.get_resume_target(package_name=WHATSAPP) == "s1_group_info"
 
 
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:

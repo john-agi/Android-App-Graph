@@ -670,6 +670,36 @@ def test_parsers_still_reject_replies_that_violate_the_schema(
     assert result == expected
 
 
+def test_the_exploration_target_request_marks_only_the_start_screen(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"node_id":"s0_home","reason":"sections"}'))
+    selected = vlm.select_exploration_target(
+        router_client,
+        "demo",
+        [
+            {"node_id": "s1_form", "is_start_node": False},
+            {"node_id": "s2_form", "is_start_node": False},
+            {"node_id": "s0_home", "is_start_node": True},
+        ],
+        settings=PAGE_DETAIL,
+    )
+
+    assert selected == "s0_home"
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
+    lines = [line for line in prompt.splitlines() if "node_id=" in line]
+    assert [line.split(" | ", 1)[0] for line in lines] == [
+        "1. node_id=s1_form",
+        "2. node_id=s2_form",
+        "3. node_id=s0_home",
+    ]
+    assert [line.endswith(" | start screen") for line in lines] == [False, False, True]
+    assert "marked start screen" in prompt
+
+
 @pytest.mark.parametrize(
     "content",
     [None, "omitted", [{"type": "text", "text": "  hello "}, {"type": "text", "text": "world "}]],

@@ -1252,45 +1252,28 @@ class GraphManager:
             external=[n for n in missing if self._is_external(n)],
         )
 
-    def get_least_explored_node(self, package_name: str | None = None) -> str | None:
-        """Return the node with the fewest outgoing edges (least explored).
-
-        Only considers nodes reachable from the start node.
-        Excludes external app nodes (ext_*) and nodes whose package
-        doesn't match the given package_name (if provided).
-        """
-        start = self.get_start_node()
-        if start is None:
-            return None
-
-        reachable = nx.descendants(self.graph, start) | {start}
-        best_node: str | None = None
-        min_out_degree = float("inf")
-
-        for node in reachable:
-            if self._is_external(node):
-                continue
-            if package_name:
-                node_pkg = self.graph.nodes[node].get("package", "")
-                if node_pkg and node_pkg != package_name:
-                    continue
-            out_degree = self.graph.out_degree(node)
-            if out_degree < min_out_degree:
-                min_out_degree = out_degree
-                best_node = _node_id(node)
-
-        return best_node
+    def get_resume_target(self, package_name: str | None = None) -> str | None:
+        """Return the node ``get_exploration_target_candidates`` ranks first, or ``None``
+        when it ranks none."""
+        candidates = self.get_exploration_target_candidates(package_name=package_name, top_k=1)
+        return _node_id(candidates[0]["node_id"]) if candidates else None
 
     def get_exploration_target_candidates(
         self,
         package_name: str | None = None,
         top_k: int = 15,
+        *,
+        always_offer_start: bool = False,
     ) -> list[dict[str, Any]]:
         """Return reachable nodes that are good candidates for continued exploration.
 
         This is a lightweight coverage signal for live exploration checkpoints.
         It favors nodes with many unexplored elements, few outgoing edges, and
-        lower visit counts.
+        lower visit counts. Each candidate's ``is_start_node`` says whether it is
+        the start node.
+
+        With ``always_offer_start``, a start node that ranks below the first
+        ``top_k`` but still has unexplored elements takes the last of their places.
         """
         start = self.get_start_node()
         if start is None:
@@ -1331,6 +1314,7 @@ class GraphManager:
                         e.get("description", "") for e in unexplored[:8]
                     ],
                     "score": score,
+                    "is_start_node": node_id == start,
                 }
             )
 
@@ -1343,7 +1327,14 @@ class GraphManager:
             ),
             reverse=True,
         )
-        return candidates[:top_k]
+        ranked = candidates[:top_k]
+        if always_offer_start and ranked:
+            start_candidate = next(
+                (c for c in candidates[len(ranked) :] if c["is_start_node"]), None
+            )
+            if start_candidate is not None and start_candidate["unexplored_elements"] > 0:
+                ranked[-1] = start_candidate
+        return ranked
 
     @staticmethod
     def embeddings_path(graph_path: Path) -> Path:
