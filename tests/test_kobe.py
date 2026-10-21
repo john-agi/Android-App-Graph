@@ -542,6 +542,92 @@ def test_a_replay_fills_a_form_through_its_dropdown_before_tapping_the_field_it_
     ]
 
 
+def _setups(explorer: Kobe) -> dict[tuple[str, str], list[object]]:
+    return {(u, v): data["setups"] for u, v, data in explorer.graph.graph.edges(data=True)}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_exploration_records_each_action_s_setup_unknown_on_the_screen_it_began_on(
+    replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """How the device came to be on the first screen is unknown, so is the setup of an
+    action sent there; a screen arrived at from elsewhere starts its setup empty."""
+    scroll, open_list, open_row, back, open_other_row = (
+        {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40},
+        {"action": "tap", "x": 50, "y": 20},
+        {"action": "tap", "x": 50, "y": 60},
+        {"action": "back"},
+        {"action": "tap", "x": 50, "y": 90},
+    )
+    _list_reached_from_home(replaying_kobe, "s2_detail", "s3_other_detail")
+    _identifying(
+        replaying_kobe,
+        monkeypatch,
+        *("s0_home", "s0_home", "s1_list", "s2_detail", "s1_list", "s3_other_detail"),
+    )
+
+    _explore_sending(replaying_kobe, monkeypatch, scroll, open_list, open_row, back, open_other_row)
+
+    assert _setups(replaying_kobe) == {
+        ("s0_home", "s0_home"): [None],
+        ("s0_home", "s1_list"): [None],
+        ("s1_list", "s2_detail"): [[]],
+        ("s2_detail", "s1_list"): [[]],
+        ("s1_list", "s3_other_detail"): [[open_row, back]],
+    }
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_after_a_step_that_leaves_the_app_the_setup_of_the_next_action_is_unknown(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Back may return to the screen the step left or a restart to the start screen, and
+    neither is an action a replay could send."""
+    open_list, scroll, open_link, open_row = (
+        {"action": "tap", "x": 50, "y": 20},
+        {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40},
+        {"action": "tap", "x": 50, "y": 60},
+        {"action": "tap", "x": 50, "y": 90},
+    )
+    explorer = _explorer(
+        screens_by_log(HOME_SCREEN, HOME_SCREEN, HOME_SCREEN, _SEARCH_SCREEN, HOME_SCREEN),
+        tmp_path,
+        router_client,
+    )
+    _list_reached_from_home(explorer, "s2_detail")
+    _identifying(explorer, monkeypatch, "s0_home", "s1_list", "s1_list", "s1_list", "s2_detail")
+
+    _explore_sending(explorer, monkeypatch, open_list, scroll, open_link, open_row)
+
+    assert _setups(explorer) == {
+        ("s0_home", "s1_list"): [None],
+        ("s1_list", "s1_list"): [[]],
+        ("s1_list", f"ext_{_SEARCH}"): [[scroll]],
+        ("s1_list", "s2_detail"): [None],
+    }
+
+
+@pytest.mark.parametrize(("reached", "setup"), [("s1_list", []), ("s0_home", None)])
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_a_resumed_exploration_knows_the_setup_only_on_the_node_its_replay_reached(
+    reached: str, setup: list[object] | None, replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scroll = {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40}
+    _list_reached_from_home(replaying_kobe)
+    replaying_kobe.graph.add_edge("s0_home", "s1_list", action=[{"action": "tap", "x": 1, "y": 2}])
+    _identifying(replaying_kobe, monkeypatch, reached, reached)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Scroll", []))
+    monkeypatch.setattr("android_app_graph.kobe.predict_next_action", lambda **_kw: (scroll, ""))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+
+    replaying_kobe.explore(max_steps=1, resume_from="s1_list")
+
+    assert _setups(replaying_kobe)[(reached, reached)] == [setup]
+
+
 @pytest.mark.parametrize("malformed", [False, True])
 def test_exploration_wait_recovery_respects_step_limit(
     malformed: bool,

@@ -83,6 +83,8 @@ _FIXED_INSTRUCTION_MAX_WORDS = 6
 EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
 EXTERNAL_WEB_BACK_PRESSES = 3
+# A longer setup is an excursion, not a recipe for the state an action needs.
+MAX_SETUP_ACTIONS = 8
 
 
 class _SamePackageNodes(NamedTuple):
@@ -102,6 +104,17 @@ class PathToStart(NamedTuple):
     external: list[str]
 
 
+class PathStep(NamedTuple):
+    """One step of a path ``find_path`` returns: the node it reaches, the recorded action
+    that reaches it, and that action's setup, the device actions sent before it on the
+    node the step leaves. The first step is the path's start, with the action ``{}`` and
+    no setup."""
+
+    node: str
+    action: dict[str, Any] | list[dict[str, Any]]
+    setup: tuple[dict[str, Any], ...]
+
+
 @dataclass(frozen=True, kw_only=True)
 class EdgeDetails:
     """What one traversal records next to its action in the edge's aligned lists.
@@ -115,12 +128,72 @@ class EdgeDetails:
             Format: {"key": {"before": old_val, "after": new_val}, ...}
         num_steps: Number of action steps the edge takes to traverse.
             If None, defaults to len(action) for lists or 1 for single actions.
+        setup: The device actions sent on the source node before the action since
+            the traversal last arrived there from elsewhere, as ``SetupTrail`` reads
+            them; None when they are unknown.
     """
 
     instruction: str | None = None
     target_observation: str | None = None
     schema_delta: dict[str, Any] | None = None
     num_steps: int | None = None
+    setup: Sequence[dict[str, Any]] | None = None
+
+
+class SetupTrail:
+    """The device actions an exploration sent since it began on a screen, from which it
+    reads each action's setup: the actions sent on the action's source node since the
+    trail last arrived there from elsewhere.
+
+    The trail keeps the nodes it arrived at in order. Arriving at one of them again, such
+    as a form after one of its dropdowns, ends a round trip: the nodes after it are left
+    behind, and the round trip's actions join its setup, as a self-loop's do. Arriving at
+    any other node starts its setup empty. Node IDs are compared through
+    ``resolve_node_id``, so a node renamed or merged while the trail holds it still matches.
+    """
+
+    def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
+        self._resolve_node_id = resolve_node_id
+        self._actions: list[dict[str, Any]] = []
+        # Each node with the index into _actions where its setup starts, or None when
+        # the trail began on it without knowing how the device came to be there.
+        self._arrivals: list[tuple[str, int | None]] = []
+
+    def begin(self, node: str, *, arrived: bool) -> None:
+        """Begin the trail again on ``node``, forgetting every action before.
+
+        ``arrived`` says the device has just arrived at ``node`` from elsewhere, as when a
+        replay reaches the node it replays to, so the setup on it starts empty. Otherwise
+        the setup of every action sent on ``node`` is unknown until the trail arrives
+        there from elsewhere again.
+        """
+        self._actions = []
+        self._arrivals = [(node, 0 if arrived else None)]
+
+    def setup(self, node: str) -> list[dict[str, Any]] | None:
+        """Return the setup of an action sent on ``node`` now, or None when it is unknown."""
+        position = self._position(node)
+        if position is None:
+            return None
+        start = self._arrivals[position][1]
+        return None if start is None else self._actions[start:]
+
+    def step(self, actions: Sequence[dict[str, Any]], reached: str) -> None:
+        """Add ``actions``, sent on the node the trail is on, and ``reached``, the node
+        they led to."""
+        self._actions.extend(actions)
+        position = self._position(reached)
+        if position is None:
+            self._arrivals.append((reached, len(self._actions)))
+        else:
+            del self._arrivals[position + 1 :]
+
+    def _position(self, node: str) -> int | None:
+        resolved = self._resolve_node_id(node)
+        for position in reversed(range(len(self._arrivals))):
+            if self._resolve_node_id(self._arrivals[position][0]) == resolved:
+                return position
+        return None
 
 
 @dataclass(frozen=True)
@@ -407,11 +480,72 @@ def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
         ("instructions", ""),
         ("target_observations", ""),
         ("schema_deltas", None),
+        ("setups", None),
     ):
         values = list(edge_data.get(key, []))
         values.extend([placeholder] * (len(actions) - len(values)))
         aligned[key] = values
     return aligned
+
+
+def _setup_actions(entry: object) -> tuple[dict[str, Any], ...]:
+    """Return an action's entry of ``setups`` as its device actions; an entry that is not
+    a list of actions, such as the placeholder of a setup not recorded, gives none."""
+    if not isinstance(entry, list) or not all(isinstance(action, dict) for action in entry):
+        return ()
+    return tuple(as_str_dict(action) for action in entry)
+
+
+def _recorded_setup(
+    setup: Sequence[dict[str, Any]] | None, source: str, target: str
+) -> list[dict[str, Any]] | None:
+    """Return ``setup`` as the edge from ``source`` to ``target`` records it: one longer
+    than ``MAX_SETUP_ACTIONS`` is logged as dropped and recorded as unknown."""
+    if setup is None:
+        return None
+    if len(setup) > MAX_SETUP_ACTIONS:
+        logger.info(
+            "Dropped the setup of an action on %s -> %s: %d actions, more than %d",
+            source,
+            target,
+            len(setup),
+            MAX_SETUP_ACTIONS,
+        )
+        return None
+    return list(setup)
+
+
+def _count_repeat(
+    edge_data: dict[str, Any],
+    action: dict[str, Any] | list[dict[str, Any]],
+    setup: list[dict[str, Any]] | None,
+) -> bool:
+    """Count one more visit when the edge already holds ``action``, and return whether it
+    does. A known ``setup`` replaces the action's recorded one when that is unknown or
+    longer."""
+    for index, recorded_action in enumerate(edge_data.get("actions", [])):
+        if recorded_action == action:
+            edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
+            setups = _aligned_lists(edge_data)["setups"]
+            recorded = setups[index]
+            if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
+                setups[index] = setup
+                edge_data["setups"] = setups
+            return True
+    return False
+
+
+def _action_costs(edge_data: dict[str, Any]) -> list[int]:
+    """Return how many device actions a replay of each action of an edge sends: the
+    action's steps and its setup's."""
+    aligned = _aligned_lists(edge_data)
+    steps = as_int_list(aligned["num_steps"]) or [
+        _default_num_steps(action) for action in aligned["actions"]
+    ]
+    return [
+        own + len(_setup_actions(setup))
+        for own, setup in zip(steps, aligned["setups"], strict=False)
+    ]
 
 
 def _member_observations(node: dict[str, Any]) -> list[str]:
@@ -1229,7 +1363,11 @@ class GraphManager:
             details: What this traversal recorded next to its action; none by default.
 
         If an edge with the same action already exists, it is not duplicated.
-        Instead, a visit counter is incremented.
+        Instead, a visit counter is incremented, and a known setup replaces the
+        action's recorded one when that is unknown or longer.
+
+        A setup of more than ``MAX_SETUP_ACTIONS`` actions is logged as dropped and
+        recorded as unknown.
 
         The edge is dropped with a warning when either endpoint is missing, or when the
         source is an ``ext_`` node: one such node stands for every screen of an outside
@@ -1251,13 +1389,12 @@ class GraphManager:
         num_steps = details.num_steps
         if num_steps is None:
             num_steps = _default_num_steps(action)
+        setup = _recorded_setup(details.setup, source, target)
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            for a in edge_data.get("actions", []):
-                if a == action:
-                    edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-                    return
+            if _count_repeat(edge_data, action, setup):
+                return
         else:
             self.graph.add_edge(source, target, visit_count=1)
             edge_data = self.graph[source][target]
@@ -1268,6 +1405,7 @@ class GraphManager:
             ("instructions", details.instruction or ""),
             ("target_observations", details.target_observation or ""),
             ("schema_deltas", details.schema_delta),
+            ("setups", setup),
         ):
             edge_data[key].append(value)
 
@@ -1308,6 +1446,12 @@ class GraphManager:
             if recorded_instruction == instruction:
                 return index, action
         return None
+
+    def action_setup(self, source: str, target: str, index: int) -> tuple[dict[str, Any], ...]:
+        """Return the setup of action *index* of source→target, the device actions a replay
+        sends on *source* before it; an action recorded without a setup has none."""
+        setups = self.graph[source][target].get("setups", [])
+        return _setup_actions(setups[index]) if index < len(setups) else ()
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
         """Move action *index* of source→target, with its entry in every per-action list, to
@@ -1509,26 +1653,25 @@ class GraphManager:
 
     @staticmethod
     def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
-        """Return the minimum num_steps for an edge (used as path weight)."""
-        steps = as_int_list(edge_data.get("num_steps"))
-        return min(steps) if steps else 1
+        """Return the fewest device actions a replay of one of the edge's actions sends,
+        its setup's included (used as path weight)."""
+        costs = _action_costs(edge_data)
+        return min(costs) if costs else 1
 
-    def find_path(
-        self, source: str, target: str
-    ) -> list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] | None:
+    def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
 
-        Edge weight = minimum num_steps recorded for that edge, so paths
-        with fewer total action steps are preferred.
+        An edge weighs as its cheapest action: the fewest steps, its setup's included,
+        so a path whose actions need no setup is preferred.
 
         Returns:
-            A list of (node_id, action) tuples representing the path.
-            action can be a single dict or a list of dicts (compound action).
-            The first entry has action={} (it's the starting node).
+            The path's steps, the first being the source itself. A step's action is the
+            edge's cheapest action, a single dict or a list of dicts (compound action),
+            with its setup; an edge without actions gives ``{}``.
             Returns None if no path exists.
         """
         if source == target:
-            return [(source, {})]
+            return [PathStep(source, {}, ())]
 
         if source not in self.graph or target not in self.graph:
             return None
@@ -1543,20 +1686,21 @@ class GraphManager:
         except nx.NetworkXNoPath:
             return None
 
-        result: list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] = [
-            (_node_id(node_path[0]), {})
-        ]
+        result = [PathStep(_node_id(node_path[0]), {}, ())]
         for i in range(len(node_path) - 1):
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
-            actions = edge_data.get("actions", [])
-            steps_list = edge_data.get("num_steps", [1] * len(actions))
-            if actions:
-                best_idx = steps_list.index(min(steps_list)) if steps_list else 0
-                action = actions[best_idx]
+            costs = _action_costs(edge_data)
+            if costs:
+                best_idx = costs.index(min(costs))
+                step = PathStep(
+                    _node_id(t),
+                    edge_data["actions"][best_idx],
+                    self.action_setup(_node_id(s), _node_id(t), best_idx),
+                )
             else:
-                action = {}
-            result.append((t, action))
+                step = PathStep(_node_id(t), {}, ())
+            result.append(step)
 
         return result
 
@@ -1580,7 +1724,8 @@ class GraphManager:
         Returns:
             A list of path steps:
             [
-                {"type": "navigate", "from": src, "to": tgt, "actions": [action, ...]},
+                {"type": "navigate", "from": src, "to": tgt,
+                 "setup": [action, ...], "action": action},
                 {"type": "self_loop", "node": n, "instruction": str,
                  "actions": action_seq, "schema_delta": {...},
                  "required_schema": {"key": "value"}},
@@ -1602,8 +1747,8 @@ class GraphManager:
                     return None
 
                 for i in range(1, len(nav_path)):
-                    node_id, action = nav_path[i]
-                    prev_node = nav_path[i - 1][0]
+                    node_id, action, setup = nav_path[i]
+                    prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
                     instruction = ""
                     instructions = edge_data.get("instructions", [])
@@ -1618,6 +1763,7 @@ class GraphManager:
                             "type": "navigate",
                             "from": prev_node,
                             "to": node_id,
+                            "setup": list(setup),
                             "action": action,
                             "instruction": instruction,
                             "target_observation": target_obs,
@@ -1872,9 +2018,9 @@ class GraphManager:
                 "num_steps": attrs.get("num_steps", []),
                 "visit_count": attrs.get("visit_count", 0),
             }
-            schema_deltas = attrs.get("schema_deltas")
-            if schema_deltas:
-                edge_data["schema_deltas"] = schema_deltas
+            for key in ("schema_deltas", "setups"):
+                if attrs.get(key):
+                    edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
 
         write_json_atomically(path, data, indent=2, ensure_ascii=False)
@@ -1975,9 +2121,9 @@ class GraphManager:
                 "num_steps": edge_data.get("num_steps", []),
                 "visit_count": edge_data.get("visit_count", 0),
             }
-            schema_deltas = edge_data.get("schema_deltas")
-            if schema_deltas:
-                edge_attrs["schema_deltas"] = schema_deltas
+            for key in ("schema_deltas", "setups"):
+                if edge_data.get(key):
+                    edge_attrs[key] = edge_data[key]
             self.graph.add_edge(
                 edge_data["source"],
                 edge_data["target"],

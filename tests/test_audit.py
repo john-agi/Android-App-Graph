@@ -1414,6 +1414,80 @@ def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
 
 
 @pytest.mark.usefixtures("_fake_device")
+def test_re_explore_replays_each_action_after_its_setup(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _graph_with_nodes(
+        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
+    )
+    graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=EdgeDetails(setup=[_SWIPE]))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
+    )
+
+    assert result["navigated_to"] == "s1_detail"
+    assert device_log == [*_FIRST_RESTART, _SWIPE, _DETAIL_TAP]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup_with_it(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
+    _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home")
+
+    (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
+
+    assert (result["status"], result["moved_to"]) == ("moved", "s2_settings")
+    assert graph.graph["s0_home"]["s2_settings"]["setups"] == [None, [_SWIPE]]
+    assert device_log == [*_FIRST_RESTART, _SWIPE, _DETAIL_TAP, *_RESTART]
+
+
+@pytest.mark.parametrize(
+    ("reached", "scroll_setup", "row_setup"),
+    [("s1_detail", [], [_SWIPE]), ("s0_home", None, None)],
+    ids=["replay reached", "replay missed"],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_reached(
+    reached: str,
+    scroll_setup: list[object] | None,
+    row_setup: list[object] | None,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    row_tap = {"action": "tap", "x": 540, "y": 1700}
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, reached, reached, "s2_settings")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    sent = iter([_SWIPE, row_tap])
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    _re_explore(
+        graph,
+        [issue],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=2,
+    )
+
+    edges = graph.graph[reached]
+    assert edges[reached]["setups"] == [scroll_setup]
+    assert (edges["s2_settings"]["actions"][-1], edges["s2_settings"]["setups"][-1]) == (
+        [row_tap],
+        row_setup,
+    )
+
+
+@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_takes_no_step_from_a_screen_the_graph_has_no_node_for(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:

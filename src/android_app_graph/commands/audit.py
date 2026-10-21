@@ -27,7 +27,7 @@ import argparse
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -61,6 +61,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    SetupTrail,
 )
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
@@ -272,7 +273,8 @@ class _Step:
     """One planned and executed action.
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
-    wrote, which differs when an ``end`` is recorded as a back press.
+    wrote, which differs when an ``end`` is recorded as a back press. ``setup`` is what
+    ``SetupTrail.setup`` read for the action, ``None`` when unknown.
     """
 
     before: Observation
@@ -280,6 +282,7 @@ class _Step:
     planned_instruction: str
     element: int | None
     action: dict[str, Any]
+    setup: list[dict[str, Any]] | None = None
 
 
 def _identify(
@@ -306,15 +309,18 @@ def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[st
 
 
 def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
-    """Navigate to target node by replaying shortest path. Returns actual node reached."""
+    """Navigate to target node by replaying shortest path, each action after its setup.
+    Returns actual node reached."""
     start = run.graph.resolve_node_id(run.start_node)
     path = run.graph.find_path(start, target_node)
     if path is None:
         logger.warning("No path from %s to %s", start, target_node)
         return None
 
-    for _node_id, action in path[1:]:
-        _execute(run.recorder, action)
+    for step in path[1:]:
+        for setup_action in step.setup:
+            _execute(run.recorder, setup_action)
+        _execute(run.recorder, step.action)
 
     actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
     if actual != target_node:
@@ -432,7 +438,9 @@ def _record_step(
         source,
         new_node,
         action=[action],
-        details=EdgeDetails(instruction=instruction, target_observation=target_obs, num_steps=1),
+        details=EdgeDetails(
+            instruction=instruction, target_observation=target_obs, num_steps=1, setup=step.setup
+        ),
     )
     run.recorder.record_transition(
         Transition(
@@ -475,10 +483,15 @@ def _explore_steps(
     start_from: str,
     num_steps: int,
     hint: str,
+    *,
+    arrived: bool,
 ) -> list[dict[str, Any]]:
-    """Run exploration steps from a node with a hint for the planner."""
+    """Run exploration steps from a node with a hint for the planner. ``arrived`` says
+    the replay before them arrived at the node, as ``SetupTrail.begin`` takes it."""
     current_node = start_from
     step_results: list[dict[str, Any]] = []
+    trail = SetupTrail(run.graph.resolve_node_id)
+    trail.begin(start_from, arrived=arrived)
 
     for step_i in range(num_steps):
         device_state = run.recorder.get_state()
@@ -499,10 +512,16 @@ def _explore_steps(
             with run.recorder.source("external_app_recovery"):
                 device_state = return_to_app(run.recorder, run.app_launch, logger)
             current_node = _identify(run, device_state, expected_node=current_node)
+            trail.begin(current_node, arrived=False)
             continue
 
+        step = replace(step, setup=trail.setup(current_node))
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
         step_results.append(step_result)
+        if step_result["to"] == EXTERNAL_WEB_NODE:
+            trail.begin(current_node, arrived=False)
+        else:
+            trail.step([step.action], current_node)
 
     return step_results
 
@@ -516,8 +535,8 @@ def _replay_to(run: _ReExploreRun, node: str) -> str | None:
 def _correct_flagged_edge(
     run: _ReExploreRun, source: str, target: str, instruction: str
 ) -> dict[str, Any]:
-    """Execute the flagged action once from *source* and correct its edge by where it
-    leads. Returns the outcome fields of the issue's result.
+    """Execute the flagged action once from *source*, after its setup, and correct its
+    edge by where it leads. Returns the outcome fields of the issue's result.
     """
     found = run.graph.find_edge_action(source, target, instruction)
     if found is None:
@@ -525,6 +544,8 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, action = found
 
+    for setup_action in run.graph.action_setup(source, target, index):
+        _execute(run.recorder, setup_action)
     before = run.recorder.get_state()
     _execute(run.recorder, action)
     after = run.recorder.get_state()
@@ -607,7 +628,7 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
         f"to '{target_desc}'."
     )
     steps = _explore_steps(
-        run, run.graph.resolve_node_id(source), run.session.steps_per_issue, hint=hint
+        run, run.graph.resolve_node_id(source), run.session.steps_per_issue, hint=hint, arrived=True
     )
     return {"issue": issue, **outcome, "steps": steps}
 
@@ -635,7 +656,9 @@ def _explore_node(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
         f"This screen might be able to lead to pages like {expected_pages}. "
         f"Check if any elements on this screen should be interacted with."
     )
-    step_results = _explore_steps(run, actual, run.session.steps_per_issue, hint=hint)
+    step_results = _explore_steps(
+        run, actual, run.session.steps_per_issue, hint=hint, arrived=actual == node
+    )
 
     return {
         "issue": issue,

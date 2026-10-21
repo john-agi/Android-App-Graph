@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    SetupTrail,
 )
 from android_app_graph.utils.vlm_utils import (
     ActionRequest,
@@ -192,6 +194,7 @@ class Kobe:
         self.controller = StepRecorder(
             controller, steps_dir, run_kind="explore", source="main_loop"
         )
+        self._setup_trail = SetupTrail(self.graph.resolve_node_id)
 
     def maybe_continue_from_coverage_checkpoint(
         self,
@@ -303,6 +306,7 @@ class Kobe:
         node, _ = self._identify(self.controller.get_state())
         if node == EXTERNAL_WEB_NODE:
             node, _ = self._leave_external_web(expected_node=None)
+        self._setup_trail.begin(node, arrived=False)
         return node
 
     def _require_node(self, node_id: str) -> dict[str, Any]:
@@ -341,7 +345,8 @@ class Kobe:
         """Navigate to a target node by replaying saved edges from the start node.
 
         This executes the shortest path of already-known actions from the
-        app's entry point to the target node — no VLM calls needed.
+        app's entry point to the target node — no VLM calls needed. Each action's
+        setup is sent before it.
 
         Args:
             target_node: The node ID to navigate to.
@@ -350,7 +355,9 @@ class Kobe:
             The node ID actually reached (verified via identify_state).
         """
         with self.controller.source("navigation_replay"):
-            return self._replay_to(target_node)
+            reached = self._replay_to(target_node)
+        self._setup_trail.begin(reached, arrived=reached == target_node)
+        return reached
 
     def _replay_to(self, target_node: str) -> str:
         start_node = self.graph.get_start_node()
@@ -376,10 +383,11 @@ class Kobe:
             target_node,
         )
 
-        for i, (node_id, action) in enumerate(path):
+        for i, (node_id, action, setup) in enumerate(path):
             if i == 0:
                 continue  # the first entry is the start node and carries no action
 
+            self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
             if isinstance(action, list):
                 self.logger.info(
                     "  Replay %d/%d: %s --> %s via %d compound actions",
@@ -418,6 +426,21 @@ class Kobe:
             self.logger.info("Successfully reached target node %s", target_node)
 
         return actual_node
+
+    def _replay_setup(self, setup: Sequence[dict[str, Any]], node: str, progress: str) -> None:
+        """Send ``setup``, the setup of the replay's next action, on ``node``, each action
+        followed by the pause every replayed action gets."""
+        for number, setup_action in enumerate(setup, start=1):
+            self.logger.info(
+                "  Replay %s: setup %d/%d on %s via %s",
+                progress,
+                number,
+                len(setup),
+                node,
+                setup_action.get("action", "?"),
+            )
+            self.controller.exe_action(setup_action)
+            time.sleep(1)
 
     def explore(
         self,
@@ -506,6 +529,7 @@ class Kobe:
                 max_steps,
             )
         node, device_state = self._identify(self.controller.get_state())
+        self._setup_trail.begin(node, arrived=False)
         return _Position(node, device_state)
 
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
@@ -598,8 +622,12 @@ class Kobe:
     def _record_edge(
         self, move: _Move, target: str, after: dict[str, Any], details: EdgeDetails
     ) -> None:
-        """Add the edge ``move`` took to ``target`` and its transition to the step log."""
-        self.graph.add_edge(move.source, target, action=move.action_sequence, details=details)
+        """Add the edge ``move`` took to ``target``, with the move's setup, and its
+        transition to the step log."""
+        setup = self._setup_trail.setup(move.source)
+        self.graph.add_edge(
+            move.source, target, action=move.action_sequence, details=replace(details, setup=setup)
+        )
         self.controller.record_transition(
             Transition(
                 before=move.before,
@@ -620,6 +648,7 @@ class Kobe:
         self.graph.maybe_normalize_node_edges(move.source)
         self.save_graph()
         node, device_state = self._identify(device_state, expected_node=move.source)
+        self._setup_trail.begin(node, arrived=False)
         return self._continue_after(node, device_state, max_steps)
 
     def _record_external_web_step(
@@ -645,6 +674,7 @@ class Kobe:
         self.graph.total_steps_completed += 1
         self.save_graph()
         node, device_state = self._leave_external_web(expected_node=move.source)
+        self._setup_trail.begin(node, arrived=False)
         return self._continue_after(node, device_state, max_steps)
 
     def _record_in_app_step(
@@ -671,6 +701,7 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
+        self._setup_trail.step(move.action_sequence, new_node)
         self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.maybe_normalize_node_edges(move.source)
         self.graph.total_steps_completed += 1
