@@ -77,7 +77,7 @@ def write_json_atomically(
             os.fsync(f.fileno())
         if path.exists():
             shutil.copymode(path, tmp_path)
-        os.replace(tmp_path, path)
+        Path(tmp_path).replace(path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise

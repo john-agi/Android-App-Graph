@@ -104,10 +104,9 @@ def _merge_into_schema(
         if key not in schema:
             schema[key] = [value]
             logger.debug("Schema: new key '%s' with value %s", key, value)
-        else:
-            if value not in schema[key]:
-                schema[key].append(value)
-                logger.debug("Schema: key '%s' got new value %s", key, value)
+        elif value not in schema[key]:
+            schema[key].append(value)
+            logger.debug("Schema: key '%s' got new value %s", key, value)
     return schema
 
 
@@ -574,9 +573,8 @@ class GraphManager:
             cached = self._last_identify_cache
             if cached is not None and cached.node_id == node_id:
                 self._last_identify_cache = cached._replace(node_id=new_node_id)
-        else:
-            if node_data.get("reference_screenshot"):
-                self._dirty_screenshots.add(node_id)
+        elif node_data.get("reference_screenshot"):
+            self._dirty_screenshots.add(node_id)
 
         logger.info(
             "Renamed node %s → %s: '%s' → '%s'",
@@ -1395,7 +1393,7 @@ class GraphManager:
         none.
         """
         path = Path(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with Path(path).open(encoding="utf-8") as f:
             raw = json.load(f)
         # Run before any attribute below is assigned or the graph is cleared: a
         # corrupt file must leave the previously loaded graph and counters
@@ -1407,7 +1405,7 @@ class GraphManager:
         embeddings: dict[str, list[float]] = {}
         embedding_models: dict[str, str] = {}
         if emb_path.exists():
-            with open(emb_path, "r", encoding="utf-8") as f:
+            with Path(emb_path).open(encoding="utf-8") as f:
                 for node_id, entry in as_str_dict(json.load(f)).items():
                     if isinstance(entry, dict):
                         tagged = as_str_dict(entry)

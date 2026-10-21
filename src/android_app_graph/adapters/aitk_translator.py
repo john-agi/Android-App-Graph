@@ -209,7 +209,7 @@ one-step instruction. No explanations."""
 
 
 def _load_graph_from_json(path: Path) -> nx.DiGraph:
-    with open(path, "r", encoding="utf-8") as f:
+    with Path(path).open(encoding="utf-8") as f:
         raw = json.load(f)
     # Run before anything else below: a graph with one bad node or edge must
     # reject before the node loop's per-node screenshot path lookup, and
