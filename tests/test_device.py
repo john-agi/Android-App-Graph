@@ -6,6 +6,7 @@ import base64
 import logging
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -241,6 +242,43 @@ def test_a_system_overlay_package_is_recognised(package: str) -> None:
 def test_an_app_package_is_not_a_system_overlay(package: str) -> None:
     """Both contain "ime" without being keyboards."""
     assert not device.is_system_overlay(package)
+
+
+@pytest.mark.parametrize(
+    ("package", "outside"),
+    [
+        ("com.android.chrome", True),
+        ("com.demo", False),
+        ("com.google.android.inputmethod.latin", False),
+        ("com.google.android.permissioncontroller", False),
+        ("", False),
+    ],
+)
+def test_only_another_app_in_front_is_outside_the_app(package: str, outside: bool) -> None:
+    assert device.is_outside_app(package, "com.demo") is outside
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_return_to_app_lets_a_refused_force_stop_through(
+    screens_by_log: Callable[..., device.DeviceController],
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_app = {
+        "activity": "com.android.chrome.Main",
+        "screenshot": "",
+        "package": "com.android.chrome",
+    }
+    controller = screens_by_log(other_app)
+
+    def refuse(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        device_log.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="device offline")
+
+    monkeypatch.setattr(device.subprocess, "run", refuse)
+    with pytest.raises(device.ForceStopRefusedError):
+        device.return_to_app(controller, "demo", "com.demo", None, logging.getLogger("test"))
+    assert device_log == [{"action": "back"}, _FORCE_STOP]
 
 
 # Hand-written in the layout of `adb shell dumpsys package`, not captured from a device.

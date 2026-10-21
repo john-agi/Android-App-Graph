@@ -38,10 +38,11 @@ from android_app_graph.device import (
     AdbController,
     DeviceController,
     grant_runtime_permissions,
-    is_system_overlay,
+    is_outside_app,
     keyboard_status,
     launch_app,
     restart_app,
+    return_to_app,
     soft_keyboard_hint,
 )
 from android_app_graph.utils import (
@@ -262,8 +263,7 @@ class _ReExploreRun:
 
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
     """A keyboard or system dialog on top of the app does not count as leaving it."""
-    package = device_state.get("package", "").strip()
-    return bool(package and package != run.target.package_name and not is_system_overlay(package))
+    return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
 def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[str, Any]]) -> None:
@@ -467,9 +467,13 @@ def _explore_steps(
 
         if _left_app(run, device_state):
             logger.warning("Left app during re-explore, pressing back")
-            run.session.controller.exe_action({"action": "back"})
-            time.sleep(1)
-            device_state = run.session.controller.get_state()
+            device_state = return_to_app(
+                run.session.controller,
+                run.target.app_name,
+                run.target.package_name,
+                run.target.launch_activity,
+                logger,
+            )
             current_node = run.graph.identify_state(
                 device_state["activity"],
                 device_state["screenshot"],

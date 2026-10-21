@@ -13,10 +13,11 @@ from openrouter import OpenRouter
 from android_app_graph.device import (
     DeviceController,
     ForceStopRefusedError,
-    is_system_overlay,
+    is_outside_app,
     keyboard_status,
     restart_app,
-    run_adb,
+    restart_into_app,
+    return_to_app,
     soft_keyboard_hint,
 )
 from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
@@ -70,10 +71,6 @@ def _target_observation(page_description: str, detail_snapshot: dict[str, Any]) 
         else ""
     )
     return f"{page_description} ({details})" if details else page_description
-
-
-def _is_outside_app(package: str, app_package: str) -> bool:
-    return bool(package) and package != app_package and not is_system_overlay(package)
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,16 +279,7 @@ class Kobe:
         one more restart first, and an outside web page is left with back presses,
         so exploration continues inside the app.
         """
-        device_state = self.controller.get_state()
-        package = device_state.get("package", "").strip()
-        if package and package != self.package_name and not is_system_overlay(package):
-            restart_app(
-                self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
-            )
-            device_state = self.controller.get_state()
-        node = self.graph.identify_state(
-            device_state["activity"], device_state["screenshot"], device_state["package"]
-        )
+        node, _ = self._identify(self.controller.get_state())
         if node == EXTERNAL_WEB_NODE:
             node, _ = self._leave_external_web()
         return node
@@ -355,12 +343,8 @@ class Kobe:
 
         if len(path) <= 1:
             self.logger.info("Already at target node %s", target_node)
-            device_state = self.controller.get_state()
-            return self.graph.identify_state(
-                device_state["activity"],
-                device_state["screenshot"],
-                device_state["package"],
-            )
+            node, _ = self._identify(self.controller.get_state())
+            return node
 
         self.logger.info(
             "Replaying %d actions to reach node %s ...",
@@ -398,12 +382,7 @@ class Kobe:
                     self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
-        device_state = self.controller.get_state()
-        actual_node = self.graph.identify_state(
-            device_state["activity"],
-            device_state["screenshot"],
-            device_state["package"],
-        )
+        actual_node, _ = self._identify(self.controller.get_state())
         if actual_node != target_node:
             self.logger.warning(
                 "Expected to reach %s but arrived at %s. Continuing from %s.",
@@ -502,8 +481,8 @@ class Kobe:
                 start_step,
                 max_steps,
             )
-        device_state = self.controller.get_state()
-        return _Position(self._identify(device_state), device_state)
+        node, device_state = self._identify(self.controller.get_state())
+        return _Position(node, device_state)
 
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
         """Take one step from ``position``, record it, and return where the next one starts."""
@@ -519,10 +498,10 @@ class Kobe:
         time.sleep(0.5)
         device_state = self.controller.get_state()
         package = device_state.get("package", "").strip()
-        if _is_outside_app(package, self.package_name):
+        if is_outside_app(package, self.package_name):
             return self._record_external_app_step(move, package, device_state, max_steps)
 
-        new_node = self._identify(device_state)
+        new_node, device_state = self._identify(device_state)
         move = replace(move, source=self.graph.resolve_node_id(move.source))
         new_node_data = self._require_node(new_node)
         if new_node == EXTERNAL_WEB_NODE:
@@ -593,18 +572,18 @@ class Kobe:
     def _record_external_app_step(
         self, move: _Move, package: str, device_state: dict[str, Any], max_steps: int
     ) -> _Position:
-        self._handle_external_app(
+        device_state = self._handle_external_app(
             move.source,
             move.action_sequence,
             package,
             device_state,
             instruction=move.instruction,
         )
-        device_state = self.controller.get_state()
         self.graph.total_steps_completed += 1
         self.graph.maybe_normalize_node_edges(move.source)
         self.save_graph()
-        return self._continue_after(self._identify(device_state), device_state, max_steps)
+        node, device_state = self._identify(device_state)
+        return self._continue_after(node, device_state, max_steps)
 
     def _record_external_web_step(
         self, move: _Move, web_node_data: dict[str, Any], max_steps: int
@@ -688,12 +667,25 @@ class Kobe:
             sum(tokens_after.values()),
         )
 
-    def _identify(self, device_state: dict[str, Any]) -> str:
-        return self.graph.identify_state(
-            device_state["activity"],
-            device_state["screenshot"],
-            device_state["package"],
+    def _identify(self, device_state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Return the node of the screen in ``device_state``, and that state.
+
+        Another app's screen gets no node: with another app in front, the app is
+        restarted first, and the node and state returned are those of the screen the
+        restart shows.
+        """
+        package = device_state.get("package", "")
+        if is_outside_app(package, self.package_name):
+            self.logger.warning(
+                "%s is in front of %s. Restarting %s.", package, self.package_name, self.app_name
+            )
+            device_state = restart_into_app(
+                self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
+            )
+        node = self.graph.identify_state(
+            device_state["activity"], device_state["screenshot"], device_state["package"]
         )
+        return node, device_state
 
     def _continue_after(self, node: str, device_state: dict[str, Any], max_steps: int) -> _Position:
         node, device_state = self._apply_coverage_checkpoint_after_step(
@@ -714,10 +706,7 @@ class Kobe:
         for _ in range(EXTERNAL_WEB_BACK_PRESSES):
             self.controller.exe_action({"action": "back"})
             time.sleep(1)
-            device_state = self.controller.get_state()
-            node = self.graph.identify_state(
-                device_state["activity"], device_state["screenshot"], device_state["package"]
-            )
+            node, device_state = self._identify(self.controller.get_state())
             if node != EXTERNAL_WEB_NODE:
                 return node, device_state
         self.logger.warning(
@@ -728,11 +717,7 @@ class Kobe:
         restart_app(
             self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
         )
-        device_state = self.controller.get_state()
-        node = self.graph.identify_state(
-            device_state["activity"], device_state["screenshot"], device_state["package"]
-        )
-        return node, device_state
+        return self._identify(self.controller.get_state())
 
     def _handle_external_app(
         self,
@@ -741,14 +726,14 @@ class Kobe:
         external_package: str,
         device_state: dict[str, Any],
         instruction: str | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         """Handle navigation to an external app.
 
         Creates a special node for the external app (no VLM calls), records the
-        edge, presses back, and if that doesn't return to our app, relaunches it.
+        edge, and returns to the app with ``return_to_app``.
 
         Returns:
-            The external app node ID.
+            The state of the app's screen that ``return_to_app`` returned to.
         """
         ext_activity = device_state.get("activity", "unknown")
         ext_node_id = f"ext_{external_package}"
@@ -795,42 +780,9 @@ class Kobe:
             ext_node_id,
         )
 
-        self.controller.exe_action({"action": "back"})
-        time.sleep(1)
-
-        state = self.controller.get_state()
-        if state.get("package", "") != self.package_name:
-            self.logger.warning(
-                "Back button didn't return to %s (now at %s). Relaunching...",
-                self.package_name,
-                state.get("package", ""),
-            )
-            ctrl_config = self.controller.config
-            udid = ctrl_config.get("device", ctrl_config).get("udid", "emulator-5554")
-            relaunch = run_adb(
-                [
-                    "-s",
-                    udid,
-                    "shell",
-                    "monkey",
-                    "-p",
-                    self.package_name,
-                    "-c",
-                    "android.intent.category.LAUNCHER",
-                    "1",
-                ],
-                output="discard",
-                check=False,
-            )
-            if relaunch.returncode != 0:
-                self.logger.warning(
-                    "Relaunch of %s exited with %d; continuing, the next state check will confirm",
-                    self.package_name,
-                    relaunch.returncode,
-                )
-            time.sleep(3)
-
-        return ext_node_id
+        return return_to_app(
+            self.controller, self.app_name, self.package_name, self.launch_activity, self.logger
+        )
 
     def save_graph(self) -> None:
         """Persist the graph to disk."""

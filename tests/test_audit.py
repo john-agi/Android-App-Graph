@@ -1247,30 +1247,56 @@ def test_re_explore_spends_a_step_on_an_action_model_wait_without_recording_it(
     assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
 
 
+_HOME_SCREEN = {"activity": "com.demo.Home", "screenshot": "aG9tZQ==", "package": "com.demo"}
+_DETAIL_SCREEN = {**_HOME_SCREEN, "activity": "com.demo.Detail", "screenshot": "ZGV0YWls"}
+_BROWSER_SCREEN = {
+    "activity": "com.browser.Main",
+    "screenshot": "YnJvd3Nlcg==",
+    "package": "com.browser",
+}
+
+
+@pytest.mark.parametrize(
+    ("after_the_tap", "leaving"),
+    [
+        ([_BROWSER_SCREEN, _HOME_SCREEN], [_BACK]),
+        (
+            [_BROWSER_SCREEN, _BROWSER_SCREEN, _BROWSER_SCREEN, _HOME_SCREEN],
+            [_BACK, _FORCE_STOP, _PACKAGE_LAUNCH],
+        ),
+    ],
+    ids=["back returns", "back leaves the other app in front"],
+)
 @pytest.mark.usefixtures("_fake_device")
-def test_re_explore_presses_back_once_and_records_nothing_when_a_step_leaves_the_app(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it(
+    after_the_tap: list[dict[str, Any]],
+    leaving: list[object],
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
 ) -> None:
+    """Only the app's screens are identified, and the next step starts from one."""
     graph, _graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args: "s0_home")
+    nodes = {"com.demo.Home": "s0_home", "com.demo.Detail": "s1_detail"}
+    monkeypatch.setattr(
+        graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
+    )
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
-    before = _edges(graph)
     issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
+    # The replay's restart shows home, and the second step's tap opens the detail page.
+    controller = screens_by_log(*[_HOME_SCREEN] * 3, *after_the_tap, _DETAIL_SCREEN)
 
-    (result,) = _re_explore(
-        graph,
-        [issue],
-        _ReplayController(device_log, "com.browser"),
-        client,
-        tmp_path,
-        steps_per_issue=1,
-    )
+    (result,) = _re_explore(graph, [issue], controller, client, tmp_path, steps_per_issue=2)
 
-    assert result == {"issue": issue, "status": "explored", "navigated_to": "s0_home", "steps": []}
-    assert _edges(graph) == before
-    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, tap, _BACK]
+    assert [(step["step"], step["from"], step["to"]) for step in result["steps"]] == [
+        (2, "s0_home", "s1_detail")
+    ]
+    assert set(graph.graph.edges) == {("s0_home", "s1_detail")}
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, tap, *leaving, tap]
 
 
 @pytest.mark.usefixtures("_fake_device")

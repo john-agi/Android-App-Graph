@@ -17,7 +17,7 @@ from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 from PIL import Image
 
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, StillOutsideAppError
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
 from android_app_graph.utils.vlm_utils import PlanRequest
@@ -1459,3 +1459,178 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
         if b"No screens have been discovered" in request.content
     ]
     assert len(described_without_known_screens) == 2
+
+
+_SEARCH = "com.google.android.settings.intelligence"
+_SEARCH_SCREEN = {**_screen(f"{_SEARCH}.SearchActivity", "orange"), "package": _SEARCH}
+_KEYBOARD = "com.google.android.inputmethod.latin"
+_TAP = {"action": "tap", "x": 50, "y": 100}
+
+
+def _explore_from_home_into_another_app(
+    explorer: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    *identifying: httpx.Response,
+    max_steps: int = 1,
+) -> list[object]:
+    """Explore with a first step that taps from home into another app and steps that wait
+    after it. ``identifying`` answers the model requests that identifying the screen the
+    first step ends on makes. Returns the page description each step planned from."""
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    router_responses.extend(
+        [
+            chat_response(content='{"page_description":"home"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=_TAP_REPLY),
+            *identifying,
+            *[chat_response(content=_WAIT_REPLY) for _ in range(max_steps - 1)],
+        ]
+    )
+    explorer.explore(max_steps=max_steps)
+    return planned_from
+
+
+def _node_packages(explorer: Kobe) -> dict[str, object]:
+    return {node: data.get("package") for node, data in explorer.graph.graph.nodes(data=True)}
+
+
+@pytest.mark.parametrize(
+    ("after_the_tap", "leaving"),
+    [
+        ([_SEARCH_SCREEN, HOME_SCREEN], [_BACK]),
+        (
+            [_SEARCH_SCREEN, _SEARCH_SCREEN, _SEARCH_SCREEN, HOME_SCREEN],
+            [_BACK, _FORCE_STOP, _PACKAGE_LAUNCH],
+        ),
+    ],
+    ids=["back returns", "back leaves the other app in front"],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_into_another_app_returns_to_the_app_before_the_next_step(
+    after_the_tap: list[dict[str, object]],
+    leaving: list[object],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Back can close only the keyboard and leave the other app's screen up. Launching
+    the app would then resume its task with that screen still on top, so the explorer
+    force-stops the app before launching it, and gives the other app's screen no node."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN, *after_the_tap), tmp_path, router_client)
+
+    planned_from = _explore_from_home_into_another_app(
+        explorer, router_responses, chat_response, embedding_body, monkeypatch, max_steps=2
+    )
+
+    assert device_log == [_TAP, *leaving]
+    assert planned_from == ["home", "home"]
+    home_image = f"data:image/png;base64,{HOME_SCREEN['screenshot']}"
+    assert home_image in router_requests[-1].content.decode()
+    assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keyboard = {**_screen("com.demo.Home", "gray"), "package": _KEYBOARD}
+    explorer = _explorer(
+        screens_by_log(HOME_SCREEN, _SEARCH_SCREEN, keyboard), tmp_path, router_client
+    )
+
+    _explore_from_home_into_another_app(
+        explorer,
+        router_responses,
+        chat_response,
+        embedding_body,
+        monkeypatch,
+        chat_response(content='{"page_description":"home with the keyboard shown"}'),
+        httpx.Response(200, json=embedding_body),
+    )
+
+    assert device_log == [_TAP, _BACK]
+    assert _node_packages(explorer) == {
+        "s0_home": "com.demo",
+        f"ext_{_SEARCH}": None,
+        "s1_home_with_the_keyboard_shown": _KEYBOARD,
+    }
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_another_app_still_in_front_after_the_restart_stops_exploration_naming_it(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explorer = _explorer(screens_by_log(HOME_SCREEN, _SEARCH_SCREEN), tmp_path, router_client)
+
+    with pytest.raises(StillOutsideAppError, match=_SEARCH):
+        _explore_from_home_into_another_app(
+            explorer, router_responses, chat_response, embedding_body, monkeypatch
+        )
+
+    assert device_log == [_TAP, _BACK, _FORCE_STOP, _PACKAGE_LAUNCH]
+    assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifying_it(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    open_detail = {"action": "tap", "coordinate": [30, 40]}
+    after_the_replay = [_SEARCH_SCREEN, _SEARCH_SCREEN, HOME_SCREEN]
+    device = screens_by_log(*[HOME_SCREEN] * 3, *after_the_replay)
+    explorer = _explorer(device, tmp_path, router_client)
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
+    explorer.graph.add_edge("s0_home", "s1_detail", action=[open_detail])
+    nodes = {"com.demo.Home": "s0_home"}
+    monkeypatch.setattr(
+        explorer.graph, "identify_state", lambda activity, _screenshot, _package: nodes[activity]
+    )
+
+    assert explorer.navigate_to_node("s1_detail") == "s0_home"
+    restart = [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert device_log == [*restart, open_detail, *restart]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_exploration_that_starts_in_another_app_restarts_the_app_and_stops_if_it_stays(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+) -> None:
+    explorer = _explorer(screens_by_log(_SEARCH_SCREEN), tmp_path, router_client)
+
+    with pytest.raises(StillOutsideAppError, match=_SEARCH):
+        explorer.explore(max_steps=1)
+
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH]
+    assert list(explorer.graph.graph) == []

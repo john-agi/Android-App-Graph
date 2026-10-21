@@ -495,6 +495,66 @@ def is_system_overlay(package: str) -> bool:
     return "inputmethod" in lower or "keyboard" in lower
 
 
+def is_outside_app(package: str, app_package: str) -> bool:
+    """Return whether ``package``, the package the device reports in front, belongs to
+    an app other than ``app_package``.
+
+    A system overlay sits on top of the app without leaving it, and an empty package
+    names no app.
+    """
+    return bool(package) and package != app_package and not is_system_overlay(package)
+
+
+class StillOutsideAppError(RuntimeError):
+    """Another app is still in front after the app was restarted, so a step taken now
+    would act on that app and record its screens as the app's."""
+
+
+def restart_into_app(
+    controller: DeviceController,
+    app_name: str,
+    package_name: str,
+    launch_activity: str | None,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Restart the app with ``restart_app`` and return the state of the screen it shows.
+
+    Raises ``StillOutsideAppError`` naming the package in front when it still belongs
+    to another app.
+    """
+    restart_app(controller, app_name, package_name, launch_activity, logger)
+    state = controller.get_state()
+    package = state.get("package", "")
+    if is_outside_app(package, package_name):
+        msg = f"{package} is still in front after restarting {package_name}"
+        raise StillOutsideAppError(msg)
+    return state
+
+
+def return_to_app(
+    controller: DeviceController,
+    app_name: str,
+    package_name: str,
+    launch_activity: str | None,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Press Back after a step opened another app and return the state of the app's
+    screen, restarting the app with ``restart_into_app`` when Back does not return to it.
+
+    Back pops only the top activity, so the other app can stay in front, for example
+    when Back only closed its keyboard. A launch would then resume the app's task with
+    the other app's activity still on top, which the force-stop in the restart avoids.
+    """
+    controller.exe_action({"action": "back"})
+    time.sleep(1)
+    state = controller.get_state()
+    package = state.get("package", "")
+    if not is_outside_app(package, package_name):
+        return state
+    logger.warning("Back left %s in front of %s. Restarting %s.", package, package_name, app_name)
+    return restart_into_app(controller, app_name, package_name, launch_activity, logger)
+
+
 def grant_runtime_permissions(udid: str, package_name: str) -> None:
     """Grant ``package_name`` every permission it requests.
 
