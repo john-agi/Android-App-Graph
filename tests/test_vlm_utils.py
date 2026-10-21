@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -756,7 +757,69 @@ def test_the_verifier_treats_keyboard_focus_and_scroll_as_the_same_screen(
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     assert "differ only in whether the on-screen keyboard is shown" in prompt
     assert "Which input field is active" not in prompt
-    assert "A screen with such a menu" in prompt  # an open menu still makes a DIFFERENT screen
+
+
+def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """A menu open over a page and its expanded sections are recorded as the state keys
+    ``open_menu`` and ``expanded_sections``, never in the page's description, while a
+    dialog or full-screen picker with its own purpose is described as a screen."""
+    for existing_nodes in (None, ["Add Wi-Fi network dialog"]):
+        router_responses.append(
+            chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
+        )
+        vlm.describe_page_and_state(
+            router_client, png_screenshot, existing_nodes=existing_nodes, settings=PAGE_DETAIL
+        )
+    for request in router_requests:
+        prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
+        kept_out = re.search(r'[^.]*never change "page_description"', prompt)
+        assert kept_out is not None
+        for kind in ("menu", "dropdown", "picker", "popup", "expanded"):
+            assert kind in kept_out.group(), kind
+        assert '"open_menu"' in prompt
+        assert '"expanded_sections"' in prompt
+        assert "full-screen picker that has its own purpose" in prompt
+
+
+def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """Screens that differ only by an open menu or an expanded section are the SAME
+    screen, nothing on the DIFFERENT side or in the refined descriptions names a menu,
+    and a dialog with its own purpose stays DIFFERENT from the page beneath it."""
+    router_responses.append(chat_response(content='{"same":true,"reason":"menu only"}'))
+    vlm.verify_same_node(
+        router_client, png_screenshot, png_screenshot, "Wi-Fi settings", settings=PAGE_DETAIL
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    same_cases, different_cases = prompt.split("Two screenshots are DIFFERENT screens", 1)
+    same_cases = same_cases[same_cases.index("Two screenshots are the SAME screen") :]
+    for kind in ("overflow menu", "dropdown", "picker", "popup", "context menu", "expanded"):
+        assert kind in same_cases, kind
+    assert "menu" not in different_cases
+    assert "its own purpose" in different_cases
+
+
+def test_the_merge_audit_no_longer_excludes_a_page_with_its_menu_open(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"issues":[],"summary":"fine"}'))
+    vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
+    assert "menu" not in prompt
 
 
 @pytest.mark.parametrize(
