@@ -175,7 +175,7 @@ class Kobe:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
         self.graph.package_name = self.package_name
 
-    def _maybe_continue_from_coverage_checkpoint(
+    def maybe_continue_from_coverage_checkpoint(
         self,
         step: int,
         max_steps: int,
@@ -315,7 +315,7 @@ class Kobe:
         device_state: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         """Apply periodic coverage continuation after any completed step."""
-        checkpoint_node = self._maybe_continue_from_coverage_checkpoint(
+        checkpoint_node = self.maybe_continue_from_coverage_checkpoint(
             step,
             max_steps,
             current_node,

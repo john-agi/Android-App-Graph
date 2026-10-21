@@ -66,15 +66,15 @@ def test_plot_reports_missing_graph_file(
     ],
 )
 def test_shorten_words(text: str | None, expected: str) -> None:
-    assert plot._shorten_words(text) == expected
+    assert plot.shorten_words(text) == expected
 
 
 def test_shorten_words_truncates_on_characters() -> None:
-    assert plot._shorten_words("abcdefghij", max_words=6, max_chars=8) == "abcde..."
+    assert plot.shorten_words("abcdefghij", max_words=6, max_chars=8) == "abcde..."
 
 
 def test_shorten_edge_label_strips_noise() -> None:
-    label = plot._shorten_edge_label("Tap the [Search] button to open {{value}} (again)")
+    label = plot.shorten_edge_label("Tap the [Search] button to open {{value}} (again)")
     assert "[" not in label
     assert "(" not in label
     assert "button" not in label
@@ -82,11 +82,11 @@ def test_shorten_edge_label_strips_noise() -> None:
 
 
 def test_wrap_label_breaks_on_width() -> None:
-    assert plot._wrap_label("alpha beta gamma", width=10) == "alpha beta\\ngamma"
+    assert plot.wrap_label("alpha beta gamma", width=10) == "alpha beta\\ngamma"
 
 
 def test_wrap_label_of_empty_text() -> None:
-    assert plot._wrap_label("") == ""
+    assert plot.wrap_label("") == ""
 
 
 @pytest.mark.parametrize(
@@ -100,7 +100,7 @@ def test_wrap_label_of_empty_text() -> None:
     ],
 )
 def test_node_category(description: str, category: str) -> None:
-    assert plot._node_category(description) == category
+    assert plot.node_category(description) == category
 
 
 @pytest.mark.parametrize(
@@ -118,7 +118,7 @@ def test_node_category(description: str, category: str) -> None:
     ],
 )
 def test_summarize_actions(actions: list[Any], expected: str) -> None:
-    assert plot._summarize_actions(actions) == expected
+    assert plot.summarize_actions(actions) == expected
 
 
 def _paper_graph() -> nx.DiGraph:
@@ -135,36 +135,36 @@ def _paper_graph() -> nx.DiGraph:
 
 
 def test_largest_weak_component_of_empty_graph() -> None:
-    assert plot._largest_weak_component(nx.DiGraph()).number_of_nodes() == 0
+    assert plot.largest_weak_component(nx.DiGraph()).number_of_nodes() == 0
 
 
 def test_largest_weak_component_keeps_the_biggest() -> None:
-    kept = plot._largest_weak_component(_paper_graph())
+    kept = plot.largest_weak_component(_paper_graph())
     assert set(kept) == {"s0_home", "s1_search", "ext_launcher"}
 
 
 def test_drop_external_nodes() -> None:
-    kept = plot._drop_external_nodes(_paper_graph())
+    kept = plot.drop_external_nodes(_paper_graph())
     assert "ext_launcher" not in kept
     assert "s0_home" in kept
 
 
 def test_trim_leaf_rounds_removes_leaves() -> None:
-    trimmed = plot._trim_leaf_rounds(_paper_graph(), 1)
+    trimmed = plot.trim_leaf_rounds(_paper_graph(), 1)
     assert "s2_orphan" not in trimmed
     assert "ext_launcher" not in trimmed
 
 
 def test_trim_leaf_rounds_is_a_no_op_without_rounds() -> None:
     graph = _paper_graph()
-    assert set(plot._trim_leaf_rounds(graph, 0)) == set(graph)
+    assert set(plot.trim_leaf_rounds(graph, 0)) == set(graph)
 
 
 def test_prepare_paper_graph_filters_and_reports(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level("INFO", logger=plot.__name__):
-        prepared = plot._prepare_paper_graph(
+        prepared = plot.prepare_paper_graph(
             _paper_graph(),
             keep_disconnected=False,
             keep_external=False,
@@ -176,7 +176,7 @@ def test_prepare_paper_graph_filters_and_reports(
 
 def test_prepare_paper_graph_can_keep_everything() -> None:
     graph = _paper_graph()
-    prepared = plot._prepare_paper_graph(
+    prepared = plot.prepare_paper_graph(
         graph,
         keep_disconnected=True,
         keep_external=True,
@@ -187,7 +187,7 @@ def test_prepare_paper_graph_can_keep_everything() -> None:
 
 def test_as_digraph_rejects_other_types() -> None:
     with pytest.raises(TypeError, match="expected a networkx DiGraph"):
-        plot._as_digraph(object())
+        plot.as_digraph(object())
 
 
 def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:

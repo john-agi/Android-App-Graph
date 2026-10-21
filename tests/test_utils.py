@@ -296,6 +296,6 @@ def test_the_log_time_is_local_wall_clock_time(monkeypatch: pytest.MonkeyPatch) 
     )
     record.created = created
 
-    app_logging._ColorHandler().emit(record)
+    app_logging.ColorHandler().emit(record)
 
     assert output.getvalue().split(" ", 1)[0] == local_time

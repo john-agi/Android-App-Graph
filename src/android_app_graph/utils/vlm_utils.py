@@ -1718,7 +1718,7 @@ _MOBILE_USE_ACTIONS: dict[str, Callable[[dict[str, object], int, int], dict[str,
 }
 
 
-def _tool_call_to_aitk(
+def tool_call_to_aitk(
     args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
 ) -> dict[str, object]:
     """Convert mobile_use arguments using the contract in README.md#action-responses."""
@@ -1969,7 +1969,7 @@ def _raw_json_arguments(raw: str) -> dict[str, object] | None:
     return as_object_dict(parsed) if isinstance(parsed, dict) else None
 
 
-def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
+def parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
     Handles both JSON in a <tool_call> block and native tool calling.
@@ -2034,13 +2034,13 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     """Turn an action reply into an AITK action and its history entry."""
     raw = message_text(resp)
     try:
-        tool_args, thought, action_desc = _parse_agent_response(resp)
+        tool_args, thought, action_desc = parse_agent_response(resp)
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
         raise _MalformedActionOutputError(_unparsed_reason(raw), raw) from exc
     if tool_args is None:
         raise _MalformedActionOutputError(_unparsed_reason(raw), raw)
     try:
-        action = _tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
+        action = tool_call_to_aitk(tool_args, screen_w=screen_w, screen_h=screen_h)
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
         reason = f"the mobile_use arguments were invalid: {exc}"
         raise _MalformedActionOutputError(reason, raw) from exc

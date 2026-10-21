@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
+import networkx as nx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -1211,7 +1212,7 @@ def test_reset_task_state_clears_the_previous_task(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger=aitk_translator.logger.name)
-    turn_replies = ("A", _NO_INFORMATION, '{"choice": "C", "instruction": "tap the shoes result"}')
+    turn_replies = ("A", _NO_INFORMATION, '{"choice": 3, "instruction": "tap the shoes result"}')
     use_model(stepping, *turn_replies, *turn_replies)
     state, history = _step_payload()
     task = "Open demo and buy shoes"
@@ -1320,18 +1321,18 @@ def test_build_options_lists_done_self_loops_neighbours_and_free(tmp_path: Path)
     text, options = aitk_translator.build_options(graph, "home")
 
     assert [opt["type"] for opt in options] == ["done", "self_loop", "neighbor", "free"]
-    assert [opt["letter"] for opt in options] == ["A", "B", "C", "D"]
+    assert [opt["number"] for opt in options] == [1, 2, 3, 4]
     assert options[1]["instruction"] == "search for {query}"
     assert options[2]["instruction"] == "tap the first result"
 
     lines = text.splitlines()
-    assert lines[0].startswith("A) DONE")
+    assert lines[0].startswith("1) DONE")
     assert (
         lines[1]
-        == 'B) Stay here — "search for {query}" → results shown | changes: query:  -> shoes'
+        == '2) Stay here — "search for {query}" → results shown | changes: query:  -> shoes'
     )
-    assert lines[2] == 'C) Go to "results list" — "tap the first result" → the results list'
-    assert lines[3].startswith("D) FREE")
+    assert lines[2] == '3) Go to "results list" — "tap the first result" → the results list'
+    assert lines[3].startswith("4) FREE")
 
 
 def test_build_options_falls_back_to_raw_self_loop_instructions(tmp_path: Path) -> None:
@@ -1352,8 +1353,8 @@ def test_build_options_falls_back_to_raw_self_loop_instructions(tmp_path: Path) 
     assert options[1]["instruction"] == "scroll down"
     assert options[2]["instruction"] == "scroll up"
     lines = text.splitlines()
-    assert lines[1] == 'B) Stay here — "scroll down" → more results | changes: page: 1 -> 2'
-    assert lines[2] == 'C) Stay here — "scroll up"'
+    assert lines[1] == '2) Stay here — "scroll down" → more results | changes: page: 1 -> 2'
+    assert lines[2] == '3) Stay here — "scroll up"'
 
 
 def test_build_options_shows_each_self_loop_action_its_own_schema_delta() -> None:
@@ -1385,9 +1386,9 @@ def test_build_options_shows_each_self_loop_action_its_own_schema_delta() -> Non
     text, _ = aitk_translator.build_options(gm.graph, "s0_list")
 
     assert text.splitlines()[1:4] == [
-        'B) Stay here — "Scroll down the list" → list | changes: first_visible_item: A -> K',
-        'C) Stay here — "Tap the info icon" → list',
-        "D) Stay here — \"Type 'milk'\" → list | changes: search_query: None -> milk",
+        '2) Stay here — "Scroll down the list" → list | changes: first_visible_item: A -> K',
+        '3) Stay here — "Tap the info icon" → list',
+        "4) Stay here — \"Type 'milk'\" → list | changes: search_query: None -> milk",
     ]
 
 
@@ -1409,8 +1410,8 @@ def test_build_options_lists_no_self_loop_action_without_an_instruction() -> Non
     text, _ = aitk_translator.build_options(gm.graph, "s0_list")
 
     assert text.splitlines()[1:-1] == [
-        'B) Stay here — "Scroll down the list" | changes: top_item: A -> K',
-        "C) Stay here — \"Type 'milk'\" | changes: query: None -> milk",
+        '2) Stay here — "Scroll down the list" | changes: top_item: A -> K',
+        "3) Stay here — \"Type 'milk'\" | changes: query: None -> milk",
     ]
 
 
@@ -1421,7 +1422,7 @@ def test_build_options_skips_the_self_loop_when_listing_neighbours(tmp_path: Pat
     _, options = aitk_translator.build_options(graph, "home")
     assert [opt for opt in options if opt["type"] == "neighbor"] == [
         {
-            "letter": "C",
+            "number": 3,
             "type": "neighbor",
             "instruction": "tap the first result",
         }
@@ -1454,101 +1455,40 @@ def use_model(
     return answer
 
 
-def test_build_options_caps_at_26_entries_and_drops_the_least_visited_neighbours(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An oversized menu is trimmed to 26 entries instead of raising IndexError.
-
-    DONE and FREE always keep their slot, and the 24 remaining slots keep the
-    most-visited neighbours (edge visit_count descending) rather than an
-    arbitrary subset.
-    """
-    graph = aitk_translator.load_graph_from_json(
-        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
-    )
-    for i in range(30):
-        neighbor = f"n{i}"
-        graph.add_node(neighbor, page_description=f"screen {i}")
-        graph.add_edge(
-            "home",
-            neighbor,
-            instructions=[f"go to {i}"],
-            target_observations=[],
-            instruction_templates=[],
-            visit_count=i,  # n29 is visited most, n0 least
-        )
-
-    with caplog.at_level("WARNING"):
-        text, options = aitk_translator.build_options(graph, "home")
-
-    assert len(options) == 26
-    assert options[0]["type"] == "done"
-    assert options[-1]["type"] == "free"
-    # Option carries no node id any more, so the kept neighbours are identified
-    # by their edge instruction ("go to {i}"), unique per n{i} neighbour here.
-    kept_instructions = {opt["instruction"] for opt in options if opt["type"] == "neighbor"}
-    # The demo graph's self-loop takes one slot, leaving 23 for 31 neighbours; "results"
-    # ties with n0-n6 at visit_count 0 and is dropped with them.
-    assert len(kept_instructions) == 23
-    assert kept_instructions == {f"go to {i}" for i in range(7, 30)}
-    assert "tap the first result" not in kept_instructions
-    assert text.count("\n") == len(options) - 1
-    assert "home" in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("num_self_loops", "num_neighbors", "expected_self_loop", "expected_neighbor"),
-    [
-        (30, 3, 21, 3),
-        (5, 40, 5, 19),
-        (30, 30, 12, 12),
-    ],
+@given(
+    self_loop_count=st.integers(min_value=0, max_value=40),
+    neighbor_count=st.integers(min_value=0, max_value=40),
 )
-def test_build_options_reserves_half_the_middle_slots_for_neighbours(
-    tmp_path: Path,
-    num_self_loops: int,
-    num_neighbors: int,
-    expected_self_loop: int,
-    expected_neighbor: int,
+def test_build_options_numbers_every_self_loop_instruction_and_neighbour(
+    self_loop_count: int, neighbor_count: int
 ) -> None:
-    """Neighbours are the only navigation options in the menu, so a node with many
-    self-loop instructions (GraphManager adds one per distinct self-loop action)
-    must never be able to evict every "Go to" option: neighbours keep at least
-    half of the 24 middle slots, and self-loop instructions take the rest.
-    """
-    graph = aitk_translator.load_graph_from_json(
-        _write_graph(tmp_path, nodes=_DEMO_NODES, edges=_DEMO_EDGES)
-    )
-    graph.remove_edge("home", "results")
-    graph.remove_edge("home", "home")
-    graph.add_edge(
-        "home",
-        "home",
-        instructions=[f"self loop {i}" for i in range(num_self_loops)],
-        target_observations=[],
-        instruction_templates=[],
-        schema_deltas=[],
-    )
-    for i in range(num_neighbors):
-        neighbor = f"n{i}"
-        graph.add_node(neighbor, page_description=f"screen {i}")
+    """The menu lists every self-loop instruction and every neighbour between DONE
+    and FREE, numbered 1, 2, 3, ... in that order, however many the node has."""
+    graph = nx.DiGraph()
+    graph.add_node("home", page_description="home screen")
+    if self_loop_count:
         graph.add_edge(
-            "home",
-            neighbor,
-            instructions=[f"go to {i}"],
-            target_observations=[],
-            instruction_templates=[],
-            visit_count=i,
+            "home", "home", instructions=[f"self loop {i}" for i in range(self_loop_count)]
         )
+    for i in range(neighbor_count):
+        graph.add_node(f"n{i}", page_description=f"screen {i}")
+        graph.add_edge("home", f"n{i}", instructions=[f"go to {i}"])
 
-    _text, options = aitk_translator.build_options(graph, "home")
+    text, options = aitk_translator.build_options(graph, "home")
 
-    kept_self_loop = [opt for opt in options if opt["type"] == "self_loop"]
-    kept_neighbors = [opt for opt in options if opt["type"] == "neighbor"]
-    assert len(kept_self_loop) == expected_self_loop
-    assert len(kept_neighbors) == expected_neighbor
-    assert len(options) == 2 + expected_self_loop + expected_neighbor
+    numbers = list(range(1, self_loop_count + neighbor_count + 3))
+    assert [opt["number"] for opt in options] == numbers
+    assert [opt["type"] for opt in options] == [
+        "done",
+        *["self_loop"] * self_loop_count,
+        *["neighbor"] * neighbor_count,
+        "free",
+    ]
+    assert [opt.get("instruction") for opt in options[1:-1]] == [
+        *(f"self loop {i}" for i in range(self_loop_count)),
+        *(f"go to {i}" for i in range(neighbor_count)),
+    ]
+    assert [line.split(") ", 1)[0] for line in text.splitlines()] == [str(n) for n in numbers]
 
 
 def test_record_info_stores_what_the_model_read_as_written(
@@ -1685,21 +1625,28 @@ def test_a_failed_v2_generation_is_asked_again_once_then_raises(
     assert len(router_requests) == 2
 
 
+@pytest.mark.parametrize("choice", ["3", '"3"'])
 def test_decide_returns_the_chosen_option(
-    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
+    choice: str, use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    completions = use_model(translator, '{"choice": "c", "instruction": "tap the shoes result"}')
+    """The model picks an option by its menu number, as a JSON number or a quoted one."""
+    completions = use_model(
+        translator, f'{{"choice": {choice}, "instruction": "tap the shoes result"}}'
+    )
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
 
     assert decision["type"] == "neighbor"
     assert decision["instruction"] == "tap the shoes result"
-    assert "State parameters: [query]" in completions.prompt_text()
+    prompt = completions.prompt_text()
+    assert "State parameters: [query]" in prompt
+    assert '3) Go to "results list"' in prompt
+    assert '"choice": <option number>' in prompt
 
 
 def test_decide_keeps_the_graph_instruction_when_the_model_omits_one(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(translator, '{"choice": "C"}')
+    use_model(translator, '{"choice": 3}')
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["instruction"] == "tap the first result"
 
@@ -1709,7 +1656,7 @@ def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
 ) -> None:
     """DONE's instruction is never read by _step, so falling back to the whole task
     here is harmless; the type-specific fallback still applies to it."""
-    use_model(translator, '{"choice": "A"}')
+    use_model(translator, '{"choice": 1}')
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "done", "instruction": "buy shoes"}
 
@@ -1724,7 +1671,7 @@ def test_decide_leaves_a_free_pick_without_an_instruction_empty(
     re-plans through plan_free_action; it is unreachable if this falls back to
     the task text instead.
     """
-    use_model(translator, '{"choice": "D"}')
+    use_model(translator, '{"choice": 4}')
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": ""}
 
@@ -1732,7 +1679,7 @@ def test_decide_leaves_a_free_pick_without_an_instruction_empty(
 def test_decide_uses_the_models_instruction_for_a_free_pick(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
+    use_model(translator, '{"choice": 4, "instruction": "Tap the cart icon"}')
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": "Tap the cart icon"}
 
@@ -1759,24 +1706,29 @@ def test_decide_treats_an_empty_json_object_as_parsed_not_failed(
     completions = use_model(translator, "{}")
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
-    assert decision["reason"] == "DECIDE returned unrecognized choice ''"
+    assert decision["reason"] == "DECIDE returned unrecognized choice None"
     assert len(completions.calls) == 1
 
 
+@pytest.mark.parametrize(("choice", "shown"), [("5", "5"), ('"C"', "'C'"), ("true", "True")])
 def test_decide_reports_an_unknown_choice(
-    use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
+    choice: str,
+    shown: str,
+    use_model: _UseModel,
+    translator: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    use_model(translator, '{"choice": "Z", "instruction": "tap something"}')
+    """A number past the menu, a letter and a boolean name no option."""
+    use_model(translator, f'{{"choice": {choice}, "instruction": "tap something"}}')
     decision = translator.decide(translator.graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["instruction"] == "tap something"
-    assert decision["reason"] == "DECIDE returned unrecognized choice 'Z'"
+    assert decision["reason"] == f"DECIDE returned unrecognized choice {shown}"
 
 
 def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
-    completions = use_model(translator, '{"choice": "A"}')
+    completions = use_model(translator, '{"choice": 1}')
     translator.decide(translator.graphs["demo"], "buy shoes", "results", "screenshot")
     assert "State parameters" not in completions.prompt_text()
 
@@ -2195,7 +2147,7 @@ def test_to_agent_runs_the_loop(
     turn_replies = (
         "A",
         '{"information": "The total is 9 EUR"}',
-        '{"choice": "C", "instruction": "tap the shoes result"}',
+        '{"choice": 3, "instruction": "tap the shoes result"}',
     )
     use_model(stepping, *turn_replies, *turn_replies)
     state, history = _step_payload()
@@ -2213,7 +2165,7 @@ def test_to_agent_runs_the_loop(
 def test_to_agent_stops_the_run_on_an_unreadable_record_reply(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    completions = use_model(stepping, "A", "nothing", '{"choice": "C"}')
+    completions = use_model(stepping, "A", "nothing", '{"choice": 3}')
     state, history = _step_payload()
 
     with pytest.raises(aitk_translator.RecordReplyError):
@@ -2225,7 +2177,7 @@ def test_to_agent_stops_the_run_on_an_unreadable_record_reply(
 def test_step_ends_the_task_on_a_done_decision(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "A"}', "9 EUR")
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": 1}', "9 EUR")
     state, history = _step_payload()
 
     response = json.loads(stepping.to_agent("buy shoes", state, history))
@@ -2243,7 +2195,7 @@ def test_step_downgrades_an_early_end_to_a_wait(
         "predict_next_action",
         lambda *_a, **_k: ({"action": "end", "answer": "guessed"}, "gave up | on home"),
     )
-    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": 3}')
     state, history = _step_payload()
 
     response = json.loads(stepping.to_agent("buy shoes", state, history))
@@ -2291,7 +2243,7 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
         stepping,
         "A",  # IDENTIFY
         _NO_INFORMATION,  # RECORD
-        '{"choice": "D"}',  # DECIDE picks FREE, writes no instruction
+        '{"choice": 4}',  # DECIDE picks FREE, writes no instruction
         "Tap the search bar",  # free-action fallback plan
     )
     state, history = _step_payload()
@@ -2303,7 +2255,7 @@ def test_step_replans_when_a_free_pick_has_no_instruction(
 def test_step_resolves_the_graph_from_the_package(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    completions = use_model(stepping, "A", _NO_INFORMATION, '{"choice": "C"}')
+    completions = use_model(stepping, "A", _NO_INFORMATION, '{"choice": 3}')
     state, history = _step_payload()
 
     json.loads(stepping.to_agent("buy shoes", state, history))
@@ -2358,8 +2310,8 @@ def test_step_switches_to_the_graph_of_the_package_now_in_the_foreground(
     """The graph is chosen on every step, so a second app's steps use its own graph."""
     completions = use_model(
         two_apps,
-        *("A", _NO_INFORMATION, '{"choice": "D", "instruction": "Open the shop app"}'),
-        *("A", _NO_INFORMATION, '{"choice": "B", "instruction": "Tap checkout"}'),
+        *("A", _NO_INFORMATION, '{"choice": 4, "instruction": "Open the shop app"}'),
+        *("A", _NO_INFORMATION, '{"choice": 2, "instruction": "Tap checkout"}'),
     )
     history = {"actions": ["earlier"]}
     demo = {
@@ -2429,7 +2381,7 @@ def test_step_offers_only_the_nodes_of_the_foreground_package(
         ],
         image_embeddings={"inbox": [0.6, 0.8], "mail": [1.0, 0.0]},
     )
-    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "B", "instruction": "Open the chat"}')
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": 2, "instruction": "Open the chat"}')
     state = {"screenshot": "shot", "activity": conversations, "package": messages}
 
     with caplog.at_level(logging.INFO, logger=aitk_translator.logger.name):
@@ -2456,7 +2408,7 @@ def test_step_identifies_an_android_world_screen_in_a_graph_saved_without_node_p
         nodes=[{"id": "tabs", "activity": tabbed}],
         image_embeddings={"tabs": [1.0, 0.0]},
     )
-    use_model(stepping, "A", _NO_INFORMATION, '{"choice": "B", "instruction": "Open a new tab"}')
+    use_model(stepping, "A", _NO_INFORMATION, '{"choice": 2, "instruction": "Open a new tab"}')
     state = {"screenshot": "shot", "activity": f"{chrome}/{tabbed}", "package": chrome}
 
     with caplog.at_level(logging.INFO, logger=aitk_translator.logger.name):
@@ -2474,7 +2426,7 @@ def test_step_warns_when_the_task_names_no_known_app(
 ) -> None:
     """An unresolvable app falls straight through to the reactive loop, and only
     the task's first turn looks for one."""
-    turn_replies = ("A", _NO_INFORMATION, '{"choice": "C"}')
+    turn_replies = ("A", _NO_INFORMATION, '{"choice": 3}')
     use_model(stepping, *turn_replies, *turn_replies)
     state, history = _step_payload()
 

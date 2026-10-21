@@ -45,7 +45,7 @@ def _require_viz() -> None:
         raise ImportError(msg) from exc
 
 
-def _as_digraph(graph: object) -> nx.DiGraph:
+def as_digraph(graph: object) -> nx.DiGraph:
     """Return a ``networkx`` result as ``DiGraph``.
 
     ``networkx`` ships no annotations, so ``copy()`` and ``subgraph()`` come
@@ -107,7 +107,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         elif instructions:
             label = "\n".join(instructions)
         else:
-            label = _summarize_actions(edge["actions"])
+            label = summarize_actions(edge["actions"])
 
         is_self_loop = edge["source"] == edge["target"]
         schema_deltas = edge.get("schema_deltas", [])
@@ -141,7 +141,7 @@ def _delta_suffix(schema_deltas: list[Any]) -> str:
     return "\n[Δ " + ", ".join(delta_parts) + "]" if delta_parts else ""
 
 
-def _summarize_actions(actions: list[Any]) -> str:
+def summarize_actions(actions: list[Any]) -> str:
     """Create a readable label from action list."""
     if not actions:
         return "?"
@@ -163,7 +163,7 @@ def _summarize_actions(actions: list[Any]) -> str:
     return _describe_action(first)
 
 
-def _shorten_words(text: str | None, max_words: int = 6, max_chars: int = 42) -> str:
+def shorten_words(text: str | None, max_words: int = 6, max_chars: int = 42) -> str:
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     if not text:
         return ""
@@ -175,7 +175,7 @@ def _shorten_words(text: str | None, max_words: int = 6, max_chars: int = 42) ->
     return text
 
 
-def _shorten_edge_label(text: str | None, max_words: int = 8, max_chars: int = 52) -> str:
+def shorten_edge_label(text: str | None, max_words: int = 8, max_chars: int = 52) -> str:
     text = re.sub(r"\[[^\]]*\]", " ", str(text or ""))
     text = re.sub(r"\{\{[^}]+\}\}", "value", text)
     text = re.sub(r"\([^)]*\)", " ", text)
@@ -183,10 +183,10 @@ def _shorten_edge_label(text: str | None, max_words: int = 8, max_chars: int = 5
         r"\b(?:the|a|an|to|on|in|with|button|icon|option)\b", " ", text, flags=re.IGNORECASE
     )
     text = re.sub(r"\s+", " ", text).strip(" .,-")
-    return _shorten_words(text, max_words=max_words, max_chars=max_chars)
+    return shorten_words(text, max_words=max_words, max_chars=max_chars)
 
 
-def _wrap_label(text: str | None, width: int = 18) -> str:
+def wrap_label(text: str | None, width: int = 18) -> str:
     words = str(text or "").split()
     lines = []
     current = ""
@@ -201,7 +201,7 @@ def _wrap_label(text: str | None, width: int = 18) -> str:
     return "\\n".join(lines)
 
 
-def _node_category(desc: str) -> str:
+def node_category(desc: str) -> str:
     desc_l = desc.lower()
     if any(k in desc_l for k in ("search", "results", "list")):
         return "search"
@@ -214,18 +214,18 @@ def _node_category(desc: str) -> str:
     return "other"
 
 
-def _largest_weak_component(graph: nx.DiGraph) -> nx.DiGraph:
+def largest_weak_component(graph: nx.DiGraph) -> nx.DiGraph:
     """Return a copy containing only the largest weakly connected component."""
     if graph.number_of_nodes() == 0:
-        return _as_digraph(graph.copy())
+        return as_digraph(graph.copy())
     components = list(nx.weakly_connected_components(graph))
     if not components:
-        return _as_digraph(graph.copy())
+        return as_digraph(graph.copy())
     largest = max(components, key=len)
-    return _as_digraph(graph.subgraph(largest).copy())
+    return as_digraph(graph.subgraph(largest).copy())
 
 
-def _drop_external_nodes(graph: nx.DiGraph) -> nx.DiGraph:
+def drop_external_nodes(graph: nx.DiGraph) -> nx.DiGraph:
     """Remove launcher/permission/external-app nodes that stretch paper layouts."""
     keep = []
     for node, data in graph.nodes(data=True):
@@ -233,12 +233,12 @@ def _drop_external_nodes(graph: nx.DiGraph) -> nx.DiGraph:
         if node.startswith("ext_") or "external app" in text:
             continue
         keep.append(node)
-    return _as_digraph(graph.subgraph(keep).copy())
+    return as_digraph(graph.subgraph(keep).copy())
 
 
-def _trim_leaf_rounds(graph: nx.DiGraph, rounds: int) -> nx.DiGraph:
+def trim_leaf_rounds(graph: nx.DiGraph, rounds: int) -> nx.DiGraph:
     """Iteratively remove degree-0/1 leaves from a copy of the graph."""
-    trimmed = _as_digraph(graph.copy())
+    trimmed = as_digraph(graph.copy())
     for _ in range(max(0, rounds)):
         leaves = [
             node
@@ -251,7 +251,7 @@ def _trim_leaf_rounds(graph: nx.DiGraph, rounds: int) -> nx.DiGraph:
     return trimmed
 
 
-def _prepare_paper_graph(
+def prepare_paper_graph(
     graph: nx.DiGraph,
     *,
     keep_disconnected: bool,
@@ -261,16 +261,16 @@ def _prepare_paper_graph(
     """Apply paper-figure filters and report what changed."""
     original_nodes = graph.number_of_nodes()
     original_edges = graph.number_of_edges()
-    filtered = _as_digraph(graph.copy())
+    filtered = as_digraph(graph.copy())
 
     if not keep_external:
-        filtered = _drop_external_nodes(filtered)
+        filtered = drop_external_nodes(filtered)
     if not keep_disconnected:
-        filtered = _largest_weak_component(filtered)
+        filtered = largest_weak_component(filtered)
     if trim_leaves:
-        filtered = _trim_leaf_rounds(filtered, trim_leaves)
+        filtered = trim_leaf_rounds(filtered, trim_leaves)
         if not keep_disconnected:
-            filtered = _largest_weak_component(filtered)
+            filtered = largest_weak_component(filtered)
 
     removed_nodes = original_nodes - filtered.number_of_nodes()
     removed_edges = original_edges - filtered.number_of_edges()
@@ -345,10 +345,10 @@ def plot_paper_graphviz(
 
     for node_id, data in graph.nodes(data=True):
         desc = data.get("page_description", node_id)
-        category = _node_category(desc)
+        category = node_category(desc)
         fill, border = palette[category]
         visits = data.get("visit_count", 0)
-        short_desc = _wrap_label(_shorten_words(desc, style.max_node_words, 38), width=16)
+        short_desc = wrap_label(shorten_words(desc, style.max_node_words, 38), width=16)
         node_attrs = {
             "label": f"{node_id}\\n{short_desc}",
             "fillcolor": fill,
@@ -360,7 +360,7 @@ def plot_paper_graphviz(
     edge_seen: Counter[tuple[str, str]] = Counter()
     for src, tgt, data in graph.edges(data=True):
         label = data.get("label", "")
-        short = _wrap_label(_shorten_words(label, style.max_edge_words, 34), width=14)
+        short = wrap_label(shorten_words(label, style.max_edge_words, 34), width=14)
         visits = data.get("visit_count", 0)
         edge_attrs = {
             "label": f" {short} " if short else "",
@@ -436,7 +436,7 @@ def plot_paper_matplotlib(
         "other": "#4f46e5",
     }
     categories = {
-        node: _node_category(data.get("page_description", node))
+        node: node_category(data.get("page_description", node))
         for node, data in graph.nodes(data=True)
     }
 
@@ -486,7 +486,7 @@ def plot_paper_matplotlib(
         )
 
     node_labels = {
-        node: f"{node}\n{_shorten_words(data.get('page_description', node), style.max_node_words, 34)}"
+        node: f"{node}\n{shorten_words(data.get('page_description', node), style.max_node_words, 34)}"
         for node, data in graph.nodes(data=True)
     }
     nx.draw_networkx_labels(
@@ -506,7 +506,7 @@ def plot_paper_matplotlib(
 
     if style.show_edge_labels:
         edge_labels = {
-            (s, t): _shorten_words(data.get("label", ""), style.max_edge_words, 24)
+            (s, t): shorten_words(data.get("label", ""), style.max_edge_words, 24)
             for s, t, data in graph.edges(data=True)
             if data.get("label") and s != t
         }
@@ -625,7 +625,7 @@ def plot_pyvis(
 
     for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
         desc = data.get("page_description", node_id)
-        short_desc = _shorten_words(desc, style.max_node_words, 40)
+        short_desc = shorten_words(desc, style.max_node_words, 40)
         visits = data.get("visit_count", 0)
         state_keys = data.get("state_keys", [])
         screenshot_uri = data.get("screenshot_uri")
@@ -678,7 +678,7 @@ def plot_pyvis(
         n_actions = data.get("num_actions", 0)
 
         tooltip = f"Visits: {visits}<br>Action sequences: {n_actions}<br>{label}"
-        short_label = _shorten_edge_label(label, style.max_edge_words, 54)
+        short_label = shorten_edge_label(label, style.max_edge_words, 54)
 
         # Parallel edges get different curvatures so they stay distinguishable.
         pair = (min(src, tgt), max(src, tgt))
@@ -909,7 +909,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 
     if args.backend == "paper":
-        graph = _prepare_paper_graph(
+        graph = prepare_paper_graph(
             graph,
             keep_disconnected=args.keep_disconnected,
             keep_external=args.keep_external,

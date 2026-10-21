@@ -73,7 +73,7 @@ OptionType = Literal["done", "self_loop", "neighbor", "free"]
 class Option(TypedDict):
     """One DECIDE menu entry; the keys present depend on ``type``."""
 
-    letter: str
+    number: int
     type: OptionType
     instruction: NotRequired[str]
 
@@ -159,7 +159,7 @@ Pick the best action to make progress on the task.
 
 Think easily and briefly, under 10 sentences if needed. Reply with ONLY a JSON object:
 {{
-  "choice": "<option letter>",
+  "choice": <option number>,
   "instruction": "<refined instruction for the action agent — replace generic \
 terms with specific values from the task, e.g. 'search for London Bridge' \
 instead of 'search for a location'>"
@@ -610,7 +610,7 @@ def edge_effect_hint(edge_data: dict[str, Any], index: int | None = None) -> str
 
 
 def _build_self_loop_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[Option, str]]:
-    """Return (option, menu line) pairs for the self-loop, lettered later by the cap."""
+    """Return (option, menu line) pairs for the self-loop, numbered later by build_options."""
     if not graph.has_edge(node_id, node_id):
         return []
     edge_data = graph[node_id][node_id]
@@ -623,7 +623,7 @@ def _build_self_loop_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[O
             tmpl_text, obs_text = unpack_template(tmpl)
             effect = edge_effect_hint(edge_data)
             option: Option = {
-                "letter": "",
+                "number": 0,
                 "type": "self_loop",
                 "instruction": tmpl_text,
             }
@@ -640,7 +640,7 @@ def _build_self_loop_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[O
                 continue
             effect = edge_effect_hint(edge_data, i)
             option: Option = {
-                "letter": "",
+                "number": 0,
                 "type": "self_loop",
                 "instruction": instr,
             }
@@ -654,9 +654,9 @@ def _build_self_loop_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[O
     return candidates
 
 
-def _build_neighbor_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[int, Option, str]]:
-    """Return (visit_count, option, menu line) per neighbour, lettered later by the cap."""
-    candidates: list[tuple[int, Option, str]] = []
+def _build_neighbor_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[Option, str]]:
+    """Return (option, menu line) per neighbour, numbered later by build_options."""
+    candidates: list[tuple[Option, str]] = []
     for _, raw_neighbor, edge_data in graph.out_edges(node_id, data=True):
         neighbor = str(raw_neighbor)
         if neighbor == node_id:
@@ -678,7 +678,7 @@ def _build_neighbor_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[in
 
         effect = edge_effect_hint(edge_data, 0)
         option: Option = {
-            "letter": "",
+            "number": 0,
             "type": "neighbor",
             "instruction": instr,
         }
@@ -688,78 +688,33 @@ def _build_neighbor_candidates(graph: nx.DiGraph, node_id: str) -> list[tuple[in
         if effect:
             edge_hint += f" | changes: {effect}"
         line = f'Go to "{neighbor_desc}"{edge_hint}'
-        visit_count = as_int(edge_data.get("visit_count")) or 0
-        candidates.append((visit_count, option, line))
+        candidates.append((option, line))
     return candidates
 
 
 def build_options(graph: nx.DiGraph, node_id: str) -> tuple[str, list[Option]]:
     """Build the option list for the DECIDE prompt.
 
-    A-Z gives 26 slots: DONE and FREE are reserved, and the other 24 are split
-    between self-loop instructions and neighbours. Neighbours are the only way
-    to navigate the graph (GraphManager adds one self-loop instruction per
-    distinct self-loop action, e.g. each typed query on a search screen, so
-    self-loop instructions alone can otherwise fill every slot), so when both
-    would overflow the 24 slots, neighbours keep at least half of them
-    (ranked by visit_count, the only usefulness signal) and self-loop
-    instructions take the rest.
+    Options are numbered from 1: DONE first, then every self-loop instruction
+    and every neighbour, then FREE.
     """
-    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    max_middle_options = len(letters) - 2  # reserve DONE and FREE
-
-    self_loop_candidates = _build_self_loop_candidates(graph, node_id)
-    neighbor_candidates = _build_neighbor_candidates(graph, node_id)
-
-    kept_self_loop = self_loop_candidates
-    kept_neighbors = [(opt, line) for _, opt, line in neighbor_candidates]
-    total_middle = len(self_loop_candidates) + len(neighbor_candidates)
-
-    if total_middle > max_middle_options:
-        neighbor_reserve = min(len(neighbor_candidates), max_middle_options // 2)
-        self_loop_budget = min(len(self_loop_candidates), max_middle_options - neighbor_reserve)
-        neighbor_budget = max_middle_options - self_loop_budget
-        kept_self_loop = self_loop_candidates[:self_loop_budget]
-        ranked = sorted(
-            range(len(neighbor_candidates)),
-            key=lambda i: (-neighbor_candidates[i][0], i),
-        )
-        keep_indices = sorted(ranked[:neighbor_budget])
-        kept_neighbors = [
-            (neighbor_candidates[i][1], neighbor_candidates[i][2]) for i in keep_indices
-        ]
-        logger.warning(
-            "[DECIDE] %s: %d candidate actions exceed the %d-letter menu; "
-            "dropped %d least-useful self-loop instruction(s)/neighbour(s), "
-            "keeping neighbours to at least half the menu.",
-            node_id,
-            total_middle,
-            max_middle_options,
-            total_middle - len(kept_self_loop) - len(kept_neighbors),
-        )
-
-    options: list[Option] = []
+    entries: list[tuple[Option, str]] = [
+        (
+            {"number": 0, "type": "done"},
+            "DONE — the task is fully complete, answer is in memory",
+        ),
+        *_build_self_loop_candidates(graph, node_id),
+        *_build_neighbor_candidates(graph, node_id),
+        (
+            {"number": 0, "type": "free"},
+            "FREE — do something not listed above (describe it)",
+        ),
+    ]
     lines: list[str] = []
-    idx = 0
-
-    letter = letters[idx]
-    options.append({"letter": letter, "type": "done"})
-    lines.append(f"{letter}) DONE — the task is fully complete, answer is in memory")
-    idx += 1
-
-    for option, line in (*kept_self_loop, *kept_neighbors):
-        letter = letters[idx]
-        option["letter"] = letter
-        options.append(option)
-        lines.append(f"{letter}) {line}")
-        idx += 1
-
-    letter = letters[idx]
-    options.append({"letter": letter, "type": "free"})
-    lines.append(f"{letter}) FREE — do something not listed above (describe it)")
-    idx += 1
-
-    return "\n".join(lines), options
+    for number, (option, line) in enumerate(entries, start=1):
+        option["number"] = number
+        lines.append(f"{number}) {line}")
+    return "\n".join(lines), [option for option, _ in entries]
 
 
 def make_response(message: str, aitk_action: dict[str, Any]) -> str:
@@ -1178,16 +1133,17 @@ class UIKobeV2Translator(BaseTranslator):
                 "reason": "DECIDE response could not be parsed",
             }
 
-        choice_letter = as_str(result.get("choice", ""), "").upper()
+        raw_choice = result.get("choice")
+        choice = as_int(raw_choice)
         instruction = as_str(result.get("instruction", ""), "")
         logger.info(
-            "[DECIDE] parsed choice=%s instruction=%r",
-            choice_letter,
+            "[DECIDE] parsed choice=%r instruction=%r",
+            raw_choice,
             instruction,
         )
 
         for opt in options_list:
-            if opt["letter"] == choice_letter:
+            if opt["number"] == choice:
                 if opt["type"] == "free":
                     # An empty instruction is what makes _choose_action re-plan a FREE pick;
                     # the task-text fallback would hide that. Graph-built options may be
@@ -1200,11 +1156,11 @@ class UIKobeV2Translator(BaseTranslator):
                     "instruction": resolved_instruction,
                 }
 
-        logger.warning("DECIDE: unrecognized choice '%s'", choice_letter)
+        logger.warning("DECIDE: unrecognized choice %r", raw_choice)
         return {
             "type": "free",
             "instruction": instruction,
-            "reason": f"DECIDE returned unrecognized choice {choice_letter!r}",
+            "reason": f"DECIDE returned unrecognized choice {raw_choice!r}",
         }
 
     def plan_free_action(
