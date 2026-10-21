@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 NORMALIZE_EVERY_N_VISITS = 10
+_FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
@@ -880,7 +881,7 @@ class GraphManager:
             instr = recorded[0]
             # Heuristic: if no quoted values, numbers, or proper nouns, unlikely to be parameterizable
             has_variable = any(c.isdigit() for c in instr) or '"' in instr or "'" in instr
-            if not has_variable and len(instr.split()) <= 6:
+            if not has_variable and len(instr.split()) <= _FIXED_INSTRUCTION_MAX_WORDS:
                 edge_data["instruction_templates"] = []
                 return False
 

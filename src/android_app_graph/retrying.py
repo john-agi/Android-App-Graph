@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Upstream UI-KOBE's V2_PARSE_RETRIES = 1: one more attempt after the first.
 UNUSABLE_OUTPUT_ATTEMPTS = 2
+_SUCCESS_STATUS_CODES = range(200, 300)
 
 
 class UnusableOutputError(ValueError):
@@ -24,7 +25,7 @@ class UnusableOutputError(ValueError):
 
 def _is_unusable(exc: Exception) -> bool:
     if isinstance(exc, ResponseValidationError):
-        return 200 <= exc.status_code < 300
+        return exc.status_code in _SUCCESS_STATUS_CODES
     return isinstance(exc, UnusableOutputError)
 
 

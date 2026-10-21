@@ -535,6 +535,9 @@ def plot_paper_matplotlib(
     logger.info("Paper graph saved to %s", output_path)
 
 
+_TOOLTIP_UNEXPLORED_LIMIT = 10
+
+
 def plot_pyvis(
     graph: nx.DiGraph,
     output_path: str,
@@ -628,9 +631,11 @@ def plot_pyvis(
         unexplored = [e for e in elements if not e.get("explored", False)]
         if unexplored:
             tooltip += "<br><b>Unexplored:</b> "
-            tooltip += ", ".join(e.get("description", "?") for e in unexplored[:10])
-            if len(unexplored) > 10:
-                tooltip += f" (+{len(unexplored) - 10} more)"
+            tooltip += ", ".join(
+                e.get("description", "?") for e in unexplored[:_TOOLTIP_UNEXPLORED_LIMIT]
+            )
+            if len(unexplored) > _TOOLTIP_UNEXPLORED_LIMIT:
+                tooltip += f" (+{len(unexplored) - _TOOLTIP_UNEXPLORED_LIMIT} more)"
         if screenshot_uri:
             tooltip += (
                 f'<br><br><img src="{screenshot_uri}" '
@@ -695,6 +700,9 @@ def plot_pyvis(
     logger.info("Interactive graph saved to %s", output_path)
 
 
+_GRAPHVIZ_EDGE_LABEL_CHARS = 35
+
+
 def plot_graphviz(graph: nx.DiGraph, output_path: str) -> None:
     """Create a static graph image using graphviz."""
     agraph = nx.nx_agraph.to_agraph(graph)
@@ -716,7 +724,11 @@ def plot_graphviz(graph: nx.DiGraph, output_path: str) -> None:
     for edge in agraph.edges():
         data = graph.edges[edge[0], edge[1]]
         label = data.get("label", "")
-        short = label[:35] + "..." if len(label) > 35 else label
+        short = (
+            label[:_GRAPHVIZ_EDGE_LABEL_CHARS] + "..."
+            if len(label) > _GRAPHVIZ_EDGE_LABEL_CHARS
+            else label
+        )
         edge.attr["label"] = f"  {short}  "
 
     agraph.draw(output_path, prog="dot")

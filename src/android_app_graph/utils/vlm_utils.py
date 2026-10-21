@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_PIXELS = 1_000_000
+_COORDINATE_AXES = 2
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -1631,7 +1632,7 @@ def _tool_call_to_aitk(
     action = args.get("action", "")
 
     def _scale(coord: object) -> tuple[int, int]:
-        if not isinstance(coord, list) or len(coord) != 2:
+        if not isinstance(coord, list) or len(coord) != _COORDINATE_AXES:
             msg = "Action coordinates must be two finite numbers"
             raise ValueError(msg)
         values = as_float_list(coord)

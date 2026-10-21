@@ -442,6 +442,9 @@ def parse_model_choice(raw: str, valid_letters: str) -> str | None:
     return last_answer_signal(text, valid_letters)
 
 
+_MAX_ONE_STEP_INSTRUCTION_CHARS = 500
+
+
 def parse_one_step_instruction(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
@@ -461,7 +464,7 @@ def parse_one_step_instruction(raw: str) -> str:
     if final_matches:
         text = text[final_matches[-1].start(1) :].strip()
 
-    if len(text) > 500:
+    if len(text) > _MAX_ONE_STEP_INSTRUCTION_CHARS:
         return ""
     generic_phrases = (
         "take one immediate visible ui action",
