@@ -13,7 +13,8 @@ order, so two dumps are compared by window type, layer and bounds.
 
 The elements a user can act on are read from the windows the user can act on, and
 each has a ``Locator`` that finds it again in another tree of the same screen. A
-tap's ``hit_test`` says which element, or which other window, the tap lands on.
+tap's ``hit_test`` says which element, or which other window, the tap lands on, and
+``resolve_anchor`` where that element is in another tree.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ _CANVAS_CLASSES = frozenset(
 )
 _MOST_OF_WINDOW = 0.5
 _LABEL_LIMIT = 60
+_BOUNDS_COORDINATES = 4
 
 
 class UnusableDumpError(ValueError):
@@ -211,8 +213,26 @@ class Anchor:
             "bounds": [bounds.left, bounds.top, bounds.right, bounds.bottom],
         }
 
+    @classmethod
+    def from_record(cls, record: object) -> Anchor | None:
+        """Return the anchor ``as_record`` wrote, or ``None`` for anything else."""
+        if not isinstance(record, Mapping):
+            return None
+        found = Locator.from_record(record.get("locator"))
+        bounds = record.get("bounds")
+        if found is None or not isinstance(bounds, list) or len(bounds) != _BOUNDS_COORDINATES:
+            return None
+        coordinates = [
+            value for value in bounds if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        if len(coordinates) != _BOUNDS_COORDINATES:
+            return None
+        left, top, right, bottom = coordinates
+        return cls(found, Bounds(left, top, right, bottom))
+
 
 type HitKind = Literal["element", "outside_dialog", "keyboard", "system", "nothing"]
+type AnchorMiss = Literal["no_match", "ambiguous", "covered"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +429,41 @@ def hit_test(tree: UiTree, point: tuple[int, int], screen: Bounds) -> Hit:
         element = _element_node(tree, tapped)
         return Hit("element", Anchor(locator(tree, element), tree.nodes[element].bounds), element)
     return Hit("nothing" if active is None else "outside_dialog")
+
+
+def resolve_anchor(
+    tree: UiTree, anchor: Anchor, package: str, screen: Bounds
+) -> tuple[int, int] | AnchorMiss:
+    """Return where a tap on ``anchor`` goes in ``tree``, a screen of ``package`` in the
+    pixels of ``screen``: the centre of the current bounds of the one element there that
+    the anchor's locator finds, or why there is none.
+
+    The element is a visible, enabled node of the ``acting_windows`` that the locator
+    finds. When some of those nodes take taps, only they count: in a Compose screen the
+    layout views around a button take their label from its text and share its locator.
+    ``no_match`` is no such node and ``ambiguous`` more than one. ``covered`` is a node
+    that a tap at its centre, as ``hit_test`` dispatches it, does not reach, because a
+    higher window, such as a dialog or the keyboard, or another element lies over it.
+    """
+    windows = set(acting_windows(tree, package))
+    found = [
+        index
+        for index in find_nodes(tree, anchor.locator)
+        if tree.nodes[index].window in windows
+        and tree.nodes[index].enabled
+        and _area(tree.nodes[index].bounds)
+    ]
+    candidates = [index for index in found if _tappable(tree, index)] or found
+    if not candidates:
+        return "no_match"
+    if len(candidates) > 1:
+        return "ambiguous"
+    (index,) = candidates
+    bounds = tree.nodes[index].bounds
+    centre = ((bounds.left + bounds.right) // 2, (bounds.top + bounds.bottom) // 2)
+    if hit_test(tree, centre, screen).node != index:
+        return "covered"
+    return centre
 
 
 def part_of(tree: UiTree, index: int, wanted: Locator) -> bool:

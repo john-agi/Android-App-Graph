@@ -32,6 +32,7 @@ from android_app_graph.ui_tree import (
     parse_tree,
     part_of,
     region,
+    resolve_anchor,
     same_screen,
     thin_tree_reason,
     xml_document,
@@ -1108,3 +1109,167 @@ def test_a_button_is_not_part_of_the_layout_that_shares_another_button_s_locator
     assert len(find_nodes(tree, disable)) > 1
     assert not part_of(tree, cancel_node, disable)
     assert part_of(tree, cancel_node, cancel)
+
+
+def _anchor_of(tree: UiTree, package: str, label: str, recorded: Bounds) -> Anchor:
+    """The anchor a tap recorded on the element labelled ``label``, with the bounds the
+    element had then."""
+    return Anchor(_element_at(tree, package, label).locator, recorded)
+
+
+def test_an_anchor_that_finds_one_element_resolves_to_its_current_centre() -> None:
+    """The row was recorded higher up the list; the tap goes where the row is now."""
+    tree = parse_tree(_dump("windows_plain_list"))
+    recorded = Bounds(0, 415, 1344, 633)
+    anchor = _anchor_of(tree, "com.android.settings", "Network & internet", recorded)
+
+    point = resolve_anchor(tree, anchor, "com.android.settings", _FIXTURE_SCREEN)
+
+    assert point == (672, 808)
+
+
+def test_the_layout_views_that_share_a_compose_button_s_locator_leave_it_unique() -> None:
+    tree = parse_tree(_dump("windows_dialog_compose"))
+    anchor = _anchor_of(tree, "com.android.settings", "Disable app", Bounds(0, 0, 10, 10))
+
+    assert len(find_nodes(tree, anchor.locator)) > 1
+    assert resolve_anchor(tree, anchor, "com.android.settings", _FIXTURE_SCREEN) == (985, 1721)
+
+
+def test_an_anchor_without_a_tappable_match_resolves_to_its_one_match() -> None:
+    """A tap on a title that takes no taps anchors the title; its centre reaches it too."""
+    title = _node({"class": "android.widget.TextView", "text": "Clock", "bounds": "[0,0][400,100]"})
+    tree = _screen(_node({}, title))
+
+    found = resolve_anchor(tree, Anchor(locator(tree, 1), Bounds(0, 0, 1, 1)), _APP, _SCREEN)
+
+    assert found == (200, 50)
+
+
+def test_an_anchor_whose_element_is_gone_finds_no_match() -> None:
+    tree = parse_tree(_dump("windows_plain_list"))
+    apps = _element_at(tree, "com.android.settings", "Apps").locator
+    gone = Anchor(dataclasses.replace(apps, label="Display"), Bounds(0, 1189, 1344, 1407))
+
+    assert resolve_anchor(tree, gone, "com.android.settings", _FIXTURE_SCREEN) == "no_match"
+
+
+def test_two_elements_with_the_anchor_s_locator_are_ambiguous() -> None:
+    tree = _screen(_node({}, _row("Wi-Fi", {"bounds": "[0,0][1000,200]"}), _row("Wi-Fi")))
+
+    found = resolve_anchor(tree, Anchor(locator(tree, 1), Bounds(0, 0, 1000, 200)), _APP, _SCREEN)
+
+    assert found == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        pytest.param({"enabled": "false", "bounds": "[0,500][1000,700]"}, id="disabled"),
+        pytest.param({"bounds": "[0,500][1000,500]"}, id="invisible"),
+    ],
+)
+def test_a_disabled_or_invisible_node_with_the_anchor_s_locator_does_not_count(
+    attributes: dict[str, str],
+) -> None:
+    rows = (_row("Wi-Fi", {"bounds": "[0,0][1000,200]"}), _row("Wi-Fi", attributes))
+    tree = _screen(_node({}, *rows))
+
+    found = resolve_anchor(tree, Anchor(locator(tree, 1), Bounds(0, 0, 1, 1)), _APP, _SCREEN)
+
+    assert found == (500, 100)
+
+
+def test_an_anchor_finds_nothing_in_the_keyboard_or_a_system_window() -> None:
+    """The ``q`` key and the status bar's clock are on the screen, but not in the app."""
+    tree = parse_tree(_dump("windows_keyboard"))
+    key = next(i for i, node in enumerate(tree.nodes) if node.content_description == "q")
+    clock = next(i for i, node in enumerate(tree.nodes) if node.resource_id.endswith("/clock"))
+
+    for index in (key, clock):
+        anchor = Anchor(locator(tree, index), tree.nodes[index].bounds)
+        assert resolve_anchor(tree, anchor, "com.android.settings", _FIXTURE_SCREEN) == "no_match"
+
+
+def test_an_element_under_the_keyboard_is_covered() -> None:
+    save = _node({"clickable": "true", "text": "Save", "bounds": "[0,1800][1000,1900]"})
+    keyboard = _window(
+        _node({"package": "com.google.android.inputmethod.latin"}),
+        kind="TYPE_INPUT_METHOD",
+        layer=1,
+        active=False,
+        bounds="[0,1400][1000,2000]",
+    )
+    tree = parse_tree(
+        f'<displays><display id="0">{keyboard}{_window(_node({}, save))}</display></displays>'
+    )
+    (button,) = [index for index, node in enumerate(tree.nodes) if node.text == "Save"]
+
+    found = resolve_anchor(tree, Anchor(locator(tree, button), Bounds(0, 0, 1, 1)), _APP, _SCREEN)
+
+    assert found == "covered"
+
+
+def test_an_element_whose_centre_another_element_is_drawn_over_is_covered() -> None:
+    """A floating button drawn last lies over the middle of the row."""
+    add = _node(
+        {
+            "class": "android.widget.ImageButton",
+            "clickable": "true",
+            "content-desc": "Add",
+            "bounds": "[400,50][600,150]",
+            "drawing-order": "2",
+        }
+    )
+    tree = _screen(
+        _node({}, _row("Wi-Fi", {"bounds": "[0,0][1000,200]", "drawing-order": "1"}), add)
+    )
+
+    found = resolve_anchor(tree, Anchor(locator(tree, 1), Bounds(0, 0, 1000, 200)), _APP, _SCREEN)
+
+    assert found == "covered"
+
+
+def test_a_container_whose_centre_is_on_one_of_its_elements_is_covered() -> None:
+    """A tap between two rows anchors the list; a tap at the list's centre would open a row."""
+    tree = _screen(
+        _node(
+            {
+                "class": "androidx.recyclerview.widget.RecyclerView",
+                "resource-id": f"{_APP}:id/list",
+            },
+            _row("Wi-Fi", {"bounds": "[0,900][1000,1100]"}),
+        )
+    )
+
+    found = resolve_anchor(tree, Anchor(locator(tree, 0), Bounds(0, 0, 1000, 2000)), _APP, _SCREEN)
+
+    assert found == "covered"
+
+
+def test_an_anchor_reads_back_what_it_writes() -> None:
+    written = Anchor(
+        Locator("a:id/row", "android.widget.LinearLayout", "Wi-Fi", ("a:id/list",)),
+        Bounds(0, 699, 1344, 917),
+    )
+
+    assert Anchor.from_record(json.loads(json.dumps(written.as_record()))) == written
+
+
+_LOCATOR_RECORD = Locator("", "android.view.View", "Wi-Fi", ()).as_record()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param(None, id="none"),
+        pytest.param([], id="not an object"),
+        pytest.param({"locator": None, "bounds": [0, 0, 1, 1]}, id="no locator"),
+        pytest.param({"locator": _LOCATOR_RECORD}, id="no bounds"),
+        pytest.param({"locator": _LOCATOR_RECORD, "bounds": [0, 0, 1]}, id="three coordinates"),
+        pytest.param({"locator": _LOCATOR_RECORD, "bounds": [0, 0, 1, "1"]}, id="a string"),
+        pytest.param({"locator": _LOCATOR_RECORD, "bounds": [0, 0, 1, True]}, id="a flag"),
+    ],
+)
+def test_a_malformed_anchor_record_reads_as_none(record: object) -> None:
+    assert Anchor.from_record(record) is None
