@@ -70,7 +70,8 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - Annotate everything you touch; no `Any` to silence the checker. Narrow
   untyped payloads with the helpers in `payloads.py`, not with `cast`.
 - Take the `DeviceController` and `AvdManager` Protocols from `device.py`,
-  never the concrete aitk classes, so a fake device can stand in for tests.
+  never the concrete `AdbController` or `EmulatorManager`, so a fake device
+  can stand in for tests.
 - Delete dead code instead of commenting it out.
 - A pull request that edits `depends_on` in `tach.toml` states the
   architectural justification in its body.
@@ -104,8 +105,6 @@ suppression; Ruff's ARG rules and Vulture both ignore them.
 - `required-version` is bumped by hand in its own pull request, together with
   the `version:` of every setup-uv step under `.github/workflows/`; those
   checkout, setup-uv and Python steps are byte-for-byte copies of `ci.yml`.
-- `aitk` is pinned to a commit in `[tool.uv.sources]`; there is no sibling
-  checkout.
 
 ## Branches and pull requests
 
