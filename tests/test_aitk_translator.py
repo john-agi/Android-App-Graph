@@ -1204,7 +1204,7 @@ def test_reset_task_state_clears_the_previous_task(
     translator._step_count = 7
     translator._memory.add_action("tapped Search")
 
-    translator._reset_task_state()
+    translator.reset_task_state()
 
     assert translator._app_opened is False
     assert translator._current_graph is None
@@ -1219,11 +1219,11 @@ def test_reset_task_state_keeps_the_screen_size_aitk_reported(
 
     It only ever changes when AITK calls to_device with the real size, never on
     a new task, so a task reset must not silently reset it back to the 1080x1920
-    default while _call_action_agent keeps using it for grounding.
+    default while call_action_agent keeps using it for grounding.
     """
     translator.to_device(json.dumps({"aitk_action": {"action": "wait", "time": 1}}), 1440, 3120)
 
-    translator._reset_task_state()
+    translator.reset_task_state()
 
     assert (translator._screen_w, translator._screen_h) == (1440, 3120)
 
@@ -1517,7 +1517,7 @@ def test_record_info_stores_what_the_model_read_as_written(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, '{"information": "The search field shows \\"milk\\""}')
-    translator._record_info("buy milk", "screenshot")
+    translator.record_info("buy milk", "screenshot")
     assert translator._memory.info == ['The search field shows "milk"']
     assert _NO_INFORMATION in completions.prompt_text()
 
@@ -1528,7 +1528,7 @@ def test_record_info_stores_a_fact_that_starts_with_the_word_nothing(
     """RECORD keeps a fact that starts with the word "nothing", such as the answer to a
     task like "Do I have anything on Friday?"."""
     use_model(translator, '{"information": "Nothing is scheduled on Friday"}')
-    translator._record_info("Do I have anything on Friday?", "screenshot")
+    translator.record_info("Do I have anything on Friday?", "screenshot")
     assert translator._memory.info == ["Nothing is scheduled on Friday"]
 
 
@@ -1536,7 +1536,7 @@ def test_record_info_stores_no_information_in_a_single_call(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, _NO_INFORMATION, '{"information": "unread"}')
-    translator._record_info("buy shoes", "screenshot")
+    translator.record_info("buy shoes", "screenshot")
     assert translator._memory.info == []
     assert len(completions.calls) == 1
 
@@ -1548,7 +1548,7 @@ def test_record_info_raises_on_an_unreadable_reply_without_asking_again(
     translator._memory.add_info("The total is 9 EUR")
     completions = use_model(translator, raw, '{"information": "unread"}')
     with pytest.raises(aitk_translator.RecordReplyError, match=r"^\[RECORD\] "):
-        translator._record_info("buy shoes", "screenshot")
+        translator.record_info("buy shoes", "screenshot")
     assert translator._memory.info == ["The total is 9 EUR"]
     assert len(completions.calls) == 1
 
@@ -1567,7 +1567,7 @@ def test_record_info_raises_on_a_reply_cut_off_at_its_token_limit(
     with pytest.raises(
         aitk_translator.RecordReplyError, match=r"^\[RECORD\] the reply hit its token limit$"
     ):
-        translator._record_info("buy shoes", "screenshot")
+        translator.record_info("buy shoes", "screenshot")
     assert translator._memory.info == []
     assert len(router_requests) == 1
 
@@ -1576,7 +1576,7 @@ def test_generate_answer_returns_the_first_non_empty_reply(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, "  ", "9 EUR")
-    assert translator._generate_answer("buy shoes") == "9 EUR"
+    assert translator.generate_answer("buy shoes") == "9 EUR"
     assert len(completions.calls) == 2
 
 
@@ -1584,14 +1584,14 @@ def test_generate_answer_gives_up_after_the_retry(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, "", "")
-    assert translator._generate_answer("buy shoes") == ""
+    assert translator.generate_answer("buy shoes") == ""
 
 
 def test_plan_free_action_uses_the_planned_instruction(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, "Tap the cart icon")
-    instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", ["earlier"])
+    instruction = translator.plan_free_action("buy shoes", "screenshot", "no graph", ["earlier"])
     assert instruction == "Tap the cart icon"
 
 
@@ -1599,7 +1599,7 @@ def test_plan_free_action_falls_back_when_the_planner_is_generic(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, "Take the best action", "Take the best action")
-    instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+    instruction = translator.plan_free_action("buy shoes", "screenshot", "no graph", [])
     assert instruction == "Wait briefly for the current screen to finish loading."
 
 
@@ -1612,7 +1612,7 @@ def test_a_truncated_v2_reply_is_not_asked_again_and_takes_the_fallback(
 ) -> None:
     use_model(translator)
     router_responses.append(chat_response(content="Tap the", finish_reason="length"))
-    instruction = translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+    instruction = translator.plan_free_action("buy shoes", "screenshot", "no graph", [])
     assert instruction == "Wait briefly for the current screen to finish loading."
     assert len(router_requests) == 1
 
@@ -1635,7 +1635,7 @@ def test_a_failed_v2_generation_is_asked_again_once_then_raises(
     )
 
     def plan() -> str:
-        return translator._plan_free_action("buy shoes", "screenshot", "no graph", [])
+        return translator.plan_free_action("buy shoes", "screenshot", "no graph", [])
 
     if recover:
         assert plan() == "Tap the cart icon"
@@ -1649,7 +1649,7 @@ def test_decide_returns_the_chosen_option(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, '{"choice": "c", "instruction": "tap the shoes result"}')
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
 
     assert decision["type"] == "neighbor"
     assert decision["instruction"] == "tap the shoes result"
@@ -1660,7 +1660,7 @@ def test_decide_keeps_the_graph_instruction_when_the_model_omits_one(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, '{"choice": "C"}')
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["instruction"] == "tap the first result"
 
 
@@ -1670,7 +1670,7 @@ def test_decide_falls_back_to_the_task_for_an_option_without_an_instruction(
     """DONE's instruction is never read by _step, so falling back to the whole task
     here is harmless; the type-specific fallback still applies to it."""
     use_model(translator, '{"choice": "A"}')
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "done", "instruction": "buy shoes"}
 
 
@@ -1681,11 +1681,11 @@ def test_decide_leaves_a_free_pick_without_an_instruction_empty(
 
     FREE never carries a built-in instruction, and _step's
     ``decision_type == "free" and not instruction`` branch is the only path that
-    re-plans through _plan_free_action; it is unreachable if this falls back to
+    re-plans through plan_free_action; it is unreachable if this falls back to
     the task text instead.
     """
     use_model(translator, '{"choice": "D"}')
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": ""}
 
 
@@ -1693,7 +1693,7 @@ def test_decide_uses_the_models_instruction_for_a_free_pick(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, '{"choice": "D", "instruction": "Tap the cart icon"}')
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {"type": "free", "instruction": "Tap the cart icon"}
 
 
@@ -1701,7 +1701,7 @@ def test_decide_reports_an_unparseable_reply(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, "no json", "still no json")
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision == {
         "type": "free",
         "instruction": "",
@@ -1717,7 +1717,7 @@ def test_decide_treats_an_empty_json_object_as_parsed_not_failed(
     unusable) parse, so it must reach the "unrecognized choice" path and not be
     retried as a parse failure."""
     completions = use_model(translator, "{}")
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["reason"] == "DECIDE returned unrecognized choice ''"
     assert len(completions.calls) == 1
@@ -1727,7 +1727,7 @@ def test_decide_reports_an_unknown_choice(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(translator, '{"choice": "Z", "instruction": "tap something"}')
-    decision = translator._decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
+    decision = translator.decide(translator._graphs["demo"], "buy shoes", "home", "screenshot")
     assert decision["type"] == "free"
     assert decision["instruction"] == "tap something"
     assert decision["reason"] == "DECIDE returned unrecognized choice 'Z'"
@@ -1737,7 +1737,7 @@ def test_decide_omits_state_parameters_for_a_node_without_a_schema(
     use_model: _UseModel, translator: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(translator, '{"choice": "A"}')
-    translator._decide(translator._graphs["demo"], "buy shoes", "results", "screenshot")
+    translator.decide(translator._graphs["demo"], "buy shoes", "results", "screenshot")
     assert "State parameters" not in completions.prompt_text()
 
 
@@ -1780,7 +1780,7 @@ def identifiable(
 
 
 def test_identify_node_without_a_graph(translator: aitk_translator.UIKobeV2Translator) -> None:
-    assert translator._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
+    assert translator.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_picks_the_model_choice(
@@ -1788,7 +1788,7 @@ def test_identify_node_picks_the_model_choice(
 ) -> None:
     use_model(identifiable, "A")
     assert (
-        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") == "home"
+        identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") == "home"
     )
 
 
@@ -1800,7 +1800,7 @@ def test_identify_node_only_asks_the_action_model_to_pick_a_candidate(
     completions = use_model(identifiable, "A")
 
     assert (
-        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") == "home"
+        identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") == "home"
     )
 
     assert len(completions.calls) == 1
@@ -1832,7 +1832,7 @@ def test_identify_node_skips_a_stale_dimension_embedding_and_logs_once(
     use_model(identifiable, "A")
 
     with caplog.at_level("WARNING"):
-        node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+        node_id = identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
     assert node_id == "home"
     stale_warnings = [
@@ -1847,14 +1847,14 @@ def test_identify_node_respects_a_rejection(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     use_model(identifiable, "none")
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
+    assert identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_retries_an_unparseable_pick(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(identifiable, "hmm", "B")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+    node_id = identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
     assert node_id == "results"
     assert len(completions.calls) == 2
 
@@ -1864,7 +1864,7 @@ def test_identify_node_retries_a_multi_letter_reply_instead_of_guessing(
 ) -> None:
     """A "BC"-shaped reply must not be silently mapped to a candidate by substring luck."""
     completions = use_model(identifiable, "BC", "B")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+    node_id = identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
     assert node_id == "results"
     assert len(completions.calls) == 2
 
@@ -1880,7 +1880,7 @@ def test_identify_node_retry_appends_the_parse_hint_and_recovers(
     rather than guess, so the second attempt (still "A") is what recovers it.
     """
     completions = use_model(identifiable, "A login screen is the best match", "A")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+    node_id = identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
     assert node_id == "home"
     assert len(completions.calls) == 2
@@ -1894,7 +1894,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
     use_model: _UseModel, identifiable: aitk_translator.UIKobeV2Translator
 ) -> None:
     completions = use_model(identifiable, "A")
-    node_id = identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+    node_id = identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
     assert node_id == "home"
     assert len(completions.calls) == 1
@@ -1905,7 +1905,7 @@ def test_identify_node_succeeds_on_the_first_attempt_without_a_hint(
 def test_identify_node_without_candidates_in_the_current_package(
     identifiable: aitk_translator.UIKobeV2Translator,
 ) -> None:
-    assert identifiable._identify_node("org.other.thing/.Main", "shot", "org.other.thing") is None
+    assert identifiable.identify_node("org.other.thing/.Main", "shot", "org.other.thing") is None
 
 
 def test_identify_node_without_cached_embeddings(
@@ -1914,7 +1914,7 @@ def test_identify_node_without_cached_embeddings(
     graph = identifiable._graphs["demo"]
     for node in graph.nodes:
         del graph.nodes[node]["image_embedding"]
-    assert identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
+    assert identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
 
 
 def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
@@ -1958,7 +1958,7 @@ def test_identify_node_and_build_options_tolerate_a_graph_with_null_json_fields(
     assert [opt["type"] for opt in options] == ["done", "free"]
 
     use_model(translator, "A")
-    assert translator._identify_node("", "shot", "com.demo.app") == "home"
+    assert translator.identify_node("", "shot", "com.demo.app") == "home"
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1970,7 +1970,7 @@ def test_identify_node_propagates_an_embedding_failure(
 
     monkeypatch.setattr(embedding_cache, "get_image_embedding", _always_fails)
     with pytest.raises(RuntimeError, match="embedding down"):
-        identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
+        identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
 
 
 def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
@@ -1988,7 +1988,7 @@ def test_call_action_agent_reports_the_keyboard_and_splits_the_history(
     monkeypatch.setattr(aitk_translator.device, "soft_keyboard_hint", lambda: " (keyboard up)")
     monkeypatch.setattr(aitk_translator, "predict_next_action", _fake_predict)
 
-    action, observation, entry = translator._call_action_agent(
+    action, observation, entry = translator.call_action_agent(
         "type shoes", ["earlier"], "shot", overall_task="buy shoes"
     )
     assert action == {"action": "tap", "x": 1, "y": 2}
@@ -2008,7 +2008,7 @@ def test_call_action_agent_without_a_keyboard_hint(
         lambda *_a, **_k: ({"action": "back"}, "went back"),
     )
 
-    action, observation, entry = translator._call_action_agent("go back", [], "shot")
+    action, observation, entry = translator.call_action_agent("go back", [], "shot")
     assert action == {"action": "back"}
     assert observation == ""
     assert entry == "went back"
@@ -2180,7 +2180,7 @@ def test_step_replans_when_decide_produces_no_instruction(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
     """A matched node whose DECIDE reply never parses must still re-plan through
-    _plan_free_action rather than executing the action agent on an empty instruction."""
+    plan_free_action rather than executing the action agent on an empty instruction."""
     use_model(
         stepping,
         "A",  # IDENTIFY
@@ -2199,7 +2199,7 @@ def test_step_replans_when_decide_produces_no_instruction(
 def test_step_replans_when_a_free_pick_has_no_instruction(
     use_model: _UseModel, stepping: aitk_translator.UIKobeV2Translator
 ) -> None:
-    """A FREE pick without an instruction re-plans through _plan_free_action.
+    """A FREE pick without an instruction re-plans through plan_free_action.
 
     The alternative is sending the whole task text as one instruction and
     recording it as the completed action.
@@ -2460,8 +2460,7 @@ def test_identify_node_no_candidates_diagnostic_counts_stale_vectors_too(
 
     with caplog.at_level("WARNING"):
         assert (
-            identifiable._identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app")
-            is None
+            identifiable.identify_node("com.demo.app/.HomeActivity", "shot", "com.demo.app") is None
         )
 
     expected = (
@@ -2557,9 +2556,9 @@ def test_v2_decisions_use_the_action_model_and_never_read_page_detail_or_instruc
     router_responses.extend(
         [chat_response(content=_NO_INFORMATION), chat_response(content="Tap Search")]
     )
-    translator._record_info("find shoes", png_screenshot)
+    translator.record_info("find shoes", png_screenshot)
     assert (
-        translator._plan_free_action("find shoes", png_screenshot, "missing graph path", [])
+        translator.plan_free_action("find shoes", png_screenshot, "missing graph path", [])
         == "Tap Search"
     )
     bodies = [as_str_dict(json.loads(request.content)) for request in router_requests]

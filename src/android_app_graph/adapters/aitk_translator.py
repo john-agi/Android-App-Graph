@@ -76,7 +76,7 @@ class Option(TypedDict):
 
 
 class Decision(TypedDict):
-    """The outcome of ``_decide``, read by ``_step`` for ``type`` and ``instruction``;
+    """The outcome of ``decide``, read by ``_step`` for ``type`` and ``instruction``;
     a "free" fallback additionally carries ``reason``."""
 
     type: OptionType
@@ -833,9 +833,9 @@ class UIKobeV2Translator(BaseTranslator):
         # A device property: only to_device updates it, and a task reset must not.
         self._screen_w = 1080
         self._screen_h = 1920
-        self._reset_task_state()
+        self.reset_task_state()
 
-    def _reset_task_state(self) -> None:
+    def reset_task_state(self) -> None:
         self._current_graph: nx.DiGraph | None = None
         self._app_name: str = ""
         self._app_opened = False
@@ -985,7 +985,7 @@ class UIKobeV2Translator(BaseTranslator):
         )
         return None
 
-    def _identify_node(self, activity: str, screenshot: str, package: str) -> str | None:
+    def identify_node(self, activity: str, screenshot: str, package: str) -> str | None:
         """Match the current screen to a graph node, or return ``None`` when none matches.
 
         1. Embed the screenshot and score it against the cached screenshot embeddings
@@ -1096,7 +1096,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[IDENTIFY] identified node=%s", chosen_node)
         return chosen_node
 
-    def _record_info(self, task: str, screenshot: str) -> None:
+    def record_info(self, task: str, screenshot: str) -> None:
         """Store the task-relevant fact the current screen shows, if it shows one.
 
         Raises ``RecordReplyError`` for a reply it cannot read or one cut off at
@@ -1117,7 +1117,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[RECORD] parsed=%r", info)
         self._memory.add_info(info)
 
-    def _decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> Decision:
+    def decide(self, graph: nx.DiGraph, task: str, node_id: str, screenshot: str) -> Decision:
         """Ask the model to pick the next action.
 
         Returns the chosen option's type together with its resolved
@@ -1185,7 +1185,7 @@ class UIKobeV2Translator(BaseTranslator):
             "reason": f"DECIDE returned unrecognized choice {choice_letter!r}",
         }
 
-    def _plan_free_action(
+    def plan_free_action(
         self,
         task: str,
         screenshot: str,
@@ -1215,7 +1215,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.warning("[FREE] planner failed; using conservative concrete fallback")
         return "Wait briefly for the current screen to finish loading."
 
-    def _call_action_agent(
+    def call_action_agent(
         self,
         task: str,
         action_history: list[str],
@@ -1237,7 +1237,7 @@ class UIKobeV2Translator(BaseTranslator):
         observation = history_entry.split(" | ")[0] if " | " in history_entry else ""
         return aitk_action, observation, history_entry
 
-    def _generate_answer(self, task: str) -> str:
+    def generate_answer(self, task: str) -> str:
         prompt = DONE_PROMPT.format(
             task=task,
             memory=self._memory.format(),
@@ -1272,15 +1272,15 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info("[LOOP] Step %d", self._step_count)
         logger.info(_SEP_THICK)
 
-        node_id = self._identify_node(activity, screenshot, package)
+        node_id = self.identify_node(activity, screenshot, package)
         logger.info("[IDENTIFY] Node: %s", node_id)
 
-        self._record_info(task, screenshot)
+        self.record_info(task, screenshot)
         logger.info("[RECORD] Memory: %s", self._memory.format())
 
         decision: Decision
         if node_id is not None and graph is not None:
-            decision = self._decide(graph, task, node_id, screenshot)
+            decision = self.decide(graph, task, node_id, screenshot)
         else:
             reason = (
                 "no graph is loaded"
@@ -1288,7 +1288,7 @@ class UIKobeV2Translator(BaseTranslator):
                 else "the current screen did not match any graph node"
             )
             logger.warning("[DECIDE] Falling back to free action: %s", reason)
-            fallback_instruction = self._plan_free_action(
+            fallback_instruction = self.plan_free_action(
                 task,
                 screenshot,
                 reason,
@@ -1302,7 +1302,7 @@ class UIKobeV2Translator(BaseTranslator):
             reason = decision.get(
                 "reason", "graph guidance did not produce an executable instruction"
             )
-            instruction = self._plan_free_action(
+            instruction = self.plan_free_action(
                 task,
                 screenshot,
                 reason,
@@ -1318,7 +1318,7 @@ class UIKobeV2Translator(BaseTranslator):
         )
 
         if decision_type == "done":
-            answer = self._generate_answer(task)
+            answer = self.generate_answer(task)
             logger.info(_SEP_THICK)
             logger.info("[DONE] Answer: %s", answer)
             logger.info("[DONE] Memory: %s", self._memory.format())
@@ -1331,7 +1331,7 @@ class UIKobeV2Translator(BaseTranslator):
         logger.info(_SEP)
         logger.info('ACTION AGENT one-step instruction: "%s"', instruction)
         logger.info(_SEP)
-        aitk_action, obs, history_entry = self._call_action_agent(
+        aitk_action, obs, history_entry = self.call_action_agent(
             instruction,
             [],
             screenshot,
@@ -1357,7 +1357,7 @@ class UIKobeV2Translator(BaseTranslator):
     @override
     def to_agent(self, task: str, state: dict[str, Any], history: dict[str, Any]) -> str:
         if not history.get("actions", []):
-            self._reset_task_state()
+            self.reset_task_state()
         return self._step(task, state, history)
 
     @override
