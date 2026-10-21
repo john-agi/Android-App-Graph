@@ -1594,24 +1594,17 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
     """Extract the JSON arguments from a <tool_call> block, even one missing its </tool_call>."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
     inner = m.group(1).strip() if m else ""
+    start = raw.find("<tool_call>")
+    if not inner and start == -1:
+        return None
 
-    if not inner:
-        start = raw.find("<tool_call>")
-        if start == -1:
-            return None
-        remainder = raw[start + len("<tool_call>") :].lstrip()
-        decoder = json.JSONDecoder()
-        try:
-            parsed, _end = decoder.raw_decode(remainder)
-        except json.JSONDecodeError:
-            return None
-        if "arguments" in parsed:
-            return parsed["arguments"]
-        return parsed
-
-    inner = strip_json_fences(inner)
+    # A closed block must hold only JSON; an unclosed one ends wherever its JSON object does.
     try:
-        parsed = json.loads(inner)
+        if inner:
+            parsed = json.loads(strip_json_fences(inner))
+        else:
+            remainder = raw[start + len("<tool_call>") :].lstrip()
+            parsed, _end = json.JSONDecoder().raw_decode(remainder)
     except json.JSONDecodeError:
         return None
     # A native tool call arrives as {"name": ..., "arguments": {...}}; only the arguments matter.
@@ -1947,6 +1940,33 @@ def describe_executed_action(
     return instruction or None
 
 
+def _labelled_line(raw: str, label: str) -> str:
+    """Return the text after the reply's first ``label:``, up to the end of its line."""
+    m = re.search(rf"{re.escape(label)}:\s*(.+?)(?:\n|$)", raw)
+    return as_str(m.group(1), "").strip() if m else ""
+
+
+def _native_arguments(arguments: str) -> dict[str, object] | None:
+    """Decode a native tool call's arguments, or return None unless they are a JSON object."""
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return None
+    return as_object_dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _raw_json_arguments(raw: str) -> dict[str, object] | None:
+    """Decode a reply that is bare JSON, unwrapping its ``arguments`` like a <tool_call> block."""
+    try:
+        parsed = json.loads(strip_json_fences(raw))
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse action agent response. Raw:\n%s", raw)
+        return None
+    if isinstance(parsed, dict) and "arguments" in parsed:
+        parsed = parsed["arguments"]
+    return as_object_dict(parsed) if isinstance(parsed, dict) else None
+
+
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
@@ -1964,44 +1984,20 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, s
         return None, "", ""
     logger.debug("  Agent raw output: %s", raw)
 
-    thought = ""
-    thought_m = re.search(r"Thought:\s*(.+?)(?:\n|$)", raw)
-    if thought_m:
-        thought = as_str(thought_m.group(1), "").strip()
-
-    action_desc = ""
-    action_m = re.search(r"Action:\s*(.+?)(?:\n|$)", raw)
-    if action_m:
-        action_desc = as_str(action_m.group(1), "").strip()
+    thought = _labelled_line(raw, "Thought")
+    action_desc = _labelled_line(raw, "Action")
 
     if tool_calls:
         logger.info("  Agent used native tool calling")
-        try:
-            native_args = json.loads(tool_calls[0].function.arguments)
-        except json.JSONDecodeError:
+        native_args = _native_arguments(tool_calls[0].function.arguments)
+        if native_args is None:
             return None, thought, action_desc
-        if not isinstance(native_args, dict):
-            return None, thought, action_desc
-        tool_args = as_object_dict(native_args)
-        return tool_args, thought, action_desc or str(tool_args)
+        return native_args, thought, action_desc or str(native_args)
 
     tool_args = _parse_tool_call(raw)
     if tool_args is not None:
         return as_object_dict(tool_args), thought, action_desc
-
-    raw_json = strip_json_fences(raw)
-    try:
-        parsed = json.loads(raw_json)
-        if not isinstance(parsed, dict):
-            return None, thought, action_desc
-        if "arguments" in parsed:
-            parsed = parsed["arguments"]
-        if not isinstance(parsed, dict):
-            return None, thought, action_desc
-        return as_object_dict(parsed), thought, action_desc
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse action agent response. Raw:\n%s", raw)
-        return None, thought, action_desc
+    return _raw_json_arguments(raw), thought, action_desc
 
 
 class _MalformedActionOutputError(UnusableOutputError):
