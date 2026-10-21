@@ -99,11 +99,13 @@ def _adb_stdout_bytes(args: Sequence[str]) -> bytes:
 
 
 # No letters, digits or "_": _type sends those with `input text`.
+# Known defect, copied unchanged: a code with a comment is the KeyEvent constant named
+# there, so typing that character sends another character or nothing.
 _KEYCODE: dict[str, int] = {
     "ENTER": 66,
     "BACK": 4,
     "HOME": 3,
-    "ALL_APPS": 187,
+    "APP_SWITCH": 187,
     "DEL": 67,
     " ": 62,
     "@": 77,
@@ -116,28 +118,27 @@ _KEYCODE: dict[str, int] = {
     "#": 18,
     "(": 162,
     ")": 163,
-    "!": 161,
-    "?": 166,
-    ":": 74,
-    ";": 186,
+    "!": 161,  # KEYCODE_NUMPAD_EQUALS
+    "?": 166,  # KEYCODE_CHANNEL_UP
+    ":": 74,  # KEYCODE_SEMICOLON
+    ";": 186,  # KEYCODE_PROG_BLUE
     "=": 70,
     "'": 75,
-    '"': 140,
-    "&": 150,
-    "%": 129,
-    "$": 128,
-    "<": 153,
-    ">": 154,
-    "{": 145,
-    "}": 146,
-    # Known defect, copied unchanged: 47 and 48 are KEYCODE_S and KEYCODE_T.
-    "[": 47,
-    "]": 48,
-    "|": 124,
+    '"': 140,  # KEYCODE_F10
+    "&": 150,  # KEYCODE_NUMPAD_6
+    "%": 129,  # KEYCODE_MEDIA_EJECT
+    "$": 128,  # KEYCODE_MEDIA_CLOSE
+    "<": 153,  # KEYCODE_NUMPAD_9
+    ">": 154,  # KEYCODE_NUMPAD_DIVIDE
+    "{": 145,  # KEYCODE_NUMPAD_1
+    "}": 146,  # KEYCODE_NUMPAD_2
+    "[": 47,  # KEYCODE_S
+    "]": 48,  # KEYCODE_T
+    "|": 124,  # KEYCODE_INSERT
     "\\": 73,
     "`": 68,
-    "~": 152,
-    "^": 161,
+    "~": 152,  # KEYCODE_NUMPAD_8
+    "^": 161,  # KEYCODE_NUMPAD_EQUALS
 }
 
 # Typed with `input text` after upper-casing; any other character is a key event.
@@ -212,7 +213,7 @@ class AdbController:
         """Open recent apps, swipe the list to its left end and tap where the launcher
         shows Clear all.
         """
-        self._press("ALL_APPS")
+        self._press("APP_SWITCH")
         self._swipe(int(0.1 * self.w), int(0.5 * self.h), int(0.9 * self.w), int(0.5 * self.h), 100)
         time.sleep(1)
         self._tap(int(0.2 * self.w), int(0.48 * self.h))
