@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from openrouter import OpenRouter
@@ -1594,30 +1594,134 @@ def _parse_tool_call(raw: str) -> dict[str, Any] | None:
     """Extract the JSON arguments from a <tool_call> block, even one missing its </tool_call>."""
     m = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL)
     inner = m.group(1).strip() if m else ""
+    start = raw.find("<tool_call>")
+    if not inner and start == -1:
+        return None
 
-    if not inner:
-        start = raw.find("<tool_call>")
-        if start == -1:
-            return None
-        remainder = raw[start + len("<tool_call>") :].lstrip()
-        decoder = json.JSONDecoder()
-        try:
-            parsed, _end = decoder.raw_decode(remainder)
-        except json.JSONDecodeError:
-            return None
-        if "arguments" in parsed:
-            return parsed["arguments"]
-        return parsed
-
-    inner = strip_json_fences(inner)
+    # A closed block must hold only JSON; an unclosed one ends wherever its JSON object does.
     try:
-        parsed = json.loads(inner)
+        if inner:
+            parsed = json.loads(strip_json_fences(inner))
+        else:
+            remainder = raw[start + len("<tool_call>") :].lstrip()
+            parsed, _end = json.JSONDecoder().raw_decode(remainder)
     except json.JSONDecodeError:
         return None
     # A native tool call arrives as {"name": ..., "arguments": {...}}; only the arguments matter.
     if "arguments" in parsed:
         return parsed["arguments"]
     return parsed
+
+
+def _scale(coord: object, screen_w: int, screen_h: int) -> tuple[int, int]:
+    """Scale a coordinate on the model's 0-1000 scale to device pixels."""
+    if not isinstance(coord, list) or len(coord) != 2:
+        msg = "Action coordinates must be two finite numbers"
+        raise ValueError(msg)
+    values = as_float_list(coord)
+    if not values:
+        msg = "Action coordinates must be two finite numbers"
+        raise ValueError(msg)
+    x = int(values[0] / 1000 * screen_w)
+    y = int(values[1] / 1000 * screen_h)
+    return x, y
+
+
+def _duration(args: dict[str, object]) -> int:
+    """Read a swipe's or long press's duration: a numeric time, else duration, else 1000."""
+    for key in ("time", "duration"):
+        duration = as_int(args.get(key))
+        if duration is not None:
+            return duration
+    return 1000
+
+
+def _click(args: dict[str, object], screen_w: int, screen_h: int) -> dict[str, object]:
+    x, y = _scale(args.get("coordinate"), screen_w, screen_h)
+    return {"action": "tap", "x": x, "y": y}
+
+
+def _long_press(args: dict[str, object], screen_w: int, screen_h: int) -> dict[str, object]:
+    x, y = _scale(args.get("coordinate"), screen_w, screen_h)
+    return {"action": "long_press", "x": x, "y": y, "duration": _duration(args)}
+
+
+_SWIPE_ENDPOINTS: dict[str, Callable[[int, int], tuple[int, int, int, int]]] = {
+    "up": lambda w, h: (w // 2, h * 3 // 4, w // 2, h // 4),
+    "down": lambda w, h: (w // 2, h // 4, w // 2, h * 3 // 4),
+    "left": lambda w, h: (w * 4 // 5, h // 2, w // 5, h // 2),
+    "right": lambda w, h: (w // 5, h // 2, w * 4 // 5, h // 2),
+}
+
+
+def _direction_endpoints(
+    direction: object, screen_w: int, screen_h: int
+) -> tuple[int, int, int, int]:
+    if isinstance(direction, str):
+        endpoints = _SWIPE_ENDPOINTS.get(direction)
+        if endpoints is not None:
+            return endpoints(screen_w, screen_h)
+    msg = "Swipe requires a supported direction"
+    raise ValueError(msg)
+
+
+def _swipe(args: dict[str, object], screen_w: int, screen_h: int) -> dict[str, object]:
+    start, end = args.get("coordinate"), args.get("coordinate2")
+    direction = args.get("direction")
+    if start is not None and end is not None:
+        x1, y1 = _scale(start, screen_w, screen_h)
+        x2, y2 = _scale(end, screen_w, screen_h)
+    elif direction is not None:
+        # A malformed coordinate is an error even when the direction alone would do.
+        for coordinate in (start, end):
+            if coordinate is not None:
+                _scale(coordinate, screen_w, screen_h)
+        x1, y1, x2, y2 = _direction_endpoints(direction, screen_w, screen_h)
+    else:
+        msg = "Swipe requires coordinates or a supported direction"
+        raise ValueError(msg)
+    return {"action": "swipe", "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration": _duration(args)}
+
+
+def _type(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, object]:
+    text = args.get("text")
+    if isinstance(text, str):
+        return {"action": "type", "text": text}
+    msg = "Type requires a text string"
+    raise ValueError(msg)
+
+
+_SYSTEM_BUTTONS: dict[str, str] = {"Back": "back", "Home": "home", "Enter": "enter"}
+
+
+def _system_button(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, object]:
+    button = args.get("button", "")
+    if isinstance(button, str) and button in _SYSTEM_BUTTONS:
+        return {"action": _SYSTEM_BUTTONS[button]}
+    msg = "System button must be Back, Home or Enter"
+    raise ValueError(msg)
+
+
+def _wait(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, object]:
+    return {"action": "wait", "time": args.get("time") or args.get("duration") or 3}
+
+
+def _end(_args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, object]:
+    return {"action": "end"}
+
+
+_MOBILE_USE_ACTIONS: dict[str, Callable[[dict[str, object], int, int], dict[str, object]]] = {
+    "click": _click,
+    "long_press": _long_press,
+    "swipe": _swipe,
+    "type": _type,
+    "system_button": _system_button,
+    "wait": _wait,
+    "end": _end,
+    "terminate": _end,
+    "answer": _end,
+    "error": _end,
+}
 
 
 def _tool_call_to_aitk(
@@ -1629,106 +1733,12 @@ def _tool_call_to_aitk(
         args = {**args, **as_object_dict(nested)}
 
     action = args.get("action", "")
-
-    def _scale(coord: object) -> tuple[int, int]:
-        if not isinstance(coord, list) or len(coord) != 2:
-            msg = "Action coordinates must be two finite numbers"
-            raise ValueError(msg)
-        values = as_float_list(coord)
-        if not values:
-            msg = "Action coordinates must be two finite numbers"
-            raise ValueError(msg)
-        x = int(values[0] / 1000 * screen_w)
-        y = int(values[1] / 1000 * screen_h)
-        return x, y
-
-    def _get_duration() -> int:
-        for key in ("time", "duration"):
-            duration = as_int(args.get(key))
-            if duration is not None:
-                return duration
-        return 1000
-
-    if action == "click":
-        coord = args.get("coordinate")
-        x, y = _scale(coord)
-        return {"action": "tap", "x": x, "y": y}
-
-    if action == "long_press":
-        coord = args.get("coordinate")
-        x, y = _scale(coord)
-        return {"action": "long_press", "x": x, "y": y, "duration": _get_duration()}
-
-    if action == "swipe":
-        start, end = args.get("coordinate"), args.get("coordinate2")
-        if start is not None and end is not None:
-            x1, y1 = _scale(start)
-            x2, y2 = _scale(end)
-        elif args.get("direction") is not None:
-            for coordinate in (start, end):
-                if coordinate is not None:
-                    _scale(coordinate)
-            direction = args["direction"]
-            if direction == "up":
-                x1, y1 = screen_w // 2, screen_h * 3 // 4
-                x2, y2 = screen_w // 2, screen_h // 4
-            elif direction == "down":
-                x1, y1 = screen_w // 2, screen_h // 4
-                x2, y2 = screen_w // 2, screen_h * 3 // 4
-            elif direction == "left":
-                x1, y1 = screen_w * 4 // 5, screen_h // 2
-                x2, y2 = screen_w // 5, screen_h // 2
-            elif direction == "right":
-                x1, y1 = screen_w // 5, screen_h // 2
-                x2, y2 = screen_w * 4 // 5, screen_h // 2
-            else:
-                msg = "Swipe requires a supported direction"
-                raise ValueError(msg)
-        else:
-            msg = "Swipe requires coordinates or a supported direction"
-            raise ValueError(msg)
-        return {
-            "action": "swipe",
-            "x1": x1,
-            "y1": y1,
-            "x2": x2,
-            "y2": y2,
-            "duration": _get_duration(),
-        }
-
-    if action == "type":
-        text = args.get("text")
-        if not isinstance(text, str):
-            msg = "Type requires a text string"
-            raise ValueError(msg)
-        return {"action": "type", "text": text}
-
-    if action == "system_button":
-        button = args.get("button", "")
-        if button == "Back":
-            return {"action": "back"}
-        if button == "Home":
-            return {"action": "home"}
-        if button == "Enter":
-            return {"action": "enter"}
-        msg = "System button must be Back, Home or Enter"
+    # A JSON list or object as the action is unhashable, and must stay a ValueError.
+    convert = _MOBILE_USE_ACTIONS.get(action) if isinstance(action, str) else None
+    if convert is None:
+        msg = f"Unknown action: {action}"
         raise ValueError(msg)
-
-    if action == "wait":
-        t = args.get("time") or args.get("duration") or 3
-        return {"action": "wait", "time": t}
-
-    if action in ("end", "terminate"):
-        return {"action": "end"}
-
-    if action == "answer":
-        return {"action": "end"}
-
-    if action == "error":
-        return {"action": "end"}
-
-    msg = f"Unknown action: {action}"
-    raise ValueError(msg)
+    return convert(args, screen_w, screen_h)
 
 
 _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
@@ -1930,6 +1940,33 @@ def describe_executed_action(
     return instruction or None
 
 
+def _labelled_line(raw: str, label: str) -> str:
+    """Return the text after the reply's first ``label:``, up to the end of its line."""
+    m = re.search(rf"{re.escape(label)}:\s*(.+?)(?:\n|$)", raw)
+    return as_str(m.group(1), "").strip() if m else ""
+
+
+def _native_arguments(arguments: str) -> dict[str, object] | None:
+    """Decode a native tool call's arguments, or return None unless they are a JSON object."""
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return None
+    return as_object_dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _raw_json_arguments(raw: str) -> dict[str, object] | None:
+    """Decode a reply that is bare JSON, unwrapping its ``arguments`` like a <tool_call> block."""
+    try:
+        parsed = json.loads(strip_json_fences(raw))
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse action agent response. Raw:\n%s", raw)
+        return None
+    if isinstance(parsed, dict) and "arguments" in parsed:
+        parsed = parsed["arguments"]
+    return as_object_dict(parsed) if isinstance(parsed, dict) else None
+
+
 def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, str, str]:
     """Parse an action agent VLM response.
 
@@ -1947,44 +1984,20 @@ def _parse_agent_response(resp: ChatResult) -> tuple[dict[str, object] | None, s
         return None, "", ""
     logger.debug("  Agent raw output: %s", raw)
 
-    thought = ""
-    thought_m = re.search(r"Thought:\s*(.+?)(?:\n|$)", raw)
-    if thought_m:
-        thought = as_str(thought_m.group(1), "").strip()
-
-    action_desc = ""
-    action_m = re.search(r"Action:\s*(.+?)(?:\n|$)", raw)
-    if action_m:
-        action_desc = as_str(action_m.group(1), "").strip()
+    thought = _labelled_line(raw, "Thought")
+    action_desc = _labelled_line(raw, "Action")
 
     if tool_calls:
         logger.info("  Agent used native tool calling")
-        try:
-            native_args = json.loads(tool_calls[0].function.arguments)
-        except json.JSONDecodeError:
+        native_args = _native_arguments(tool_calls[0].function.arguments)
+        if native_args is None:
             return None, thought, action_desc
-        if not isinstance(native_args, dict):
-            return None, thought, action_desc
-        tool_args = as_object_dict(native_args)
-        return tool_args, thought, action_desc or str(tool_args)
+        return native_args, thought, action_desc or str(native_args)
 
     tool_args = _parse_tool_call(raw)
     if tool_args is not None:
         return as_object_dict(tool_args), thought, action_desc
-
-    raw_json = strip_json_fences(raw)
-    try:
-        parsed = json.loads(raw_json)
-        if not isinstance(parsed, dict):
-            return None, thought, action_desc
-        if "arguments" in parsed:
-            parsed = parsed["arguments"]
-        if not isinstance(parsed, dict):
-            return None, thought, action_desc
-        return as_object_dict(parsed), thought, action_desc
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse action agent response. Raw:\n%s", raw)
-        return None, thought, action_desc
+    return _raw_json_arguments(raw), thought, action_desc
 
 
 class _MalformedActionOutputError(UnusableOutputError):
