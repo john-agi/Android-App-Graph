@@ -100,7 +100,7 @@ depends_on = []
 
 [[modules]]
 path = "android_app_graph.device"
-depends_on = []
+depends_on = ["android_app_graph.ui_tree"]
 
 [[modules]]
 path = "android_app_graph.payloads"

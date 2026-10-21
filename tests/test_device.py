@@ -13,6 +13,7 @@ from typing import Any, NoReturn
 import pytest
 
 from android_app_graph import device
+from android_app_graph.ui_tree import IDLE_FAILURE, xml_document
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _PM = ["adb", "-s", "test-device", "shell", "pm"]
@@ -517,7 +518,8 @@ _UDID = "emulator-5554"
 _ADB = ["adb", "-s", _UDID]
 _INPUT = [*_ADB, "shell", "input"]
 _WM_SIZE = ("-s", _UDID, "shell", "wm", "size")
-_UI_DUMP = ("-s", _UDID, "exec-out", "uiautomator dump /dev/stdout")
+_API_LEVEL = ("-s", _UDID, "shell", "getprop", "ro.build.version.sdk")
+_UI_DUMP = ("-s", _UDID, "exec-out", "uiautomator dump --windows /dev/stdout")
 _SCREENCAP = ("-s", _UDID, "exec-out", "screencap -p")
 _DUMPSYS_WINDOW = ("-s", _UDID, "shell", "dumpsys", "window")
 
@@ -527,11 +529,13 @@ class _FakeAdb:
 
     ``events`` records each adb argv and each sleep in the order they happened, and
     ``timeouts`` the timeout of each adb call. ``replies`` maps the arguments after
-    ``adb`` to an exit status and raw stdout; any other command exits 0 with no
+    ``adb`` to an exit status and raw stdout; ``queued`` maps them to replies that the
+    next calls take in turn, before ``replies``. Any other command exits 0 with no
     output. Stdout stays bytes unless the caller asks for text, which must name its
     encoding: the host's locale differs between machines, and Android writes UTF-8.
     ``stalls`` maps the arguments after ``adb`` to how many of their next calls stall
-    until their timeout expires; a stalled call without a timeout would never return.
+    until their timeout expires, before any reply; a stalled call without a timeout
+    would never return.
     """
 
     def __init__(self) -> None:
@@ -539,6 +543,7 @@ class _FakeAdb:
         self.timeouts: list[float | None] = []
         self.replies: dict[tuple[str, ...], tuple[int, bytes]] = {}
         self.stalls: dict[tuple[str, ...], int] = {}
+        self.queued: dict[tuple[str, ...], list[tuple[int, bytes]]] = {}
 
     def run(
         self,
@@ -559,7 +564,8 @@ class _FakeAdb:
                 raise AssertionError(msg)
             self.stalls[args] -= 1
             raise subprocess.TimeoutExpired(command, timeout)
-        returncode, stdout = self.replies.get(args, (0, b""))
+        queue = self.queued.get(args)
+        returncode, stdout = queue.pop(0) if queue else self.replies.get(args, (0, b""))
         if check and returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
         if not text:
@@ -581,6 +587,7 @@ def adb(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> _FakeAdb:
 
 @pytest.fixture
 def controller(adb: _FakeAdb) -> device.AdbController:
+    adb.replies[_API_LEVEL] = (0, b"37\n")
     adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
     built = device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
     adb.events.clear()
@@ -588,7 +595,11 @@ def controller(adb: _FakeAdb) -> device.AdbController:
     return built
 
 
-def test_adb_controller_reads_the_screen_size_of_the_configured_device(adb: _FakeAdb) -> None:
+@pytest.mark.parametrize("api_level", [b"30\n", b"37\n"])
+def test_adb_controller_reads_the_screen_size_of_the_configured_device(
+    adb: _FakeAdb, api_level: bytes
+) -> None:
+    adb.replies[_API_LEVEL] = (0, api_level)
     adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
     config = {"device": {"udid": _UDID}}
 
@@ -596,17 +607,49 @@ def test_adb_controller_reads_the_screen_size_of_the_configured_device(adb: _Fak
 
     assert (controller.w, controller.h) == (1080, 2400)
     assert controller.config is config
-    assert adb.events == [["adb", *_WM_SIZE]]
+    assert adb.events == [["adb", *_API_LEVEL], ["adb", *_WM_SIZE]]
 
 
 def test_adb_controller_raises_when_wm_size_reports_no_size(adb: _FakeAdb) -> None:
+    adb.replies[_API_LEVEL] = (0, b"37\n")
     adb.replies[_WM_SIZE] = (0, b"Physical size: unknown\n")
     with pytest.raises(ValueError, match=r"^Failed to get screen size$"):
         device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
 
 
+def test_building_the_controller_below_api_30_raises_naming_the_level(adb: _FakeAdb) -> None:
+    adb.replies[_API_LEVEL] = (0, b"29\n")
+
+    with pytest.raises(RuntimeError, match=r"^emulator-5554 runs API level 29; .* API level 30"):
+        device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
+
+    assert adb.events == [["adb", *_API_LEVEL]]
+
+
+@pytest.mark.parametrize(
+    "api_level", [b"", b"thirty\n", "\u0663\u0660\n".encode()], ids=["empty", "word", "digits"]
+)
+def test_building_the_controller_raises_when_the_api_level_does_not_read(
+    adb: _FakeAdb, api_level: bytes
+) -> None:
+    adb.replies[_API_LEVEL] = (0, api_level)
+
+    with pytest.raises(ValueError, match=r"^Failed to read the API level of emulator-5554"):
+        device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
+
+
 # PNG's signature contains CR LF, so any newline translation would change the base64.
 _PNG = b"\x89PNG\r\n\x1a\n"
+
+
+def _uiautomator(name: str) -> str:
+    return (Path(__file__).parent / "data" / f"uiautomator_{name}.txt").read_text(encoding="utf-8")
+
+
+# A trimmed `uiautomator dump --windows` of Settings' home screen, trailing line included,
+# and the same screen one tap later, with a node's text changed.
+_SCREEN = _uiautomator("windows_plain_list")
+_LATER = _SCREEN.replace('text="Apps"', 'text="Apps and notifications"')
 
 
 @pytest.mark.parametrize(
@@ -636,26 +679,33 @@ _PNG = b"\x89PNG\r\n\x1a\n"
         pytest.param("WINDOW MANAGER WINDOWS (dumpsys window windows)\n", "unknown", "unknown"),
     ],
 )
-def test_get_state_returns_the_xml_screenshot_package_and_activity(
+def test_get_state_returns_the_tree_screenshot_package_and_activity(
     controller: device.AdbController,
     adb: _FakeAdb,
     dumpsys_window: str,
     package: str,
     activity: str,
 ) -> None:
-    xml = '<hierarchy><node text="Café" /></hierarchy>'
-    adb.replies[_UI_DUMP] = (0, xml.encode())
+    adb.replies[_UI_DUMP] = (0, _SCREEN.encode())
     adb.replies[_SCREENCAP] = (0, _PNG)
     adb.replies[_DUMPSYS_WINDOW] = (0, dumpsys_window.encode())
 
     assert controller.get_state() == {
-        "xml": xml,
+        "xml": xml_document(_SCREEN),
+        "ui_tree_error": None,
+        "ui_tree_retakes": 0,
+        "ui_tree_settled": True,
         "screenshot": base64.b64encode(_PNG).decode("ascii"),
         "package": package,
         "activity": activity,
         "status_bar": None,
     }
-    assert adb.events == [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+    assert adb.events == [
+        ["adb", *_UI_DUMP],
+        ["adb", *_SCREENCAP],
+        ["adb", *_UI_DUMP],
+        ["adb", *_DUMPSYS_WINDOW],
+    ]
 
 
 def _dumpsys_window(name: str) -> str:
@@ -718,7 +768,157 @@ def test_a_hidden_misplaced_or_missing_status_bar_gives_no_frame(dumpsys_window:
     assert device.status_bar_frame(dumpsys_window) is None
 
 
-@pytest.mark.parametrize("failing", [_UI_DUMP, _SCREENCAP, _DUMPSYS_WINDOW])
+def _state_of(
+    adb: _FakeAdb, controller: device.AdbController, *dumps: tuple[int, bytes]
+) -> dict[str, Any]:
+    """Read the state while the dumps reply ``dumps`` in turn and each screenshot is the
+    next of ``b"shot-0"``, ``b"shot-1"``, ..."""
+    adb.queued[_UI_DUMP] = list(dumps)
+    adb.queued[_SCREENCAP] = [(0, f"shot-{n}".encode()) for n in range(len(dumps))]
+    return controller.get_state()
+
+
+def _reads(adb: _FakeAdb) -> list[str]:
+    names: dict[tuple[str, ...], str] = {
+        _UI_DUMP: "dump",
+        _SCREENCAP: "screencap",
+        _DUMPSYS_WINDOW: "dumpsys",
+    }
+    return [names[tuple(event[1:])] for event in adb.events if isinstance(event, list)]
+
+
+def _shot(n: int) -> str:
+    return base64.b64encode(f"shot-{n}".encode()).decode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("dumps", "reads", "kept", "retakes", "settled"),
+    [
+        pytest.param(
+            [_SCREEN, _LATER, _LATER],
+            ["dump", "screencap", "dump", "screencap", "dump", "dumpsys"],
+            (_LATER, 1),
+            1,
+            True,
+            id="settled after one retake",
+        ),
+        pytest.param(
+            [_SCREEN, _LATER, _SCREEN, _LATER],
+            ["dump", "screencap", "dump", "screencap", "dump", "screencap", "dump", "dumpsys"],
+            (_SCREEN, 2),
+            2,
+            False,
+            id="never settled",
+        ),
+    ],
+)
+def test_the_screenshot_and_the_dump_are_retaken_while_the_two_dumps_differ(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    dumps: list[str],
+    reads: list[str],
+    kept: tuple[str, int],
+    retakes: int,
+    settled: bool,
+) -> None:
+    """The last dump becomes the first of the new pair, and the dump kept is the one
+    taken right before the kept screenshot."""
+    state = _state_of(adb, controller, *((0, dump.encode()) for dump in dumps))
+
+    assert _reads(adb) == reads
+    xml, shot = kept
+    assert (state["xml"], state["screenshot"]) == (xml_document(xml), _shot(shot))
+    assert (state["ui_tree_error"], state["ui_tree_retakes"], state["ui_tree_settled"]) == (
+        None,
+        retakes,
+        settled,
+    )
+
+
+def test_a_change_in_the_status_bar_alone_needs_no_retake(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    next_minute = _SCREEN.replace('text="1:33"', 'text="1:34"')
+
+    state = _state_of(adb, controller, (0, _SCREEN.encode()), (0, next_minute.encode()))
+
+    assert _reads(adb) == ["dump", "screencap", "dump", "dumpsys"]
+    assert (state["ui_tree_retakes"], state["ui_tree_settled"]) == (0, True)
+
+
+_UNUSABLE = {
+    "adb failed": ((1, b""), "adb exited with status 1"),
+    "empty": ((0, b""), "empty output"),
+    "not utf-8": ((0, b"<displays>\xff</displays>"), "output is not UTF-8"),
+    "default dump": (
+        (0, _uiautomator("default_plain_list").encode()),
+        "root is <hierarchy>, not <displays>",
+    ),
+    "truncated": (
+        (0, _SCREEN[:200].encode()),
+        "XML does not parse: unclosed token: line 1, column 82",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "unusable", [pytest.param(reply, id=name) for name, (reply, _) in _UNUSABLE.items()]
+)
+def test_an_unusable_dump_is_retried_once(
+    controller: device.AdbController, adb: _FakeAdb, unusable: tuple[int, bytes]
+) -> None:
+    screen = (0, _SCREEN.encode())
+
+    state = _state_of(adb, controller, unusable, screen, screen)
+
+    assert _reads(adb) == ["dump", "dump", "screencap", "dump", "dumpsys"]
+    assert (state["xml"], state["ui_tree_error"], state["ui_tree_settled"]) == (
+        xml_document(_SCREEN),
+        None,
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("unusable", "reason"),
+    [pytest.param(reply, reason, id=name) for name, (reply, reason) in _UNUSABLE.items()],
+)
+def test_a_dump_still_unusable_leaves_no_tree_with_the_reason_and_takes_the_screenshot(
+    controller: device.AdbController, adb: _FakeAdb, unusable: tuple[int, bytes], reason: str
+) -> None:
+    state = _state_of(adb, controller, unusable, unusable)
+
+    assert _reads(adb) == ["dump", "dump", "screencap", "dumpsys"]
+    assert (state["xml"], state["ui_tree_error"]) == (None, reason)
+    assert (state["ui_tree_retakes"], state["ui_tree_settled"]) == (0, False)
+    assert state["screenshot"] == _shot(0)
+
+
+def test_an_idle_failure_is_not_retried(controller: device.AdbController, adb: _FakeAdb) -> None:
+    """The failed dump has already waited ten seconds for a quiet second."""
+    idle = (0, _uiautomator("windows_never_idle").encode())
+
+    state = _state_of(adb, controller, idle, (0, _SCREEN.encode()))
+
+    assert _reads(adb) == ["dump", "screencap", "dumpsys"]
+    assert (state["xml"], state["ui_tree_error"], state["screenshot"]) == (
+        None,
+        IDLE_FAILURE,
+        _shot(0),
+    )
+
+
+def test_an_unusable_second_dump_keeps_the_first_unsettled(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    state = _state_of(adb, controller, (0, _SCREEN.encode()), (0, b""), (0, b""))
+
+    assert _reads(adb) == ["dump", "screencap", "dump", "dump", "dumpsys"]
+    assert (state["xml"], state["ui_tree_error"]) == (xml_document(_SCREEN), None)
+    assert (state["ui_tree_retakes"], state["ui_tree_settled"]) == (0, False)
+
+
+@pytest.mark.parametrize("failing", [_SCREENCAP, _DUMPSYS_WINDOW])
 def test_get_state_raises_when_a_read_fails(
     controller: device.AdbController, adb: _FakeAdb, failing: tuple[str, ...]
 ) -> None:
@@ -727,9 +927,16 @@ def test_get_state_raises_when_a_read_fails(
         controller.get_state()
 
 
-_STATE_READS = [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+_STATE_READS = [
+    ["adb", *_UI_DUMP],
+    ["adb", *_SCREENCAP],
+    ["adb", *_UI_DUMP],
+    ["adb", *_DUMPSYS_WINDOW],
+]
 _EACH_STATE_READ = [
-    pytest.param(_UI_DUMP, "-s emulator-5554 exec-out 'uiautomator dump /dev/stdout'", id="dump"),
+    pytest.param(
+        _UI_DUMP, "-s emulator-5554 exec-out 'uiautomator dump --windows /dev/stdout'", id="dump"
+    ),
     pytest.param(_SCREENCAP, "-s emulator-5554 exec-out 'screencap -p'", id="screenshot"),
     pytest.param(_DUMPSYS_WINDOW, "-s emulator-5554 shell dumpsys window", id="dumpsys window"),
 ]
@@ -738,9 +945,10 @@ _EACH_STATE_READ = [
 def test_get_state_gives_each_read_a_30_second_timeout(
     controller: device.AdbController, adb: _FakeAdb
 ) -> None:
+    adb.replies[_UI_DUMP] = (0, _SCREEN.encode())
     controller.get_state()
     assert adb.events == _STATE_READS
-    assert adb.timeouts == [30, 30, 30]
+    assert adb.timeouts == [30, 30, 30, 30]
 
 
 @pytest.mark.parametrize(("stalled", "command"), _EACH_STATE_READ)
@@ -751,7 +959,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
     stalled: tuple[str, ...],
     command: str,
 ) -> None:
-    adb.replies[_UI_DUMP] = (0, b"<hierarchy />")
+    adb.replies[_UI_DUMP] = (0, _SCREEN.encode())
     adb.replies[_SCREENCAP] = (0, _PNG)
     adb.replies[_DUMPSYS_WINDOW] = (0, b"  mCurrentFocus=Window{1 u0 com.demo/.Main}\n")
     adb.stalls[stalled] = 1
@@ -760,7 +968,10 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
         state = controller.get_state()
 
     assert state == {
-        "xml": "<hierarchy />",
+        "xml": xml_document(_SCREEN),
+        "ui_tree_error": None,
+        "ui_tree_retakes": 0,
+        "ui_tree_settled": True,
         "screenshot": base64.b64encode(_PNG).decode("ascii"),
         "package": "com.demo",
         "activity": "com.demo.Main",
@@ -768,7 +979,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
     }
     retried = _STATE_READS.index(["adb", *stalled])
     assert adb.events == [*_STATE_READS[: retried + 1], *_STATE_READS[retried:]]
-    assert adb.timeouts == [30, 30, 30, 30]
+    assert adb.timeouts == [30, 30, 30, 30, 30]
     assert caplog.messages == [f"adb {command} timed out after 30 s; retrying once"]
 
 
@@ -776,6 +987,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
 def test_get_state_raises_naming_the_command_when_a_read_times_out_twice(
     controller: device.AdbController, adb: _FakeAdb, stalled: tuple[str, ...]
 ) -> None:
+    adb.replies[_UI_DUMP] = (0, _SCREEN.encode())
     adb.stalls[stalled] = 2
 
     with pytest.raises(subprocess.TimeoutExpired) as raised:
