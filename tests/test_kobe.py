@@ -9,7 +9,7 @@ import logging
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import override
+from typing import NoReturn, override
 
 import httpx
 import pytest
@@ -83,7 +83,8 @@ class _Device:
         return self._state
 
     def exe_action(self, action: dict[str, object]) -> None:
-        raise AssertionError(f"No device action expected: {action}")
+        msg = f"No device action expected: {action}"
+        raise AssertionError(msg)
 
 
 class _ReplayDevice(_Device):
@@ -308,6 +309,49 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
     with pytest.raises(ValueError, match="No path from s0_home to s1_orphan"):
         replaying_kobe.navigate_to_node("s1_orphan")
     assert device_log == []
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_rest(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loaded graph file can hold an edge with no actions; the replay passes over it."""
+    open_detail = {"action": "tap", "coordinate": [30, 40]}
+    graph_file = tmp_path / "hand_edited.json"
+    graph_file.write_text(
+        json.dumps(
+            {
+                "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
+                "edges": [
+                    {"source": "s0_splash", "target": "s1_home", "actions": []},
+                    {"source": "s1_home", "target": "s2_detail", "actions": [[open_detail]]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    replaying_kobe.graph.load_graph(graph_file)
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s2_detail")
+
+    assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_detail]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edge action stored as one dict, not a list of steps, reaches the device as it is."""
+    open_detail = {"action": "tap", "coordinate": [30, 40]}
+    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
+    replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=open_detail)
+    monkeypatch.setattr(replaying_kobe.graph, "identify_state", lambda *_args: "s1_detail")
+
+    assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
+    assert device_log == [_FORCE_STOP, _PACKAGE_LAUNCH, open_detail]
 
 
 @pytest.mark.parametrize("malformed", [False, True])
@@ -548,6 +592,28 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     assert [e["description"] for e in elements if e["explored"]] == explored
     assert ("is not among the 2 unexplored element(s) on s0_home" in caplog.text) is warned
     assert kobe.graph.graph["s0_home"]["s1_compose"]["instructions"] == [instruction]
+
+
+def test_a_crash_mid_exploration_is_logged_with_its_traceback(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    failure = RuntimeError("planner down")
+
+    def _crash(**_kwargs: object) -> NoReturn:
+        raise failure
+
+    kobe.graph.graph.add_node("s0_home", page_description="home", interactable_elements=[])
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args: "s0_home")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda: "")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _crash)
+
+    with caplog.at_level(logging.ERROR, logger="test"), pytest.raises(RuntimeError):
+        kobe.explore(max_steps=1)
+
+    (crash,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert crash.getMessage() == "Exploration crashed at step 0. Graph saved. Re-run to resume."
+    assert isinstance(crash.exc_info, tuple)
+    assert crash.exc_info[1] is failure
 
 
 class _ScriptedDevice:

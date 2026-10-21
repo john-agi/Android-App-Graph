@@ -780,9 +780,11 @@ def test_the_sdk_retries_a_timeout_or_a_dropped_connection_once_it_recovers(
     def flaky(request: httpx.Request) -> httpx.Response:
         attempts.append(request)
         if len(attempts) == 1 and failure == "timeout":
-            raise httpx.ReadTimeout("provider timed out", request=request)
+            msg = "provider timed out"
+            raise httpx.ReadTimeout(msg, request=request)
         if len(attempts) == 1:
-            raise httpx.ConnectError("connection reset", request=request)
+            msg = "connection reset"
+            raise httpx.ConnectError(msg, request=request)
         return httpx.Response(200, json=chat_body)
 
     with httpx.Client(transport=httpx.MockTransport(flaky)) as http_client:

@@ -784,11 +784,13 @@ def _send_chat_once(
         timeout_ms=int(settings.request_timeout * 1000),
     )
     if not isinstance(response, ChatResult):
-        raise TypeError("Expected a non-streaming OpenRouter chat response")
+        msg = "Expected a non-streaming OpenRouter chat response"
+        raise TypeError(msg)
     token_tracker.record(call_type, settings.model, response.usage)
     finish_reason = response.choices[0].finish_reason if response.choices else None
     if finish_reason == "error":
-        raise GenerationFailedError(f"{call_type}: the provider reported finish_reason=error")
+        msg = f"{call_type}: the provider reported finish_reason=error"
+        raise GenerationFailedError(msg)
     if finish_reason == "length":
         reasoning_tokens = _reasoning_tokens(response.usage)
         logger.warning(
@@ -796,7 +798,8 @@ def _send_chat_once(
             call_type,
             "" if reasoning_tokens is None else f", reasoning_tokens={reasoning_tokens}",
         )
-        raise TruncatedReplyError(f"{call_type}: the reply hit its token limit")
+        msg = f"{call_type}: the reply hit its token limit"
+        raise TruncatedReplyError(msg)
     if finish_reason == "content_filter":
         logger.warning(
             "%s: the provider's content filter stopped the reply (finish_reason=content_filter)",
@@ -861,27 +864,33 @@ def _parse_page_description(
 ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     result = json.loads(strip_json_fences(text))
     if not isinstance(result, dict):
-        raise TypeError("Expected page description to be a JSON object")
+        msg = "Expected page description to be a JSON object"
+        raise TypeError(msg)
     payload = as_object_dict(result)
     description = payload.get("page_description")
     if not isinstance(description, str) or not description.strip():
-        raise ValueError("Expected a non-empty page_description string")
+        msg = "Expected a non-empty page_description string"
+        raise ValueError(msg)
     state = payload.get("state", {})
     if not isinstance(state, dict):
-        raise TypeError("Expected page state to be a JSON object")
+        msg = "Expected page state to be a JSON object"
+        raise TypeError(msg)
     raw_elements = payload.get("elements", [])
     if not isinstance(raw_elements, list):
-        raise TypeError("Expected page elements to be a JSON array")
+        msg = "Expected page elements to be a JSON array"
+        raise TypeError(msg)
     elements: list[dict[str, str]] = []
     for raw_element in raw_elements:
         element = as_object_dict(raw_element)
         label, position = element.get("description"), element.get("position")
         if not isinstance(label, str) or not isinstance(position, str):
-            raise TypeError("Expected element description and position strings")
+            msg = "Expected element description and position strings"
+            raise TypeError(msg)
         elements.append({"description": label, "position": position})
     is_external_web = payload.get("is_external_web", False)
     if not isinstance(is_external_web, bool):
-        raise TypeError("Expected is_external_web to be a boolean")
+        msg = "Expected is_external_web to be a boolean"
+        raise TypeError(msg)
     return description, as_object_dict(state), elements, is_external_web
 
 
@@ -971,7 +980,8 @@ def describe_page_and_state(
         try:
             return _parse_page_description(message_text(resp))
         except (TypeError, ValueError) as exc:
-            raise UnusableOutputError("Malformed page description") from exc
+            msg = "Malformed page description"
+            raise UnusableOutputError(msg) from exc
 
     page_description, state, elements, is_external_web = call_with_retry(
         "[API] page describe and state", request_description
@@ -1517,13 +1527,16 @@ def _embedding_vector(
 ) -> list[float]:
     """Record a completed response's usage, then return its one finite vector."""
     if not isinstance(response, CreateEmbeddingsResponseBody):
-        raise TypeError("Expected an OpenRouter JSON embedding response")
+        msg = "Expected an OpenRouter JSON embedding response"
+        raise TypeError(msg)
     token_tracker.record(call_type, model, response.usage)
     if len(response.data) != 1:
-        raise ValueError("Expected one embedding vector from OpenRouter")
+        msg = "Expected one embedding vector from OpenRouter"
+        raise ValueError(msg)
     vector = as_float_list(response.data[0].embedding)
     if not vector:
-        raise UnusableOutputError("OpenRouter returned an empty, non-finite or non-float embedding")
+        msg = "OpenRouter returned an empty, non-finite or non-float embedding"
+        raise UnusableOutputError(msg)
     return vector
 
 

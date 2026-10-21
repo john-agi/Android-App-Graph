@@ -18,7 +18,7 @@ from hypothesis import settings
 from openrouter import OpenRouter
 from PIL import Image
 
-from android_app_graph import cli
+from android_app_graph import cli, device
 from android_app_graph.adapters import aitk_translator
 from android_app_graph.commands import audit, embed
 from android_app_graph.device import DeviceController
@@ -89,10 +89,19 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 @pytest.fixture
-def device_log(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+def adb_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve adb to the bare name ``adb``, so a test that replaces ``subprocess.run``
+    neither needs adb installed nor depends on where it is.
+    """
+    monkeypatch.setattr(device, "adb_executable", lambda: "adb")
+
+
+@pytest.fixture
+def device_log(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> list[object]:
     """Fake controllers append their actions here too, so a test sees adb commands
     and device actions in the order the device would have received them.
     """
+    del adb_on_path  # requested for its side effect on device.adb_executable
     log: list[object] = []
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:

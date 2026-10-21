@@ -41,7 +41,7 @@ def test_local_hypothesis_profile_has_no_deadline() -> None:
     """
     local = {k: v for k, v in os.environ.items() if k not in {"CI", "HYPOTHESIS_PROFILE"}}
     conftest = Path(__file__).with_name("conftest.py")
-    loaded = subprocess.run(
+    loaded = subprocess.run(  # noqa: S603  # runs this interpreter in isolated mode on a file from this repository
         [sys.executable, "-I", "-c", _PRINT_LOADED_DEADLINE, str(conftest)],
         env=local,
         capture_output=True,
