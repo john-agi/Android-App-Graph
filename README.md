@@ -69,7 +69,10 @@ graph TD;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
+    cmd --> groups["android_app_graph.member_groups"];
     gm --> gf;
+    gm --> groups;
+    gm --> rounds["android_app_graph.merge_rounds"];
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
     gm --> vlm;
@@ -303,12 +306,14 @@ temperature and timeout.
 
 Edge normalization sends up to 16 requests at once: exploration's pass over a
 node's outgoing edges at every tenth visit and its final pass over every edge,
-and the audit's pass over every edge. Each request keeps its own timeout, retries
+and the audit's pass over every edge. The audit's merge and member checks send
+each round of verifier questions the same way (see [Merge proposals](#merge-proposals)
+and [Member checks](#member-checks)). Each request keeps its own timeout, retries
 and fallback as above, and logs its own warnings, such as a timeout or a 429 sent
-again, when they happen. The templates are written and logged in the graph's edge
-order, whichever request is answered first, and the usage summary counts every
-request. A request that raises, such as one refused for lack of credit or still
-answered with 429 at its deadline, cancels the requests not yet sent; the
+again, when they happen. The results are applied and logged in the order of the
+edges or questions, whichever request is answered first, and the usage summary
+counts every request. A request that raises, such as one refused for lack of credit
+or still answered with 429 at its deadline, cancels the requests not yet sent; the
 templates of those already answered are still written, and then the error stops
 the command.
 
@@ -793,7 +798,7 @@ replayed or corrected.
 #### Merge proposals
 
 The audit collects the node pairs that may be one screen in one set, so each pair is
-verified once whatever proposed it. Each pair names its sources:
+decided once whatever proposed it. Each pair names its sources:
 
 - `text_audit`: the model's `merge_nodes` issues;
 - `image`: two in-app nodes of one package whose closest members reach a cosine of
@@ -803,19 +808,42 @@ verified once whatever proposed it. Each pair names its sources:
   more pairs, and a higher grouping floor separates more members.
 
 A near-identical image proves nothing on its own: a start search and a destination
-search look alike and are different screens. Each pair is verified on its two
-closest members: the verifier sees the member of the more-visited node, with that
-node's description, beside the member of the other. A confirmed pair is merged into
-its lower-numbered node; a pair whose node an earlier merge removed is verified on
-the node that kept it. The coverage checkpoint's merge audit verifies the model's
-pairs the same way and proposes none from images, since every checkpoint would
-otherwise propose again each pair an earlier one kept apart.
+search look alike and are different screens. A pair is verified on its two closest
+members: the verifier sees the member of the more-visited node, with that node's
+description, beside the member of the other.
 
-`<app_name>_merge.json` lists every pair: `node_a` and `node_b`, the `sources` and
-what each found in `findings` (the model's `issue`, or the image `members` and their
-`score`), the `members` the verifier was shown by node and their `image_score`, the
-`status` (`merged`, `kept_separate`, or `skipped` with the `reason` the pair cannot be
-verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reused`.
+Two answers can decide a third: A = B and B = C give A = C, and A = B and B ≠ C give
+A ≠ C. So the pairs are ordered by the image cosine of their closest members, most
+alike first, and verified in rounds, as Wang et al. do in
+[Leveraging Transitive Relations for Crowdsourced Joins](https://arxiv.org/abs/1408.6916):
+
+- a round asks every open pair that the pairs before it could not decide even if all
+  of them were one screen, up to 16 at a time (see
+  [Requests and recovery](#requests-and-recovery));
+- once its answers are in, every open pair they decide is deduced, never asked;
+- the rounds go on until every pair is asked or deduced.
+
+Asked in that order, a round never asks a pair whose answer could contradict the
+answers before it, and the rounds ask the same pairs that one question at a time in
+that order would.
+
+The "same" answers join the nodes into clusters, with no "different" answer inside
+any of them, and each cluster is merged into its lowest-numbered node. The coverage
+checkpoint's merge audit verifies the model's pairs the same way and proposes none
+from images, since every checkpoint would otherwise propose again each pair an
+earlier one kept apart.
+
+`<app_name>_merge.json` holds:
+
+- `rounds`, and how many pairs were `asked` and `deduced`;
+- `merges`: each cluster's `kept` node and the nodes `removed` into it;
+- `pairs`: every pair with `node_a` and `node_b`, the `sources` and what each found in
+  `findings` (the model's `issue`, or the image `members` and their `score`), the
+  closest `members` by node and their `image_score`, whether it was `asked`, the
+  `round` that asked it or after which it was deduced, the answer `same`, the
+  verifier's `reason` and `reused` for an asked pair or the asked pairs it is
+  `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
+  `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
 
 #### Member checks
 
@@ -840,8 +868,11 @@ representative is the node's home.
 - A node gets three checks at most, larger groups first; the rest are `unchecked`.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
-- Every split check runs before any move check, so a member can move to a node a
-  split made. A verifier answer on a pair of members is reused within the run.
+- Every node's split checks are asked at once, up to 16 at a time, and the splits
+  are made in node order; then every move check is asked at once and the moves are
+  made in node order, so a member can move to a node a split made. A rejected
+  member's short list asks its verifier calls one at a time. A verifier answer on a
+  pair of members is reused within the run.
   Two merged nodes whose closest members fall below the grouping floor, a pair from
   `text_audit` or one the images propose between the merge floor and the grouping
   floor, are two groups of the merged node: their split check is the pair the merge
