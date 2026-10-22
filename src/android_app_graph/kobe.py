@@ -95,7 +95,7 @@ class _Position:
 
 @dataclass(frozen=True, slots=True)
 class _Move:
-    """One executed action, and what the step read before it that recording it needs.
+    """One planned action, and what the step read before it that recording it needs.
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
     wrote, which differs when an ``end`` is recorded as a back press.
@@ -211,27 +211,13 @@ class Kobe:
             step,
         )
         current_node = self._merge_duplicate_nodes(step, current_node)
-        candidates = self._continuation_candidates(current_node)
-        if not candidates:
+        selected = self._choose_continuation_target(current_node)
+        if selected is None:
             self.logger.info(
                 "Coverage checkpoint at step %d: no alternate under-explored candidates.",
                 step,
             )
             return None
-
-        selected = select_exploration_target(
-            self.client,
-            app_name=self.app_name,
-            candidates=candidates,
-            settings=self.page_detail,
-        )
-        if not selected:
-            selected = candidates[0]["node_id"]
-            self.logger.info(
-                "Coverage checkpoint at step %d: model did not select a valid node; using top candidate %s.",
-                step,
-                selected,
-            )
 
         if selected == current_node:
             return None
@@ -264,6 +250,28 @@ class Kobe:
             current_node = self.graph.resolve_node_id(current_node)
         return current_node
 
+    def _choose_continuation_target(self, current_node: str) -> str | None:
+        """Return the node the page-detail model chooses among the ranked candidates other
+        than ``current_node``, the top-ranked one when it chooses none, or ``None`` when
+        no other node is ranked."""
+        candidates = self._continuation_candidates(current_node)
+        if not candidates:
+            return None
+        selected = select_exploration_target(
+            self.client,
+            app_name=self.app_name,
+            candidates=candidates,
+            settings=self.page_detail,
+        )
+        if selected:
+            return selected
+        top_candidate = str(candidates[0]["node_id"])
+        self.logger.info(
+            "The model did not select a valid continuation target; using top candidate %s.",
+            top_candidate,
+        )
+        return top_candidate
+
     def _continuation_candidates(self, current_node: str) -> list[dict[str, Any]]:
         candidates = self.graph.get_exploration_target_candidates(
             package_name=self.package_name,
@@ -273,13 +281,14 @@ class Kobe:
         return [c for c in candidates if c.get("node_id") != current_node]
 
     def _navigate_to_continuation(self, selected: str, current_node: str) -> str | None:
-        """Return the node the checkpoint continues from, or ``None`` when the navigation
-        failed before the app restart and the device is still on ``current_node``."""
+        """Return the node exploration continues from after navigating to ``selected``, or
+        ``None`` when the navigation failed before the app restart and the device is still
+        on ``current_node``."""
         try:
             actual_node = self.navigate_to_node(selected)
         except (NoPathError, ForceStopRefusedError) as exc:
             self.logger.warning(
-                "Coverage checkpoint navigation to %s failed before the app restart; "
+                "Navigation to continuation target %s failed before the app restart; "
                 "continuing from %s.",
                 selected,
                 current_node,
@@ -288,7 +297,7 @@ class Kobe:
             return None
         except Exception as exc:
             self.logger.warning(
-                "Coverage checkpoint navigation to %s failed after the app restart; "
+                "Navigation to continuation target %s failed after the app restart; "
                 "continuing from the screen the device is on.",
                 selected,
                 exc_info=exc,
@@ -535,7 +544,7 @@ class Kobe:
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
         """Take one step from ``position``, record it, and return where the next one starts."""
         tokens_before = token_tracker.snapshot_by_type()
-        move = self._plan_and_act(position, tokens_before)
+        move = self._plan_move(position, tokens_before)
         if move is None:
             time.sleep(1)
             device_state = self.controller.get_state()
@@ -543,6 +552,11 @@ class Kobe:
             self.save_graph()
             return _Position(position.node, device_state)
 
+        if move.action.get("action") == "back" and self._back_leaves_app(position.node):
+            continued = self._continue_from_ranked_target(position, max_steps)
+            if continued is not None:
+                return continued
+        self.controller.exe_action(move.action)
         time.sleep(0.5)
         device_state = self.controller.get_state()
         package = device_state.get("package", "").strip()
@@ -556,8 +570,49 @@ class Kobe:
             return self._record_external_web_step(move, new_node_data, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
 
-    def _plan_and_act(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
-        """Plan an action from ``position`` and execute it; ``None`` when the action
+    def _back_leaves_app(self, node: str) -> bool:
+        """Return whether Back on ``node`` is taken to leave the app, so that a step that
+        plans it there continues from a ranked target instead.
+
+        The start node is the screen the app is launched on, the root activity of its
+        task, and Back there returns to the home screen
+        (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
+        """
+        return node == self.graph.get_start_node()
+
+    def _continue_from_ranked_target(self, position: _Position, max_steps: int) -> _Position | None:
+        """Take the step that planned Back on ``position`` by continuing from a ranked
+        target, chosen and reached as at a coverage checkpoint but without its merge audit,
+        and return where the next step starts; ``None``, having done nothing, when no other
+        node is ranked, so that the caller presses Back.
+
+        A navigation that fails before the app restart leaves the device on ``position``,
+        where the next step starts.
+        """
+        with self.controller.source("coverage_checkpoint"):
+            target = self._choose_continuation_target(position.node)
+            if target is None:
+                self.logger.info(
+                    "  Back on %s leaves the app, but no other node is ranked; pressing it.",
+                    position.node,
+                )
+                return None
+            self.logger.info(
+                "Step %d/%d: Back on %s leaves the app; continuing from ranked target %s instead.",
+                self.graph.total_steps_completed + 1,
+                max_steps,
+                position.node,
+                target,
+            )
+            reached = self._navigate_to_continuation(target, position.node)
+            if reached is not None:
+                position = _Position(reached, self.controller.get_state())
+        self.graph.total_steps_completed += 1
+        self.save_graph()
+        return self._continue_after(position.node, position.device_state, max_steps)
+
+    def _plan_move(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
+        """Plan an action from ``position`` for the caller to execute; ``None`` when the action
         model asks to wait, which executes nothing."""
         screenshot = position.device_state["screenshot"]
         node_data = self._require_node(position.node)
@@ -607,7 +662,6 @@ class Kobe:
         elif action.get("action") == "wait":
             self.logger.info("  Action agent requested wait")
             return None
-        self.controller.exe_action(action)
         return _Move(
             source=position.node,
             before=Observation.from_state(position.device_state),
@@ -671,6 +725,7 @@ class Kobe:
                 target_observation=web_node_data.get("page_description", ""),
             ),
         )
+        self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.total_steps_completed += 1
         self.save_graph()
         node, device_state = self._leave_external_web(expected_node=move.source)
@@ -805,8 +860,8 @@ class Kobe:
     def _handle_external_app(self, move: _Move, device_state: dict[str, Any]) -> dict[str, Any]:
         """Handle navigation to an external app.
 
-        Records the screen in the external app's node (no VLM calls) and the edge, and
-        returns to the app with ``return_to_app``.
+        Records the screen in the external app's node (no VLM calls) and the edge, marks
+        the planned element explored, and returns to the app with ``return_to_app``.
 
         Returns:
             The state of the app's screen that ``return_to_app`` returned to.
@@ -829,6 +884,7 @@ class Kobe:
                 target_observation=f"[left app to {external_package}]",
             ),
         )
+        self.graph.mark_element_explored(move.source, move.planned_element)
         self.logger.info(
             "Step: %s --[%s]--> %s (external)",
             move.source,

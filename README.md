@@ -214,16 +214,25 @@ The OpenRouter SDK retries 5XX responses, dropped connections (refused, reset or
 failed reads and writes) and timeouts with its default exponential backoff
 (0.5 s, then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between
 tries), waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
-header asks instead. It stops once twice the request's timeout has passed since
-the first attempt, so a timed-out attempt gets exactly one more, and 5XX
-responses are retried for up to two minutes at the default timeout and ten
-minutes for the audits. It does not retry 429 or other 4xx responses, which fail
-at once, nor a server that closes the connection without sending a response. The
-application never retries what the SDK has given up on: a call that still times
-out takes the fallback listed below for a truncated reply, and a call without
-one raises. OpenRouter bills a non-streaming request in full even after the
-client disconnects, so an attempt cut off at its deadline is still billed, and a
-timeout shorter than the model needs pays for the same request twice.
+header asks instead. The application sends a request answered with 429 (too many
+requests) again after the same backoff, or after as long as the response's
+`Retry-After` header asks, in seconds or as a date, when that is positive and
+ends by the deadline below. A backoff that would end past the deadline is cut
+short to end at it, so no 429 is sent again after the deadline, and a 429 that
+arrives at or past it fails at once. Each 429 sent again logs a warning naming
+the call (`normalize_edge: rate limited (HTTP 429); sending again in 1.2 s`), so
+the log shows how often the provider limited the run. Both share one deadline:
+they stop once twice the request's timeout has passed since the first attempt,
+so a timed-out attempt gets exactly one more, and 5XX and 429 responses are
+retried for up to two minutes at the default timeout and ten minutes for the
+audits, after which the last one fails. Other 4xx responses, including 402 (no
+credit left), fail at once, as does a server that closes the connection without
+sending a response. The application never retries what the SDK has given up on:
+a call that still times out takes the fallback listed below for a truncated
+reply, and a call without one raises. OpenRouter bills a non-streaming request
+in full even after the client disconnects, so an attempt cut off at its deadline
+is still billed, and a timeout shorter than the model needs pays for the same
+request twice.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
@@ -291,6 +300,17 @@ Each command opens one OpenRouter client for the whole run, shares it across eve
 role and closes it when the run ends; each request carries its own role's model,
 temperature and timeout.
 
+Edge normalization sends up to 16 requests at once: exploration's pass over a
+node's outgoing edges at every tenth visit and its final pass over every edge,
+and the audit's pass over every edge. Each request keeps its own timeout, retries
+and fallback as above, and logs its own warnings, such as a timeout or a 429 sent
+again, when they happen. The templates are written and logged in the graph's edge
+order, whichever request is answered first, and the usage summary counts every
+request. A request that raises, such as one refused for lack of credit or still
+answered with 429 at its deadline, cancels the requests not yet sent; the
+templates of those already answered are still written, and then the error stops
+the command.
+
 Every read of the screen, in exploration and in the audit, runs three adb
 commands: the UI dump, the screenshot and `dumpsys window`. Each one that runs
 longer than 30 seconds is stopped and run once more, with a warning naming the
@@ -325,10 +345,12 @@ graph and its audited copy share them. Every screenshot that
 [screen matching](#screen-matching) takes is embedded once and kept. Nothing reads
 the vector of any other screenshot, so none is made for the screens of other apps,
 including one a Back press leaves in front, or for a screenshot read without being
-matched, such as the one after a wait. A file without a model tag, tagged with
-another model, or unreadable counts as empty after one warning, and a malformed
-vector is dropped with a warning. Nothing is pruned, since observation IDs never
-change.
+matched, such as the one after a wait. A file tagged with another model counts as
+empty after one warning. A damaged file stops exploration or the audit as it loads
+the graph, before any member is embedded, with an error naming the file and the
+damage: the file cannot be read or parsed, has no model tag or no `embeddings`
+object, or holds a malformed or non-finite vector, named by observation. Nothing is
+pruned, since observation IDs never change.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no vector is embedded first, as when `image_emb.json` is missing
@@ -410,8 +432,9 @@ For long runs, use the auto-resume wrapper:
 ### Replaying to a node
 
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
-steps and each issue that `app-graph-audit --re-explore` works on reach their node
-by replaying recorded actions from the app's start screen. Before every replay the
+steps, a step that plans Back on the start screen (below) and each issue that
+`app-graph-audit --re-explore` works on reach their node by replaying recorded actions
+from the app's start screen. Before every replay the
 app is force-stopped (`adb shell am force-stop <package_name>`) and launched again
 with its task cleared (`adb shell am start -n <component> -f 0x10008000`), so another
 app's screen left in that task, such as a search screen the app opened, does not come
@@ -435,12 +458,24 @@ among the `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also
 offers the app's start screen while it has unexplored elements, in the last of
 those places when it ranks below them.
 
+Back on the start screen leaves the app for the home screen, and exploration then
+restarts the app onto the same screen. So when an exploration step plans Back there,
+or its action model answers `end`, which exploration records as Back, Back is not
+pressed. The explorer chooses a node as a checkpoint does, among the ranked nodes
+other than the start screen but without the checkpoint's merge audit, replays to it
+and continues from it. The step counts toward `max_steps`, and its log line names the
+node. In the step log, the replay's records have the `source` `navigation_replay` and
+the screen read after it `coverage_checkpoint`. When no other node is ranked, Back is
+pressed.
+
 ### External apps and web pages
 
 A step that opens another app records an edge to an `ext_<package>` node. A step
 that opens web content from outside the app, such as a browser or custom tab
 showing an address bar or URL, records an edge to the single shared `ext_web`
-node. Either way the explorer then presses back. A redirecting link or a browser's
+node. Either way the element the step acted on is marked explored, as after a
+step that stays in the app, and the explorer then presses back. A redirecting
+link or a browser's
 own history can keep an outside web page up, so the explorer presses back again,
 a few times at most, and if the page is still showing restarts the app as before
 a [replay](#replaying-to-a-node). Back can also leave another app in front, for
