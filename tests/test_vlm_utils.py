@@ -1585,6 +1585,47 @@ def test_node_verification_takes_the_answer_to_its_second_ask(
     assert len(attempts) == 3
 
 
+def test_each_node_verification_ask_sends_a_429_again_within_a_deadline_of_its_own(
+    monkeypatch: pytest.MonkeyPatch, png_screenshot: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each ask is answered 429 with a ``Retry-After`` that ends at its 120 s deadline, and
+    the request sent again then times out at 60 s, so no answer comes after 360 s."""
+    elapsed: list[float] = [0.0]
+    attempts: list[httpx.Request] = []
+
+    def rate_limit_then_time_out(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) % 2:
+            return httpx.Response(
+                429,
+                json={"error": {"code": 429, "message": "rate limited"}},
+                headers={"retry-after": "120"},
+            )
+        elapsed[0] += 60
+        msg = "no complete response within 60 s"
+        raise httpx.ReadTimeout(msg, request=request)
+
+    def sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(time, "time", lambda: elapsed[0])
+    monkeypatch.setattr(time, "sleep", sleep)
+    with (
+        caplog.at_level("WARNING"),
+        httpx.Client(transport=httpx.MockTransport(rate_limit_then_time_out)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        verdict = vlm.verify_same_node(
+            client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": False, "answered": False, "reason": "timed out"}
+    assert len(attempts) == 4
+    assert caplog.text.count("node_verify: rate limited (HTTP 429); sending again in 120.0 s") == 2
+    assert "node_verify: asking once more" in caplog.text
+    assert elapsed[0] == 6 * PAGE_DETAIL.request_timeout
+
+
 def test_node_verification_with_an_unparseable_reply_has_no_answer(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
