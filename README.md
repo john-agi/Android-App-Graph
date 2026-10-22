@@ -448,8 +448,7 @@ the app opened on when exploration began: Clock opens on the tab used last, even
 its task cleared. So after the launch the replay identifies the screen, expecting the
 start screen. When it is another node and recorded actions lead from that node to the
 target, the replay starts there, and otherwise from the start screen; a log line names
-the node whenever it is not the start screen. The start screen itself never changes,
-since the screen an app opens on can change again.
+the node whenever it is not the start screen.
 
 The replay follows the path that sends the fewest device actions, each edge
 weighed by its cheapest action: the action's own steps and its

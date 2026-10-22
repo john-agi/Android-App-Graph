@@ -2498,7 +2498,7 @@ def _edge_to_the_launcher(explorer: Kobe, source: str, action: dict[str, object]
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_back_where_back_has_left_the_app_before_continues_from_a_ranked_target_instead(
+def test_back_where_a_recorded_back_has_left_the_app_continues_from_a_ranked_target_instead(
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
