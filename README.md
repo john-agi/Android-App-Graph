@@ -356,9 +356,9 @@ first rejection refined it to (`identify.refinement.new_description`), which als
 the node the screen starts when every check rejects it. An exact match copies its
 member's vector without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
-member whose record holds a `describe` output: a missing file, one tagged with another
-model, or one without such a member's vector stops exploration or the audit as it
-loads the graph, with an error naming the file and the problem.
+member of an in-app node: a missing file, one tagged with another model, or one
+without such a member's vector stops exploration or the audit as it loads the graph,
+with an error naming the file and the problem.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no image vector is embedded first, as when `image_emb.json` is
