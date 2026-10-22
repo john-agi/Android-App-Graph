@@ -3247,6 +3247,24 @@ def test_find_path_returns_the_setup_of_the_action_it_takes() -> None:
     ]
 
 
+def test_find_path_and_action_setup_give_each_setup_action_its_anchor() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "row"},
+        details=EdgeDetails(setup=[_SCROLL, _TAP], setup_anchors=[None, _ROW_ANCHOR]),
+    )
+    setup = Setup((_SCROLL, _TAP), (None, Anchor(_ROW, Bounds(0, 699, 1344, 917))))
+
+    assert gm.action_setup("s0_home", "s1_settings", 0) == setup
+    path = gm.find_path("s0_home", "s1_settings")
+    assert path is not None
+    assert path[1].setup == setup
+
+
 @pytest.mark.parametrize("setups", [[None], [{"action": "swipe"}], [[_SCROLL, "swipe"]]])
 def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
     setups: list[object],

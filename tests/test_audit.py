@@ -1132,6 +1132,37 @@ def test_the_audit_s_replay_taps_each_element_where_the_screen_shows_it_now(
     assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP]
 
 
+def _setup_tapping_the_network_row() -> EdgeDetails:
+    """The flagged instruction, after a setup that tapped Settings' Network & internet
+    row while it sat higher up the list than Settings' home fixture shows it."""
+    recorded, details = _network_row_tapped_higher_up()
+    assert details.effect is not None
+    return EdgeDetails(
+        instruction=_FLAGGED, setup=[recorded], setup_anchors=details.effect.anchor_records()
+    )
+
+
+@pytest.mark.parametrize("issue", [_retry(), {"type": "explore_node", "node": "s1_detail"}])
+@pytest.mark.usefixtures("_fake_device")
+def test_the_audit_taps_each_setup_element_where_the_screen_shows_it_now(
+    issue: dict[str, Any], client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its replay sends a path action's setup, and its retry of a flagged action sends
+    that action's setup, each tap on the element it recorded."""
+    graph = _graph_with_nodes(
+        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
+    )
+    graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=_setup_tapping_the_network_row())
+    reached = iter(["s1_detail"] if issue["type"] == "explore_node" else ["s0_home", "s1_detail"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached, "s0_home"))
+    monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Open the detail")
+    controller = _SettingsHome("com.demo")
+
+    _re_explore(graph, [{"expected_pages": [], **issue}], controller, client, tmp_path)
+
+    assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP, _DETAIL_TAP]
+
+
 @pytest.mark.parametrize("arrives_at", [None, "s2_settings"])
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_leaves_the_graph_unchanged_when_the_replay_misses_the_source(

@@ -484,6 +484,19 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     assert device_log == [*_FIRST_RESTART, open_detail]
 
 
+def _network_row_higher_up() -> Anchor:
+    """The anchor of a tap on the Network & internet row while the row sat higher up
+    Settings' home than its fixture shows it."""
+    row = next(
+        element
+        for element in actionable_elements(
+            parse_tree(_PLAIN_LIST), "com.demo", Bounds(0, 0, _FIXTURE_W, _FIXTURE_H)
+        )
+        if element.label == "Network & internet"
+    )
+    return Anchor(row.locator, Bounds(0, 415, 1344, 633))
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_now(
     tmp_path: Path,
@@ -497,13 +510,6 @@ def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_
         _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
     )
     explorer.graph.graph.add_nodes_from(["s0_home", "s1_network"])
-    row = next(
-        element
-        for element in actionable_elements(
-            parse_tree(_PLAIN_LIST), "com.demo", Bounds(0, 0, _FIXTURE_W, _FIXTURE_H)
-        )
-        if element.label == "Network & internet"
-    )
     recorded = {"action": "tap", "x": 672, "y": 524}
     explorer.graph.add_edge(
         "s0_home",
@@ -511,9 +517,7 @@ def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_
         [recorded],
         details=EdgeDetails(
             effect=ActionEffect(
-                (ActionHit("element", Anchor(row.locator, Bounds(0, 415, 1344, 633))),),
-                None,
-                no_visible_effect=False,
+                (ActionHit("element", _network_row_higher_up()),), None, no_visible_effect=False
             )
         ),
     )
@@ -525,6 +529,42 @@ def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_
     records = step_records(explorer.controller.steps)
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "navigation_replay"),
+        ("action", "navigation_replay"),
+        ("observation", "navigation_replay"),
+    ]
+    assert records[1]["observation"] == records[0]["id"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replayed_setup_tap_reads_the_screen_first_and_taps_its_element_where_it_is_now(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The setup's tap on the Network & internet row goes where the row is now, and the
+    action after it, Back, replays as recorded."""
+    explorer = _explorer(
+        _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
+    )
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_network"])
+    recorded, back = {"action": "tap", "x": 672, "y": 524}, {"action": "back"}
+    explorer.graph.add_edge(
+        "s0_home",
+        "s1_network",
+        [back],
+        details=EdgeDetails(setup=[recorded], setup_anchors=[_network_row_higher_up().as_record()]),
+    )
+    monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s1_network")
+
+    assert explorer.navigate_to_node("s1_network") == "s1_network"
+
+    assert device_log == [*_FIRST_RESTART, {"action": "tap", "x": 672, "y": 808}, back]
+    records = step_records(explorer.controller.steps)
+    assert [(record["kind"], record["source"]) for record in records] == [
+        ("observation", "navigation_replay"),
+        ("action", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
     ]
