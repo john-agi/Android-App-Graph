@@ -351,11 +351,11 @@ class Kobe:
             return checkpoint_node, self.controller.get_state()
 
     def navigate_to_node(self, target_node: str) -> str:
-        """Navigate to a target node by replaying saved edges from the start node.
+        """Navigate to a target node by restarting the app and replaying saved edges.
 
-        This executes the shortest path of already-known actions from the
-        app's entry point to the target node — no VLM calls needed. Each action's
-        setup is sent before it.
+        This executes the shortest path of already-known actions to the target node
+        from the node of the screen the app opens on, when one leads from it, and
+        otherwise from the start node. Each action's setup is sent before it.
 
         Args:
             target_node: The node ID to navigate to.
@@ -365,7 +365,7 @@ class Kobe:
         """
         with self.controller.source("navigation_replay"):
             reached = self._replay_to(target_node)
-        self._setup_trail.begin(reached, arrived=reached == target_node)
+        self._setup_trail.begin(reached, arrived=reached == self.graph.resolve_node_id(target_node))
         return reached
 
     def _replay_to(self, target_node: str) -> str:
@@ -380,11 +380,17 @@ class Kobe:
             raise NoPathError(msg)
 
         restart_app(self.controller, self.app_launch, self.logger)
+        opened_on, _ = self._identify(self.controller.get_state(), expected_node=start_node)
+        start_node = self.graph.resolve_node_id(start_node)
+        target_node = self.graph.resolve_node_id(target_node)
+        if opened_on != start_node:
+            self.logger.info(
+                "%s opened on %s, not on the start node %s.", self.app_name, opened_on, start_node
+            )
+            path = self.graph.find_path(opened_on, target_node) or path
 
         if len(path) <= 1:
-            self.logger.info("Already at target node %s", target_node)
-            node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
-            return node
+            return self._report_arrival(opened_on, target_node)
 
         self.logger.info(
             "Replaying %d actions to reach node %s ...",
@@ -394,7 +400,7 @@ class Kobe:
 
         for i, (node_id, action, setup) in enumerate(path):
             if i == 0:
-                continue  # the first entry is the start node and carries no action
+                continue  # the first entry is the node the replay starts on and carries no action
 
             self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
             if isinstance(action, list):
@@ -424,6 +430,11 @@ class Kobe:
             time.sleep(1)  # brief pause for the UI to settle
 
         actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
+        return self._report_arrival(actual_node, target_node)
+
+    def _report_arrival(self, actual_node: str, target_node: str) -> str:
+        """Log whether a replay to ``target_node`` reached it, and return ``actual_node``,
+        where exploration continues either way."""
         if actual_node != target_node:
             self.logger.warning(
                 "Expected to reach %s but arrived at %s. Continuing from %s.",
@@ -572,13 +583,20 @@ class Kobe:
 
     def _back_leaves_app(self, node: str) -> bool:
         """Return whether Back on ``node`` is taken to leave the app, so that a step that
-        plans it there continues from a ranked target instead.
+        plans it there continues from a ranked target instead: on the start node, and on
+        a node from which Back has been recorded leaving the app, an edge by Back to an
+        ``ext_`` node.
 
         The start node is the screen the app is launched on, the root activity of its
         task, and Back there returns to the home screen
         (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
+        An app can also open on another screen, such as the tab used last, where Back
+        then leaves the app too.
         """
-        return node == self.graph.get_start_node()
+        return node == self.graph.get_start_node() or any(
+            target.startswith("ext_") and [{"action": "back"}] in data.get("actions", [])
+            for _, target, data in self.graph.graph.out_edges(node, data=True)
+        )
 
     def _continue_from_ranked_target(self, position: _Position, max_steps: int) -> _Position | None:
         """Take the step that planned Back on ``position`` by continuing from a ranked
