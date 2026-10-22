@@ -459,6 +459,76 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
     assert [candidate["node"] for candidate in candidates] == ["s1_list", "s2_menu"]
 
 
+SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
+
+
+def _actions_and_setups(graph: GraphManager) -> dict[tuple[str, str], list[tuple[object, object]]]:
+    return {
+        (s, t): list(zip(data["actions"], data["setups"], strict=True))
+        for s, t, data in graph.graph.edges(data=True)
+    }
+
+
+@pytest.mark.parametrize(
+    ("nodes", "edges", "transitions", "expected"),
+    [
+        (
+            SPLIT,
+            (
+                _edge(
+                    "s0_home",
+                    "s1_list",
+                    TAP_A,
+                    TAP_B,
+                    TAP_C,
+                    TAP_D,
+                    setups=[SCROLLED, [], None, SCROLLED_TWICE],
+                ),
+                _edge("s1_list", "s0_home", BACK, setups=[SCROLLED]),
+                _edge("s0_home", "s0_home", SCROLL, setups=[[]]),
+            ),
+            SPLIT_TRANSITIONS,
+            {
+                ("s0_home", "s1_list"): [
+                    ([TAP_A], SCROLLED),
+                    ([TAP_C], None),
+                    ([TAP_D], SCROLLED_TWICE),
+                ],
+                ("s2_screen_000003", "s1_list"): [([TAP_A], SCROLLED), ([TAP_B], [])],
+                ("s2_screen_000003", "s2_screen_000003"): [([SCROLL], [])],
+                ("s0_home", "s0_home"): [([SCROLL], [])],
+                ("s1_list", "s2_screen_000003"): [([BACK], SCROLLED)],
+            },
+        ),
+        (
+            MOVE,
+            (_edge("s0_home", "s2_menu", TAP_A, setups=[SCROLLED]),),
+            MOVE_TRANSITIONS,
+            {("s3_screen_000003", "s2_menu"): [([TAP_A], SCROLLED)]},
+        ),
+    ],
+    ids=["split", "move"],
+)
+@pytest.mark.usefixtures("models")
+def test_an_action_that_follows_moved_members_keeps_its_setup(
+    nodes: dict[str, list[tuple[str, list[float]]]],
+    edges: tuple[dict[str, object], ...],
+    transitions: tuple[tuple[str, str, object, str, str], ...],
+    expected: dict[tuple[str, str], list[tuple[object, object]]],
+    graph_path: Path,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """Every edge an action is put on takes its setup as recorded, known, empty or
+    unknown: the setup was sent on the screen the action was taken from, and the
+    action stays with that screen."""
+    write_member_graph(graph_path, nodes, edges=edges, transitions=transitions)
+    graph = _load(graph_path)
+
+    _check_members(graph, graph_path, {})
+
+    assert _actions_and_setups(graph) == expected
+
+
 def test_single_member_diffuse_and_vectorless_nodes_get_no_check(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
