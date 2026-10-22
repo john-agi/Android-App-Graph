@@ -196,6 +196,34 @@ def test_a_pair_the_model_and_the_images_propose_is_verified_once_naming_both_so
     assert models.shown == [("000002", "000004")]
 
 
+def test_a_pair_whose_node_an_earlier_merge_removed_is_verified_on_the_node_that_kept_it(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """A pair whose two nodes earlier merges made one is skipped without a verifier
+    call."""
+    write_member_graph(
+        graph_path,
+        {"s0_home": [("000001", X)], "s1_home": [("000002", Y)], "s2_home": [("000003", Z)]},
+    )
+    graph = _load(graph_path)
+    models.confirm("000001", "000002")
+    models.confirm("000001", "000003")
+    issues = [
+        {"node_a": "s0_home", "node_b": "s1_home"},
+        {"node_a": "s1_home", "node_b": "s2_home"},
+        {"node_a": "s2_home", "node_b": "s0_home"},
+    ]
+
+    results = graph.verify_merge_proposals(graph.merge_proposals(issues), {})
+
+    assert [result["status"] for result in results] == ["merged", "merged", "skipped"]
+    assert results[1]["members"] == {"s0_home": "000001", "s2_home": "000003"}
+    assert (results[1]["kept"], results[1]["removed"]) == ("s0_home", "s2_home")
+    assert results[2]["reason"] == "same node"
+    assert models.shown == [("000001", "000002"), ("000001", "000003")]
+    assert list(graph.graph) == ["s0_home"]
+
+
 def test_images_propose_no_pair_with_an_external_node_or_a_node_of_another_package(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
