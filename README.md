@@ -691,9 +691,9 @@ about an edge, it stores a SHA-256 of the instructions it sent in
 `normalized_instructions_hash`, whatever the answer: a template, no template, or
 the fallback for a reply that was cut off or timed out. A later pass skips an
 edge whose instructions still match that hash, so an edge is asked again only
-after it gains, loses or changes an instruction; an edge with no hash, `null` or
-absent, is asked on the next pass. A pass also skips an edge with a single
-instruction of at most six words and no quote or digit, which keeps no template.
+after it gains, loses or changes an instruction; an edge without the hash is
+asked on the next pass. A pass also skips an edge with a single instruction of
+at most six words and no quote or digit, which keeps no template.
 
 ## Visualize or Audit a Graph
 

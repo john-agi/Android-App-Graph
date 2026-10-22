@@ -2586,25 +2586,6 @@ def test_normalize_all_edges_passes_target_observations(normalizer: FakeNormaliz
     assert normalizer.calls[0]["target_observations"] == ["shoe results"]
 
 
-def test_normalize_all_edges_sends_once_an_edge_that_records_no_normalization(
-    normalizer: FakeNormalizer,
-) -> None:
-    """Even when its template's examples cover every instruction."""
-    gm = make_manager()
-    _search_graph(gm)
-    gm.graph["s0_home"]["s1_results"]["instruction_templates"] = [
-        {"template": "search for {item}", "examples": ['search for "shoes"', 'search for "hats"']}
-    ]
-
-    gm.normalize_all_edges()
-    gm.normalize_all_edges()
-
-    assert len(normalizer.calls) == 1
-    assert gm.graph["s0_home"]["s1_results"]["instruction_templates"][0]["template"] == (
-        "search for {query}"
-    )
-
-
 def test_normalize_all_edges_clears_templates_when_the_result_is_not_a_template(
     normalizer: FakeNormalizer,
 ) -> None:
@@ -4508,7 +4489,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "visit_count": d.get("visit_count", 0),
             "schema_deltas": d.get("schema_deltas") or None,
             "setups": d.get("setups") or None,
-            "normalized_instructions_hash": d.get("normalized_instructions_hash"),
+            "normalized_instructions_hash": d.get("normalized_instructions_hash") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
     }

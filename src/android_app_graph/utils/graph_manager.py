@@ -2467,9 +2467,8 @@ class GraphManager:
                 "target_observations": attrs.get("target_observations", []),
                 "num_steps": attrs.get("num_steps", []),
                 "visit_count": attrs.get("visit_count", 0),
-                "normalized_instructions_hash": attrs.get("normalized_instructions_hash"),
             }
-            for key in ("schema_deltas", "setups"):
+            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
                 if attrs.get(key):
                     edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
@@ -2569,9 +2568,8 @@ class GraphManager:
                 "target_observations": edge_data.get("target_observations", []),
                 "num_steps": edge_data.get("num_steps", []),
                 "visit_count": edge_data.get("visit_count", 0),
-                "normalized_instructions_hash": edge_data.get("normalized_instructions_hash"),
             }
-            for key in ("schema_deltas", "setups"):
+            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
                 if edge_data.get(key):
                     edge_attrs[key] = edge_data[key]
             self.graph.add_edge(
