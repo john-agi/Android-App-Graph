@@ -7,7 +7,7 @@ import copy
 import io
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NoReturn, override
 
@@ -258,17 +258,26 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
     return graph, graph_path
 
 
+type _Visit = str | tuple[str, Mapping[str, object]]
+
+
 def _identifying(
-    graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *nodes: str
+    graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *visits: _Visit
 ) -> list[str | None]:
-    """Make identify_state answer ``nodes`` in turn; return the list the expected node of
-    each call is appended to."""
+    """Make identify_state answer ``visits`` in turn, each a node, or a node with the state
+    the visit records as the node's latest; return the list the expected node of each call
+    is appended to."""
     expected: list[str | None] = []
-    answers = iter(nodes)
+    answers = iter(visits)
 
     def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
         expected.append(expected_node)
-        return next(answers)
+        visit = next(answers)
+        if isinstance(visit, str):
+            return visit
+        node, state = visit
+        graph.graph.nodes[node]["last_detail_snapshot"] = dict(state)
+        return node
 
     monkeypatch.setattr(graph, "identify_state", identify)
     return expected
@@ -1391,7 +1400,8 @@ def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_
     because the app opened on its node has reached it as one that sends its path has."""
     row_tap = {"action": "tap", "x": 540, "y": 1700}
     graph = _flagged_graph()
-    _identifying(graph, monkeypatch, *after_restart, reached, "s2_settings")
+    scrolled = {"first_visible_item": "Storage"}
+    _identifying(graph, monkeypatch, *after_restart, (reached, scrolled), "s2_settings")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     sent = iter([_SWIPE, row_tap])
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
