@@ -1243,7 +1243,12 @@ def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
         (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}], "edges": []}),
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}],
+                "edges": [],
+            }
+        ),
         "utf-8",
     )
     vectors = {kept: EMBEDDINGS["Home screen"]}
@@ -1721,7 +1726,10 @@ def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vect
 ) -> None:
     path = tmp_path / "graph.json"
     member = members(tmp_path / "steps")
-    path.write_text(json.dumps({"nodes": [{"id": "s0_home", **member}], "edges": []}), "utf-8")
+    path.write_text(
+        json.dumps({"nodes": [{"id": "s0_home", "replay_misses": 0, **member}], "edges": []}),
+        "utf-8",
+    )
     write_image_vectors(tmp_path / "steps", member["observations"])
     gm = GraphManager()
 
@@ -1755,7 +1763,12 @@ def test_closest_member_raises_naming_the_node_and_every_member_without_a_usable
     )
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}], "edges": []}),
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}],
+                "edges": [],
+            }
+        ),
         "utf-8",
     )
     write_text_vectors(path, member)
@@ -4322,7 +4335,12 @@ def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     membership = members(app_dir / "steps", b"home-image")
     path = app_dir / "demo_audited.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "activity": HOME, **membership}], "edges": []}),
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "activity": HOME, "replay_misses": 0, **membership}],
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
     write_text_vectors(path, membership)
@@ -4412,7 +4430,7 @@ def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
     previous = tmp_path / "previous" / "graph.json"
     previous.parent.mkdir()
     membership = members(previous.parent / "steps")
-    write_graph(previous, [{"id": "s9_stale", **membership}])
+    write_graph(previous, [{"id": "s9_stale", "replay_misses": 0, **membership}])
     write_text_vectors(previous, membership)
     path = tmp_path / "graph.json"
     write_graph(
@@ -4472,7 +4490,13 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
     previous = tmp_path / "previous.json"
     membership = members(tmp_path / "steps")
     previous.write_text(
-        json.dumps({"next_id": 7, "nodes": [{"id": "s9_stale", **membership}], "edges": []}),
+        json.dumps(
+            {
+                "next_id": 7,
+                "nodes": [{"id": "s9_stale", "replay_misses": 0, **membership}],
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
     write_text_vectors(previous, membership)

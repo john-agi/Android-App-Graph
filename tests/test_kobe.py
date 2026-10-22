@@ -283,8 +283,9 @@ def test_resume_from_auto_passes_over_a_node_two_replays_in_a_row_missed(
     write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    """Both replays to the form land on the home screen. The checkpoint stops offering
-    the form, and a run on the saved graph resumes at the dialog."""
+    """Both replays to the form land on the home screen. After the second, the checkpoint
+    offers the dialog and the start screen, and a run on the saved graph resumes at the
+    dialog."""
     _write_form_and_dialog_graph(tmp_path, write_graph_file, write_image_vectors)
     explorer = _explorer(_ReplayDevice(HOME_SCREEN, device_log), tmp_path, router_client)
     _identifying(explorer, monkeypatch, "s0_home", "s0_home", "s0_home", "s0_home")
@@ -2707,8 +2708,8 @@ def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both replays to the list that Back on the start screen continues with land on the
-    start screen, and each counts a miss on the list. The list is then no longer ranked,
-    so the third Back on the start screen is pressed without a model call to choose a
+    start screen, and each counts a miss on the list. With the list out of the ranking,
+    the third Back on the start screen is pressed without a model call to choose a
     target."""
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)

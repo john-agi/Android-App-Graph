@@ -2875,7 +2875,7 @@ class GraphManager:
                 interactable_elements=node_data.get("interactable_elements", []),
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
-                replay_misses=node_data.get("replay_misses", 0),
+                replay_misses=node_data["replay_misses"],
                 observations=node_data["observations"],
                 representative_observation=node_data["representative_observation"],
             )
