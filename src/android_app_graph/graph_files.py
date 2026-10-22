@@ -248,8 +248,8 @@ def observation_image_b64(steps: Path, observation_id: str) -> str:
 
 def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     """Return ``data`` once it is an object whose ``nodes``/``edges`` are lists
-    of objects with non-empty string ids and endpoints; raise ``TypeError``
-    naming ``path`` otherwise.
+    of objects with non-empty string ids and endpoints; raise the ``ValueError``
+    of ``unloadable_graph`` naming ``path`` otherwise.
 
     A hand-edited or truncated file can leave ``nodes``/``edges`` absent, ``null``,
     or holding something other than a list of objects; every such shape failure
@@ -262,34 +262,27 @@ def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     path, like every other malformed id.
     """
     if not isinstance(data, dict):
-        msg = f"Graph JSON must be an object: {path}"
-        raise TypeError(msg)
+        raise unloadable_graph(path, ["graph JSON must be an object"])
     # JSON object keys are always strings; the comprehension is what narrows the
     # loaded object to dict[str, Any] for the type checker (as payloads does).
     graph: dict[str, Any] = {key: value for key, value in data.items() if isinstance(key, str)}
     nodes = graph.get("nodes")
     edges = graph.get("edges")
     if not isinstance(nodes, list) or not isinstance(edges, list):
-        msg = f"Graph JSON must contain list fields 'nodes' and 'edges': {path}"
-        raise TypeError(msg)
+        raise unloadable_graph(path, ["graph JSON must contain list fields 'nodes' and 'edges'"])
     for node in nodes:
         if not isinstance(node, dict):
-            msg = f"Graph node must be an object: {node!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph node must be an object: {node!r}"])
         node_id = node.get("id")
         if not isinstance(node_id, str):
-            msg = f"Graph node id must be a string: {node!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph node id must be a string: {node!r}"])
         if not node_id:
-            msg = f"Graph node id must be a non-empty string: {node!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph node id must be a non-empty string: {node!r}"])
     for edge in edges:
         if not isinstance(edge, dict):
-            msg = f"Graph edge must be an object: {edge!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph edge must be an object: {edge!r}"])
         if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
-            msg = f"Graph edge endpoint must be a string: {edge!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph edge endpoint must be a string: {edge!r}"])
     return graph
 
 
@@ -314,8 +307,8 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
         if endpoint not in node_ids
     }
     if missing_ids:
-        msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
-        raise ValueError(msg)
+        problem = f"edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
+        raise unloadable_graph(path, [problem])
     return graph
 
 

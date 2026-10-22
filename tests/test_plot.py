@@ -486,10 +486,11 @@ def test_load_graph_rejects_a_file_without_an_edges_list(tmp_path: Path) -> None
     graph_path.write_text(json.dumps({"nodes": nodes}), encoding="utf-8")
     _write_step_image(tmp_path, "000000", b"image")
 
-    with pytest.raises(TypeError, match="list fields 'nodes' and 'edges'") as excinfo:
+    with pytest.raises(ValueError, match="list fields 'nodes' and 'edges'") as excinfo:
         plot.load_graph(str(graph_path))
 
     assert str(graph_path) in str(excinfo.value)
+    assert "Explore the app again into a new graph directory" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

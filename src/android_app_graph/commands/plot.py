@@ -78,11 +78,10 @@ def _image_uri(steps_dir: Path, observation_id: str) -> str:
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph).
 
-    A file without ``nodes`` and ``edges`` lists raises ``TypeError`` naming it. A node
-    that does not list its member observations with its representative among them, an
-    edge without actions or whose per-action lists do not hold one entry per action, and
-    a member whose image is missing from the step log raise ``ValueError`` naming the
-    file and each of them.
+    A file that ``require_graph_shape`` rejects, a node that does not list its member
+    observations with its representative among them, an edge without actions or whose
+    per-action lists do not hold one entry per action, and a member whose image is
+    missing from the step log raise ``ValueError`` naming the file and each of them.
     """
     path = Path(graph_path)
     with path.open("r", encoding="utf-8") as f:

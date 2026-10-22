@@ -3826,10 +3826,11 @@ def test_load_graph_rejects_a_file_without_an_edges_list(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    with pytest.raises(TypeError, match="list fields 'nodes' and 'edges'") as excinfo:
+    with pytest.raises(ValueError, match="list fields 'nodes' and 'edges'") as excinfo:
         make_manager().load_graph(path)
 
     assert str(path) in str(excinfo.value)
+    assert "Explore the app again into a new graph directory" in str(excinfo.value)
 
 
 def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
@@ -3996,7 +3997,7 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
     gm = make_manager()
     gm.load_graph(previous)
 
-    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+    with pytest.raises(ValueError, match="node id must be a string") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
 
@@ -4008,16 +4009,18 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
 
 
 def test_load_graph_rejects_a_null_nodes_field_naming_the_path(tmp_path: Path) -> None:
-    """``"nodes": null`` raises a ``TypeError`` naming the path from ``load_graph``, which
-    has no shape check of its own and relies entirely on the shared validator.
+    """``"nodes": null`` raises the ``ValueError`` every load failure raises, naming the
+    path, from ``load_graph``, which has no shape check of its own and relies entirely on
+    the shared validator.
     """
     path = tmp_path / "graph.json"
     path.write_text(json.dumps({"nodes": None, "edges": []}), encoding="utf-8")
     gm = make_manager()
 
-    with pytest.raises(TypeError, match="must contain list fields 'nodes' and 'edges'") as excinfo:
+    with pytest.raises(ValueError, match="must contain list fields 'nodes' and 'edges'") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
+    assert "Explore the app again into a new graph directory" in str(excinfo.value)
 
 
 def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> None:
@@ -4030,7 +4033,7 @@ def test_load_graph_rejects_an_int_node_id_naming_the_path(tmp_path: Path) -> No
     path.write_text(json.dumps({"nodes": [{"id": 5}], "edges": []}), encoding="utf-8")
     gm = make_manager()
 
-    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+    with pytest.raises(ValueError, match="node id must be a string") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
 
@@ -4048,7 +4051,7 @@ def test_load_graph_rejects_an_int_edge_endpoint_naming_the_path(tmp_path: Path)
     )
     gm = make_manager()
 
-    with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
+    with pytest.raises(ValueError, match="edge endpoint must be a string") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
 
@@ -4624,6 +4627,6 @@ def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path
     path = tmp_path / "graph.json"
     path.write_text("[]", encoding="utf-8")
     gm = make_manager()
-    with pytest.raises(TypeError, match="must be an object") as excinfo:
+    with pytest.raises(ValueError, match="must be an object") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
