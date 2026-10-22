@@ -38,7 +38,7 @@ class _Forest:
     def root(self, node: str) -> str:
         """Return the root of ``node``'s component, pointing every node on the way
         straight at it."""
-        path = []
+        path: list[str] = []
         while (parent := self._parent.setdefault(node, node)) != node:
             path.append(node)
             node = parent
