@@ -443,6 +443,14 @@ otherwise the package's launcher activity, looked up once per run; of several, t
 first is used and a warning names the others. Whatever the app holds only in memory,
 such as an unsaved form, is lost at each replay; data it has stored survives.
 
+The replay follows the path that sends the fewest device actions, each edge
+weighed by its cheapest action: the action's own steps and its
+[setup](#graph-edges), so a path whose actions need no setup is preferred. On
+each edge it sends that action's setup first, such as the swipe that scrolled a
+list or the dropdown choice that filled in a form, so the action finds the screen
+as exploration did. Exploration's log names each setup action, as in
+`Replay 2/3: setup 1/1 on s30_apps via swipe`.
+
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
 elements, few outgoing edges and few visits. Each checkpoint lets the model choose
@@ -639,11 +647,33 @@ explore the app again into a new graph directory.
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations` and `schema_deltas` lists hold one entry
-per action, in the same order, so entry *i* of each describes `actions[i]`. An
-action that recorded no instruction or observation has `""` in that list, and an
-action that recorded no state change has `null` in `schema_deltas`; only
-self-loop actions record one. Skip those entries when you read an edge.
+`instructions`, `target_observations`, `schema_deltas` and `setups` lists hold
+one entry per action, in the same order, so entry *i* of each describes
+`actions[i]`. An action that recorded no instruction or observation has `""` in
+that list, and an action that recorded no state change has `null` in
+`schema_deltas`; only self-loop actions record one. Skip those entries when you
+read an edge.
+
+An action's entry in `setups` is the list of device actions exploration sent on
+the edge's source node before it, since it last arrived at that node from
+elsewhere; a [replay](#replaying-to-a-node) sends them first. They are the
+node's self-loops, such as a swipe that scrolled a list down to the tapped row,
+and its round trips, actions that left the node and came back to it, such as
+opening a form's dropdown and choosing the option that shows the tapped field,
+or opening one of a list's rows and pressing Back. Exploration keeps the nodes
+it arrived at in order: coming back to one of them ends a round trip, and
+arriving at any other node starts that node's setup empty, `[]`.
+`app-graph-audit --re-explore` records setups the same way. The entry is `null`
+when the setup is unknown or too long:
+
+- How the device came to be on a screen is unknown on the screen a run begins
+  on without a replay, after a step that leaves the app, and after a replay that
+  ends elsewhere than its node, until exploration arrives at that screen from
+  another one.
+- A setup of more than 8 actions is dropped, and the log says so.
+
+An action recorded again keeps the shorter of its known setups. A graph file
+without `setups` loads unchanged, and its actions replay without a setup.
 
 ## Visualize or Audit a Graph
 
@@ -799,7 +829,8 @@ instruction looks wrong for where it leads, it:
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action
    recorded at the same position (see [Graph edges](#graph-edges));
-3. executes that action once and corrects the edge by the screen it reaches:
+3. executes that action once, after its [setup](#graph-edges), and corrects the
+   edge by the screen it reaches:
    - another node: the action moves, with its entry in every per-action list, to
      the edge toward that node, which is created if needed, and its observation
      becomes that node's description. The flagged edge is removed once no action
