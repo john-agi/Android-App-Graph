@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -177,7 +178,8 @@ def test_exploration_resolves_all_role_models_before_device_access(
     assert agent.instruction.model == "provider/instruction"
     assert (agent.action.model, agent.action.temperature) == ("provider/action", 0.0)
     assert agent.action.request_timeout == 9.0
-    assert agent.graph.embedding_model == "provider/embedding"
+    assert agent.graph.embedding is not None
+    assert agent.graph.embedding.model == "provider/embedding"
     assert agent.graph.image_embedding == agent.graph.embedding
     assert agent.graph.page_detail == agent.page_detail
     assert agent.client is agent.graph.client is router_client
@@ -2439,7 +2441,15 @@ def test_exploration_embeds_every_member_again_when_the_vectors_are_from_another
     }
 
 
+@pytest.mark.parametrize(
+    "vector_file_name",
+    [
+        pytest.param("steps/image_emb.json", id="image vectors"),
+        pytest.param("demo_text_emb.json", id="text vectors"),
+    ],
+)
 def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
+    vector_file_name: str,
     tmp_path: Path,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
@@ -2450,12 +2460,14 @@ def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir()
     write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}], "edges": []})
-    vector_file = graph_path.parent / "steps" / "image_emb.json"
+    vector_file = graph_path.parent / vector_file_name
     truncated = '{"model": "provider/embedding", "embeddings": {"s0_home-observation": [1.0,'
     vector_file.write_text(truncated, encoding="utf-8")
     router_responses.append(httpx.Response(200, json=embedding_body))
 
-    with pytest.raises(ValueError, match=r"image_emb\.json cannot be read or parsed"):
+    with pytest.raises(
+        ValueError, match=rf"{re.escape(vector_file.name)} cannot be read or parsed"
+    ):
         _explorer(
             _Device(AssertionError("loading must not read the device")), tmp_path, router_client
         )

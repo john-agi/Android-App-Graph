@@ -1,7 +1,7 @@
 """Tests for android_app_graph.graph_files.
 
-Atomic JSON and byte writing, the step log's layout, and graph-structure
-validation.
+Atomic JSON and byte writing, the step log's layout, model-tagged vector files,
+and graph-structure validation.
 """
 
 from __future__ import annotations
@@ -201,13 +201,13 @@ def test_write_json_atomically_rejects_a_read_only_target_by_os_access(
 
 def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
     """``os.replace`` over a symlink replaces the link itself: with
-    ``demo.emb.json -> shared_cache.json``, writing must land in
+    ``demo_text_emb.json -> shared_cache.json``, writing must land in
     ``shared_cache.json`` and leave the link a link, not silently detach it
     into a plain file that shadows the (unchanged) shared target.
     """
     target = tmp_path / "shared_cache.json"
     target.write_text('{"old": 1}', encoding="utf-8")
-    link = tmp_path / "demo.emb.json"
+    link = tmp_path / "demo_text_emb.json"
     link.symlink_to(target)
 
     graph_files.write_json_atomically(link, {"new": 2})
@@ -258,6 +258,65 @@ def test_an_explored_graph_and_its_audited_copy_share_one_step_log(tmp_path: Pat
     steps = graph_files.graph_steps_dir(app_dir / "demo.json")
     assert steps == app_dir / "steps"
     assert graph_files.graph_steps_dir(app_dir / "demo_audited.json") == steps
+
+
+def test_an_explored_graph_and_its_audited_copy_keep_their_own_text_vectors(
+    tmp_path: Path,
+) -> None:
+    assert graph_files.text_embeddings_path(tmp_path / "demo.json") == (
+        tmp_path / "demo_text_emb.json"
+    )
+    assert graph_files.text_embeddings_path(tmp_path / "demo_audited.json") == (
+        tmp_path / "demo_audited_text_emb.json"
+    )
+
+
+TEXT_MODEL = "provider/embedding"
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        pytest.param(None, "is missing", id="missing"),
+        pytest.param("{not json", "cannot be read or parsed", id="corrupt"),
+        pytest.param(
+            json.dumps({"embeddings": {"000000": [0.5]}}),
+            "is not tagged with the model that wrote it",
+            id="no tag",
+        ),
+        pytest.param(
+            json.dumps({"model": TEXT_MODEL}), "has no embeddings object", id="no embeddings"
+        ),
+        pytest.param(
+            json.dumps({"model": "other/model", "embeddings": {"000000": [0.5]}}),
+            f"was written by model 'other/model', not the configured {TEXT_MODEL!r}",
+            id="another model",
+        ),
+        pytest.param(
+            json.dumps({"model": TEXT_MODEL, "embeddings": {"000000": [0.5], "000001": []}}),
+            "has a malformed or non-finite vector for observation(s) 000001",
+            id="malformed vector",
+        ),
+        pytest.param(
+            json.dumps({"model": TEXT_MODEL, "embeddings": {"000001": [0.5]}}),
+            "has no vector for observation(s) 000000",
+            id="a required vector missing",
+        ),
+    ],
+)
+def test_an_unusable_text_vector_file_raises_naming_the_file_and_the_problem(
+    content: str | None, problem: str, tmp_path: Path
+) -> None:
+    """Nothing embeds a description again, so the graph cannot be loaded."""
+    path = graph_files.text_embeddings_path(tmp_path / "demo.json")
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"demo_text_emb\.json") as raised:
+        graph_files.load_embeddings(path, model=TEXT_MODEL, kind="text", required=["000000"])
+
+    assert f"Text embedding file {path} {problem}" in str(raised.value)
+    assert str(raised.value).endswith(". Explore the app again into a new graph directory.")
 
 
 def test_a_step_keeps_its_record_image_and_tree_under_its_id(tmp_path: Path) -> None:

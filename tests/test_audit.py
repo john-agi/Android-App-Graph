@@ -1715,6 +1715,33 @@ def test_the_audit_embeds_the_members_the_explored_graph_has_no_image_vector_for
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_the_audited_copy_starts_its_text_vectors_from_the_explored_graph_s(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    router_requests: list[httpx.Request],
+    write_graph_file: Callable[[Path, dict[str, Any]], None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    app_dir = tmp_path / "graphs" / "demo"
+    app_dir.mkdir(parents=True)
+    write_graph_file(app_dir / "demo.json", {"nodes": [{"id": "s0_home"}], "edges": []})
+    member = "s0_home-observation"
+    write_image_vectors(app_dir / "steps", [member])
+    explored = {"model": "google/gemini-embedding-2", "embeddings": {member: [1.0, 0.0]}}
+    (app_dir / "demo_text_emb.json").write_text(json.dumps(explored), encoding="utf-8")
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+    config = _write_config(tmp_path, str(tmp_path / "graphs"))
+
+    assert audit.main(["-c", str(config), "--app", "demo"]) == 0
+
+    assert router_requests == []
+    audited = json.loads((app_dir / "demo_audited_text_emb.json").read_text(encoding="utf-8"))
+    assert audited == explored
+    assert json.loads((app_dir / "demo_text_emb.json").read_text(encoding="utf-8")) == explored
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_audit_skips_a_configured_app_without_a_graph_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
