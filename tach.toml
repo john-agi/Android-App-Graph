@@ -36,6 +36,10 @@ path = "android_app_graph.member_groups"
 depends_on = []
 
 [[modules]]
+path = "android_app_graph.merge_rounds"
+depends_on = []
+
+[[modules]]
 path = "android_app_graph.screen_image"
 depends_on = []
 
