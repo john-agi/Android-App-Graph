@@ -25,7 +25,7 @@ Android-App-Graph/
 │       ├── kobe.py                    # Core app explorer
 │       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
 │       ├── step_log.py                # Records every screenshot and action in steps/
-│       ├── ui_tree.py                 # The accessibility tree of a screen, parsed and compared
+│       ├── ui_tree.py                 # A screen's accessibility tree: parsed, compared, its elements located
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
@@ -74,6 +74,7 @@ graph TD;
     gm --> gf;
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
+    gm --> tree;
     gm --> vlm;
     gf --> pay;
     steps --> gf;
@@ -581,9 +582,9 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `ui_tree_error`, `null` when `<id>.xml` exists and otherwise why there is no tree, `ui_tree_retakes`, how many times the screenshot was taken again, and `ui_tree_settled`, whether the two dumps around the kept screenshot agreed; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
+| `observation` | each screenshot | `width` and `height` of its image, `screen_size`, the width and height of the screenshot as the device took it, in the screen pixels of its tree's bounds, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `ui_tree_error`, `null` when `<id>.xml` exists and otherwise why there is no tree, `ui_tree_retakes`, how many times the screenshot was taken again, and `ui_tree_settled`, whether the two dumps around the kept screenshot agreed; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
-| `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
+| `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, and `from_node` and `to_node` as they were then |
 
 An action or transition record takes `activity` and `package` from the screenshot
 it was taken from. A replay acts without looking, so a replayed action names the
@@ -603,10 +604,12 @@ emulator it is 142 of 2424 rows in portrait. A bar that is hidden, as in immersi
 mode, not at the top, or not reported gives `null` and 0 rows, and the whole image
 is hashed, which can miss an exact match but never invents one.
 
-`describe` holds the screen description model's `page_description`, `state`,
-`elements` and `is_external_web`; an exact match copies them from the member it
-matched and names it in `copied_from`. `identify` holds what decided the screen's
-node:
+`describe` holds the screen description model's `page_description`, `state` and
+`is_external_web`, the screen's [`elements`](#elements) as a node stores them, with
+their locators and without `explored`, and `thin_tree`, why the description model
+found the elements itself, or `null` when they came from the tree; an exact match
+copies them from the member it matched and names it in `copied_from`. `identify`
+holds what decided the screen's node:
 
 - `stage`: `exact`, `expected`, `short_list`, `new` or `external_web`;
 - `expected_node`, the node the caller expected, or `null`;
@@ -623,7 +626,8 @@ node:
 `navigation_replay`, `coverage_checkpoint`, `external_app_recovery`,
 `external_web_recovery`, `re_explore` (the audit's exploration steps) or
 `edge_retry` (the audit's replay of a flagged edge). A retried edge has no
-planner, so its transition holds the flagged instruction and a `null` element.
+planner, so its transition holds the flagged instruction and a `null` element and
+`element_locator`.
 
 On 139 screenshots of the Settings app from a 1280x2856 emulator, each became a
 669x1493 image of 74 KB on average (176 KB at most) and took about 0.35 s to
@@ -725,6 +729,56 @@ its record in `steps/`, or an edge has no actions or per-action lists (see
 fails the same way, except that it reads no record or tree in `steps/` and needs
 the image of every member, not only of the representative. Explore the app again
 into a new graph directory.
+
+#### Elements
+
+Each node lists the elements a user can act on in `interactable_elements`. A
+screenshot the description model describes has its elements read from its
+accessibility tree, in the windows the user can act on: the active application
+window and the app's windows above it, such as a popup that does not take focus,
+never the keyboard or the status bar. A dialog or menu that takes focus hides the
+screen under it from the tree, so only its own elements are listed. An element is a
+visible, enabled node that is clickable, long-clickable, checkable or scrollable, a
+text field (a class ending in `EditText` or `AutoCompleteTextView`: the tree has no
+attribute that says a node takes text), or a row of a `ListView`, `GridView` or
+`ExpandableListView`, which takes its rows' taps itself, as in a popup menu. A
+toggle inside a clickable row, and a clickable node with the label of the clickable
+node it is in, are part of that one. Nodes with the same locator are one element,
+and the nodes of one scrollable list that share a resource ID and differ only in
+label are one list item, which stands for all of them.
+
+An element's `locator` finds it again in another tree: its resource ID, class,
+label, and the resource IDs of its ancestors that have one, outermost first. The
+label is the node's text, else its content description, else the first text inside
+it, which in a list row is the row's title and not its summary, since the summary
+changes with the setting it shows. A scrollable node's label is its own text or
+content description only, because scrolling changes what is inside it, and a text
+field's is its hint, else its content description, never what was typed. A list
+item's label is `null`, and its locator matches every row.
+
+The description model receives the screen's elements numbered, one line each with
+the class, the label and the region of the screen, and writes one description per
+number; it adds no element of its own. When the screenshot has no tree, the tree
+lists no element, or one web view or one node that draws its own content (a `View`,
+`SurfaceView`, `TextureView` or `GLSurfaceView` without children) covers more than
+half of a window the user can act on, the model finds the elements itself instead,
+and they have no locator.
+
+A node stores each element as `locator`, `description`, `position` (the third of
+the screen, across and down, that holds the element's centre, such as `top left`,
+or the region the model named), `bounds` in screen pixels (`null` for the model's
+elements), `source` (`tree` or `model`) and `explored`. A later visit, and a merge
+of two nodes, add the elements the node does not list yet: the tree's by locator,
+the model's by lowercased description, so a button the model describes two ways is
+still one element. An element explored in either of two merged nodes stays
+explored.
+
+The exploration planner sees the node's unexplored elements numbered from 1, each
+with its description and position, and names the number its instruction acts on.
+The step marks that element explored, found by its locator, and its transition
+record names the locator next to the number, which indexes a list that every
+marked element shortens. The coverage checkpoint ranks and shows nodes by the same
+unexplored elements.
 
 ### Graph edges
 

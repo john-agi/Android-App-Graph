@@ -35,7 +35,7 @@ from android_app_graph.graph_files import (
 )
 from android_app_graph.payloads import as_int, as_int_list, as_object_dict, as_str
 from android_app_graph.screen_image import encode_screenshot, pixel_hash, status_bar_rows
-from android_app_graph.ui_tree import UiTree, UnusableDumpError, parse_tree
+from android_app_graph.ui_tree import Locator, UiTree, UnusableDumpError, parse_tree
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 
 _FRAME_COORDINATES = 4
+_SIZE_COORDINATES = 2
 _NO_TREE = "the device state has no tree"
 
 type RunKind = Literal["explore", "audit"]
@@ -62,13 +63,18 @@ type StepSource = Literal[
 class Observation:
     """One screen as ``StepRecorder.get_state`` captured it, with its screenshot as
     base64 WebP, the ``pixel_hash`` of that image below the status bar, and its
-    accessibility tree, or ``None`` with the reason it has none in ``ui_tree_error``."""
+    accessibility tree, or ``None`` with the reason it has none in ``ui_tree_error``.
+
+    ``screen_size`` is the width and height of the screenshot as the device took it,
+    in the screen pixels the tree's bounds are in.
+    """
 
     observation_id: str
     screenshot_b64: str
     activity: str
     package: str
     pixel_hash: str
+    screen_size: tuple[int, int]
     ui_tree: UiTree | None
     ui_tree_error: str | None
 
@@ -87,6 +93,7 @@ class Observation:
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
             pixel_hash=as_str(state.get("pixel_hash"), ""),
+            screen_size=screen_size_of(state),
             ui_tree=tree if isinstance(tree := state.get("ui_tree"), UiTree) else None,
             ui_tree_error=as_str(state.get("ui_tree_error"), "") or None,
         )
@@ -97,15 +104,18 @@ class Transition:
     """One recorded edge: the screens before and after an action, what the planner
     asked for, and the nodes both screens were assigned to at that moment.
 
-    ``instruction`` and ``element`` are the planner's; ``action`` is what ran on the
-    device. A retried edge has no planner, so its ``instruction`` is the one the edge
-    recorded and its ``element`` is ``None``.
+    ``instruction`` and ``element`` are the planner's, ``element`` the number it gave the
+    element in its list, and ``element_locator`` that element's locator, ``None`` for an
+    element the model found on a screen whose tree was too thin; ``action`` is what ran
+    on the device. A retried edge has no planner, so its ``instruction`` is the one the
+    edge recorded and its ``element`` and ``element_locator`` are ``None``.
     """
 
     before: Observation
     after: Observation
     instruction: str
     element: int | None
+    element_locator: Locator | None
     action: dict[str, Any] | list[dict[str, Any]]
     from_node: str
     to_node: str
@@ -204,9 +214,16 @@ def _status_bar(state: Mapping[str, object]) -> list[int] | None:
     return frame if len(frame) == _FRAME_COORDINATES else None
 
 
-def _image_height(image: bytes) -> int:
+def _image_size(image: bytes) -> tuple[int, int]:
     with Image.open(io.BytesIO(image)) as opened:
-        return opened.height
+        return opened.size
+
+
+def screen_size_of(fields: Mapping[str, object]) -> tuple[int, int]:
+    """Return the ``screen_size`` of a device state or an observation record, ``(0, 0)``
+    when it holds none."""
+    size = as_int_list(fields.get("screen_size"))
+    return (size[0], size[1]) if len(size) == _SIZE_COORDINATES else (0, 0)
 
 
 def _state_tree(state: Mapping[str, object]) -> tuple[str, UiTree]:
@@ -269,9 +286,9 @@ class StepRecorder:
 
     def get_state(self) -> dict[str, Any]:
         """Return the wrapped controller's state with its screenshot encoded as WebP,
-        the ``observation_id`` it was recorded under, its ``pixel_hash``, and its
-        ``"xml"`` parsed into ``"ui_tree"``, or ``None`` with the reason in
-        ``"ui_tree_error"``.
+        the ``observation_id`` it was recorded under, its ``pixel_hash``, the
+        ``screen_size`` of the screenshot it took, and its ``"xml"`` parsed into
+        ``"ui_tree"``, or ``None`` with the reason in ``"ui_tree_error"``.
 
         The hash leaves out the rows of the controller's ``status_bar`` frame; a
         controller that reports none has the whole image hashed.
@@ -285,11 +302,11 @@ class StepRecorder:
             tree_error = None
         png = base64.b64decode(state["screenshot"], validate=True)
         webp = encode_screenshot(png)
-        with Image.open(io.BytesIO(webp)) as image:
-            width, height = image.size
+        width, height = _image_size(webp)
+        screen_size = _image_size(png)
         status_bar = _status_bar(state)
         band_rows = status_bar_rows(
-            status_bar, screenshot_height=_image_height(png), image_height=height
+            status_bar, screenshot_height=screen_size[1], image_height=height
         )
         observation = Observation(
             observation_id=self._take_step_id(),
@@ -297,6 +314,7 @@ class StepRecorder:
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
             pixel_hash=pixel_hash(webp, band_rows),
+            screen_size=screen_size,
             ui_tree=tree,
             ui_tree_error=tree_error,
         )
@@ -316,6 +334,7 @@ class StepRecorder:
                 "status_bar": status_bar,
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
+                "screen_size": list(screen_size),
                 "ui_tree_error": tree_error,
                 "ui_tree_retakes": as_int(state.get("ui_tree_retakes")) or 0,
                 "ui_tree_settled": state.get("ui_tree_settled") is True,
@@ -327,6 +346,7 @@ class StepRecorder:
             "screenshot": observation.screenshot_b64,
             "observation_id": observation.observation_id,
             "pixel_hash": observation.pixel_hash,
+            "screen_size": list(screen_size),
             "ui_tree": tree,
             "ui_tree_error": tree_error,
         }
@@ -357,6 +377,11 @@ class StepRecorder:
                 "after": transition.after.observation_id,
                 "instruction": transition.instruction,
                 "element": transition.element,
+                "element_locator": (
+                    transition.element_locator.as_record()
+                    if transition.element_locator is not None
+                    else None
+                ),
                 "action": transition.action,
                 "from_node": transition.from_node,
                 "to_node": transition.to_node,

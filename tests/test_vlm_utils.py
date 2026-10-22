@@ -392,7 +392,7 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
 
 _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
     "page": lambda client, screenshot: vlm.describe_page_and_state(
-        client, screenshot, settings=PAGE_DETAIL
+        client, vlm.DescribeRequest(screenshot_b64=screenshot), settings=PAGE_DETAIL
     ),
     "verify": lambda client, screenshot: vlm.verify_same_node(
         client, screenshot, screenshot, "home", settings=PAGE_DETAIL
@@ -645,7 +645,9 @@ def _sent_schemas(
             "{}",
         )
     )
-    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+    vlm.describe_page_and_state(
+        router_client, vlm.DescribeRequest(screenshot_b64=png_screenshot), settings=PAGE_DETAIL
+    )
     vlm.verify_same_node(
         router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
     )
@@ -706,7 +708,7 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
         chat_response(content='{"page_description":"news article","is_external_web":true}')
     )
     *_, is_external_web = vlm.describe_page_and_state(
-        router_client, png_screenshot, settings=PAGE_DETAIL
+        router_client, vlm.DescribeRequest(screenshot_b64=png_screenshot), settings=PAGE_DETAIL
     )
     assert is_external_web is True
     body = json.loads(router_requests[0].content)
@@ -728,7 +730,9 @@ def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
             chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
         )
         vlm.describe_page_and_state(
-            router_client, png_screenshot, existing_nodes=existing_nodes, settings=PAGE_DETAIL
+            router_client,
+            vlm.DescribeRequest(screenshot_b64=png_screenshot, existing_nodes=existing_nodes),
+            settings=PAGE_DETAIL,
         )
     for request in router_requests:
         prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
@@ -774,7 +778,9 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
             chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
         )
         vlm.describe_page_and_state(
-            router_client, png_screenshot, existing_nodes=existing_nodes, settings=PAGE_DETAIL
+            router_client,
+            vlm.DescribeRequest(screenshot_b64=png_screenshot, existing_nodes=existing_nodes),
+            settings=PAGE_DETAIL,
         )
     for request in router_requests:
         prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
@@ -1023,7 +1029,9 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
                 settings=ACTION,
             )[0]
         case _:
-            return vlm.describe_page_and_state(client, png_screenshot, settings=PAGE_DETAIL)[0]
+            return vlm.describe_page_and_state(
+                client, vlm.DescribeRequest(screenshot_b64=png_screenshot), settings=PAGE_DETAIL
+            )[0]
 
 
 _GOOD_REPLIES: dict[str, str] = {
@@ -1171,7 +1179,9 @@ def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+    vlm.describe_page_and_state(
+        router_client, vlm.DescribeRequest(screenshot_b64=png_screenshot), settings=PAGE_DETAIL
+    )
     vlm.verify_same_node(
         router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
     )
@@ -1347,7 +1357,9 @@ def test_a_malformed_page_description_is_re_asked_once_then_raises(
 ) -> None:
     router_responses.extend(chat_response(content=malformed) for _ in range(2))
     with pytest.raises(UnusableOutputError, match="Malformed page description") as caught:
-        vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+        vlm.describe_page_and_state(
+            router_client, vlm.DescribeRequest(screenshot_b64=png_screenshot), settings=PAGE_DETAIL
+        )
     assert isinstance(caught.value.__cause__, error)
     assert message in str(caught.value.__cause__)
     assert len(router_requests) == 2
@@ -1493,7 +1505,11 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
 
     def request() -> object:
         if operation == "description":
-            return vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+            return vlm.describe_page_and_state(
+                router_client,
+                vlm.DescribeRequest(screenshot_b64=png_screenshot),
+                settings=PAGE_DETAIL,
+            )
         return vlm.plan_next_action(
             router_client,
             vlm.PlanRequest(
@@ -1566,7 +1582,11 @@ def test_a_page_description_that_still_times_out_raises(
     timing_out_client: OpenRouter, png_screenshot: str
 ) -> None:
     with pytest.raises(httpx.ReadTimeout, match="no complete response"):
-        vlm.describe_page_and_state(timing_out_client, png_screenshot, settings=PAGE_DETAIL)
+        vlm.describe_page_and_state(
+            timing_out_client,
+            vlm.DescribeRequest(screenshot_b64=png_screenshot),
+            settings=PAGE_DETAIL,
+        )
 
 
 def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_content(
@@ -1977,3 +1997,122 @@ def test_action_sdk_retries_and_the_single_re_ask_are_separate(
             )
     assert len(router_requests) == 3
     assert len(no_sleep) == 1
+
+
+_TREE_ELEMENTS = ['ImageButton "Navigate up" (top left)', 'Button "Save" (bottom right)']
+
+
+def test_given_tree_elements_the_model_only_describes_each_numbered_one(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    reply = {
+        "page_description": "edit page",
+        "state": {},
+        "element_descriptions": [
+            {"number": 2, "description": " save button "},
+            {"number": 2, "description": "second guess"},
+            {"number": 3, "description": "not listed"},
+        ],
+        "is_external_web": False,
+    }
+    router_responses.append(chat_response(content=json.dumps(reply)))
+
+    result = vlm.describe_page_and_state(
+        router_client,
+        vlm.DescribeRequest(screenshot_b64=png_screenshot, tree_elements=_TREE_ELEMENTS),
+        settings=PAGE_DETAIL,
+    )
+
+    assert result == ("edit page", {}, [{"description": ""}, {"description": "save button"}], False)
+    body = json.loads(router_requests[0].content)
+    prompt = body["messages"][0]["content"][0]["text"]
+    assert '1. ImageButton "Navigate up" (top left)\n2. Button "Save" (bottom right)\n' in prompt
+    assert '"element_descriptions"' in prompt
+    assert '"position"' not in prompt
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert "elements" not in schema["properties"]
+    assert schema["required"] == [
+        "page_description",
+        "state",
+        "element_descriptions",
+        "is_external_web",
+    ]
+    items = schema["properties"]["element_descriptions"]["items"]
+    assert items["required"] == ["number", "description"]
+
+
+def test_without_tree_elements_the_model_finds_the_elements_itself(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"page_description":"home"}'))
+
+    vlm.describe_page_and_state(
+        router_client, vlm.DescribeRequest(screenshot_b64=png_screenshot), settings=PAGE_DETAIL
+    )
+
+    body = json.loads(router_requests[0].content)
+    prompt = body["messages"][0]["content"][0]["text"]
+    assert '3. "elements": A list of INTERACTABLE elements' in prompt
+    assert '{"description": "back button", "position": "top left"}' in prompt
+    assert "element_descriptions" not in prompt
+    assert "elements" in body["response_format"]["json_schema"]["schema"]["required"]
+
+
+@pytest.mark.parametrize(
+    ("malformed", "message"),
+    [
+        ('{"page_description":"home","element_descriptions":{}}', "element descriptions"),
+        ('{"page_description":"home","element_descriptions":[null]}', "element number"),
+        (
+            '{"page_description":"home","element_descriptions":[{"number":"first","description":"x"}]}',
+            "element number",
+        ),
+        (
+            '{"page_description":"home","element_descriptions":[{"number":1,"description":2}]}',
+            "element number",
+        ),
+    ],
+)
+def test_malformed_element_descriptions_are_re_asked_once_then_raise(
+    malformed: str,
+    message: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.extend(chat_response(content=malformed) for _ in range(2))
+    request = vlm.DescribeRequest(screenshot_b64=png_screenshot, tree_elements=_TREE_ELEMENTS)
+
+    with pytest.raises(UnusableOutputError, match="Malformed page description") as caught:
+        vlm.describe_page_and_state(router_client, request, settings=PAGE_DETAIL)
+
+    assert isinstance(caught.value.__cause__, TypeError)
+    assert message in str(caught.value.__cause__)
+    assert len(router_requests) == 2
+
+
+def test_elements_left_undescribed_are_logged(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router_responses.append(chat_response(content='{"page_description":"home"}'))
+    request = vlm.DescribeRequest(screenshot_b64=png_screenshot, tree_elements=_TREE_ELEMENTS)
+
+    with caplog.at_level("WARNING"):
+        *_, elements, _ = vlm.describe_page_and_state(router_client, request, settings=PAGE_DETAIL)
+
+    assert elements == [{"description": ""}, {"description": ""}]
+    assert "The description model described 0 of the 2 listed elements" in caplog.text

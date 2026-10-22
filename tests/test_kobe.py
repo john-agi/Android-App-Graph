@@ -22,6 +22,7 @@ from android_app_graph.device import DeviceController, StillOutsideAppError
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
+from android_app_graph.ui_tree import xml_document
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 from android_app_graph.utils.vlm_utils import PlanRequest
 
@@ -863,6 +864,62 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     assert explorer.graph.graph.nodes["s1_about"]["observations"] == ["000002"]
 
 
+_PLAIN_LIST = xml_document(
+    (Path(__file__).parent / "data" / "uiautomator_windows_plain_list.txt").read_text("utf-8")
+)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_marks_the_planned_tree_element_and_its_transition_names_the_locator(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    explorer = _explorer(
+        _Screens({**HOME_SCREEN, "xml": _PLAIN_LIST}, _screen("com.demo.SettingsActivity", "gray")),
+        tmp_path,
+        router_client,
+    )
+    home = {
+        "page_description": "home",
+        "element_descriptions": [
+            {"number": number, "description": description}
+            for number, description in enumerate(
+                ["search bar", "settings list", "Network & internet", "Apps"], start=1
+            )
+        ],
+    }
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(home)),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":3,"instruction":"Tap Network & internet"}'),
+            chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"network"}'),
+            httpx.Response(200, json={**embedding_body, "data": [_ORTHOGONAL]}),
+            chat_response(content=_DIFFERENT),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    elements = explorer.graph.graph.nodes["s0_home"]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == ["Network & internet"]
+    (transition,) = [
+        r for r in step_records(tmp_path / "demo" / "steps") if r["kind"] == "transition"
+    ]
+    assert transition["element"] == 3
+    assert transition["element_locator"] == elements[2]["locator"]
+    assert transition["element_locator"]["label"] == "Network & internet"
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_recovery(
     tmp_path: Path,
@@ -1314,7 +1371,14 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
     assert agent.graph.graph.has_edge(renamed, results)
     assert agent.graph.graph.nodes[renamed]["interactable_elements"] == [
-        {"description": "Search button", "position": "top", "explored": True}
+        {
+            "locator": None,
+            "description": "Search button",
+            "position": "top",
+            "bounds": None,
+            "source": "model",
+            "explored": True,
+        }
     ]
     assert "add_edge: missing node(s)" not in caplog.text
 

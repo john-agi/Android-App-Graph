@@ -10,19 +10,51 @@ window is read once.
 
 Window IDs change from one dump to the next, and ``layer`` is only the windows'
 order, so two dumps are compared by window type, layer and bounds.
+
+The elements a user can act on are read from the windows the user can act on, and
+each has a ``Locator`` that finds it again in another tree of the same screen.
 """
 
 from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 IDLE_FAILURE = "ERROR: could not get idle state."
 SYSTEM_WINDOW = "TYPE_SYSTEM"
+APPLICATION_WINDOW = "TYPE_APPLICATION"
+# Chosen from the 69 trees of a 60-step Settings exploration: its smallest screens,
+# dropdown menus of one row, list that one element correctly, so only a tree that
+# lists none is too thin by count.
+MIN_ACTIONABLE_ELEMENTS = 1
 
 _TRAILER = "UI hierchary dumped to:"
 _BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+# Subclasses that keep EditText's accessibility class name report it, Compose text
+# fields included; the dump has no attribute that says a node takes text.
+_TEXT_FIELD_SUFFIXES = ("EditText", "AutoCompleteTextView")
+# An AdapterView handles its rows' taps itself, so a popup menu's rows are not clickable.
+_ADAPTER_LISTS = frozenset(
+    {
+        "android.widget.ListView",
+        "android.widget.GridView",
+        "android.widget.ExpandableListView",
+    }
+)
+_WEB_VIEW = "android.webkit.WebView"
+# A leaf of one of these classes draws its content itself, which the tree cannot show.
+_CANVAS_CLASSES = frozenset(
+    {
+        "android.view.View",
+        "android.view.SurfaceView",
+        "android.view.TextureView",
+        "android.opengl.GLSurfaceView",
+    }
+)
+_MOST_OF_WINDOW = 0.5
+_LABEL_LIMIT = 60
 
 
 class UnusableDumpError(ValueError):
@@ -103,6 +135,90 @@ class UiTree:
     nodes: tuple[UiNode, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class Locator:
+    """What finds a node again in another tree: its resource ID, class, label and the
+    resource IDs of its ancestors, outermost first, leaving out ancestors without one.
+
+    A node's label is its text, else its content description, else the first text
+    among its descendants, which in a list row is its title and not the summary that
+    changes with the setting. A scrollable node's label is its own text or content
+    description only, since scrolling changes its descendants, and a text field's is
+    its hint, else its content description, since its text is what was typed.
+    ``label`` is ``None`` for a list item, which stands for every row that differs only
+    in label.
+    """
+
+    resource_id: str
+    class_name: str
+    label: str | None
+    ancestor_ids: tuple[str, ...]
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "resource_id": self.resource_id,
+            "class": self.class_name,
+            "label": self.label,
+            "ancestor_ids": list(self.ancestor_ids),
+        }
+
+    @classmethod
+    def from_record(cls, record: object) -> Locator | None:
+        """Return the locator ``as_record`` wrote, or ``None`` for anything else."""
+        if not isinstance(record, Mapping):
+            return None
+        resource_id = record.get("resource_id")
+        class_name = record.get("class")
+        label = record.get("label")
+        ancestor_ids = record.get("ancestor_ids")
+        if not isinstance(resource_id, str) or not isinstance(class_name, str):
+            return None
+        if label is not None and not isinstance(label, str):
+            return None
+        if not isinstance(ancestor_ids, list):
+            return None
+        ids = [ancestor for ancestor in ancestor_ids if isinstance(ancestor, str)]
+        if len(ids) != len(ancestor_ids):
+            return None
+        return cls(resource_id, class_name, label, tuple(ids))
+
+
+@dataclass(frozen=True, slots=True)
+class TreeElement:
+    """An element the user can act on: its locator, its label (a list item's is its
+    first row's), its bounds and coarse ``region`` on the screen, and ``rows``, the
+    number of rows a list item stands for, or 1."""
+
+    locator: Locator
+    label: str
+    bounds: Bounds
+    region: str
+    scrollable: bool
+    text_field: bool
+    rows: int
+
+    def summary(self) -> str:
+        """Return the element in a few words: its short class, its label and traits,
+        and its region, as ``Button "Save" (bottom right)``."""
+        words = [self.locator.class_name.rsplit(".", 1)[-1] or "node"]
+        if self.label:
+            shortened = (
+                self.label
+                if len(self.label) <= _LABEL_LIMIT
+                else f"{self.label[: _LABEL_LIMIT - 1]}…"
+            )
+            words.append(f'"{shortened}"')
+        traits = []
+        if self.rows > 1:
+            traits.append(f"list item, one of {self.rows} rows")
+        if self.text_field:
+            traits.append("text field")
+        if self.scrollable:
+            traits.append("scrollable")
+        described = " ".join(words) + "".join(f", {trait}" for trait in traits)
+        return f"{described} ({self.region})" if self.region else described
+
+
 def xml_document(dump: str) -> str:
     """Return ``dump``, what ``uiautomator dump`` printed, without the line it prints
     after the XML."""
@@ -156,6 +272,237 @@ def same_screen(first: UiTree, second: UiTree) -> bool:
     bounds, and checked, selected, focused and enabled flags.
     """
     return _screen_key(first) == _screen_key(second)
+
+
+def acting_windows(tree: UiTree, package: str) -> list[int]:
+    """Return the indices of the windows the user can act on, top to bottom: the
+    active application window and the application windows of ``package`` above it on
+    its display, such as a popup that does not take focus. The keyboard and system
+    windows are never among them, and a window that takes focus hides the windows
+    below it from the dump."""
+    active = next(
+        (
+            index
+            for index, window in enumerate(tree.windows)
+            if window.active and window.window_type == APPLICATION_WINDOW
+        ),
+        None,
+    )
+    if active is None:
+        return []
+    base = tree.windows[active]
+    packages: dict[int, str] = {}
+    for node in tree.nodes:
+        if node.parent is None:
+            packages.setdefault(node.window, node.package)
+    return [
+        index
+        for index, window in enumerate(tree.windows)
+        if index == active
+        or (
+            window.window_type == APPLICATION_WINDOW
+            and window.display_id == base.display_id
+            and window.layer > base.layer
+            and packages.get(index) == package
+        )
+    ]
+
+
+def locator(tree: UiTree, index: int) -> Locator:
+    """Return the locator of node ``index`` of ``tree``."""
+    node = tree.nodes[index]
+    ancestor_ids = [
+        tree.nodes[ancestor].resource_id
+        for ancestor in _ancestors(tree, index)
+        if tree.nodes[ancestor].resource_id
+    ]
+    return Locator(
+        node.resource_id, node.class_name, _label(tree, index), tuple(reversed(ancestor_ids))
+    )
+
+
+def find_nodes(tree: UiTree, wanted: Locator) -> list[int]:
+    """Return the indices of every node of ``tree`` that ``wanted`` locates, in document
+    order; a list item's locator matches each of its rows. The caller decides what one
+    match, none or several mean."""
+    return [
+        index
+        for index, node in enumerate(tree.nodes)
+        if node.resource_id == wanted.resource_id
+        and node.class_name == wanted.class_name
+        and _locates(wanted, locator(tree, index))
+    ]
+
+
+def actionable_elements(tree: UiTree, package: str, screen: Bounds) -> list[TreeElement]:
+    """Return the elements of ``tree`` the user can act on, in document order, with
+    their regions on ``screen``.
+
+    They are the visible, enabled nodes of the ``acting_windows`` that are clickable,
+    long-clickable, checkable or scrollable, the text fields, and the rows of a list
+    that handles its rows' taps. A checkable node inside a clickable one, and a
+    clickable node with the same label as the clickable one it is in, are part of
+    that one. Nodes that share a locator are one element, and the nodes inside one
+    scrollable container that share a resource ID and differ only in label are one
+    list item.
+    """
+    windows = set(acting_windows(tree, package))
+    groups: dict[tuple[object, ...], list[tuple[int, Locator]]] = {}
+    for index, node in enumerate(tree.nodes):
+        if node.window not in windows or not _acts(tree, index):
+            continue
+        found = locator(tree, index)
+        container = None if node.scrollable else _scrollable_container(tree, index)
+        key: tuple[object, ...] = (
+            (container, found.resource_id, found.class_name, found.ancestor_ids)
+            if found.resource_id and container is not None
+            else (found,)
+        )
+        groups.setdefault(key, []).append((index, found))
+    elements: dict[Locator, TreeElement] = {}
+    for members in groups.values():
+        index, found = members[0]
+        is_list = len({member.label for _, member in members}) > 1
+        element_locator = (
+            Locator(found.resource_id, found.class_name, None, found.ancestor_ids)
+            if is_list
+            else found
+        )
+        node = tree.nodes[index]
+        elements.setdefault(
+            element_locator,
+            TreeElement(
+                locator=element_locator,
+                label=found.label or "",
+                bounds=node.bounds,
+                region=region(node.bounds, screen),
+                scrollable=node.scrollable,
+                text_field=_is_text_field(node),
+                rows=len(members) if is_list else 1,
+            ),
+        )
+    return list(elements.values())
+
+
+def thin_tree_reason(tree: UiTree, package: str, elements: Sequence[TreeElement]) -> str | None:
+    """Return why ``tree``, whose ``actionable_elements`` are ``elements``, is too thin to
+    list a screen's elements, or ``None`` when it is not.
+
+    It is when it has fewer than ``MIN_ACTIONABLE_ELEMENTS``, or when one web view, or
+    one node that draws its content itself, covers most of a window the user can act
+    on: such screens expose few of the elements they show.
+    """
+    if len(elements) < MIN_ACTIONABLE_ELEMENTS:
+        return f"{len(elements)} actionable element(s), fewer than {MIN_ACTIONABLE_ELEMENTS}"
+    windows = set(acting_windows(tree, package))
+    for node in tree.nodes:
+        if node.window not in windows:
+            continue
+        drawn = node.class_name == _WEB_VIEW or (
+            not node.children and node.class_name in _CANVAS_CLASSES
+        )
+        window_area = _area(tree.windows[node.window].bounds)
+        if drawn and window_area and _area(node.bounds) > _MOST_OF_WINDOW * window_area:
+            short_class = node.class_name.rsplit(".", 1)[-1]
+            return f"a {short_class} covers most of the window"
+    return None
+
+
+def region(bounds: Bounds, screen: Bounds) -> str:
+    """Return where the centre of ``bounds`` lies on ``screen`` in thirds, as ``top
+    left``, ``top``, ``center`` or ``bottom right``; ``""`` for a screen without area."""
+    width = screen.right - screen.left
+    height = screen.bottom - screen.top
+    if width <= 0 or height <= 0:
+        return ""
+    x = ((bounds.left + bounds.right) / 2 - screen.left) / width
+    y = ((bounds.top + bounds.bottom) / 2 - screen.top) / height
+    vertical = "top" if y < 1 / 3 else "bottom" if y >= 2 / 3 else ""
+    horizontal = "left" if x < 1 / 3 else "right" if x >= 2 / 3 else ""
+    return " ".join(word for word in (vertical, horizontal) if word) or "center"
+
+
+def _locates(wanted: Locator, found: Locator) -> bool:
+    return found.ancestor_ids == wanted.ancestor_ids and (
+        wanted.label is None or found.label == wanted.label
+    )
+
+
+def _area(bounds: Bounds) -> int:
+    return max(0, bounds.right - bounds.left) * max(0, bounds.bottom - bounds.top)
+
+
+def _is_text_field(node: UiNode) -> bool:
+    return node.class_name.endswith(_TEXT_FIELD_SUFFIXES)
+
+
+def _label(tree: UiTree, index: int) -> str:
+    node = tree.nodes[index]
+    if _is_text_field(node):
+        return _words(node.hint) or _words(node.content_description)
+    own = _words(node.text) or _words(node.content_description)
+    if own or node.scrollable:
+        return own
+    stack = list(reversed(node.children))
+    while stack:
+        descendant = tree.nodes[stack.pop()]
+        if text := _words(descendant.text):
+            return text
+        stack.extend(reversed(descendant.children))
+    return ""
+
+
+def _words(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _tappable(tree: UiTree, index: int) -> bool:
+    node = tree.nodes[index]
+    in_adapter_list = node.parent is not None and (
+        tree.nodes[node.parent].class_name in _ADAPTER_LISTS
+    )
+    return node.clickable or node.long_clickable or in_adapter_list
+
+
+def _acts(tree: UiTree, index: int) -> bool:
+    node = tree.nodes[index]
+    if not node.enabled or not _area(node.bounds):
+        return False
+    if node.scrollable or _is_text_field(node):
+        return True
+    tappable = _tappable(tree, index)
+    if not tappable and not node.checkable:
+        return False
+    outer = next(
+        (
+            ancestor
+            for ancestor in _ancestors(tree, index)
+            if _tappable(tree, ancestor) and tree.nodes[ancestor].enabled
+        ),
+        None,
+    )
+    if outer is None:
+        return True
+    return tappable and _label(tree, outer) != _label(tree, index)
+
+
+def _scrollable_container(tree: UiTree, index: int) -> int | None:
+    return next(
+        (ancestor for ancestor in _ancestors(tree, index) if tree.nodes[ancestor].scrollable),
+        None,
+    )
+
+
+def _ancestors(tree: UiTree, index: int) -> Iterator[int]:
+    """Yield the indices of the ancestors of node ``index``, innermost first."""
+    parent = _parent(tree, index)
+    while parent is not None:
+        yield parent
+        parent = _parent(tree, parent)
+
+
+def _parent(tree: UiTree, index: int) -> int | None:
+    return tree.nodes[index].parent
 
 
 type _NodeKey = tuple[str, str, str, str, Bounds, bool, bool, bool, bool, int]

@@ -31,6 +31,7 @@ from android_app_graph.utils.graph_manager import (
     EdgeDetails,
     GraphManager,
     SetupTrail,
+    element_locator,
 )
 from android_app_graph.utils.vlm_utils import (
     ActionRequest,
@@ -98,7 +99,9 @@ class _Move:
     """One planned action, and what the step read before it that recording it needs.
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
-    wrote, which differs when an ``end`` is recorded as a back press.
+    wrote, which differs when an ``end`` is recorded as a back press. ``planned_element``
+    is the number the planner gave the element it acts on, and ``planned_target`` that
+    element as the source node listed it, or ``None`` when it named none.
     """
 
     source: str
@@ -107,6 +110,7 @@ class _Move:
     instruction: str
     planned_instruction: str
     planned_element: int | None
+    planned_target: dict[str, Any] | None
     detail_before: dict[str, Any]
     tokens_before: dict[str, int]
 
@@ -662,6 +666,7 @@ class Kobe:
             ),
             settings=self.instruction,
         )
+        planned_target = self.graph.planned_element(position.node, planned_element)
 
         action, _history_entry = predict_next_action(
             client=self.client,
@@ -693,6 +698,7 @@ class Kobe:
             instruction=recorded_instruction,
             planned_instruction=instruction,
             planned_element=planned_element,
+            planned_target=planned_target,
             detail_before=detail_before,
             tokens_before=tokens_before,
         )
@@ -712,6 +718,7 @@ class Kobe:
                 after=Observation.from_state(after),
                 instruction=move.planned_instruction,
                 element=move.planned_element,
+                element_locator=element_locator(move.planned_target),
                 action=move.action,
                 from_node=move.source,
                 to_node=target,
@@ -749,7 +756,7 @@ class Kobe:
                 target_observation=web_node_data.get("page_description", ""),
             ),
         )
-        self.graph.mark_element_explored(move.source, move.planned_element)
+        self.graph.mark_element_explored(move.source, move.planned_target)
         self._count_step(
             move.source, move.action_sequence, EXTERNAL_WEB_NODE, move.tokens_before, max_steps
         )
@@ -783,7 +790,7 @@ class Kobe:
             ),
         )
         self._setup_trail.step(move.action_sequence, new_node, detail_after)
-        self.graph.mark_element_explored(move.source, move.planned_element)
+        self.graph.mark_element_explored(move.source, move.planned_target)
         self.graph.maybe_normalize_node_edges(move.source)
         self._count_step(move.source, move.action_sequence, new_node, move.tokens_before, max_steps)
         self.save_graph()
@@ -926,7 +933,7 @@ class Kobe:
                 target_observation=f"[left app to {external_package}]",
             ),
         )
-        self.graph.mark_element_explored(move.source, move.planned_element)
+        self.graph.mark_element_explored(move.source, move.planned_target)
         with self.controller.source("external_app_recovery"):
             return ext_node_id, return_to_app(self.controller, self.app_launch, self.logger)
 

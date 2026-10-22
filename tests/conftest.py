@@ -380,7 +380,13 @@ def _write_member_record(steps_dir: Path, observation_id: str) -> None:
         "id": observation_id,
         "kind": "observation",
         "pixel_hash": f"hash-{observation_id}",
-        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
+        "describe": {
+            "page_description": "",
+            "state": {},
+            "elements": [],
+            "is_external_web": False,
+            "thin_tree": None,
+        },
     }
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
 
@@ -444,6 +450,23 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
 type Members = dict[str, list[tuple[str, list[float]]]]
 
 
+def _member_element(observation_id: str) -> dict[str, object]:
+    """The one element ``write_member_graph`` describes member ``observation_id`` with, as
+    its describe output stores it: a button read from its tree."""
+    return {
+        "locator": {
+            "resource_id": "com.demo:id/button",
+            "class": "android.widget.Button",
+            "label": f"Button {observation_id}",
+            "ancestor_ids": [],
+        },
+        "description": f"Button {observation_id}",
+        "position": "top left",
+        "bounds": [0, 0, 100, 100],
+        "source": "tree",
+    }
+
+
 @pytest.fixture
 def write_member_graph() -> Callable[..., None]:
     """Write a graph file of ``com.demo`` nodes whose members have an image, a tree, an
@@ -484,11 +507,13 @@ def write_member_graph() -> Callable[..., None]:
                     "activity": f"com.demo.Activity{observation_id}",
                     "package": "com.demo",
                     "pixel_hash": f"hash-{observation_id}",
+                    "screen_size": [1080, 2400],
                     "describe": {
                         "page_description": f"Screen {observation_id}",
                         "state": {"seen_in": observation_id},
-                        "elements": [{"description": f"Button {observation_id}"}],
+                        "elements": [_member_element(observation_id)],
                         "is_external_web": False,
+                        "thin_tree": None,
                     },
                 }
                 (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")

@@ -388,7 +388,19 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
     assert node["page_description"] == "Screen 000003"
     assert node["representative_observation"] == "000003"
     assert node["interactable_elements"] == [
-        {"description": "Button 000003", "position": "", "explored": False}
+        {
+            "locator": {
+                "resource_id": "com.demo:id/button",
+                "class": "android.widget.Button",
+                "label": "Button 000003",
+                "ancestor_ids": [],
+            },
+            "description": "Button 000003",
+            "position": "top left",
+            "bounds": [0, 0, 100, 100],
+            "source": "tree",
+            "explored": False,
+        }
     ]
     assert node["state_schema"] == {"seen_in": ["000003", "000004"]}
     assert node["activities"] == ["com.demo.Activity000003", "com.demo.Activity000004"]
