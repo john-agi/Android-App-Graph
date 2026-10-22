@@ -1933,7 +1933,7 @@ class GraphManager:
             return
         edge_data.update(remaining)
         if indices:
-            edge_data["instruction_templates"] = []
+            _drop_templates(edge_data)
         edge_data["visit_count"] = max(
             len(remaining["actions"]), edge_data.get("visit_count", 0) - traversals
         )
