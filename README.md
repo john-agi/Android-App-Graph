@@ -214,16 +214,25 @@ The OpenRouter SDK retries 5XX responses, dropped connections (refused, reset or
 failed reads and writes) and timeouts with its default exponential backoff
 (0.5 s, then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between
 tries), waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
-header asks instead. It stops once twice the request's timeout has passed since
-the first attempt, so a timed-out attempt gets exactly one more, and 5XX
-responses are retried for up to two minutes at the default timeout and ten
-minutes for the audits. It does not retry 429 or other 4xx responses, which fail
-at once, nor a server that closes the connection without sending a response. The
-application never retries what the SDK has given up on: a call that still times
-out takes the fallback listed below for a truncated reply, and a call without
-one raises. OpenRouter bills a non-streaming request in full even after the
-client disconnects, so an attempt cut off at its deadline is still billed, and a
-timeout shorter than the model needs pays for the same request twice.
+header asks instead. The application sends a request answered with 429 (too many
+requests) again after the same backoff, or after as long as the response's
+`Retry-After` header asks, in seconds or as a date, when that is positive and
+ends by the deadline below. A backoff that would end past the deadline is cut
+short to end at it, so no 429 is sent again after the deadline, and a 429 that
+arrives at or past it fails at once. Each 429 sent again logs a warning naming
+the call (`normalize_edge: rate limited (HTTP 429); sending again in 1.2 s`), so
+the log shows how often the provider limited the run. Both share one deadline:
+they stop once twice the request's timeout has passed since the first attempt,
+so a timed-out attempt gets exactly one more, and 5XX and 429 responses are
+retried for up to two minutes at the default timeout and ten minutes for the
+audits, after which the last one fails. Other 4xx responses, including 402 (no
+credit left), fail at once, as does a server that closes the connection without
+sending a response. The application never retries what the SDK has given up on:
+a call that still times out takes the fallback listed below for a truncated
+reply, and a call without one raises. OpenRouter bills a non-streaming request
+in full even after the client disconnects, so an attempt cut off at its deadline
+is still billed, and a timeout shorter than the model needs pays for the same
+request twice.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
