@@ -28,7 +28,6 @@ from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
 
-PAGE_DETAIL = ModelSettings("gpt-test")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _RESOLVE_LAUNCHER = [
     *("adb", "-s", "test-device", "shell", "pm", "resolve-activity", "--brief"),
@@ -51,11 +50,6 @@ def client() -> Iterator[OpenRouter]:
     """An OpenRouter client that is never called: every VLM helper is monkeypatched."""
     with open_client("not-a-real-key") as opened:
         yield opened
-
-
-def _unreachable_verifier(**_kwargs: object) -> dict[str, Any]:
-    msg = "verify_same_node must not be called for a skipped merge candidate"
-    raise AssertionError(msg)
 
 
 def _write_config(tmp_path: Path, graph_dir: str = "graphs") -> Path:
@@ -85,10 +79,6 @@ def _png(shade: int) -> str:
 def _webp(png: str) -> str:
     """Return ``png`` as the base64 WebP a StepRecorder hands over."""
     return base64.b64encode(encode_screenshot(png)).decode("ascii")
-
-
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
 
 
 def test_audit_parser_defaults() -> None:
@@ -193,139 +183,6 @@ def test_normalize_and_save_audited_graph(tmp_path: Path, monkeypatch: pytest.Mo
 
 def _merge_issue(node_a: str = "s0_home", node_b: str = "s1_home") -> dict[str, Any]:
     return {"type": "merge_nodes", "node_a": node_a, "node_b": node_b}
-
-
-def test_verify_and_merge_nodes_merges_confirmed_pair(
-    client: OpenRouter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
-) -> None:
-    """The verifier compares the two representatives' images, read from the step log."""
-    graph = _graph_with_nodes(
-        ("s0_home", {"page_description": "Home", "visit_count": 3}),
-        ("s1_home", {"page_description": "Start", "visit_count": 1}),
-    )
-    graph.steps_dir = tmp_path / "steps"
-    add_representative(graph, "s0_home", b"image-a")
-    add_representative(graph, "s1_home", b"image-b")
-    seen: dict[str, object] = {}
-
-    def fake_verify(**kwargs: object) -> dict[str, Any]:
-        seen.update(kwargs)
-        return {"same": True, "reason": "identical screens"}
-
-    monkeypatch.setattr(audit, "verify_same_node", fake_verify)
-
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
-
-    assert result["status"] == "merged"
-    assert result["kept"] == "s0_home"
-    assert result["removed"] == "s1_home"
-    assert result["reason"] == "identical screens"
-    # The description of the more-visited node is used as the reference.
-    assert seen["existing_description"] == "Home"
-    assert seen["settings"] == PAGE_DETAIL
-    assert (seen["screenshot_existing_b64"], seen["screenshot_new_b64"]) == (
-        _b64(b"image-a"),
-        _b64(b"image-b"),
-    )
-    assert "s1_home" not in graph.graph
-    assert graph.graph.nodes["s0_home"]["observations"] == [
-        "s0_home-observation",
-        "s1_home-observation",
-    ]
-
-
-def test_verify_and_merge_nodes_keeps_separate(
-    client: OpenRouter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
-) -> None:
-    graph = _graph_with_nodes(
-        ("s0_home", {"page_description": "Home"}),
-        ("s1_home", {"page_description": "Settings"}),
-    )
-    graph.steps_dir = tmp_path / "steps"
-    add_representative(graph, "s0_home")
-    add_representative(graph, "s1_home")
-    monkeypatch.setattr(
-        audit,
-        "verify_same_node",
-        lambda **_kwargs: {"same": False, "reason": "different content"},
-    )
-
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
-
-    assert result["status"] == "kept_separate"
-    assert result["reason"] == "different content"
-    assert set(graph.graph) == {"s0_home", "s1_home"}
-
-
-def test_verify_and_merge_nodes_skips_missing_screenshot(
-    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    graph = _graph_with_nodes(
-        ("s0_home", {"representative_observation": "000000"}),
-        ("s1_home", {}),
-    )
-    monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
-
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
-
-    assert result["status"] == "skipped"
-    assert result["reason"] == "missing screenshot"
-
-
-def test_verify_and_merge_nodes_skips_a_pair_with_an_external_node(
-    client: OpenRouter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
-) -> None:
-    """An ext_ node stands for every screen of another app or the web, so its
-    representative is never compared with an app screen or merged into one."""
-    graph = _graph_with_nodes(("s0_home", {}), (EXTERNAL_WEB_NODE, {}))
-    graph.steps_dir = tmp_path / "steps"
-    add_representative(graph, "s0_home")
-    add_representative(graph, EXTERNAL_WEB_NODE)
-    monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
-
-    (result,) = audit.verify_and_merge_nodes(
-        graph, [_merge_issue(node_b=EXTERNAL_WEB_NODE)], client, PAGE_DETAIL
-    )
-
-    assert (result["status"], result["reason"]) == ("skipped", "external node")
-    assert set(graph.graph) == {"s0_home", EXTERNAL_WEB_NODE}
-
-
-def test_verify_and_merge_nodes_skips_a_self_pair(
-    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An auditor naming one node twice keeps the node."""
-    graph = _graph_with_nodes(("s0_home", {"page_description": "Home", "visit_count": 3}))
-    monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
-
-    issue = _merge_issue(node_a="s0_home", node_b="s0_home")
-    (result,) = audit.verify_and_merge_nodes(graph, [issue], client, PAGE_DETAIL)
-
-    assert result["status"] == "skipped"
-    assert result["reason"] == "same node"
-    assert set(graph.graph) == {"s0_home"}
-    assert graph.graph.nodes["s0_home"]["visit_count"] == 3
-
-
-def test_verify_and_merge_nodes_skips_removed_node(
-    client: OpenRouter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    graph = _graph_with_nodes(("s0_home", {}))
-    monkeypatch.setattr(audit, "verify_same_node", _unreachable_verifier)
-
-    (result,) = audit.verify_and_merge_nodes(graph, [_merge_issue()], client, PAGE_DETAIL)
-
-    assert result["status"] == "skipped"
-    assert result["reason"] == "node removed"
 
 
 class FakeController:
@@ -1420,6 +1277,80 @@ def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
 
 
 @pytest.mark.usefixtures("_fake_device")
+def test_re_explore_replays_each_action_after_its_setup(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _graph_with_nodes(
+        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
+    )
+    graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=EdgeDetails(setup=[_SWIPE]))
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
+    )
+
+    assert result["navigated_to"] == "s1_detail"
+    assert device_log == [*_FIRST_RESTART, _SWIPE, _DETAIL_TAP]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup_with_it(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
+    _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home")
+
+    (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
+
+    assert (result["status"], result["moved_to"]) == ("moved", "s2_settings")
+    assert graph.graph["s0_home"]["s2_settings"]["setups"] == [None, [_SWIPE]]
+    assert device_log == [*_FIRST_RESTART, _SWIPE, _DETAIL_TAP, *_RESTART]
+
+
+@pytest.mark.parametrize(
+    ("reached", "scroll_setup", "row_setup"),
+    [("s1_detail", [], [_SWIPE]), ("s0_home", None, None)],
+    ids=["replay reached", "replay missed"],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_reached(
+    reached: str,
+    scroll_setup: list[object] | None,
+    row_setup: list[object] | None,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    row_tap = {"action": "tap", "x": 540, "y": 1700}
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, reached, reached, "s2_settings")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    sent = iter([_SWIPE, row_tap])
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    _re_explore(
+        graph,
+        [issue],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=2,
+    )
+
+    edges = graph.graph[reached]
+    assert edges[reached]["setups"] == [scroll_setup]
+    assert (edges["s2_settings"]["actions"][-1], edges["s2_settings"]["setups"][-1]) == (
+        [row_tap],
+        row_setup,
+    )
+
+
+@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_takes_no_step_from_a_screen_the_graph_has_no_node_for(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
@@ -1534,6 +1465,43 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
     assert device_log == [*_FIRST_RESTART, tap, *leaving, tap]
     # Back from the other app expects the screen the step left.
     assert expected == ["s0_home", "s0_home", None]
+
+
+@pytest.mark.parametrize(
+    "after_the_tap",
+    [_BROWSER_SCREEN, {**_HOME_SCREEN, "activity": "com.demo.Article", "screenshot": _png(50)}],
+    ids=["another app", "outside web page"],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_the_setup_of_the_step_after_one_that_leaves_the_app_as_unknown(
+    after_the_tap: dict[str, Any],
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    screens_by_log: Callable[..., DeviceController],
+) -> None:
+    """Back may return to the screen the step left or a restart to the start screen, and
+    neither is an action a replay could send."""
+    graph, _graph_path = _two_node_graph(tmp_path)
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    nodes = {
+        "com.demo.Home": "s0_home",
+        "com.demo.Detail": "s1_detail",
+        "com.demo.Article": EXTERNAL_WEB_NODE,
+    }
+    monkeypatch.setattr(
+        graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
+    )
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+    issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
+    controller = screens_by_log(*[_HOME_SCREEN] * 4, after_the_tap, _HOME_SCREEN, _DETAIL_SCREEN)
+
+    _re_explore(graph, [issue], controller, client, tmp_path, steps_per_issue=2)
+
+    edge = graph.graph["s0_home"]["s1_detail"]
+    assert (edge["actions"][-1], edge["setups"][-1]) == ([tap], None)
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -1758,36 +1726,54 @@ def test_audit_skips_a_configured_app_without_a_graph_file(
     assert list(tmp_path.rglob("*")) == [config]
 
 
-@pytest.mark.parametrize("status", ["merged", "kept_separate"])
+@pytest.mark.parametrize("same", [True, False])
 @pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
-    status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    same: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    add_representative: Callable[..., None],
+    write_image_vectors: Callable[..., None],
 ) -> None:
+    """Each merge result names the sources that proposed the pair and the member of each
+    node the verifier was shown."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    graph_dir = tmp_path / "graphs"
-    app_dir = graph_dir / "demo"
-    app_dir.mkdir(parents=True)
-    (app_dir / "demo.json").write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
-    config = _write_config(tmp_path, str(graph_dir))
+    app_dir = tmp_path / "graphs" / "demo"
+    _save_with_representatives(
+        _graph_with_nodes(("s0_home", {}), ("s1_home", {})),
+        app_dir / "demo.json",
+        add_representative,
+        write_image_vectors,
+    )
+    config = _write_config(tmp_path, str(tmp_path / "graphs"))
     issue = _merge_issue()
-    merge_results = [{"issue": issue, "status": status}]
-    verified: list[list[dict[str, Any]]] = []
-
-    def verify(
-        _graph: GraphManager, merge_issues: list[dict[str, Any]], *_args: object
-    ) -> list[dict[str, Any]]:
-        verified.append(merge_issues)
-        return merge_results
-
     monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": [issue]})
-    monkeypatch.setattr(audit, "verify_and_merge_nodes", verify)
+    monkeypatch.setattr(
+        graph_manager, "verify_same_node", lambda *_args, **_kwargs: {"same": same, "reason": "r"}
+    )
     monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
 
     assert audit.main(["-c", str(config)]) == 0
 
-    assert verified == [[issue]]
-    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == merge_results
-    assert (app_dir / "demo_audited.json").exists() == (status == "merged")
+    outcome = (
+        {"status": "merged", "kept": "s0_home", "removed": "s1_home"}
+        if same
+        else {"status": "kept_separate"}
+    )
+    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == [
+        {
+            "node_a": "s0_home",
+            "node_b": "s1_home",
+            "sources": ["text_audit"],
+            "findings": [{"source": "text_audit", "issue": issue}],
+            "members": {"s0_home": "s0_home-observation", "s1_home": "s1_home-observation"},
+            "image_score": 0.0,
+            "reason": "r",
+            "reused": False,
+            **outcome,
+        }
+    ]
+    assert (app_dir / "demo_audited.json").exists() == same
 
 
 _BROWSER = "ext_com.android.chrome"
@@ -1894,7 +1880,9 @@ def test_audit_reports_no_path_to_the_start_node_for_the_graph_after_its_merges(
         explored, app_dir / "demo.json", add_representative, write_image_vectors
     )
     monkeypatch.setattr(
-        audit, "verify_same_node", lambda **_kwargs: {"same": True, "reason": "same list"}
+        graph_manager,
+        "verify_same_node",
+        lambda *_args, **_kwargs: {"same": True, "reason": "same list"},
     )
     caplog.set_level(logging.INFO, logger=audit.logger.name)
 

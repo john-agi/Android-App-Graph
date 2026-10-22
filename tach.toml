@@ -22,6 +22,7 @@ path = "android_app_graph.commands"
 depends_on = [
     "android_app_graph.device",
     "android_app_graph.graph_files",
+    "android_app_graph.member_groups",
     "android_app_graph.screen_image",
     "android_app_graph.step_log",
     "android_app_graph.utils",
@@ -32,6 +33,10 @@ depends_on = [
 
 [[modules]]
 path = "android_app_graph.graph_files"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.member_groups"
 depends_on = []
 
 [[modules]]
@@ -80,6 +85,7 @@ path = "android_app_graph.utils.graph_manager"
 depends_on = [
     "android_app_graph.android_packages",
     "android_app_graph.graph_files",
+    "android_app_graph.member_groups",
     "android_app_graph.payloads",
     "android_app_graph.step_log",
     "android_app_graph.utils",
