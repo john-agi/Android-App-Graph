@@ -790,9 +790,11 @@ screenshots belong to the edge's endpoints: the node that lists each screenshot,
 for one no node lists, the node the transition recorded. Once the members have moved,
 the action is kept on every edge its transitions give, so an action taken from both
 groups stays on both edges, and an action no transition matches stays where it is.
-An action that now leads to another node takes that node's description as its
-observation, and an edge that lost an action drops its instruction templates, which
-the final normalization rebuilds.
+An action takes its entry in every per-action list with it, its
+[setup](#graph-edges) as recorded: the setup was sent on the screen the action was
+taken from, and the action stays with that screen. An action that now leads to
+another node takes that node's description as its observation, and an edge that lost
+an action drops its instruction templates, which the final normalization rebuilds.
 
 `<app_name>_members.json` holds the `grouping_floor`, `home_share` and
 `checks_per_node`, and:
