@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Iterator
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, override
 
 import httpx
 import pytest
@@ -274,6 +277,105 @@ def test_token_tracker_adds_the_provider_bill_of_a_byok_request_to_its_cost() ->
     summary = tracker.summary()
     assert summary["action:qwen/qwen3.8-flash"]["cost"] == pytest.approx(0.00032197)
     assert summary["embedding:voyageai/voyage-multimodal-3.5"]["cost"] == pytest.approx(0.000011)
+
+
+# How long a blocked call waits to be let go before it fails the test instead of hanging.
+RELEASE_TIMEOUT = 10.0
+
+
+class CallFailedError(RuntimeError):
+    """Raised by the call for the item it names."""
+
+
+class OpenOnMessage(logging.Handler):
+    """Sets *event* when a record's message contains *text*."""
+
+    def __init__(self, text: str, event: threading.Event) -> None:
+        super().__init__()
+        self.text = text
+        self.event = event
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.text in record.getMessage():
+            self.event.set()
+
+
+def test_call_concurrently_cancels_the_calls_not_yet_started_once_a_call_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Item 0 fails at once and every other started call waits for the cancellation, so no
+    item past the first one the freed worker may take ever starts."""
+    in_flight = vlm.MAX_REQUESTS_IN_FLIGHT
+    cancelled = threading.Event()
+    started: list[int] = []
+    applied: list[tuple[int, int]] = []
+
+    def call(item: int) -> int:
+        started.append(item)
+        if item == 0:
+            raise CallFailedError(item)
+        assert cancelled.wait(RELEASE_TIMEOUT)
+        if item == 1:
+            raise CallFailedError(item)
+        return item * 10
+
+    vlm_logger = logging.getLogger(vlm.__name__)
+    handler = OpenOnMessage("not yet started", cancelled)
+    vlm_logger.addHandler(handler)
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger=vlm.__name__),
+            pytest.raises(CallFailedError) as raised,
+        ):
+            vlm.call_concurrently(
+                "test_call",
+                call,
+                range(3 * in_flight),
+                lambda item, result: applied.append((item, result)),
+            )
+    finally:
+        vlm_logger.removeHandler(handler)
+
+    assert raised.value.args == (0,)
+    assert max(started) <= in_flight
+    assert applied == [(item, item * 10) for item in sorted(started) if item > 1]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("test_call failed; cancelled ") for message in messages)
+    assert "test_call failed too: CallFailedError: 1" in messages
+
+
+def test_call_concurrently_sends_no_queued_call_after_an_error_on_the_calling_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error in ``apply``, like an interrupt, cancels the queued calls rather than waiting
+    for all of them; the started calls wait until the pool's shutdown has cancelled them."""
+    in_flight = vlm.MAX_REQUESTS_IN_FLIGHT
+    shut_down = threading.Event()
+    started: list[int] = []
+
+    class SignallingPool(ThreadPoolExecutor):
+        @override
+        def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+            super().shutdown(wait=False, cancel_futures=cancel_futures)
+            shut_down.set()
+            super().shutdown(wait=wait)
+
+    def call(item: int) -> int:
+        started.append(item)
+        if item > 0:
+            assert shut_down.wait(RELEASE_TIMEOUT)
+        return item
+
+    def apply(_item: int, _result: int) -> None:
+        raise CallFailedError
+
+    monkeypatch.setattr(vlm, "ThreadPoolExecutor", SignallingPool)
+
+    with pytest.raises(CallFailedError):
+        vlm.call_concurrently("test_call", call, range(3 * in_flight), apply)
+
+    assert max(started) <= in_flight
 
 
 _STRUCTURED: dict[str, tuple[str, bool]] = {
