@@ -7,8 +7,9 @@ fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE) by Yuxiang Chai.
 
 1. **Explore an app.** Android-App-Graph opens an Android app on an emulator, observes the
    current screen, chooses an exploration action, and records the result.
-2. **Build a graph.** Each app state becomes a graph node. Actions that move the
-   app between states become graph edges.
+2. **Build a graph.** Each screen of the app becomes a graph node, and what
+   changes on it, such as a scrolled list or an open menu, is that node's state.
+   Actions that move the app between states become graph edges.
 3. **Audit and plot the graph.** `app-graph-audit` finds duplicate nodes and
    mislabelled edges and can correct them on the device; `app-graph-plot` draws
    the graph.
@@ -609,6 +610,23 @@ other's numbers.
 
 ### Graph nodes
 
+A node is a screen by its purpose. What changes on a screen without changing its
+purpose is the node's state, which the screen description model records on each
+visit: whether the on-screen keyboard is shown (`keyboard_visible`), the focused
+field (`focused_field`), how far a list is scrolled (`first_visible_item` and
+`last_visible_item`), the overflow menu, dropdown, picker, popup or context menu
+open over the screen (`open_menu`, naming the menu, or `null`), and which sections
+are expanded (`expanded_sections`). The verifier counts screens that differ only in
+these as the same screen. So opening or closing a menu is a self-loop whose
+`schema_deltas` entry records `open_menu`, choosing an option that keeps the screen
+is a self-loop recording the value it changed, and choosing one that leaves the
+screen is an edge to where it leads. A menu's options join the screen's elements as
+rows revealed by scrolling do, and an option's action records the tap that opened
+the menu in its [setup](#graph-edges), so a replay opens the menu before choosing
+the option. A dialog, bottom sheet or full-screen picker that has its own purpose,
+such as a data usage warning dialog, is a node of its own, and a menu open over it
+is that node's state.
+
 Each node lists the observations assigned to it in `observations`, in step
 order, and names one of them `representative_observation`:
 
@@ -656,7 +674,8 @@ what each step found.
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later
-   rejections refine nothing.
+   rejections refine nothing. Refined descriptions, like every description, leave out
+   the state listed in [Graph nodes](#graph-nodes), such as an open menu.
 
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.
@@ -684,9 +703,9 @@ An action's entry in `setups` is the list of device actions exploration sent on
 the edge's source node before it, since it last arrived at that node from
 elsewhere; a [replay](#replaying-to-a-node) sends them first. They are the
 node's self-loops, such as a swipe that scrolled a list down to the tapped row,
+or opening a form's dropdown and choosing the option that shows the tapped field,
 and its round trips, actions that left the node and came back to it, such as
-opening a form's dropdown and choosing the option that shows the tapped field,
-or opening one of a list's rows and pressing Back. Exploration keeps the nodes
+opening one of a list's rows and pressing Back. Exploration keeps the nodes
 it arrived at in order: coming back to one of them ends a round trip, and
 arriving at any other node starts that node's setup empty, `[]`.
 `app-graph-audit --re-explore` records setups the same way. The entry is `null`
@@ -758,8 +777,8 @@ verified once whatever proposed it. Each pair names its sources:
   [member checks](#member-checks) are set separately: a lower merge floor proposes
   more pairs, and a higher grouping floor separates more members.
 
-A near-identical image proves nothing on its own: a page and the same page with a
-menu open look alike and are different screens. Each pair is verified on its two
+A near-identical image proves nothing on its own: a start search and a destination
+search look alike and are different screens. Each pair is verified on its two
 closest members: the verifier sees the member of the more-visited node, with that
 node's description, beside the member of the other. A confirmed pair is merged into
 its lower-numbered node; a pair whose node an earlier merge removed is verified on

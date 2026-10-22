@@ -344,8 +344,12 @@ addresses, dates, prices, usernames, etc.). Think of it as the screen's class na
 Good: "search results page", "route planning page", "location search page" \
 Bad: "search results for Big Ben", "route from home to work", "John's profile page" \
 All user-specific data belongs in "state", never in "page_description". \
-The on-screen keyboard, which input field has focus, and how far a list is scrolled \
-never change "page_description"; record them in "state". \
+The on-screen keyboard, which input field has focus, how far a list is scrolled, \
+an overflow menu, dropdown, picker, popup or context menu open over the screen, and which \
+of its sections are expanded never change "page_description"; record them in "state". \
+A dialog, bottom sheet or full-screen picker that has its own purpose, such as a \
+"data usage warning dialog", is a screen of its own: describe the dialog, and record a \
+menu open over it in "state". \
 Always describe what you actually see. \
 {description_hint}
 
@@ -357,6 +361,11 @@ For the "state" object, focus on:
 - "last_visible_item": the last list/menu item visible on screen
 - "focused_field": the input field that has focus, or null when none has
 - "keyboard_visible": whether the on-screen keyboard is shown
+- "open_menu": the overflow menu, dropdown, picker, popup or context menu open over the \
+  screen, named by what opened it (e.g. "overflow menu", "Security dropdown"), or null \
+  when none is open
+- "expanded_sections": on a screen with collapsible sections, the ones shown expanded, \
+  comma-separated (e.g. "Advanced options"), or null when none is
 - User-controlled state: active tab, search query, applied filters, sort order, toggle states, \
   selected items, input field contents
 - Navigation state: which sub-section or category is currently shown
@@ -419,16 +428,17 @@ Two screenshots are the SAME screen if they serve the same purpose and a user wo
 them the same page — even if the content (list items, search results, text in fields) differs. \
 For example, a search results page showing different queries is still the same screen. \
 They are also the SAME screen when they differ only in whether the on-screen keyboard is shown, \
-which input field has focus, or how far a list is scrolled.
+which input field has focus, how far a list is scrolled, whether an overflow menu, dropdown, \
+picker, popup or context menu is open over the screen, or which of its sections are expanded \
+or collapsed. A menu open over a dialog leaves it the same dialog.
 
 Two screenshots are DIFFERENT screens if they serve different purposes in the app's workflow, \
 even if they look visually similar. Pay close attention to:
 - Screen titles, headers, or labels (e.g. "Choose start location" vs "Choose destination")
 - The stage in a multi-step flow (e.g. step 1 vs step 2 of a booking)
 - Different form sections or tabs that change the screen's function
-- Any dropdown menu, overflow menu, popup menu, context menu, sort/filter menu, \
-or foreground menu panel that appears or disappears. A screen with such a menu \
-open is a DIFFERENT screen from the same underlying page with the menu closed.
+- A dialog, bottom sheet or full-screen picker that has its own purpose, such as a \
+"Data usage warning" dialog, is a DIFFERENT screen from the page beneath it.
 - A search page and a search result list page is considered different usually, though sometimes the search page also provide some suggestions.
 
 Answer with ONLY a JSON object:
@@ -439,9 +449,10 @@ If they are the SAME screen:
 If they are DIFFERENT screens, you must also provide slightly more specific descriptions that \
 distinguish them from each other. Usually adding one or two extra distinguishing words is enough. \
 Keep the descriptions concise (under 10 words each) and clearly differentiate the two screens. \
-Exception: if a dropdown/overflow/menu panel is visible, the description may be a bit longer \
-if needed, but it MUST explicitly name what menu is shown (e.g. "results page with sort menu open", \
-"home page with overflow menu open"):
+Name each screen by its purpose, never by its current state: leave out the on-screen keyboard, \
+which input field has focus, how far a list is scrolled, any overflow menu, dropdown, picker, \
+popup or context menu open over it, and which of its sections are expanded, even when a \
+screenshot shows them:
 {{"same": false, "reason": "brief explanation", \
 "existing_description": "more specific description for the first screenshot", \
 "new_description": "more specific description for the second screenshot"}}"""
@@ -1224,8 +1235,7 @@ You are reviewing mobile app graph nodes produced by an exploration agent.
 ## Task
 Find node pairs that may represent the same screen and should be verified for merging.
 Only report likely duplicate screen templates. Do NOT report different screens that merely \
-look similar, such as start search vs destination search, opened menu vs closed page, or \
-different selected tabs.
+look similar, such as start search vs destination search, or different selected tabs.
 
 Return ONLY a JSON object:
 {{
