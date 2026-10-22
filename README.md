@@ -748,7 +748,8 @@ from the page. The keyboard and the system bars are left out, so the keyboard
 appearing over a dialog leaves the dialog's signature as it was.
 
 A node's stable layout holds the entries on at least 80% of its members' signatures,
-each weighted by the share of members it is on. It is computed from the members'
+each weighted by the share of members it is on, so a menu open on fewer of a page's
+visits stays out of the page's stable layout. It is computed from the members'
 trees when first needed and again once a visit, a merge, a split or a move has
 changed the members; the graph file stores none. The layout similarity of a
 screenshot and a node is the weighted Jaccard of the screenshot's signature, each

@@ -137,6 +137,21 @@ PAGE_TREE, DIALOG_TREE, DIALOG_KEYBOARD_TREE = (
 NO_TREE = "the device state has no tree"
 
 
+def with_menu_open(tree: str) -> str:
+    """``tree`` with a menu of two options open over its screen in a popup window."""
+    options = "".join(
+        f'<node text="{label}" resource-id="android:id/title" class="android.widget.TextView" '
+        f'clickable="true" bounds="[540,{top}][1060,{top + 120}]" drawing-order="0" />'
+        for label, top in (("Help", 300), ("Reset", 420))
+    )
+    menu = (
+        '<window index="2" title="Popup Window" bounds="[540,300][1060,540]" active="false" '
+        'focused="false" accessibility-focused="false" id="560" layer="2" '
+        f'type="TYPE_APPLICATION"><hierarchy rotation="0">{options}</hierarchy></window>'
+    )
+    return tree.replace("</display>", f"{menu}</display>")
+
+
 def write_observation_image(steps_dir: Path, image: bytes, tree: str | None = EMPTY_TREE) -> str:
     """Write an observation image and its ``tree`` into ``steps_dir`` under the next free
     step ID, as a StepRecorder would, and return the ID; ``None`` writes no tree, and a
@@ -1248,22 +1263,21 @@ def test_a_node_s_stable_layout_follows_a_merge(tmp_path: Path) -> None:
 
 
 def test_a_node_s_stable_layout_follows_a_visit(vlm: FakeVlm, screen: Screens) -> None:
+    """The page's only member has its menu open; once the page is visited with the menu
+    closed, the menu is on half the members, too few for the stable layout."""
     gm = make_manager(screen.steps_dir)
-    add_screen(
-        gm,
-        "s0_page",
-        "Settings page",
-        **members(screen.steps_dir, b"1", b"2", b"3", b"4", tree=PAGE_TREE),
-    )
+    menu_open = with_menu_open(PAGE_TREE)
+    add_screen(gm, "s0_page", "Settings page", **members(screen.steps_dir, tree=menu_open))
     gm.embed_missing_members()
     page = layout_signature(parse_tree(PAGE_TREE))
-    assert gm.node_layout("s0_page") == dict.fromkeys(page, 1.0)
+    assert gm.node_layout("s0_page") == dict.fromkeys(layout_signature(parse_tree(menu_open)), 1.0)
+    assert len(gm.node_layout("s0_page")) > len(page)
     vlm.descriptions.append(("Settings page", {}, []))
-    vlm.verdicts.append({"same": True, "reason": "the page with a dialog left open"})
+    vlm.verdicts.append({"same": True, "reason": "the page with its menu closed"})
 
-    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE, tree=DIALOG_TREE)) == "s0_page"
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE, tree=PAGE_TREE)) == "s0_page"
 
-    assert gm.node_layout("s0_page") == dict.fromkeys(page, pytest.approx(0.8))
+    assert gm.node_layout("s0_page") == dict.fromkeys(page, 1.0)
 
 
 @pytest.mark.usefixtures("vlm")
