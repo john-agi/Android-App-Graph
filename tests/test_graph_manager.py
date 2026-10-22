@@ -1919,46 +1919,70 @@ def _identity(node: str) -> str:
     return node
 
 
+_TOP = {"first_visible_item": "Google"}
+_SCROLLED = {"first_visible_item": "Default apps"}
+_BACK = {"action": "back"}
+
+
 def test_a_setup_trail_starts_an_arrival_s_setup_empty_and_extends_it_with_self_loops() -> None:
     trail = SetupTrail(_identity)
-    trail.begin("s0_home", arrived=True)
+    trail.begin("s0_home", _TOP)
     assert trail.setup("s0_home") == []
 
-    trail.step([_SCROLL], "s0_home")
+    trail.step([_SCROLL], "s0_home", _SCROLLED)
     assert trail.setup("s0_home") == [_SCROLL]
 
-    trail.step([_TAP], "s1_list")
+    trail.step([_TAP], "s1_list", {})
     assert trail.setup("s1_list") == []
 
 
 def test_a_round_trip_joins_the_setup_of_the_node_it_returns_to() -> None:
-    """The nodes the round trip passed through are left behind: arriving at one of them
-    again starts its setup afresh."""
-    open_menu, choose, home = {"action": "tap", "x": 1}, {"action": "tap", "x": 2}, _TAP
+    """A round trip through a dialog that set a form's field joins the form's setup, as
+    the menu then opened on the form does. The nodes the round trip passed through are
+    left behind: arriving at one of them again starts its setup afresh."""
+    open_security, choose_enterprise, open_menu = (
+        {"action": "tap", "x": 1},
+        {"action": "tap", "x": 2},
+        {"action": "tap", "x": 3},
+    )
+    enterprise = {"security": "WPA/WPA2-Enterprise", "open_menu": None}
     trail = SetupTrail(_identity)
-    trail.begin("s0_home", arrived=True)
-    trail.step([_TAP], "s1_form")
-    trail.step([open_menu], "s2_menu")
-    trail.step([choose], "s1_form")
-    assert trail.setup("s1_form") == [open_menu, choose]
+    trail.begin("s0_home", {})
+    trail.step([_TAP], "s1_form", {"security": "None", "open_menu": None})
+    trail.step([open_security], "s2_security_dialog", {"security": "None"})
+    trail.step([choose_enterprise], "s1_form", enterprise)
+    trail.step([open_menu], "s1_form", {**enterprise, "open_menu": "CA certificate dropdown"})
+    assert trail.setup("s1_form") == [open_security, choose_enterprise, open_menu]
 
-    trail.step([open_menu], "s2_menu")
-    assert trail.setup("s2_menu") == []
+    trail.step([_BACK], "s1_form", enterprise)
+    trail.step([open_security], "s2_security_dialog", {"security": "WPA/WPA2-Enterprise"})
+    assert trail.setup("s2_security_dialog") == []
 
-    trail.step([home], "s0_home")
-    assert trail.setup("s0_home") == [_TAP, open_menu, choose, open_menu, home]
+
+def test_a_setup_leaves_out_a_field_typed_and_cleared_and_keeps_the_scroll_after_it() -> None:
+    """States compare key by key, and a key one of them lacks counts as null, so clearing
+    the field brings the list back to the state it was in on arrival."""
+    type_query, clear_query = {"action": "type", "text": "wifi"}, {"action": "tap", "x": 9}
+    trail = SetupTrail(_identity)
+    trail.begin("s1_list", _TOP)
+    trail.step([type_query], "s1_list", {**_TOP, "search_query": "wifi"})
+    trail.step([clear_query], "s1_list", {**_TOP, "search_query": None})
+    assert trail.setup("s1_list") == []
+
+    trail.step([_SCROLL], "s1_list", {**_SCROLLED, "search_query": None})
+    assert trail.setup("s1_list") == [_SCROLL]
 
 
 def test_a_setup_trail_begun_without_an_arrival_knows_no_setup_until_it_arrives_elsewhere() -> None:
     trail = SetupTrail(_identity)
-    trail.begin("s0_home", arrived=False)
-    trail.step([_SCROLL], "s0_home")
+    trail.begin("s0_home", None)
+    trail.step([_SCROLL], "s0_home", _SCROLLED)
     assert trail.setup("s0_home") is None
 
-    trail.step([_TAP], "s1_list")
+    trail.step([_TAP], "s1_list", {})
     assert trail.setup("s1_list") == []
 
-    trail.step([{"action": "back"}], "s0_home")
+    trail.step([_BACK], "s0_home", _SCROLLED)
     assert trail.setup("s0_home") is None
     assert trail.setup("s9_never_reached") is None
 
@@ -1968,16 +1992,18 @@ def test_a_setup_trail_matches_a_node_merged_away_while_it_holds_it() -> None:
     for node_id in ("s0_home", "s1_list", "s2_detail", "s5_list"):
         add_screen(gm, node_id, f"screen {node_id}")
     trail = SetupTrail(gm.resolve_node_id)
-    trail.begin("s0_home", arrived=True)
-    trail.step([_TAP], "s1_list")
-    trail.step([_SCROLL], "s1_list")
+    trail.begin("s0_home", {})
+    trail.step([_TAP], "s1_list", _TOP)
+    trail.step([_SCROLL], "s1_list", _SCROLLED)
 
     assert gm.merge_nodes("s5_list", "s1_list") is True
     assert trail.setup("s5_list") == [_SCROLL]
 
-    trail.step([_TAP], "s2_detail")
-    trail.step([{"action": "back"}], "s5_list")
-    assert trail.setup("s5_list") == [_SCROLL, _TAP, {"action": "back"}]
+    open_row = {"action": "tap", "x": 7}
+    trail.step([open_row], "s2_detail", {})
+    trail.step([_BACK], "s5_list", _SCROLLED)
+    trail.step([_TAP], "s5_list", {**_SCROLLED, "open_menu": "overflow menu"})
+    assert trail.setup("s5_list") == [_SCROLL, _TAP]
 
 
 @pytest.mark.parametrize(
