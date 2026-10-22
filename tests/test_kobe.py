@@ -704,6 +704,21 @@ _SCROLL_CLOCKS = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 60}
 _OPEN_ALARMS = {"action": "tap", "coordinate": [10, 190]}
 _SCROLL_ALARMS = {"action": "swipe", "x1": 50, "y1": 170, "x2": 50, "y2": 30}
 _OPEN_ALARM = {"action": "tap", "coordinate": [50, 40]}
+_CLOCK_NODES = ("s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new")
+
+
+def _clock_graph(explorer: Kobe) -> None:
+    """Give the graph Clock's alarms tab, its start node, reached from the clock tab, an
+    alarm reached from the alarms tab, and a What's new screen no path leads from; each
+    action has a setup."""
+    graph = explorer.graph
+    graph.graph.add_nodes_from(_CLOCK_NODES, replay_misses=0)
+    graph.add_edge(
+        "s1_clock", "s0_alarms", action=[_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
+    )
+    graph.add_edge(
+        "s0_alarms", "s2_alarm", action=[_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
+    )
 
 
 @pytest.mark.parametrize(
@@ -731,16 +746,7 @@ def test_a_replay_starts_from_the_node_the_app_opened_on(
     identifies the screen the restart shows, expecting the start node, and replays from
     that node when a recorded path leads from it, from the start node otherwise, each
     action after its setup."""
-    graph = replaying_kobe.graph
-    graph.graph.add_nodes_from(
-        ["s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new"], replay_misses=0
-    )
-    graph.add_edge(
-        "s1_clock", "s0_alarms", action=[_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
-    )
-    graph.add_edge(
-        "s0_alarms", "s2_alarm", action=[_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
-    )
+    _clock_graph(replaying_kobe)
     expected = _identifying(replaying_kobe, monkeypatch, opened_on, "s2_alarm")
     caplog.set_level(logging.INFO, logger="test")
 
@@ -751,6 +757,52 @@ def test_a_replay_starts_from_the_node_the_app_opened_on(
     assert reached == "s2_alarm"
     opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms."
     assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
+
+
+@pytest.mark.parametrize(
+    ("opened_on", "target", "replayed", "misses"),
+    [
+        pytest.param(
+            "s1_clock",
+            "s2_alarm",
+            [_SCROLL_CLOCKS, _OPEN_ALARMS, _SCROLL_ALARMS, _OPEN_ALARM],
+            1,
+            id="from a node with a path",
+        ),
+        pytest.param(
+            "s3_whats_new",
+            "s2_alarm",
+            [_SCROLL_ALARMS, _OPEN_ALARM],
+            1,
+            id="from a node without a path",
+        ),
+        pytest.param("s3_whats_new", "s0_alarms", [], 1, id="to the start node, sending nothing"),
+        pytest.param("s2_alarm", "s2_alarm", [], 0, id="app opened on the target"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_from_the_screen_the_app_opened_on_counts_a_miss_where_it_lands_elsewhere(
+    opened_on: str,
+    target: str,
+    replayed: list[object],
+    misses: int,
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app opens on a node other than the start node, and the replay ends on that
+    node. Unless it is the target, the target counts one miss, whether the replay started
+    from that node, from the start node or sent nothing; no other node's count changes."""
+    _clock_graph(replaying_kobe)
+    _identifying(replaying_kobe, monkeypatch, opened_on, opened_on)
+
+    reached = replaying_kobe.navigate_to_node(target)
+
+    assert reached == opened_on
+    assert device_log == [*_FIRST_RESTART, *replayed]
+    assert dict(replaying_kobe.graph.graph.nodes(data="replay_misses")) == {
+        node: misses if node == target else 0 for node in _CLOCK_NODES
+    }
 
 
 @pytest.mark.parametrize("malformed", [False, True])
