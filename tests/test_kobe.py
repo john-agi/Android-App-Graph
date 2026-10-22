@@ -503,7 +503,9 @@ def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_
     monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    """The Network & internet row was tapped while it sat higher up Settings' home."""
+    """The Network & internet row was tapped while it sat higher up Settings' home. The
+    first tap of a replay is aimed by the capture that identified the screen the app
+    opened on, so the screen is captured once before it, not twice."""
     explorer = _explorer(
         _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
     )
@@ -527,11 +529,10 @@ def test_a_replayed_tap_reads_the_screen_first_and_taps_its_element_where_it_is_
     records = step_records(explorer.controller.steps)
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "navigation_replay"),
-        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
     ]
-    assert records[2]["observation"] == records[1]["id"]
+    assert records[1]["observation"] == records[0]["id"]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -542,8 +543,9 @@ def test_a_replayed_setup_tap_reads_the_screen_first_and_taps_its_element_where_
     monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    """The setup's tap on the Network & internet row goes where the row is now, and the
-    action after it, Back, replays as recorded."""
+    """The setup's tap on the Network & internet row goes where the row is now, aimed by
+    the capture of the screen the app opened on, and the action after it, Back,
+    replays as recorded."""
     explorer = _explorer(
         _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
     )
@@ -563,12 +565,51 @@ def test_a_replayed_setup_tap_reads_the_screen_first_and_taps_its_element_where_
     records = step_records(explorer.controller.steps)
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "navigation_replay"),
-        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
     ]
-    assert records[2]["observation"] == records[1]["id"]
+    assert records[1]["observation"] == records[0]["id"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replayed_tap_after_the_first_action_reads_the_screen_it_starts_on(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """Only the replay's first action starts on the screen the app opened on; a later
+    anchored tap is aimed by a capture taken just before it."""
+    explorer = _explorer(
+        _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
+    )
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_network", "s2_wifi"])
+    recorded = {"action": "tap", "x": 672, "y": 524}
+    effect = ActionEffect(
+        (ActionHit("element", _network_row_higher_up()),), None, no_visible_effect=False
+    )
+    for source, target in (("s0_home", "s1_network"), ("s1_network", "s2_wifi")):
+        explorer.graph.add_edge(source, target, [recorded], details=EdgeDetails(effect=effect))
+    _identifying(explorer, monkeypatch, "s0_home", "s2_wifi")
+
+    assert explorer.navigate_to_node("s2_wifi") == "s2_wifi"
+
+    row_now = {"action": "tap", "x": 672, "y": 808}
+    assert device_log == [*_FIRST_RESTART, row_now, row_now]
+    records = step_records(explorer.controller.steps)
+    assert [record["kind"] for record in records] == [
+        "observation",
+        "action",
+        "observation",
+        "action",
+        "observation",
+    ]
+    assert (records[1]["observation"], records[3]["observation"]) == (
+        records[0]["id"],
+        records[2]["id"],
+    )
 
 
 def _explore_sending(

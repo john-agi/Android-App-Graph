@@ -491,16 +491,18 @@ A replayed tap or long press, a setup's included, goes to the element it recorde
 its [anchor](#what-an-action-acted-on), where the screen shows that element now, so a
 list that loaded more items or stopped at another scroll position does not move the
 tap onto a neighbour. The replay reads the screen first, a [capture](#step-log) like
-any other, and looks for the anchor's locator among the visible, enabled nodes of
-the windows the user can act on, counting only the nodes that take taps when some
-do. When it finds exactly one, and a tap at the centre of that node's current bounds
-reaches it, the action goes to that centre; a long press keeps its duration.
+any other: for its first action, the capture that identified the screen the app
+opened on, and for each later one, a capture taken just before it. It looks for the
+anchor's locator among the visible, enabled nodes of the windows the user can act
+on, counting only the nodes that take taps when some do. When it finds exactly one,
+and a tap at the centre of that node's current bounds reaches it, the action goes to
+that centre; a long press keeps its duration.
 Otherwise the action goes to its recorded coordinates. The log says which way each
 tap went: `anchor`, or `recorded coordinates:` and the reason, `no_anchor` (the edge
 recorded none), `no_tree`, `no_match`, `ambiguous` (more than one element) or
 `covered` (a dialog, the keyboard or another element lies over its centre). Typing,
 swipes, Back, Home, Enter and waits replay as recorded, without a look. Each
-anchored tap makes a replay one capture longer.
+anchored tap after the replay's first action makes a replay one capture longer.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
