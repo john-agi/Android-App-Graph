@@ -45,6 +45,8 @@ import networkx as nx
 from openrouter import OpenRouter
 
 from android_app_graph.graph_files import (
+    PER_ACTION_LISTS,
+    edge_problems,
     graph_steps_dir,
     load_embeddings,
     nodes_without_members,
@@ -106,7 +108,6 @@ EXTERNAL_WEB_NODE = "ext_web"
 EXTERNAL_WEB_BACK_PRESSES = 3
 # A longer setup is an excursion, not a recipe for the state an action needs.
 MAX_SETUP_ACTIONS = 8
-_PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
 
 
 class _SamePackageNodes(NamedTuple):
@@ -585,15 +586,7 @@ def _default_num_steps(action: object) -> int:
 
 def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
     """Readers pair entry i of every per-action list with actions[i] and skip placeholders."""
-    return {key: list(edge_data.get(key, [])) for key in ("actions", *_PER_ACTION_LISTS)}
-
-
-def _one_entry_per_action(edge: dict[str, Any]) -> bool:
-    actions = edge.get("actions")
-    return isinstance(actions, list) and all(
-        isinstance(edge.get(key), list) and len(edge[key]) == len(actions)
-        for key in _PER_ACTION_LISTS
-    )
+    return {key: list(edge_data.get(key, [])) for key in ("actions", *PER_ACTION_LISTS)}
 
 
 def _same_action(entry: object, action: object) -> bool:
@@ -695,8 +688,8 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
     member observations with its representative among them, or whose representative has
-    no image in ``steps_dir``, and every edge whose per-action lists do not hold one entry
-    per action.
+    no image in ``steps_dir``, and every edge without actions or whose per-action lists
+    do not hold one entry per action.
     """
     without_members = nodes_without_members(graph["nodes"])
     without_image = [
@@ -704,11 +697,6 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         for node in graph["nodes"]
         if node["id"] not in without_members
         and not observation_image_path(steps_dir, node["representative_observation"]).is_file()
-    ]
-    misaligned = [
-        f"{edge['source']} -> {edge['target']}"
-        for edge in graph["edges"]
-        if not _one_entry_per_action(edge)
     ]
     problems = []
     if without_members:
@@ -719,11 +707,7 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(
             f"node(s) with a representative without an image in {steps_dir}: {without_image}"
         )
-    if misaligned:
-        problems.append(
-            f"edge(s) without one entry per action in each of {', '.join(_PER_ACTION_LISTS)}: "
-            f"{misaligned}"
-        )
+    problems.extend(edge_problems(graph["edges"]))
     if problems:
         raise unloadable_graph(path, problems)
 
@@ -2130,8 +2114,7 @@ class GraphManager:
     def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
         """Return the fewest device actions a replay of one of the edge's actions sends,
         its setup's included (used as path weight)."""
-        costs = _action_costs(edge_data)
-        return min(costs) if costs else 1
+        return min(_action_costs(edge_data))
 
     def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
@@ -2142,7 +2125,7 @@ class GraphManager:
         Returns:
             The path's steps, the first being the source itself. A step's action is the
             edge's cheapest action, a single dict or a list of dicts (compound action),
-            with its setup; an edge without actions gives ``{}``.
+            with its setup.
             Returns None if no path exists.
         """
         if source == target:
@@ -2166,16 +2149,14 @@ class GraphManager:
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
             costs = _action_costs(edge_data)
-            if costs:
-                best_idx = costs.index(min(costs))
-                step = PathStep(
+            best_idx = costs.index(min(costs))
+            result.append(
+                PathStep(
                     _node_id(t),
                     edge_data["actions"][best_idx],
                     self.action_setup(_node_id(s), _node_id(t), best_idx),
                 )
-            else:
-                step = PathStep(_node_id(t), {}, ())
-            result.append(step)
+            )
 
         return result
 
@@ -2225,14 +2206,6 @@ class GraphManager:
                     node_id, action, setup = nav_path[i]
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
-                    instruction = ""
-                    instructions = edge_data.get("instructions", [])
-                    if instructions:
-                        instruction = instructions[0]
-                    target_obs = ""
-                    target_observations = edge_data.get("target_observations", [])
-                    if target_observations:
-                        target_obs = target_observations[0]
                     path_steps.append(
                         {
                             "type": "navigate",
@@ -2240,8 +2213,8 @@ class GraphManager:
                             "to": node_id,
                             "setup": list(setup),
                             "action": action,
-                            "instruction": instruction,
-                            "target_observation": target_obs,
+                            "instruction": edge_data["instructions"][0],
+                            "target_observation": edge_data["target_observations"][0],
                         }
                     )
 
@@ -2551,7 +2524,7 @@ class GraphManager:
         }
         self.graph.clear()
 
-        for node_data in data.get("nodes", []):
+        for node_data in data["nodes"]:
             node_id = node_data["id"]
             activities = node_data.get("activities", [])
             self.graph.add_node(
@@ -2569,7 +2542,7 @@ class GraphManager:
                 representative_observation=node_data["representative_observation"],
             )
 
-        for edge_data in data.get("edges", []):
+        for edge_data in data["edges"]:
             hashed = (
                 {"normalized_instructions_hash": edge_data["normalized_instructions_hash"]}
                 if edge_data.get("normalized_instructions_hash")
@@ -2578,7 +2551,7 @@ class GraphManager:
             self.graph.add_edge(
                 edge_data["source"],
                 edge_data["target"],
-                **{key: edge_data[key] for key in ("actions", *_PER_ACTION_LISTS)},
+                **{key: edge_data[key] for key in ("actions", *PER_ACTION_LISTS)},
                 instruction_templates=edge_data.get("instruction_templates", []),
                 visit_count=edge_data.get("visit_count", 0),
                 **hashed,
@@ -2609,10 +2582,7 @@ class GraphManager:
         actions = []
         for i in range(len(path) - 1):
             source, target = path[i], path[i + 1]
-            edge_data = self.graph[source][target]
-            edge_actions = edge_data.get("actions", [])
-            if edge_actions:
-                actions.append(edge_actions[0])
+            actions.append(self.graph[source][target]["actions"][0])
         return actions
 
     def summary(self) -> dict[str, Any]:

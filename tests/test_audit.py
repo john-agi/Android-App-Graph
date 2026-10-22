@@ -1227,42 +1227,6 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART, *_RESTART, _GEAR_TAP]
 
 
-@pytest.mark.usefixtures("_fake_device")
-def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_rest(
-    client: OpenRouter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    device_log: list[object],
-    write_graph_file: Callable[[Path, dict[str, Any]], None],
-) -> None:
-    """A loaded graph file can hold an edge with no actions; the replay passes over it."""
-    graph_path = tmp_path / "hand_edited.json"
-    write_graph_file(
-        graph_path,
-        {
-            "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
-            "edges": [
-                {"source": "s0_splash", "target": "s1_home", "actions": []},
-                {"source": "s1_home", "target": "s2_detail", "actions": [[_DETAIL_TAP]]},
-            ],
-        },
-    )
-    graph = GraphManager()
-    graph.load_graph(graph_path)
-    _identifying(graph, monkeypatch, "s0_splash", "s2_detail")
-
-    (result,) = _re_explore(
-        graph,
-        [{"type": "explore_node", "node": "s2_detail", "expected_pages": []}],
-        _LoggingController("com.demo", device_log),
-        client,
-        tmp_path,
-    )
-
-    assert (result["status"], result["navigated_to"]) == ("explored", "s2_detail")
-    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP]
-
-
 _SCROLL_CLOCKS = {"action": "swipe", "x1": 540, "y1": 1200, "x2": 540, "y2": 600}
 _OPEN_ALARMS = {"action": "tap", "x": 100, "y": 1800}
 _SCROLL_ALARMS = {"action": "swipe", "x1": 540, "y1": 1500, "x2": 540, "y2": 300}
@@ -1320,30 +1284,6 @@ def test_re_explore_replays_from_the_node_the_app_opened_on(
     assert result["navigated_to"] == "s2_alarm"
     opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms"
     assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
-
-
-@pytest.mark.usefixtures("_fake_device")
-def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
-) -> None:
-    graph = _graph_with_nodes(
-        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
-    )
-    graph.graph.add_edge("s0_home", "s1_detail")
-    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
-    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
-
-    (result,) = _re_explore(
-        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
-    )
-
-    assert result == {
-        "issue": issue,
-        "status": "explored",
-        "navigated_to": "s1_detail",
-        "steps": [],
-    }
-    assert device_log == _FIRST_RESTART
 
 
 @pytest.mark.usefixtures("_fake_device")

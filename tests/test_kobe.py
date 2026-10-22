@@ -224,9 +224,9 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
             {"id": "s2_dialog", "activity": "com.demo.Form"},
         ],
         "edges": [
-            {"source": "s0_home", "target": "s1_form"},
-            {"source": "s0_home", "target": "s2_dialog"},
-            {"source": "s1_form", "target": "s0_home"},
+            {"source": "s0_home", "target": "s1_form", "actions": [{"action": "tap"}]},
+            {"source": "s0_home", "target": "s2_dialog", "actions": [{"action": "swipe"}]},
+            {"source": "s1_form", "target": "s0_home", "actions": [{"action": "back"}]},
         ],
     }
     graph_path = tmp_path / "demo" / "demo.json"
@@ -347,35 +347,6 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
     with pytest.raises(ValueError, match="No path from s0_home to s1_orphan"):
         replaying_kobe.navigate_to_node("s1_orphan")
     assert device_log == []
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_rest(
-    replaying_kobe: Kobe,
-    device_log: list[object],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    write_graph_file: Callable[..., None],
-) -> None:
-    """A loaded graph file can hold an edge with no actions; the replay passes over it."""
-    open_detail = {"action": "tap", "coordinate": [30, 40]}
-    graph_file = tmp_path / "hand_edited.json"
-    write_graph_file(
-        graph_file,
-        {
-            "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
-            "edges": [
-                {"source": "s0_splash", "target": "s1_home", "actions": []},
-                {"source": "s1_home", "target": "s2_detail", "actions": [[open_detail]]},
-            ],
-        },
-        embedding_model="provider/embedding",
-    )
-    replaying_kobe.graph.load_graph(graph_file)
-    _identifying(replaying_kobe, monkeypatch, "s0_splash", "s2_detail")
-
-    assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
-    assert device_log == [*_FIRST_RESTART, open_detail]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1756,6 +1727,13 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
 
 
 @pytest.mark.usefixtures("no_sleep")
+def _settings_and_detail(explorer: Kobe) -> None:
+    """Give ``explorer`` the path home → settings → detail, one tap each."""
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])
+    explorer.graph.add_edge("s0_home", "s1_settings", action=[{"action": "tap", "x": 1, "y": 2}])
+    explorer.graph.add_edge("s1_settings", "s2_detail", action=[{"action": "tap", "x": 3, "y": 4}])
+
+
 def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continues_there(
     tmp_path: Path,
     router_client: OpenRouter,
@@ -1772,8 +1750,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     }
     device = _ReplayScript(device_log, launcher, _in_app("Home", "white"))
     explorer = _explorer(device, tmp_path, router_client, launch_activity="com.demo/.Main")
-    explorer.graph.graph.add_edge("s0_home", "s1_settings")
-    explorer.graph.graph.add_edge("s1_settings", "s2_detail")
+    _settings_and_detail(explorer)
     router_responses.extend(
         [
             chat_response(content=_NO_DUPLICATES),
@@ -1847,8 +1824,7 @@ def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_sta
 ) -> None:
     """Neither failure changes the screen, so the step's node and state still hold."""
     explorer = _explorer(_ReplayScript(device_log), tmp_path, router_client)
-    explorer.graph.graph.add_edge("s0_home", "s1_settings")
-    explorer.graph.graph.add_edge("s1_settings", "s2_detail")
+    _settings_and_detail(explorer)
     router_responses.extend(
         [
             chat_response(content=_NO_DUPLICATES),

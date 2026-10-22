@@ -317,7 +317,7 @@ def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[st
         for sub_action in action:
             controller.exe_action(sub_action)
             time.sleep(0.5)
-    elif action:
+    else:
         controller.exe_action(action)
     time.sleep(1)
 

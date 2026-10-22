@@ -370,25 +370,11 @@ def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
 
 
 @pytest.mark.parametrize(
-    ("data", "expected"),
-    [
-        ({"edges": []}, {"nodes": [], "edges": []}),
-        ({"nodes": []}, {"nodes": [], "edges": []}),
-        ({}, {"nodes": [], "edges": []}),
-    ],
-)
-def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
-    data: dict[str, Any], expected: dict[str, Any]
-) -> None:
-    """An absent "nodes" or "edges" key is an empty list, not a rejection --
-    only a present non-list value (``null``, a string, an object) is.
-    """
-    assert graph_files.require_graph_shape(data, Path()) == expected
-
-
-@pytest.mark.parametrize(
     ("data", "match"),
     [
+        ({"edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": None, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": [], "edges": None}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": {}, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
@@ -399,8 +385,8 @@ def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
 def test_require_graph_shape_rejects_a_malformed_shape(
     tmp_path: Path, data: dict[str, Any], match: str
 ) -> None:
-    """Every shape failure, ``"nodes": null`` and ``"nodes": ["s0"]`` included,
-    raises a ``TypeError`` naming the path.
+    """Every shape failure, an absent ``"nodes"``, ``"nodes": null`` and
+    ``"nodes": ["s0"]`` included, raises a ``TypeError`` naming the path.
     """
     path = tmp_path / "demo.json"
     with pytest.raises(TypeError, match=match) as excinfo:

@@ -8,7 +8,6 @@ and argument validation work without the extra installed.
 from __future__ import annotations
 
 import argparse
-import base64
 import importlib
 import json
 import logging
@@ -19,16 +18,18 @@ import subprocess
 import webbrowser
 from collections import Counter
 from dataclasses import dataclass
-from itertools import islice
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 
 from android_app_graph.graph_files import (
+    edge_problems,
     graph_steps_dir,
     nodes_without_members,
+    observation_image_b64,
     observation_image_path,
+    require_graph_shape,
     unloadable_graph,
 )
 from android_app_graph.screen_image import MEDIA_TYPE
@@ -69,38 +70,43 @@ def as_digraph(graph: object) -> nx.DiGraph:
 _PANEL_MEMBER_LIMIT = 10
 
 
-def _image_uri(steps_dir: Path, observation_id: str) -> str | None:
-    """Return an observation's image as a data URI, or ``None`` when the step log has
-    no image for it."""
-    image_path = observation_image_path(steps_dir, observation_id)
-    if not image_path.is_file():
-        return None
-    b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return f"data:{MEDIA_TYPE};base64,{b64}"
-
-
-def _oldest_member_image_uris(steps_dir: Path, observations: list[str]) -> list[str]:
-    """Return the images of the oldest members that have one in the step log, at most
-    ``_PANEL_MEMBER_LIMIT`` of them, as data URIs."""
-    uris = (_image_uri(steps_dir, observation) for observation in observations)
-    return list(islice((uri for uri in uris if uri is not None), _PANEL_MEMBER_LIMIT))
+def _image_uri(steps_dir: Path, observation_id: str) -> str:
+    """Return an observation's image in the step log as a data URI."""
+    return f"data:{MEDIA_TYPE};base64,{observation_image_b64(steps_dir, observation_id)}"
 
 
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph).
 
-    A node that does not list its member observations with its representative among
-    them raises ``ValueError`` naming the file and the node.
+    A file without ``nodes`` and ``edges`` lists raises ``TypeError`` naming it. A node
+    that does not list its member observations with its representative among them, an
+    edge without actions or whose per-action lists do not hold one entry per action, and
+    a member whose image is missing from the step log raise ``ValueError`` naming the
+    file and each of them.
     """
     path = Path(graph_path)
     with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+        data = require_graph_shape(json.load(f), path)
+    problems = []
     if without_members := nodes_without_members(data["nodes"]):
+        problems.append(
+            f"node(s) with no member observations with a representative: {without_members}"
+        )
+    problems.extend(edge_problems(data["edges"]))
+    if problems:
+        raise unloadable_graph(path, problems)
+    steps_dir = graph_steps_dir(path)
+    without_image = [
+        observation
+        for node in data["nodes"]
+        for observation in node["observations"]
+        if not observation_image_path(steps_dir, observation).is_file()
+    ]
+    if without_image:
         raise unloadable_graph(
-            path, [f"node(s) with no member observations with a representative: {without_members}"]
+            path, [f"member(s) without an image in {steps_dir}: {without_image}"]
         )
 
-    steps_dir = graph_steps_dir(path)
     graph = nx.DiGraph()
 
     for node in data["nodes"]:
@@ -119,13 +125,16 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
             elements_explored=n_explored,
             elements_total=len(elements),
             screenshot_uri=screenshot_uri,
-            member_image_uris=_oldest_member_image_uris(steps_dir, observations),
+            member_image_uris=[
+                _image_uri(steps_dir, observation)
+                for observation in observations[:_PANEL_MEMBER_LIMIT]
+            ],
             member_total=len(observations),
         )
 
     for edge in data["edges"]:
         templates = edge.get("instruction_templates", [])
-        instructions = [instruction for instruction in edge.get("instructions", []) if instruction]
+        instructions = [instruction for instruction in edge["instructions"] if instruction]
 
         if templates and isinstance(templates[0], dict) and templates[0].get("template"):
             label = templates[0]["template"]
@@ -135,11 +144,9 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
             label = summarize_actions(edge["actions"])
 
         is_self_loop = edge["source"] == edge["target"]
-        schema_deltas = edge.get("schema_deltas", [])
-        delta_str = _delta_suffix(schema_deltas) if is_self_loop and schema_deltas else ""
+        delta_str = _delta_suffix(edge["schema_deltas"]) if is_self_loop else ""
 
-        num_steps_list = edge.get("num_steps", [])
-        weight = min(num_steps_list) if num_steps_list else len(edge["actions"])
+        weight = min(edge["num_steps"])
         weight_str = f"\n[{weight} step{'s' if weight != 1 else ''}]"
 
         graph.add_edge(
@@ -616,16 +623,13 @@ _NODE_TOOLTIPS = """
       line.appendChild(value);
       tooltip.appendChild(line);
     });
-    var representative = typeof node.representativeMember === "number"
+    var image = document.createElement("img");
+    image.className = "node-tooltip-image";
+    image.alt = "Representative screenshot";
+    image.src = typeof node.representativeMember === "number"
       ? node.memberImages[node.representativeMember]
       : node.representativeImage;
-    if (representative) {
-      var image = document.createElement("img");
-      image.className = "node-tooltip-image";
-      image.alt = "Representative screenshot";
-      image.src = representative;
-      tooltip.appendChild(image);
-    }
+    tooltip.appendChild(image);
     return tooltip;
   }
 
@@ -677,14 +681,8 @@ _MEMBER_PANEL = """
 
   function show(newIndex) {
     index = newIndex;
-    image.hidden = images.length === 0;
-    if (images.length > 0) {
-      image.src = images[index];
-      position.textContent = index + 1 + " / " + images.length;
-    } else {
-      image.removeAttribute("src");
-      position.textContent = "No image";
-    }
+    image.src = images[index];
+    position.textContent = index + 1 + " / " + images.length;
     previous.disabled = index <= 0;
     next.disabled = index >= images.length - 1;
   }
@@ -695,8 +693,8 @@ _MEMBER_PANEL = """
       return;
     }
     var node = nodes.get(params.nodes[0]);
-    var count = node.memberTotal || 0;
-    images = node.memberImages || [];
+    var count = node.memberTotal;
+    images = node.memberImages;
     heading.textContent = node.id;
     total.textContent =
       (images.length < count ? images.length + " of " : "") +

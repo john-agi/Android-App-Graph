@@ -32,7 +32,7 @@ from openrouter import OpenRouter
 from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
-from android_app_graph.graph_files import save_embeddings, text_embeddings_path
+from android_app_graph.graph_files import PER_ACTION_LISTS, save_embeddings, text_embeddings_path
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
@@ -1193,7 +1193,8 @@ def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
         (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}]}), "utf-8"
+        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}], "edges": []}),
+        "utf-8",
     )
     vectors = {kept: EMBEDDINGS["Home screen"]}
     save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
@@ -1357,7 +1358,7 @@ def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vect
 ) -> None:
     path = tmp_path / "graph.json"
     member = members(tmp_path / "steps")
-    path.write_text(json.dumps({"nodes": [{"id": "s0_home", **member}]}), "utf-8")
+    path.write_text(json.dumps({"nodes": [{"id": "s0_home", **member}], "edges": []}), "utf-8")
     write_image_vectors(tmp_path / "steps", member["observations"])
     gm = GraphManager()
 
@@ -1391,7 +1392,8 @@ def test_closest_member_raises_naming_the_node_and_every_member_without_a_usable
     )
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}]}), "utf-8"
+        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}], "edges": []}),
+        "utf-8",
     )
     write_text_vectors(path, member)
     gm = make_manager()
@@ -2018,6 +2020,39 @@ def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
 
     message = str(excinfo.value)
     assert "['s0_home -> s1_settings']" in message
+    assert str(path) in message
+    assert "Explore the app again into a new graph directory" in message
+
+
+@pytest.mark.parametrize("actions", [None, []], ids=["absent", "empty"])
+def test_load_graph_rejects_an_edge_without_actions(
+    actions: list[object] | None, tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    lists: dict[str, list[object]] = {key: [] for key in PER_ACTION_LISTS}
+    edge = {"source": "s0_home", "target": "s1_settings", **lists}
+    if actions is not None:
+        edge["actions"] = actions
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "s0_home", **members(steps_dir)},
+                    {"id": "s1_settings", **members(steps_dir)},
+                ],
+                "edges": [edge],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"edge\(s\) without actions") as excinfo:
+        make_manager().load_graph(path)
+
+    message = str(excinfo.value)
+    assert "['s0_home -> s1_settings']" in message
+    assert "one entry per action" not in message
     assert str(path) in message
     assert "Explore the app again into a new graph directory" in message
 
@@ -3013,18 +3048,6 @@ def test_find_path_picks_the_action_with_the_fewest_steps() -> None:
     assert path == [PathStep("s0_home", {}, ()), PathStep("s1_settings", {"action": "short"}, ())]
 
 
-def test_find_path_uses_an_empty_action_for_an_edge_without_actions() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-    add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings")
-
-    assert gm.find_path("s0_home", "s1_settings") == [
-        PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {}, ()),
-    ]
-
-
 def test_find_path_returns_the_setup_of_the_action_it_takes() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -3222,11 +3245,12 @@ def test_shortest_path_returns_none_without_a_path() -> None:
 def test_get_path_actions_takes_the_first_action_of_every_hop() -> None:
     gm = make_manager()
     _line_graph(gm)
-    gm.graph.add_edge("s3_results", "s0_home")
+    gm.add_edge("s3_results", "s0_home", {"action": "d"})
+    gm.add_edge("s3_results", "s0_home", {"action": "e"})
 
     actions = gm.get_path_actions(["s0_home", "s1_settings", "s3_results", "s0_home"])
 
-    assert actions == [{"action": "a"}, {"action": "b"}]
+    assert actions == [{"action": "a"}, {"action": "b"}, {"action": "d"}]
 
 
 def test_get_start_node_returns_none_for_an_empty_graph() -> None:
@@ -3795,21 +3819,17 @@ def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     assert list(target.graph.nodes) == ["s0_home"]
 
 
-def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
-    """An absent "nodes" or "edges" key is an empty list, so a file without an
-    "edges" key loads; only a present non-list value is rejected.
-    """
+def test_load_graph_rejects_a_file_without_an_edges_list(tmp_path: Path) -> None:
     path = tmp_path / "graph.json"
-    membership = members(tmp_path / "steps")
-    node = {"id": "s0_home", "activity": HOME, "page_description": "Home screen", **membership}
-    path.write_text(json.dumps({"nodes": [node]}), encoding="utf-8")
-    write_text_vectors(path, membership)
-    gm = make_manager()
+    path.write_text(
+        json.dumps({"nodes": [{"id": "s0_home", **members(tmp_path / "steps")}]}),
+        encoding="utf-8",
+    )
 
-    gm.load_graph(path)
+    with pytest.raises(TypeError, match="list fields 'nodes' and 'edges'") as excinfo:
+        make_manager().load_graph(path)
 
-    assert list(gm.graph.nodes) == ["s0_home"]
-    assert gm.graph.number_of_edges() == 0
+    assert str(path) in str(excinfo.value)
 
 
 def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
@@ -4350,7 +4370,6 @@ screen_attrs = st.fixed_dictionaries(
     }
 )
 node_attrs = st.tuples(screen_attrs, memberships).map(lambda parts: {**parts[0], **parts[1]})
-PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
 # One tuple per action: the action, then its entry in each of PER_ACTION_LISTS.
 recorded_actions = st.lists(
     st.tuples(
@@ -4361,6 +4380,7 @@ recorded_actions = st.lists(
         st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
         setup_entries,
     ),
+    min_size=1,
     max_size=3,
 )
 

@@ -681,14 +681,14 @@ The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
-Loading a graph fails with an error naming the file and what lacks a field the
-graph needs: a node that lists no observations or whose representative is not one
-of them, a representative whose image is missing from `steps/`, a member of an
-in-app node whose record in `steps/` has no `pixel_hash` or `describe`, or an edge
-whose per-action lists (see [Graph edges](#graph-edges)) do not hold one entry per
-action. `app-graph-plot` fails the same way on a node that lists no observations
-with its representative among them. Explore the app again into a new graph
-directory.
+Loading a graph fails with an error naming the file and what is wrong: the file
+has no `nodes` or `edges` list, a node lists no observations or its representative
+is not one of them, a representative's image is missing from `steps/`, a member of
+an in-app node has no `pixel_hash` or `describe` in its record in `steps/`, or an
+edge has no actions or per-action lists (see [Graph edges](#graph-edges)) that do
+not hold one entry per action. `app-graph-plot` fails the same way, except that it
+reads no record in `steps/` and needs the image of every member, not only of the
+representative. Explore the app again into a new graph directory.
 
 ### Graph edges
 
@@ -745,8 +745,7 @@ uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 In the HTML view, each node's label ends with the number of screenshots the node
 holds, such as `[12 screenshots]`. Clicking a node opens a panel with its member
 screenshots, oldest first and at most ten, with Previous and Next buttons and the
-position, such as `3 / 10`. A member whose image is missing from `steps/` is
-skipped. Clicking the background or an edge closes the panel.
+position, such as `3 / 10`. Clicking the background or an edge closes the panel.
 
 Hovering a node shows its ID, full page description, activity, visits, state keys,
 explored element count and first ten unexplored elements, then its representative
