@@ -12,7 +12,7 @@ import logging
 import os
 import secrets
 import shutil
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 from typing import IO, Any, Literal
 
@@ -320,3 +320,26 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
         msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
         raise ValueError(msg)
     return graph
+
+
+def nodes_without_members(nodes: Iterable[dict[str, Any]]) -> list[str]:
+    """Return the IDs of the saved ``nodes`` that do not list their member observations,
+    as a list of observation IDs with the node's representative among them."""
+    return [node["id"] for node in nodes if not _lists_members(node)]
+
+
+def _lists_members(node: dict[str, Any]) -> bool:
+    observations = node.get("observations")
+    return (
+        isinstance(observations, list)
+        and all(isinstance(observation, str) for observation in observations)
+        and node.get("representative_observation") in observations
+    )
+
+
+def unloadable_graph(path: Path, problems: Iterable[str]) -> ValueError:
+    """Return the ``ValueError`` that loading the graph at ``path`` raises for
+    ``problems``, each naming what lacks a field the graph needs."""
+    return ValueError(
+        f"{path}: {'; '.join(problems)}. Explore the app again into a new graph directory."
+    )

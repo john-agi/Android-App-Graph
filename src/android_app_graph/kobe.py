@@ -185,12 +185,11 @@ class Kobe:
         self.graph.steps_dir = steps_dir
 
         if self.graph_path.exists():
-            self.graph.load_graph(self.graph_path, default_package_name=self.package_name)
+            self.graph.load_graph(self.graph_path)
             self.logger.info("Graph loaded from %s", self.graph_path)
             self.graph.embed_missing_members()
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
-        self.graph.package_name = self.package_name
         self.controller = StepRecorder(
             controller, steps_dir, run_kind="explore", source="main_loop"
         )

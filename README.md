@@ -69,7 +69,6 @@ graph TD;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
-    gm --> pkgs["android_app_graph.android_packages"];
     gm --> gf;
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
@@ -529,9 +528,7 @@ Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
 package. A dialog's node is therefore never a target of
 `--resume-from auto` or the coverage checkpoint, which replay from the screen the app
-opens on. A node without a recorded package, other than an `ext_` one, takes the
-graph file's `package_name`, or the app's configured `package_name` when the file
-has none, so a graph file whose nodes record no package loads and resumes too.
+opens on.
 
 ### Step log
 
@@ -684,10 +681,14 @@ The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
-Loading a graph fails, naming the nodes, when a node lists no observations, its
-representative is not one of them, or the representative's image is missing from
-`steps/`. A graph whose nodes do not list their observations cannot be loaded:
-explore the app again into a new graph directory.
+Loading a graph fails with an error naming the file and what lacks a field the
+graph needs: a node that lists no observations or whose representative is not one
+of them, a representative whose image is missing from `steps/`, a member of an
+in-app node whose record in `steps/` has no `pixel_hash` or `describe`, or an edge
+whose per-action lists (see [Graph edges](#graph-edges)) do not hold one entry per
+action. `app-graph-plot` fails the same way on a node that lists no observations
+with its representative among them. Explore the app again into a new graph
+directory.
 
 ### Graph edges
 
@@ -717,8 +718,7 @@ when the setup is unknown or too long:
   another one.
 - A setup of more than 8 actions is dropped, and the log says so.
 
-An action recorded again keeps the shorter of its known setups. A graph file
-without `setups` loads unchanged, and its actions replay without a setup.
+An action recorded again keeps the shorter of its known setups.
 
 Edge normalization asks the page-detail model to generalize an edge's
 instructions into `instruction_templates`, in the passes listed under
@@ -808,9 +808,8 @@ verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reu
 After the merges, the members of each in-app node are grouped by their screenshot
 vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
 and the groups are the connected components of those links, single-linkage
-clustering. Only members with a vector and a stored describe output (`describe` in
-their [record](#step-log)) are grouped. The group that holds the representative is
-the node's home.
+clustering. Only members with a vector are grouped. The group that holds the
+representative is the node's home.
 
 - A node whose home holds fewer than half of its members is `diffuse` and is left
   alone, without a verifier call.

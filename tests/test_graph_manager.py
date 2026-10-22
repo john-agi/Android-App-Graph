@@ -69,8 +69,6 @@ MESSAGES_LIST = "com.google.android.apps.messaging.ui.ConversationListActivity"
 MESSAGES_CONVERSATION = "com.google.android.apps.messaging.ui.conversation.ConversationActivity"
 GMAIL = "com.google.android.gm"
 GMAIL_LIST = "com.google.android.gm.ConversationListActivityGmail"
-# A library activity runs in the package of the app that declares it.
-GOOGLE_SIGN_IN = "com.google.android.gms.auth.api.signin.internal.SignInHubActivity"
 
 any_package_length = pytest.mark.parametrize(
     ("package", "activity", "other_activity"),
@@ -134,12 +132,27 @@ class Membership(TypedDict):
     representative_observation: str
 
 
+def write_member_record(steps_dir: Path, observation_id: str) -> None:
+    """Write the record exploration leaves for a member observation in ``steps_dir``: its
+    pixel hash and describe output."""
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "pixel_hash": f"member-{observation_id}",
+        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
+    }
+    (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+
+
 def members(steps_dir: Path, *images: bytes) -> Membership:
-    """The membership fields of a node whose observations' images, ``b"screenshot-a"``
-    unless given, are in ``steps_dir``; the first is the representative."""
-    observation_ids = [
-        write_observation_image(steps_dir, image) for image in images or (b"screenshot-a",)
-    ]
+    """The membership fields of a node whose observations, ``b"screenshot-a"`` unless
+    given, are members in ``steps_dir``; the first is the representative."""
+    observation_ids = []
+    for image in images or (b"screenshot-a",):
+        observation_id = write_observation_image(steps_dir, image)
+        write_member_record(steps_dir, observation_id)
+        observation_ids.append(observation_id)
     return {"observations": observation_ids, "representative_observation": observation_ids[0]}
 
 
@@ -159,11 +172,15 @@ class Screens:
         self, activity: str = HOME, screenshot: str = SHOT_A, package: str = PACKAGE
     ) -> Observation:
         observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot))
-        record = {"id": observation_id, "kind": "observation", "package": package}
+        pixel_hash = fake_pixel_hash(screenshot)
+        record = {
+            "id": observation_id,
+            "kind": "observation",
+            "package": package,
+            "pixel_hash": pixel_hash,
+        }
         (self.steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-        return Observation(
-            observation_id, screenshot, activity, package, fake_pixel_hash(screenshot)
-        )
+        return Observation(observation_id, screenshot, activity, package, pixel_hash)
 
     def record(self, observation: Observation) -> dict[str, Any]:
         path = self.steps_dir / f"{observation.observation_id}.json"
@@ -198,11 +215,9 @@ def add_screen(
     gm.graph.add_node(node_id, **attrs)
 
 
-def with_text_vectors(gm: GraphManager, steps_dir: Path) -> GraphManager:
-    """Return ``gm`` loaded back from a graph file beside ``steps_dir`` that gives each
-    member a text vector, the embedding of its node's description, as exploration
-    gives each screen it describes."""
-    path = steps_dir.parent / "graph.json"
+def save_with_text_vectors(gm: GraphManager, path: Path) -> None:
+    """Save ``gm`` to ``path`` with a text vector for each member, the embedding of its
+    node's description, as exploration gives each screen it describes."""
     gm.save_graph(path)
     vectors = {
         member: EMBEDDINGS.get(data["page_description"], UNKNOWN_EMBEDDING)
@@ -210,6 +225,24 @@ def with_text_vectors(gm: GraphManager, steps_dir: Path) -> GraphManager:
         for member in data.get("observations", [])
     }
     save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+
+
+def write_text_vectors(graph_path: Path, *memberships: Membership) -> None:
+    """Write beside the graph file ``graph_path`` a text vector for each member of
+    ``memberships``, as exploration keeps one for each screen it describes."""
+    vectors = {
+        member: UNKNOWN_EMBEDDING
+        for membership in memberships
+        for member in membership["observations"]
+    }
+    save_embeddings(text_embeddings_path(graph_path), vectors, model=EMBEDDING.model)
+
+
+def with_text_vectors(gm: GraphManager, steps_dir: Path) -> GraphManager:
+    """Return ``gm`` loaded back from the graph file beside ``steps_dir`` that
+    ``save_with_text_vectors`` writes."""
+    path = steps_dir.parent / "graph.json"
+    save_with_text_vectors(gm, path)
     loaded = make_manager()
     loaded.load_graph(path)
     return loaded
@@ -1160,7 +1193,7 @@ def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
         (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
+        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}]}), "utf-8"
     )
     vectors = {kept: EMBEDDINGS["Home screen"]}
     save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
@@ -1214,46 +1247,59 @@ def test_a_screen_keeps_the_vector_of_the_description_its_first_rejection_refine
     assert gm.text_vector(overlay.observation_id) == EMBEDDINGS["Promo overlay"]
 
 
+DESCRIBED = {"page_description": "Home", "state": {}, "elements": [], "is_external_web": False}
+
+
 @pytest.mark.parametrize(
-    "describe",
+    "record",
     [
-        pytest.param(None, id="none"),
-        pytest.param({"page_description": 3, "state": {}, "elements": []}, id="description"),
-        pytest.param({"page_description": "Home", "state": [], "elements": []}, id="state"),
-        pytest.param({"page_description": "Home", "state": {}, "elements": {}}, id="elements"),
+        pytest.param(None, id="no-record"),
+        pytest.param({"describe": DESCRIBED}, id="no-pixel-hash"),
+        pytest.param({"pixel_hash": "abc"}, id="no-describe"),
+        pytest.param(
+            {"pixel_hash": "abc", "describe": {**DESCRIBED, "page_description": 3}},
+            id="description",
+        ),
+        pytest.param({"pixel_hash": "abc", "describe": {**DESCRIBED, "state": []}}, id="state"),
+        pytest.param(
+            {"pixel_hash": "abc", "describe": {**DESCRIBED, "elements": {}}}, id="elements"
+        ),
     ],
 )
-def test_a_member_whose_record_holds_no_usable_describe_output_is_never_an_exact_match(
-    describe: dict[str, object] | None, vlm: FakeVlm, tmp_path: Path
+def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_output(
+    record: dict[str, object] | None, tmp_path: Path
 ) -> None:
+    """Exact matching and member checks read both from every member of an in-app node; a
+    member of an ``ext_`` node needs neither."""
     steps_dir = tmp_path / "steps"
-    member = members(steps_dir)
-    record: dict[str, object] = {"pixel_hash": fake_pixel_hash(SHOT_A)}
-    if describe is not None:
-        record["describe"] = describe
-    (steps_dir / f"{member['representative_observation']}.json").write_text(
-        json.dumps(record), "utf-8"
-    )
+    home = members(steps_dir, b"home", b"home-2")
+    undescribed = home["observations"][1]
+    step_record = steps_dir / f"{undescribed}.json"
+    if record is None:
+        step_record.unlink()
+    else:
+        step_record.write_text(json.dumps(record), "utf-8")
+    browser = write_observation_image(steps_dir, b"browser")
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", **home},
             {
-                "package_name": PACKAGE,
-                "nodes": [{"id": "s0_home", "page_description": "Home screen", **member}],
-            }
-        ),
-        "utf-8",
+                "id": EXTERNAL_WEB_NODE,
+                "observations": [browser],
+                "representative_observation": browser,
+            },
+        ],
     )
-    gm = make_manager()
-    gm.load_graph(path)
-    gm.embed_missing_members()
-    vlm.calls.clear()
-    vlm.descriptions.append(("Home screen", {}, []))
-    vlm.verdicts.append({"same": True, "reason": "home"})
 
-    gm.identify_state(Screens(steps_dir)(HOME, SHOT_A, PACKAGE))
+    with pytest.raises(ValueError, match="no pixel hash or no describe output") as excinfo:
+        make_manager().load_graph(path)
 
-    assert vlm.kinds()[:2] == ["image", "describe"]
+    message = str(excinfo.value)
+    assert f"[{undescribed!r}]" in message
+    assert str(path) in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 def test_embed_missing_members_embeds_each_in_app_member_once_and_saves_the_vectors(
@@ -1345,8 +1391,9 @@ def test_closest_member_raises_naming_the_node_and_every_member_without_a_usable
     )
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
+        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}]}), "utf-8"
     )
+    write_text_vectors(path, member)
     gm = make_manager()
     gm.load_graph(path)
 
@@ -1784,22 +1831,6 @@ def test_add_edge_appends_a_different_action_with_its_metadata() -> None:
     assert data["visit_count"] == 1
 
 
-def test_add_edge_pads_an_edge_whose_lists_are_missing_before_appending() -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-    gm.graph.add_edge("s0_home", "s0_home", actions=[{"action": "tap"}, ["a", "b"]])
-
-    gm.add_edge(
-        "s0_home", "s0_home", {"action": "swipe"}, details=EdgeDetails(instruction="scroll")
-    )
-
-    data = gm.graph["s0_home"]["s0_home"]
-    assert data["num_steps"] == [1, 2, 1]
-    assert data["instructions"] == ["", "", "scroll"]
-    assert data["target_observations"] == ["", "", ""]
-    assert data["schema_deltas"] == [None, None, None]
-
-
 def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -1874,10 +1905,7 @@ def test_a_repeated_action_keeps_its_shorter_known_setup(
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    if first is None:
-        gm.graph.add_edge("s0_home", "s1_settings", actions=[_TAP], visit_count=1)
-    else:
-        gm.add_edge("s0_home", "s1_settings", _TAP, details=EdgeDetails(setup=first))
+    gm.add_edge("s0_home", "s1_settings", _TAP, details=EdgeDetails(setup=first))
 
     gm.add_edge("s0_home", "s1_settings", _TAP, details=EdgeDetails(setup=again))
 
@@ -1950,34 +1978,48 @@ def test_a_setup_trail_matches_a_node_merged_away_while_it_holds_it() -> None:
     assert trail.setup("s5_list") == [_SCROLL, _TAP, {"action": "back"}]
 
 
-def test_a_graph_file_without_setups_loads_replays_without_them_and_saves_none(
-    tmp_path: Path, write_graph_file: Callable[[Path, dict[str, Any]], None]
+@pytest.mark.parametrize(
+    "key", ["num_steps", "instructions", "target_observations", "schema_deltas", "setups"]
+)
+@pytest.mark.parametrize("entries", [None, []], ids=["absent", "short"])
+def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
+    key: str, entries: list[object] | None, tmp_path: Path
 ) -> None:
-    path = tmp_path / "explored.json"
-    write_graph_file(
-        path,
-        {
-            "nodes": [{"id": "s0_home"}, {"id": "s1_settings"}],
-            "edges": [
-                {
-                    "source": "s0_home",
-                    "target": "s1_settings",
-                    "actions": [[_TAP]],
-                    "num_steps": [1],
-                }
-            ],
-        },
+    steps_dir = tmp_path / "steps"
+    complete = {
+        "actions": [[_TAP]],
+        "num_steps": [1],
+        "instructions": ["open settings"],
+        "target_observations": ["Settings"],
+        "schema_deltas": [None],
+        "setups": [[]],
+    }
+    lacking = {"source": "s0_home", "target": "s1_settings", **complete}
+    if entries is None:
+        del lacking[key]
+    else:
+        lacking[key] = entries
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": "s0_home", **members(steps_dir)},
+                    {"id": "s1_settings", **members(steps_dir)},
+                ],
+                "edges": [lacking, {"source": "s1_settings", "target": "s0_home", **complete}],
+            }
+        ),
+        encoding="utf-8",
     )
-    gm = GraphManager()
-    gm.load_graph(path)
 
-    assert gm.find_path("s0_home", "s1_settings") == [
-        PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", [_TAP], ()),
-    ]
-    again = tmp_path / "saved" / "explored.json"
-    gm.save_graph(again)
-    assert "setups" not in json.loads(again.read_text(encoding="utf-8"))["edges"][0]
+    with pytest.raises(ValueError, match="one entry per action") as excinfo:
+        make_manager().load_graph(path)
+
+    message = str(excinfo.value)
+    assert "['s0_home -> s1_settings']" in message
+    assert str(path) in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) -> None:
@@ -2197,30 +2239,6 @@ def test_merge_nodes_merges_edge_data_into_an_existing_edge() -> None:
     assert data["instruction_templates"] == [{"template": "go to {x}"}]
 
 
-@pytest.mark.parametrize("bare_side", ["kept", "removed"])
-def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_keep", "Home screen")
-    add_screen(gm, "s1_remove", "Home screen again")
-    bare, full = ("s0_keep", "s1_remove") if bare_side == "kept" else ("s1_remove", "s0_keep")
-    gm.graph.add_edge(bare, bare, actions=[["tap", "type"]], visit_count=1)
-    gm.add_edge(
-        full,
-        full,
-        {"action": "sort"},
-        details=EdgeDetails(instruction="sort", schema_delta={"sort": "price"}, setup=[]),
-    )
-
-    assert gm.merge_nodes("s0_keep", "s1_remove") is True
-
-    data = gm.graph["s0_keep"]["s0_keep"]
-    keys = ("actions", *PER_ACTION_LISTS)
-    padded = (["tap", "type"], 2, "", "", None, None)
-    recorded = ({"action": "sort"}, 1, "sort", "", {"sort": "price"}, [])
-    rows = list(zip(*(data[key] for key in keys), strict=True))
-    assert rows == ([padded, recorded] if bare_side == "kept" else [recorded, padded])
-
-
 def edge_rows(gm: GraphManager, source: str, target: str) -> list[tuple[Any, ...]]:
     """One (action, num_steps, instruction, observation, schema_delta, setup) row per action."""
     data = gm.graph[source][target]
@@ -2380,28 +2398,19 @@ def test_relabel_edge_action_replaces_one_instruction_and_drops_the_edge_templat
 
 
 def test_find_edge_action_matches_nothing_for_an_action_without_an_instruction() -> None:
-    """A graph loaded from JSON can hold more actions than instructions: the actions
-    past the last instruction match nothing, and the length mismatch is not an error.
-    """
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "swipe"})
     gm.add_edge(
         "s0_home",
         "s1_settings",
         {"action": "tap"},
         details=EdgeDetails(instruction="open settings"),
     )
-    gm.add_edge(
-        "s0_home",
-        "s1_settings",
-        {"action": "swipe"},
-        details=EdgeDetails(instruction="open search"),
-    )
-    gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
 
-    assert gm.find_edge_action("s0_home", "s1_settings", "open settings") == (0, {"action": "tap"})
-    assert gm.find_edge_action("s0_home", "s1_settings", "open search") is None
+    assert gm.find_edge_action("s0_home", "s1_settings", "open settings") == (1, {"action": "tap"})
+    assert gm.find_edge_action("s0_home", "s1_settings", "") is None
 
 
 @dataclass
@@ -2561,7 +2570,7 @@ def test_a_reloaded_graph_keeps_what_each_edge_last_normalization_covered(
         )
     gm.normalize_all_edges()
     path = tmp_path / "graph.json"
-    gm.save_graph(path)
+    save_with_text_vectors(gm, path)
     loaded = make_manager()
     loaded.load_graph(path)
 
@@ -3130,26 +3139,10 @@ def test_find_guided_path_records_a_schema_gap_when_no_delta_matches() -> None:
     assert steps[0]["type"] == "schema_gap"
 
 
-def test_find_guided_path_navigates_an_edge_from_a_file_without_text_lists() -> None:
+def test_find_guided_path_ignores_a_self_loop_without_schema_deltas() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "tap"}], num_steps=[1])
-
-    steps = gm.find_guided_path("s0_home", [{"node_id": "s1_settings"}])
-
-    assert steps is not None
-    assert (steps[0]["instruction"], steps[0]["target_observation"]) == ("", "")
-
-
-@pytest.mark.parametrize("source", ["add_edge", "a file without the list"])
-def test_find_guided_path_ignores_a_self_loop_without_schema_deltas(source: str) -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-    if source == "add_edge":
-        gm.add_edge("s0_home", "s0_home", {"action": "sort"})
-    else:
-        gm.graph.add_edge("s0_home", "s0_home", actions=[{"action": "sort"}])
+    gm.add_edge("s0_home", "s0_home", {"action": "sort"})
 
     steps = gm.find_guided_path(
         "s0_home", [{"node_id": "s0_home", "required_schema": {"sort": "price"}}]
@@ -3159,17 +3152,19 @@ def test_find_guided_path_ignores_a_self_loop_without_schema_deltas(source: str)
     assert steps[0]["type"] == "schema_gap"
 
 
-def test_find_guided_path_skips_empty_deltas_and_falls_back_for_short_lists() -> None:
+def test_find_guided_path_skips_empty_deltas() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    gm.graph.add_edge(
+    gm.add_edge("s0_home", "s0_home", {"action": "tap"}, details=EdgeDetails(schema_delta={}))
+    gm.add_edge(
         "s0_home",
         "s0_home",
-        actions=[],
-        instructions=[],
-        target_observations=[],
-        schema_deltas=[{}, {"sort": {"after": "price"}}],
-        visit_count=1,
+        {"action": "sort"},
+        details=EdgeDetails(
+            instruction="sort by price",
+            target_observation="sorted by price",
+            schema_delta={"sort": {"after": "price"}},
+        ),
     )
 
     steps = gm.find_guided_path(
@@ -3178,9 +3173,9 @@ def test_find_guided_path_skips_empty_deltas_and_falls_back_for_short_lists() ->
 
     assert steps is not None
     assert steps[0]["type"] == "self_loop"
-    assert steps[0]["instruction"] == ""
-    assert steps[0]["target_observation"] == ""
-    assert steps[0]["action"] == []
+    assert steps[0]["instruction"] == "sort by price"
+    assert steps[0]["target_observation"] == "sorted by price"
+    assert steps[0]["action"] == {"action": "sort"}
 
 
 def test_find_guided_path_without_a_required_schema_only_navigates() -> None:
@@ -3622,7 +3617,7 @@ def test_node_aliases_survive_save_and_load(tmp_path: Path) -> None:
     kept = gm.rename_node("s0_home", "Settings page")
     path = tmp_path / "graph.json"
 
-    gm.save_graph(path)
+    save_with_text_vectors(gm, path)
     loaded = make_manager()
     loaded.load_graph(path)
 
@@ -3764,48 +3759,6 @@ def test_a_save_that_stops_at_either_file_leaves_a_graph_that_loads(
     assert loaded.text_vector(copy.observation_id) == copy_vector
 
 
-def test_load_graph_defaults_the_activities_and_the_step_count(tmp_path: Path) -> None:
-    path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "next_id": 7,
-                "nodes": [
-                    {
-                        "id": "s0_home",
-                        "activity": HOME,
-                        "page_description": "Home screen",
-                        **members(tmp_path / "steps"),
-                    }
-                ],
-                "edges": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    gm = GraphManager()
-
-    gm.load_graph(path)
-
-    node = gm.get_node("s0_home")
-    assert node is not None
-    assert node["activities"] == [HOME]
-    assert gm.total_steps_completed == 0
-
-
-def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -> None:
-    source = make_manager()
-    source.package_name = "com.example.app"
-    path = tmp_path / "graph.json"
-    source.save_graph(path)
-
-    target = make_manager()
-    target.load_graph(path)
-
-    assert json.loads(path.read_text(encoding="utf-8"))["package_name"] == "com.example.app"
-    assert target.package_name == "com.example.app"
-
-
 def test_save_graph_and_load_graph_round_trip_each_node_package(tmp_path: Path) -> None:
     source = make_manager()
     steps_dir = tmp_path / "steps"
@@ -3821,7 +3774,7 @@ def test_save_graph_and_load_graph_round_trip_each_node_package(tmp_path: Path) 
         source, "s1_mail", "Settings page", activity=GMAIL_LIST, package=GMAIL, **members(steps_dir)
     )
     path = tmp_path / "graph.json"
-    source.save_graph(path)
+    save_with_text_vectors(source, path)
 
     target = make_manager()
     target.load_graph(path)
@@ -3829,56 +3782,11 @@ def test_save_graph_and_load_graph_round_trip_each_node_package(tmp_path: Path) 
     assert dict(target.graph.nodes(data="package")) == {"s0_list": MESSAGES, "s1_mail": GMAIL}
 
 
-@pytest.mark.parametrize(
-    ("saved_package_name", "configured_package_name"),
-    [(WHATSAPP, PACKAGE), (None, WHATSAPP)],
-    ids=["saved", "configured"],
-)
-def test_load_graph_gives_the_app_package_to_each_screen_saved_without_one(
-    tmp_path: Path, saved_package_name: str | None, configured_package_name: str
-) -> None:
-    """Every node saved without a package but the ``ext_`` placeholders gets the app's
-    package, including one whose activity class lives outside the package."""
-    steps_dir = tmp_path / "steps"
-    document: dict[str, Any] = {
-        "nodes": [
-            {"id": "s0_home", "activity": WHATSAPP_HOME, **members(steps_dir)},
-            {"id": "s1_group_info", "activity": WHATSAPP_GROUP_INFO, **members(steps_dir)},
-            {"id": "s2_sign_in", "activity": GOOGLE_SIGN_IN, **members(steps_dir)},
-            {"id": "ext_com.google.android.gm", "activity": GMAIL_LIST, **members(steps_dir)},
-            {"id": EXTERNAL_WEB_NODE, **members(steps_dir)},
-        ],
-        "edges": [
-            *(
-                {"source": "s0_home", "target": target}
-                for target in ("s1_group_info", "s2_sign_in", "ext_com.google.android.gm")
-            ),
-            {"source": "s2_sign_in", "target": "s0_home"},
-        ],
-    }
-    if saved_package_name is not None:
-        document["package_name"] = saved_package_name
-    path = tmp_path / "graph.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
-    gm = make_manager()
-
-    gm.load_graph(path, default_package_name=configured_package_name)
-
-    assert dict(gm.graph.nodes(data="package")) == {
-        "s0_home": WHATSAPP,
-        "s1_group_info": WHATSAPP,
-        "s2_sign_in": WHATSAPP,
-        "ext_com.google.android.gm": "",
-        EXTERNAL_WEB_NODE: "",
-    }
-    assert gm.get_resume_target(package_name=WHATSAPP) == "s1_group_info"
-
-
 def test_load_graph_replaces_the_current_graph(tmp_path: Path) -> None:
     source = make_manager()
     add_screen(source, "s0_home", "Home screen", **members(tmp_path / "steps"))
     path = tmp_path / "graph.json"
-    source.save_graph(path)
+    save_with_text_vectors(source, path)
 
     target = make_manager()
     add_screen(target, "s9_stale", "Stale screen")
@@ -3892,13 +3800,10 @@ def test_load_graph_accepts_a_file_with_only_nodes(tmp_path: Path) -> None:
     "edges" key loads; only a present non-list value is rejected.
     """
     path = tmp_path / "graph.json"
-    node = {
-        "id": "s0_home",
-        "activity": HOME,
-        "page_description": "Home screen",
-        **members(tmp_path / "steps"),
-    }
+    membership = members(tmp_path / "steps")
+    node = {"id": "s0_home", "activity": HOME, "page_description": "Home screen", **membership}
     path.write_text(json.dumps({"nodes": [node]}), encoding="utf-8")
+    write_text_vectors(path, membership)
     gm = make_manager()
 
     gm.load_graph(path)
@@ -3911,9 +3816,13 @@ def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     tmp_path: Path,
 ) -> None:
     app_dir = tmp_path / "demo"
-    node = {"id": "s0_home", "activity": HOME, **members(app_dir / "steps", b"home-image")}
+    membership = members(app_dir / "steps", b"home-image")
     path = app_dir / "demo_audited.json"
-    path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"nodes": [{"id": "s0_home", "activity": HOME, **membership}], "edges": []}),
+        encoding="utf-8",
+    )
+    write_text_vectors(path, membership)
     gm = make_manager()
 
     gm.load_graph(path)
@@ -3966,7 +3875,7 @@ def test_load_graph_rejects_a_node_without_members_naming_it(
     assert "['s1_settings']" in message
     assert "s0_home" not in message
     assert str(path) in message
-    assert "explore the app again" in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
@@ -3999,7 +3908,9 @@ def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
 ) -> None:
     previous = tmp_path / "previous" / "graph.json"
     previous.parent.mkdir()
-    write_graph(previous, [{"id": "s9_stale", **members(previous.parent / "steps")}])
+    membership = members(previous.parent / "steps")
+    write_graph(previous, [{"id": "s9_stale", **membership}])
+    write_text_vectors(previous, membership)
     path = tmp_path / "graph.json"
     write_graph(
         path,
@@ -4056,16 +3967,12 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
         encoding="utf-8",
     )
     previous = tmp_path / "previous.json"
+    membership = members(tmp_path / "steps")
     previous.write_text(
-        json.dumps(
-            {
-                "next_id": 7,
-                "nodes": [{"id": "s9_stale", **members(tmp_path / "steps")}],
-                "edges": [],
-            }
-        ),
+        json.dumps({"next_id": 7, "nodes": [{"id": "s9_stale", **membership}], "edges": []}),
         encoding="utf-8",
     )
+    write_text_vectors(previous, membership)
     gm = make_manager()
     gm.load_graph(previous)
 
@@ -4421,6 +4328,7 @@ memberships = step_ids.flatmap(
 )
 screen_attrs = st.fixed_dictionaries(
     {
+        "package": st.text(min_size=1, max_size=30),
         "activities": st.lists(st.text(min_size=1, max_size=30), min_size=1, max_size=3),
         "page_description": st.text(max_size=40),
         "state_schema": st.dictionaries(
@@ -4442,18 +4350,43 @@ screen_attrs = st.fixed_dictionaries(
     }
 )
 node_attrs = st.tuples(screen_attrs, memberships).map(lambda parts: {**parts[0], **parts[1]})
-edge_attrs = st.fixed_dictionaries(
-    {
-        "actions": st.lists(actions | st.lists(actions, max_size=3), max_size=3),
-        "instructions": st.lists(st.text(max_size=12), max_size=3),
-        "instruction_templates": small_dicts,
-        "target_observations": st.lists(st.text(max_size=12), max_size=3),
-        "num_steps": st.lists(st.integers(min_value=1, max_value=5), max_size=3),
-        "visit_count": st.integers(min_value=0, max_value=20),
-        "schema_deltas": small_dicts,
-        "setups": st.lists(setup_entries, max_size=3),
-        "normalized_instructions_hash": st.none() | st.text(max_size=12),
+PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
+# One tuple per action: the action, then its entry in each of PER_ACTION_LISTS.
+recorded_actions = st.lists(
+    st.tuples(
+        actions | st.lists(actions, max_size=3),
+        st.integers(min_value=1, max_value=5),
+        st.text(max_size=12),
+        st.text(max_size=12),
+        st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
+        setup_entries,
+    ),
+    max_size=3,
+)
+
+
+def edge_from(
+    recorded: list[tuple[object, ...]],
+    templates: list[dict[str, Any]],
+    visit_count: int,
+    instructions_hash: str | None,
+) -> dict[str, Any]:
+    """An edge's attributes with one entry per recorded action in each per-action list."""
+    keys = ("actions", *PER_ACTION_LISTS)
+    return {
+        **{key: [entry[index] for entry in recorded] for index, key in enumerate(keys)},
+        "instruction_templates": templates,
+        "visit_count": visit_count,
+        "normalized_instructions_hash": instructions_hash,
     }
+
+
+edge_attrs = st.builds(
+    edge_from,
+    recorded_actions,
+    small_dicts,
+    st.integers(min_value=0, max_value=20),
+    st.none() | st.text(max_size=12),
 )
 graphs = st.tuples(
     st.dictionaries(st.sampled_from(POOL), node_attrs, min_size=1),
@@ -4467,7 +4400,8 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
     """The subset of state that save_graph persists and load_graph restores."""
     nodes = {
         node_id: {
-            "activities": d.get("activities", [d.get("activity", "")]),
+            "package": d.get("package", ""),
+            "activities": d.get("activities", []),
             "page_description": d.get("page_description", ""),
             "state_schema": d.get("state_schema", {}),
             "last_detail_snapshot": d.get("last_detail_snapshot", {}),
@@ -4487,8 +4421,8 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "target_observations": d.get("target_observations", []),
             "num_steps": d.get("num_steps", []),
             "visit_count": d.get("visit_count", 0),
-            "schema_deltas": d.get("schema_deltas") or None,
-            "setups": d.get("setups") or None,
+            "schema_deltas": d.get("schema_deltas", []),
+            "setups": d.get("setups", []),
             "normalized_instructions_hash": d.get("normalized_instructions_hash") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
@@ -4511,8 +4445,9 @@ def test_save_then_load_round_trips(
         if u in nodes and v in nodes:
             gm.graph.add_edge(u, v, **attrs)
     path = tmp_path_factory.mktemp("roundtrip") / "graph.json"
-    (path.parent / "steps").mkdir()
     for attrs in nodes.values():
+        for observation_id in attrs["observations"]:
+            write_member_record(path.parent / "steps", observation_id)
         (path.parent / "steps" / f"{attrs['representative_observation']}.webp").write_bytes(b"x")
 
     gm.save_graph(path)
@@ -4588,8 +4523,6 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
                 assert "page_description" in gm.graph.nodes[u]
                 assert "page_description" in gm.graph.nodes[v]
 
-
-PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
 
 edge_and_merge_operations = st.lists(
     st.tuples(

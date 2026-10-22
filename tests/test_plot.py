@@ -268,14 +268,17 @@ def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
     assert "query" in self_loop_label
 
 
+_MEMBER = {"observations": ["000000"], "representative_observation": "000000"}
+
+
 def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
     graph_path.write_text(
         json.dumps(
             {
                 "nodes": [
-                    {"id": "s0_list", "page_description": "Shopping list"},
-                    {"id": "s1_info", "page_description": "Item info"},
+                    {"id": "s0_list", "page_description": "Shopping list", **_MEMBER},
+                    {"id": "s1_info", "page_description": "Item info", **_MEMBER},
                 ],
                 "edges": [
                     {
@@ -347,8 +350,8 @@ def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
         json.dumps(
             {
                 "nodes": [
-                    {"id": "s0_search", "page_description": "Search"},
-                    {"id": "s1_results", "page_description": "Results"},
+                    {"id": "s0_search", "page_description": "Search", **_MEMBER},
+                    {"id": "s1_results", "page_description": "Results", **_MEMBER},
                 ],
                 "edges": [
                     {"source": "s0_search", "actions": [{"action": "tap", "x": 1, "y": 2}], **edge}
@@ -369,21 +372,6 @@ def test_load_graph_reads_an_audited_graph_from_the_shared_step_log(tmp_path: Pa
 
     _data, graph = plot.load_graph(str(graph_path))
     assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
-
-
-@pytest.mark.parametrize("representative", [None, 7], ids=["absent", "not-a-string"])
-def test_load_graph_shows_no_thumbnail_without_a_representative(
-    tmp_path: Path, representative: object
-) -> None:
-    node: dict[str, object] = {"id": "s0_home", "page_description": "Home"}
-    if representative is not None:
-        node["representative_observation"] = representative
-    graph_path = tmp_path / "demo.json"
-    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
-    _write_step_image(tmp_path, "000007", b"image")
-
-    _data, graph = plot.load_graph(str(graph_path))
-    assert graph.nodes["s0_home"]["screenshot_uri"] is None
 
 
 def _write_member_graph(tmp_path: Path, observations: list[str], representative: str) -> Path:
@@ -433,24 +421,41 @@ def test_load_graph_skips_a_member_without_an_image(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("observations", "total"),
-    [(None, 0), ("000000", 0), ([7, "000000"], 1)],
-    ids=["absent", "not-a-list", "not-a-string"],
+    "membership",
+    [
+        {},
+        {"observations": "000000", "representative_observation": "000000"},
+        {"observations": [7, "000000"], "representative_observation": "000000"},
+        {"observations": ["000000"]},
+        {"observations": ["000000"], "representative_observation": 7},
+        {"observations": ["000000"], "representative_observation": "000001"},
+    ],
+    ids=[
+        "no-members",
+        "members-not-a-list",
+        "a-member-not-a-string",
+        "no-representative",
+        "representative-not-a-string",
+        "representative-not-a-member",
+    ],
 )
-def test_load_graph_counts_only_the_observation_ids_a_node_lists(
-    tmp_path: Path, observations: object, total: int
+def test_load_graph_rejects_a_node_that_does_not_list_its_members(
+    tmp_path: Path, membership: dict[str, object]
 ) -> None:
-    node: dict[str, object] = {"id": "s0_home", "page_description": "Home"}
-    if observations is not None:
-        node["observations"] = observations
     graph_path = tmp_path / "demo.json"
-    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
-    uri = _write_step_image(tmp_path, "000000", b"image")
+    nodes = [
+        {"id": "s0_home", "page_description": "Home", **_MEMBER},
+        {"id": "s1_search", "page_description": "Search", **membership},
+    ]
+    graph_path.write_text(json.dumps({"nodes": nodes, "edges": []}), encoding="utf-8")
 
-    _data, graph = plot.load_graph(str(graph_path))
+    with pytest.raises(ValueError, match="no member observations") as excinfo:
+        plot.load_graph(str(graph_path))
 
-    assert graph.nodes["s0_home"]["member_image_uris"] == [uri] * total
-    assert graph.nodes["s0_home"]["member_total"] == total
+    message = str(excinfo.value)
+    assert "['s1_search']" in message
+    assert str(graph_path) in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 def _vis_nodes(html: str) -> dict[str, dict[str, Any]]:

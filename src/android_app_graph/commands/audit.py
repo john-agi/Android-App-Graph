@@ -155,7 +155,7 @@ def select_apps_for_audit(
         msg = f"No graph found at {graph_path}"
         raise FileNotFoundError(msg)
 
-    return [{"name": app_name, "package_name": ""}]
+    return [{"name": app_name}]
 
 
 @dataclass(frozen=True, slots=True)
@@ -930,7 +930,6 @@ def _report_no_path_to_start(
 
 def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     app_name = app["name"]
-    package_name = app["package_name"]
 
     graph = GraphManager(
         client=run.client,
@@ -945,7 +944,7 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
         return
 
-    graph.load_graph(graph_path, default_package_name=package_name)
+    graph.load_graph(graph_path)
     logger.info(
         "Loaded graph for %s: %d nodes, %d edges",
         app_name,

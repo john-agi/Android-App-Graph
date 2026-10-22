@@ -295,6 +295,8 @@ def _edge(source: str, target: str, *actions: dict[str, Any], **extra: object) -
         "instructions": [f"do {index}" for index in range(len(actions))],
         "target_observations": [f"{target} after {index}" for index in range(len(actions))],
         "num_steps": [1] * len(actions),
+        "schema_deltas": [None] * len(actions),
+        "setups": [None] * len(actions),
         "visit_count": len(actions),
         **extra,
     }

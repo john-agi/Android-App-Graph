@@ -25,7 +25,12 @@ from typing import Any
 
 import networkx as nx
 
-from android_app_graph.graph_files import graph_steps_dir, observation_image_path
+from android_app_graph.graph_files import (
+    graph_steps_dir,
+    nodes_without_members,
+    observation_image_path,
+    unloadable_graph,
+)
 from android_app_graph.screen_image import MEDIA_TYPE
 from android_app_graph.utils.logging import setup_logging
 
@@ -74,23 +79,6 @@ def _image_uri(steps_dir: Path, observation_id: str) -> str | None:
     return f"data:{MEDIA_TYPE};base64,{b64}"
 
 
-def _representative_image_uri(steps_dir: Path, node: dict[str, Any]) -> str | None:
-    """Return a node's representative image as a data URI, or ``None`` when the node
-    names none or the step log has no image for it."""
-    representative = node.get("representative_observation")
-    if not isinstance(representative, str):
-        return None
-    return _image_uri(steps_dir, representative)
-
-
-def _member_observations(node: dict[str, Any]) -> list[str]:
-    """Return the observation IDs a node lists, in step order."""
-    observations = node.get("observations")
-    if not isinstance(observations, list):
-        return []
-    return [observation for observation in observations if isinstance(observation, str)]
-
-
 def _oldest_member_image_uris(steps_dir: Path, observations: list[str]) -> list[str]:
     """Return the images of the oldest members that have one in the step log, at most
     ``_PANEL_MEMBER_LIMIT`` of them, as data URIs."""
@@ -99,17 +87,25 @@ def _oldest_member_image_uris(steps_dir: Path, observations: list[str]) -> list[
 
 
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
-    """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph)."""
+    """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph).
+
+    A node that does not list its member observations with its representative among
+    them raises ``ValueError`` naming the file and the node.
+    """
     path = Path(graph_path)
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
+    if without_members := nodes_without_members(data["nodes"]):
+        raise unloadable_graph(
+            path, [f"node(s) with no member observations with a representative: {without_members}"]
+        )
 
     steps_dir = graph_steps_dir(path)
     graph = nx.DiGraph()
 
     for node in data["nodes"]:
-        screenshot_uri = _representative_image_uri(steps_dir, node)
-        observations = _member_observations(node)
+        screenshot_uri = _image_uri(steps_dir, node["representative_observation"])
+        observations = node["observations"]
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
         graph.add_node(
