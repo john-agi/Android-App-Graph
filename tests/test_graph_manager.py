@@ -14,6 +14,7 @@ import io
 import itertools
 import json
 import logging
+import math
 import socket
 import threading
 import time
@@ -31,6 +32,7 @@ from openrouter import OpenRouter
 from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
+from android_app_graph.member_groups import MERGE_FLOOR
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
 from android_app_graph.ui_tree import layout_signature, parse_tree, xml_document
 from android_app_graph.utils import ModelSettings
@@ -4608,9 +4610,15 @@ def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     assert gm.graph.number_of_nodes() == 2
 
 
+# The cosine of s0's and s1's second members in ``_two_dialogs_with_one_layout``: too low
+# for the images to propose the pair, so only the layouts do.
+DIALOGS_IMAGE_SCORE = MERGE_FLOOR / 2
+
+
 def _two_dialogs_with_one_layout(gm: GraphManager, vlm: FakeVlm, steps_dir: Path) -> None:
     """s0 and s1: one dialog's layout, described apart; their representatives look unlike
-    each other, their second members alike, and s0's third less so. s2: a page."""
+    each other, their second members alike, and s0's third less so. s2: a page that looks
+    like neither."""
     add_screen(
         gm,
         "s0_dialog",
@@ -4629,10 +4637,10 @@ def _two_dialogs_with_one_layout(gm: GraphManager, vlm: FakeVlm, steps_dir: Path
         {
             b64(b"0a"): ANY_IMAGE,
             b64(b"0b"): NEAR,
-            b64(b"0c"): [0.6, 0.8, 0.0],
+            b64(b"0c"): [0.8, 0.6, 0.0],
             b64(b"1a"): FAR,
-            b64(b"1b"): NEAR,
-            b64(b"2a"): FAR,
+            b64(b"1b"): [0.0, DIALOGS_IMAGE_SCORE, math.sqrt(1 - DIALOGS_IMAGE_SCORE**2)],
+            b64(b"2a"): [-1.0, 0.0, 0.0],
         }
     )
     gm.embed_missing_members()
@@ -4663,7 +4671,7 @@ def test_a_pair_whose_layouts_match_is_merged_only_when_the_verifier_confirms_it
     assert (call["existing"], call["new"]) == (b64(b"1b"), b64(b"0b"))
     assert call["existing_description"] == "Settings page"
     assert result["members"] == {"s1_dialog": "000004", "s0_dialog": "000001"}
-    assert result["image_score"] == pytest.approx(1.0)
+    assert result["image_score"] == pytest.approx(DIALOGS_IMAGE_SCORE)
     if same:
         assert (result["status"], result["kept"], result["removed"]) == (
             "merged",
