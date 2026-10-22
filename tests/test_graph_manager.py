@@ -14,6 +14,7 @@ import io
 import itertools
 import json
 import logging
+import math
 import os
 import socket
 import threading
@@ -438,6 +439,7 @@ def test_identify_state_records_the_describe_output_and_the_decision(
         "candidates": [],
         "verifications": [],
         "refinement": None,
+        "unverified": False,
         "node": "s0_home_screen",
     }
 
@@ -498,6 +500,7 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
         "candidates": [],
         "verifications": [],
         "refinement": None,
+        "unverified": False,
         "node": first,
     }
     assert gm.image_vector(second_observation.observation_id) == ANY_IMAGE
@@ -632,7 +635,13 @@ def test_identify_state_verified_match_merges_into_existing_node(
         }
     ]
     assert identify["verifications"] == [
-        {"node": first, "member": home.observation_id, "same": True, "reason": "identical layout"}
+        {
+            "node": first,
+            "member": home.observation_id,
+            "same": True,
+            "answered": True,
+            "reason": "identical layout",
+        }
     ]
     assert identify["node"] == first
 
@@ -1082,6 +1091,183 @@ def test_a_verifier_that_never_answers_leaves_the_screen_in_a_near_identical_nod
             "reason": "timed out",
         }
     ]
+
+
+def test_a_verifier_that_never_answers_on_a_node_that_only_looks_alike_starts_a_new_node(
+    vlm: FakeVlm,
+    screen: Screens,
+    timing_out_client: OpenRouter,
+    timed_out_requests: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The node's member compares with the screen at an image cosine of 0.90."""
+    monkeypatch.setattr(gm_module, "verify_same_node", vlm_utils.verify_same_node)
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen", {}, [])])
+    vlm.images[SHOT_B] = [0.9, math.sqrt(1 - 0.9**2), 0.0]
+    gm = make_manager(screen.steps_dir, client=timing_out_client)
+    first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    again = screen(HOME, SHOT_B, PACKAGE)
+
+    with caplog.at_level(logging.INFO):
+        node_id = gm.identify_state(again)
+
+    assert node_id == "s1_home_screen"
+    assert sorted(gm.graph) == [first, node_id]
+    assert len(timed_out_requests) == 4
+    assert "image cosine 0.900, text cosine 1.000; not near-identical" in caplog.text
+    assert "unverified" not in caplog.text
+    identify = screen.record(again)["identify"]
+    assert (identify["stage"], identify["unverified"]) == ("new", False)
+    assert identify["candidates"][0]["image_score"] == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "joins", "logged"),
+    [
+        pytest.param({"same": True, "reason": "the same page"}, True, "confirmed", id="same"),
+        pytest.param(
+            {"same": False, "reason": "a menu is open"}, False, "rejected", id="different"
+        ),
+        pytest.param(
+            {"same": False, "answered": False, "reason": "timed out"},
+            True,
+            "joins the node unverified",
+            id="no answer",
+        ),
+    ],
+)
+def test_on_a_near_identical_screen_only_a_different_answer_starts_a_new_node(
+    verdict: dict[str, Any],
+    joins: bool,
+    logged: str,
+    vlm: FakeVlm,
+    screen: Screens,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen", {}, [])])
+    vlm.verdicts.append(verdict)
+    gm = make_manager(screen.steps_dir)
+    first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    again = screen(HOME, SHOT_B, PACKAGE)
+
+    with caplog.at_level(logging.INFO):
+        node_id = gm.identify_state(again)
+
+    assert (node_id == first) is joins
+    assert gm.graph.number_of_nodes() == (1 if joins else 2)
+    assert logged in caplog.text
+    identify = screen.record(again)["identify"]
+    assert identify["unverified"] is ("answered" in verdict)
+    assert identify["verifications"][0]["answered"] is ("answered" not in verdict)
+
+
+ABOVE_ONE = math.nextafter(1.0, 2.0)
+
+
+@pytest.mark.parametrize(
+    ("image_cut_off", "text_cut_off", "joins"),
+    [
+        pytest.param(1.0, 1.0, True, id="both reached"),
+        pytest.param(ABOVE_ONE, 1.0, False, id="image short"),
+        pytest.param(1.0, ABOVE_ONE, False, id="text short"),
+    ],
+)
+def test_a_screen_without_an_answer_joins_only_when_it_reaches_both_cut_offs(
+    image_cut_off: float,
+    text_cut_off: float,
+    joins: bool,
+    vlm: FakeVlm,
+    screen: Screens,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The screen and the node's member compare at exactly 1.0 by their image vectors and
+    by their description vectors."""
+    monkeypatch.setattr(gm_module, "NEAR_IDENTICAL_IMAGE_COSINE", image_cut_off)
+    monkeypatch.setattr(gm_module, "NEAR_IDENTICAL_TEXT_COSINE", text_cut_off)
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen", {}, [])])
+    vlm.verdicts.append({"same": False, "answered": False, "reason": "timed out"})
+    gm = make_manager(screen.steps_dir)
+    first = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    assert (gm.identify_state(screen(HOME, SHOT_B, PACKAGE)) == first) is joins
+
+
+def test_a_screen_without_an_answer_on_a_node_described_otherwise_goes_to_the_next_candidate(
+    vlm: FakeVlm, screen: Screens, caplog: pytest.LogCaptureFixture
+) -> None:
+    """s0's member looks exactly like the screen but is described otherwise, so its image
+    alone does not keep the screen; the verifier confirms the next candidate, s3."""
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
+    vlm.verdicts.extend(
+        [
+            {"same": False, "answered": False, "reason": "reply truncated"},
+            {"same": True, "reason": "the results"},
+        ]
+    )
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    with caplog.at_level(logging.INFO):
+        assert gm.identify_state(observation) == "s3_results"
+
+    assert verified(vlm) == [b64(b"a"), b64(b"d")]
+    assert "image cosine 1.000, text cosine 0.000; not near-identical" in caplog.text
+    identify = screen.record(observation)["identify"]
+    assert (identify["stage"], identify["unverified"]) == ("short_list", False)
+
+
+def test_a_screen_without_an_answer_is_compared_with_the_description_of_the_member_shown(
+    vlm: FakeVlm, screen: Screens, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """s0's member closest to the screen by image is described otherwise; its other member,
+    described as the screen is, gives s0 a text score of 1.0 but is not the member the
+    verifier was shown."""
+    explored = make_manager(screen.steps_dir)
+    add_screen(explored, "s0_home", "Home screen", **members(screen.steps_dir, b"twin", b"far"))
+    vlm.images.update({b64(b"twin"): NEAR, b64(b"far"): FAR, SHOT_A: NEAR})
+    explored.embed_missing_members()
+    path = tmp_path / "graph.json"
+    explored.save_graph(path)
+    twin, far = explored.graph.nodes["s0_home"]["observations"]
+    vectors = {twin: EMBEDDINGS["Settings page"], far: EMBEDDINGS["Home screen"]}
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+    gm = make_manager()
+    gm.load_graph(path)
+    vlm.descriptions.append(("Home screen", {}, []))
+    vlm.verdicts.append({"same": False, "answered": False, "reason": "timed out"})
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    with caplog.at_level(logging.INFO):
+        node_id = gm.identify_state(observation)
+
+    assert sorted(gm.graph) == ["s0_home", node_id]
+    assert verified(vlm) == [b64(b"twin")]
+    assert "image cosine 1.000, text cosine 0.000; not near-identical" in caplog.text
+    identify = screen.record(observation)["identify"]
+    assert identify["candidates"][0]["sources"] == {
+        "image": pytest.approx(1.0),
+        "text": pytest.approx(1.0),
+    }
+    assert (identify["stage"], identify["unverified"]) == ("new", False)
+
+
+def test_an_expected_node_without_an_answer_keeps_a_near_identical_screen(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    explored = make_manager(screen.steps_dir)
+    add_screen(explored, "s0_home", "Home screen", **members(screen.steps_dir))
+    explored.embed_missing_members()
+    gm = with_text_vectors(explored, screen.steps_dir)
+    vlm.calls.clear()
+    vlm.descriptions.append(("Home screen", {}, []))
+    vlm.verdicts.append({"same": False, "answered": False, "reason": "timed out"})
+    observation = screen(HOME, SHOT_A, PACKAGE)
+
+    assert gm.identify_state(observation, expected_node="s0_home") == "s0_home"
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    identify = screen.record(observation)["identify"]
+    assert (identify["stage"], identify["unverified"]) == ("expected", True)
 
 
 def _png(image: Image.Image) -> str:

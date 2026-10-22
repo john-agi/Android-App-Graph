@@ -229,12 +229,13 @@ so a timed-out attempt gets exactly one more, and 5XX and 429 responses are
 retried for up to two minutes at the default timeout and ten minutes for the
 audits, after which the last one fails. Other 4xx responses, including 402 (no
 credit left), fail at once, as does a server that closes the connection without
-sending a response. The application never retries what the SDK has given up on:
-a call that still times out takes the fallback listed below for a truncated
-reply, and a call without one raises. OpenRouter bills a non-streaming request
-in full even after the client disconnects, so an attempt cut off at its deadline
-is still billed, and a timeout shorter than the model needs pays for the same
-request twice.
+sending a response. The application retries what the SDK has given up on only
+for node verification: a verifier request that still times out is sent once more,
+with a deadline of its own for the retries above. Any other call that still times
+out takes the fallback listed below for a truncated reply, and a call without one
+raises. OpenRouter bills a non-streaming request in full even after the client
+disconnects, so an attempt cut off at its deadline is still billed, and a timeout
+shorter than the model needs pays for the same request twice.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
@@ -260,7 +261,7 @@ No request sets `max_tokens`, so a reply stops only at the model's own output
 limit. A reply cut off there (`finish_reason: "length"`) is never asked again,
 since the same request would be cut off again. The log names the call and any
 reasoning tokens, and the caller applies its final fallback at once: an action
-waits, node verification treats the screens as different, edge normalization
+waits, node verification reports no answer, edge normalization
 and relabelling a flagged edge keep the instruction, the audits report no
 issues, the coverage checkpoint uses its top candidate, and a page description
 or an exploration plan raises. A call that still times out after the SDK's
@@ -269,6 +270,14 @@ fallback, so an action waits too; a page description, an exploration plan or an
 embedding still raises. A reply stopped by the provider's content filter
 (`finish_reason: "content_filter"`) is logged with the call's name and otherwise
 handled like any other empty or partial reply.
+
+Node verification also reports no answer for a reply it cannot parse, and logs
+each one as `node_verify: no answer` with its cause. Merge checks, the audit's and
+the coverage checkpoint's, and the audit's member checks count no answer as
+"different" (see [Merge proposals](#merge-proposals) and
+[Member checks](#member-checks)); screen matching counts it as a rejection unless
+the screen's screenshot and description are near-identical to those of the member the
+verifier was shown (see [Screen matching](#screen-matching)).
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),
@@ -587,10 +596,12 @@ node:
 - `exact_match`, the member an exact match copied;
 - `candidates`: each short-list node with the `sources` that proposed it and their
   scores, its `closest_member` and that member's `image_score`;
-- `verifications`: each verifier call's `node`, the `member` it was shown, `same` and
-  the `reason`;
+- `verifications`: each verifier call's `node`, the `member` it was shown, `same`,
+  `answered` (`false` when the verifier gave no answer) and the `reason`;
 - `refinement`: the descriptions the step's first rejection refined, and what the
   rejected node was renamed to, or `null`;
+- `unverified`: `true` when the screen joined `node` without the verifier's answer,
+  as near-identical;
 - `node`, the node the screen joined, under its ID at that moment.
 
 `source` names the part of the run that took the step: `main_loop`,
@@ -676,6 +687,13 @@ what each step found.
    screen and the rejected node, which is renamed after its new description; later
    rejections refine nothing. Refined descriptions, like every description, leave out
    the state listed in [Graph nodes](#graph-nodes), such as an open menu.
+
+A verifier call that gives no answer (see
+[Requests and recovery](#requests-and-recovery)) is logged as such. The screen still
+joins that node, as an unverified match, when it is near-identical to the member the
+call compared, the node's closest member by image: the image cosine of the two is at
+least 0.993, and the cosine of the screen's description vector and that member's is
+at least 0.80. Otherwise the call counts as a rejection, and matching goes on.
 
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.
@@ -817,12 +835,13 @@ the node's home.
 - Every other group is checked against home on the closest pair across them, the
   strongest evidence that the two are one screen:
   - a group of two or more members is a split check. When the verifier tells the
-    pair apart, the group becomes a new node.
+    pair apart, or gives no answer, the group becomes a new node.
   - a lone member is a move check. When the verifier tells it apart from its closest
-    home member, the member goes through the short list of
+    home member, or gives no answer, the member goes through the short list of
     [screen matching](#screen-matching) again, without the node it leaves, with its
     stored describe output in place of the describe call and its description vector
-    in place of the description's embedding, and with no description refined. It
+    in place of the description's embedding, with no description refined, and with a
+    call without an answer counted as a rejection even on a near-identical node. It
     moves to the first node the verifier confirms, or to a new node.
 - A node gets three checks at most, larger groups first; the rest are `unchecked`.
   A node of one member is never checked. Since home holds at least half the members,

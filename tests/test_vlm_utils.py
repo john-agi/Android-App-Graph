@@ -14,6 +14,7 @@ import logging
 import math
 import re
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, override
@@ -1427,7 +1428,7 @@ def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Resp
 @pytest.mark.parametrize(
     ("operation", "fallback"),
     [
-        ("verify", {"same": False, "reason": "reply truncated"}),
+        ("verify", {"same": False, "answered": False, "reason": "reply truncated"}),
         ("normalize", {"instruction_template": "search milk", "is_template": False}),
         ("merge_audit", {"issues": [], "summary": "reply truncated"}),
         ("audit", {"issues": [], "summary": "reply truncated"}),
@@ -1509,7 +1510,6 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
 @pytest.mark.parametrize(
     ("operation", "call_type", "fallback"),
     [
-        ("verify", "node_verify", {"same": False, "reason": "reply truncated"}),
         (
             "normalize",
             "normalize_edge",
@@ -1527,6 +1527,7 @@ def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
     call_type: str,
     fallback: object,
     timing_out_client: OpenRouter,
+    timed_out_requests: list[httpx.Request],
     png_screenshot: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1534,6 +1535,72 @@ def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
         result = _final_fallback(operation, timing_out_client, png_screenshot)
     assert result == fallback
     assert f"{call_type}: timed out after retries" in caplog.text
+    assert len(timed_out_requests) == 2
+
+
+def test_node_verification_that_times_out_is_asked_once_more_then_has_no_answer(
+    timing_out_client: OpenRouter,
+    timed_out_requests: list[httpx.Request],
+    png_screenshot: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        verdict = vlm.verify_same_node(
+            timing_out_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": False, "answered": False, "reason": "timed out"}
+    assert caplog.text.count("node_verify: timed out after retries") == 2
+    assert "node_verify: asking once more" in caplog.text
+    assert "node_verify: no answer (timed out)" in caplog.text
+    assert len(timed_out_requests) == 4
+    assert timed_out_requests[2].content == timed_out_requests[0].content
+
+
+def test_node_verification_takes_the_answer_to_its_second_ask(
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: list[float],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """The first ask times out on both of the SDK's attempts; the second ask answers."""
+    del no_sleep  # requested for its side effect on time.sleep
+    attempts: list[httpx.Request] = []
+
+    def answer_late(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) <= 2:
+            msg = "no complete response within 60 s"
+            raise httpx.ReadTimeout(msg, request=request)
+        return chat_response(content='{"same":true,"reason":"same list"}')
+
+    monkeypatch.setattr(time, "time", lambda: 61.0 * len(attempts))
+    with (
+        httpx.Client(transport=httpx.MockTransport(answer_late)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        verdict = vlm.verify_same_node(
+            client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": True, "reason": "same list"}
+    assert len(attempts) == 3
+
+
+def test_node_verification_with_an_unparseable_reply_has_no_answer(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router_responses.append(chat_response(content="The screens look the same."))
+    with caplog.at_level("WARNING"):
+        verdict = vlm.verify_same_node(
+            router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": False, "answered": False, "reason": "parse error"}
+    assert "node_verify: no answer (parse error)" in caplog.text
+    assert len(router_requests) == 1
 
 
 def test_a_page_description_that_still_times_out_raises(
