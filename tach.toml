@@ -33,7 +33,7 @@ depends_on = [
 
 [[modules]]
 path = "android_app_graph.graph_files"
-depends_on = []
+depends_on = ["android_app_graph.payloads"]
 
 [[modules]]
 path = "android_app_graph.member_groups"

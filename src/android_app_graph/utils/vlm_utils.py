@@ -101,7 +101,7 @@ def score_by_cosine[K](
 
     if stale_count:
         logger.warning(
-            "%s: embedding cache is stale for %d node(s): query dim=%d, cached dim(s)=%s%s",
+            "%s: embedding cache is stale for %d vector(s): query dim=%d, cached dim(s)=%s%s",
             scope,
             stale_count,
             len(query),

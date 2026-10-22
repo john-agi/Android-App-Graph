@@ -1,5 +1,5 @@
-"""Graph files on disk: atomic writes, the step log's layout, and graph-structure
-validation.
+"""Graph files on disk: atomic writes, the step log's layout, model-tagged vector
+files, and graph-structure validation.
 """
 
 from __future__ import annotations
@@ -8,12 +8,17 @@ import base64
 import errno
 import io
 import json
+import logging
 import os
 import secrets
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
+
+from android_app_graph.payloads import as_float_list, as_object_dict
+
+logger = logging.getLogger(__name__)
 
 
 def write_json_atomically(
@@ -139,6 +144,96 @@ def observation_image_path(steps: Path, observation_id: str) -> Path:
 def image_embeddings_path(steps: Path) -> Path:
     """Return where the step log ``steps`` keeps its observations' image vectors."""
     return steps / "image_emb.json"
+
+
+def text_embeddings_path(graph_path: Path) -> Path:
+    """Return where the graph at ``graph_path`` keeps its members' description vectors.
+
+    A description depends on the other nodes' descriptions in its prompt, so its vector
+    belongs to the graph beside it rather than to the step log the graph shares.
+    """
+    return graph_path.with_name(f"{graph_path.stem}_text_emb.json")
+
+
+type VectorKind = Literal["image", "text"]
+
+
+def _unusable_embeddings(path: Path, kind: VectorKind, problem: str) -> ValueError:
+    remedy = (
+        "Delete it to embed every screenshot again."
+        if kind == "image"
+        else "Explore the app again into a new graph directory."
+    )
+    return ValueError(f"{kind.capitalize()} embedding file {path} {problem}. {remedy}")
+
+
+def load_embeddings(
+    path: Path, *, model: str, kind: VectorKind, required: Collection[str] = ()
+) -> dict[str, list[float]]:
+    """Return the ``kind`` vectors of the file ``path`` by observation ID, when
+    ``model`` computed them, which must include one for each of ``required``.
+
+    The file is tagged with the model that wrote it, since a matching dimension
+    cannot prove two vectors came from one model. A missing file has no vectors yet.
+    An image file written by another model is empty after one warning, so every
+    screenshot is embedded again; nothing embeds a description again, so a text file
+    written by another model raises ``ValueError``.
+
+    A file that cannot be used raises ``ValueError`` naming it and the problem, so
+    damage is reported instead of repaired by paying for every vector again: a file
+    that cannot be read or parsed, is not tagged, has no ``embeddings`` object, or holds
+    a malformed or non-finite vector, and a file, missing or not, without the vector of
+    an observation of ``required``. The message names such observations.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if required:
+            raise _unusable_embeddings(path, kind, "is missing") from None
+        return {}
+    except (OSError, ValueError) as exc:
+        raise _unusable_embeddings(path, kind, f"cannot be read or parsed: {exc}") from exc
+    stored = as_object_dict(raw)
+    tag = stored.get("model")
+    if not isinstance(tag, str):
+        raise _unusable_embeddings(path, kind, "is not tagged with the model that wrote it")
+    if not isinstance(stored.get("embeddings"), dict):
+        raise _unusable_embeddings(path, kind, "has no embeddings object")
+    if tag != model:
+        if kind == "text":
+            problem = f"was written by model {tag!r}, not the configured {model!r}"
+            raise _unusable_embeddings(path, kind, problem)
+        logger.warning(
+            "Image embedding file %s was written by model %r, not the configured %r; "
+            "treating it as empty, so every observation is embedded again",
+            path,
+            tag,
+            model,
+        )
+        return {}
+    embeddings = {
+        observation_id: as_float_list(vector)
+        for observation_id, vector in as_object_dict(stored.get("embeddings")).items()
+    }
+    malformed = [observation_id for observation_id, numbers in embeddings.items() if not numbers]
+    if malformed:
+        raise _unusable_embeddings(
+            path,
+            kind,
+            f"has a malformed or non-finite vector for observation(s) {', '.join(malformed)}",
+        )
+    missing = [observation_id for observation_id in required if observation_id not in embeddings]
+    if missing:
+        raise _unusable_embeddings(
+            path, kind, f"has no vector for observation(s) {', '.join(missing)}"
+        )
+    return embeddings
+
+
+def save_embeddings(path: Path, embeddings: Mapping[str, list[float]], *, model: str) -> None:
+    """Write ``embeddings``, vectors by observation ID that ``model`` computed, to
+    ``path``, replacing the file atomically."""
+    write_json_atomically(path, {"model": model, "embeddings": dict(embeddings)})
 
 
 def observation_image_b64(steps: Path, observation_id: str) -> str:
