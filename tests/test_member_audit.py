@@ -561,6 +561,46 @@ def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
     assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
 
 
+# Home's last member is a black screen of the PIN activity, and Pattern's member a black
+# screen of another; every black member looks the same.
+BLACK_MOVE = {
+    "s0_home": [("000001", X), ("000002", _toward(X, Y, LINKED)), ("000003", Z)],
+    "s1_pattern": [("000004", Z)],
+}
+BLACK_MEMBERS = {"000003": SET_PIN, "000004": SET_PATTERN, "000005": SET_PIN}
+
+
+@pytest.mark.parametrize("pin_node", [True, False], ids=["joins-the-pin-node", "starts-a-node"])
+def test_a_black_member_moves_by_its_activity_not_by_the_verifier(
+    pin_node: bool, graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """The short list would rank every black node first, and the verifier would call two
+    identical black images one screen."""
+    nodes = {**BLACK_MOVE, "s2_pin": [("000005", Z)]} if pin_node else BLACK_MOVE
+    write_member_graph(graph_path, nodes, black=BLACK_MEMBERS)
+    graph = _load(graph_path)
+    models.confirm("000004", "000003")
+
+    (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    destination = "s2_pin" if pin_node else "s2_secure_screen:_chooselockpassword"
+    assert models.shown == [("000001", "000003")]
+    assert models.embedded == []
+    change = check["change"]
+    assert (change["to"], change["new_node"], change["black_activity"]) == (
+        destination,
+        not pin_node,
+        SET_PIN,
+    )
+    assert "000003" in graph.graph.nodes[destination]["observations"]
+    assert graph.graph.nodes["s1_pattern"]["observations"] == ["000004"]
+    assert graph.text_vector("000003") is None
+    if not pin_node:
+        assert graph.graph.nodes[destination]["page_description"] == (
+            "secure screen: ChooseLockPassword"
+        )
+
+
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
 
 

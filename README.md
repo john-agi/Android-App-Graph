@@ -861,7 +861,12 @@ representative is the node's home.
     [screen matching](#screen-matching) again, without the node it leaves, with its
     stored describe output in place of the describe call and its description vector
     in place of the description's embedding, and with no description refined. It
-    moves to the first node the verifier confirms, or to a new node.
+    moves to the first node the verifier confirms, or to a new node. A
+    [black](#screen-matching) member, which has neither, moves by its activity
+    instead, as screen matching places it, with no verifier call: to the node with a
+    black member of its activity, or to a new node described from its activity. The
+    short list would rank every black node first by image, and the verifier would see
+    two identical black images.
 - A node gets three checks at most, larger groups first; the rest are `unchecked`.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
@@ -900,7 +905,8 @@ an action drops its instruction templates, which the final normalization rebuild
   the verifier's `same` and `reason`, and `reused`. A check the verifier answered
   "different" adds the `change`: `from`, `to`, `new_node`, the `members` moved, the
   `edge_actions` moved, each with its `edge`, `action` and the edges it is on `now`,
-  and, for a move, the `short_list`'s `candidates` and `verifications`;
+  and, for a move, the `short_list`'s `candidates` and `verifications`, or, for a
+  black member, its `black_activity`;
 - `diffuse`: each diffuse node with its groups;
 - `unchecked`: each node with the groups past its three checks.
 

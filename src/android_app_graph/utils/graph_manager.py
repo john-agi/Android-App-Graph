@@ -1886,7 +1886,14 @@ class GraphManager:
         vector for the description's embedding, so the short list costs only its
         verifier calls; the node it leaves is not on the list, and no description is
         refined.
+
+        A black member, which has neither, moves by its activity instead, as screen
+        matching places a black screen: the short list would rank every black node
+        first, and the verifier would see identical black images.
         """
+        black_activity = self._stored_screens[member].black_activity
+        if black_activity is not None:
+            return self._move_black_member(node_id, member, black_activity, transitions)
         identification = self._stored_identification(node_id, member, verdicts)
         destination = self._verify_short_list(identification, excluded={node_id})
         new_node = destination is None
@@ -1900,6 +1907,28 @@ class GraphManager:
                 "candidates": decision.candidates,
                 "verifications": decision.verifications,
             },
+        }
+
+    def _move_black_member(
+        self,
+        node_id: str,
+        member: str,
+        activity: str,
+        transitions: Sequence[TransitionRecord],
+    ) -> dict[str, object]:
+        """Move the black ``member`` of ``node_id`` to another node of its package with a
+        black member of ``activity``, or to a new node described from ``activity``, and
+        return the change."""
+        package = as_str(self.graph.nodes[node_id].get("package"), "")
+        others = [n for n in self._same_package_nodes(package).node_ids if n != node_id]
+        destination = self._black_node(activity, others)
+        new_node = destination is None
+        if destination is None:
+            destination = self._node_from_stored(node_id, [member])
+        return {
+            "new_node": new_node,
+            **self._relocate(node_id, [member], destination, transitions),
+            "black_activity": activity,
         }
 
     def _stored_identification(
