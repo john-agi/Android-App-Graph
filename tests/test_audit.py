@@ -169,20 +169,18 @@ def test_run_audit_writes_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_normalize_and_save_audited_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}))
-    normalized: list[str] = []
+    steps: list[object] = []
 
-    def fake_normalize(node_id: str) -> int:
-        normalized.append(node_id)
-        return 2
+    def fake_normalize() -> int:
+        steps.append("normalize all edges")
+        return 4
 
-    saved: list[Path] = []
-    monkeypatch.setattr(graph, "normalize_node_edges", fake_normalize)
-    monkeypatch.setattr(graph, "save_graph", saved.append)
+    monkeypatch.setattr(graph, "normalize_all_edges", fake_normalize)
+    monkeypatch.setattr(graph, "save_graph", steps.append)
 
     audited_path = tmp_path / "demo_audited.json"
     assert audit.normalize_and_save_audited_graph(graph, audited_path) == 4
-    assert sorted(normalized) == ["s0_home", "s1_detail"]
-    assert saved == [audited_path]
+    assert steps == ["normalize all edges", audited_path]
 
 
 def _merge_issue(node_a: str = "s0_home", node_b: str = "s1_home") -> dict[str, Any]:
@@ -1452,7 +1450,7 @@ def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     monkeypatch.setattr(
         GraphManager, "identify_state", lambda _self, *_args, **_kwargs: next(reached)
     )
-    monkeypatch.setattr(GraphManager, "normalize_node_edges", lambda _self, _node_id: 0)
+    monkeypatch.setattr(GraphManager, "normalize_all_edges", lambda _self: 0)
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap the gear icon")
 
     assert audit.main(["--config", str(config), "--re-explore", "--steps-per-issue", "0"]) == 0
@@ -1760,7 +1758,7 @@ def _audit_with_the_model_reporting(
     monkeypatch.setattr(
         GraphManager, "run_audit", lambda _self, **_kwargs: {"issues": issues, "summary": "ok"}
     )
-    monkeypatch.setattr(GraphManager, "normalize_node_edges", lambda _self, _node_id: 0)
+    monkeypatch.setattr(GraphManager, "normalize_all_edges", lambda _self: 0)
     graph_dir = tmp_path / "graphs"
     config = _write_config(tmp_path, str(graph_dir))
 

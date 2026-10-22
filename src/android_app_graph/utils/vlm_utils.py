@@ -6,7 +6,9 @@ import json
 import logging
 import math
 import re
-from collections.abc import Callable, Iterable
+import threading
+from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -24,7 +26,7 @@ from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
-from android_app_graph.retrying import UnusableOutputError, call_with_retry, capped_retries
+from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
 from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
@@ -152,6 +154,9 @@ class TokenTracker:
 
     def __init__(self) -> None:
         self._usage: dict[str, dict[str, float]] = {}
+        # call_concurrently's worker threads record at the same time; nothing reads the
+        # totals until its pool has finished.
+        self._lock = threading.Lock()
 
     def record(
         self,
@@ -169,16 +174,19 @@ class TokenTracker:
         """
         if usage is None:
             return
-        totals = self._usage.setdefault(f"{call_type}:{model}", dict.fromkeys(_USAGE_COUNTERS, 0))
-        totals["calls"] += 1
-        totals["prompt_tokens"] += usage.prompt_tokens
-        totals["cached_prompt_tokens"] += _cached_prompt_tokens(usage)
-        totals["completion_tokens"] += (
-            usage.completion_tokens if isinstance(usage, ChatUsage) else 0
-        )
-        totals["reasoning_tokens"] += _reasoning_tokens(usage) or 0
-        totals["total_tokens"] += usage.total_tokens
-        totals["cost"] += _cost(usage)
+        with self._lock:
+            totals = self._usage.setdefault(
+                f"{call_type}:{model}", dict.fromkeys(_USAGE_COUNTERS, 0)
+            )
+            totals["calls"] += 1
+            totals["prompt_tokens"] += usage.prompt_tokens
+            totals["cached_prompt_tokens"] += _cached_prompt_tokens(usage)
+            totals["completion_tokens"] += (
+                usage.completion_tokens if isinstance(usage, ChatUsage) else 0
+            )
+            totals["reasoning_tokens"] += _reasoning_tokens(usage) or 0
+            totals["total_tokens"] += usage.total_tokens
+            totals["cost"] += _cost(usage)
 
     def snapshot(self) -> dict[str, float]:
         """Return current totals as a flat dict."""
@@ -233,6 +241,41 @@ class TokenTracker:
 
 
 token_tracker = TokenTracker()
+
+MAX_REQUESTS_IN_FLIGHT = 16
+
+
+def call_concurrently[T, R](
+    label: str, call: Callable[[T], R], inputs: Sequence[T], apply: Callable[[T, R], None]
+) -> None:
+    """Run ``call`` on every input, ``MAX_REQUESTS_IN_FLIGHT`` at a time on worker threads,
+    and ``apply`` each result on the calling thread, in input order.
+
+    ``call`` must not touch what ``apply`` changes. When a call raises, the calls not yet
+    started are cancelled, the results of the others are still applied, and then the first
+    error in input order is raised. ``label`` names the calls in the log.
+    """
+    error: BaseException | None = None
+    pool = ThreadPoolExecutor(max_workers=MAX_REQUESTS_IN_FLIGHT)
+    try:
+        futures = [pool.submit(call, item) for item in inputs]
+        for item, future in zip(inputs, futures, strict=True):
+            if future.cancelled():
+                continue
+            failure = future.exception()
+            if failure is None:
+                apply(item, future.result())
+            elif error is None:
+                error = failure
+                cancelled = sum(pending.cancel() for pending in futures)
+                logger.warning("%s failed; cancelled %d call(s) not yet started", label, cancelled)
+            else:
+                logger.warning("%s failed too: %s: %s", label, type(failure).__name__, failure)
+    finally:
+        # Cancelled here too, so an apply that raises or an interrupt sends no queued call.
+        pool.shutdown(cancel_futures=True)
+    if error is not None:
+        raise error
 
 
 def strip_json_fences(text: str) -> str:
@@ -746,15 +789,19 @@ def _send_chat_once(
     README.md#requests-and-recovery.
     """
     try:
-        response: object = client.chat.send(
-            model=settings.model,
-            messages=messages,
-            response_format=response_format,
-            plugins=None if response_format is None else [{"id": "response-healing"}],
-            temperature=settings.temperature if settings.temperature is not None else UNSET,
-            stream=False,
-            retries=capped_retries(settings.request_timeout),
-            timeout_ms=int(settings.request_timeout * 1000),
+        response: object = send_within_deadline(
+            call_type,
+            settings.request_timeout,
+            lambda retries: client.chat.send(
+                model=settings.model,
+                messages=messages,
+                response_format=response_format,
+                plugins=None if response_format is None else [{"id": "response-healing"}],
+                temperature=settings.temperature if settings.temperature is not None else UNSET,
+                stream=False,
+                retries=retries,
+                timeout_ms=int(settings.request_timeout * 1000),
+            ),
         )
     except httpx.TimeoutException:
         logger.warning("%s: timed out after retries", call_type)
@@ -1520,12 +1567,16 @@ def get_embedding(
     """Get a text embedding through the official OpenRouter SDK."""
 
     def request_embedding() -> list[float]:
-        response = client.embeddings.generate(
-            model=model,
-            input=text,
-            encoding_format="float",
-            retries=capped_retries(request_timeout),
-            timeout_ms=int(request_timeout * 1000),
+        response = send_within_deadline(
+            "embedding",
+            request_timeout,
+            lambda retries: client.embeddings.generate(
+                model=model,
+                input=text,
+                encoding_format="float",
+                retries=retries,
+                timeout_ms=int(request_timeout * 1000),
+            ),
         )
         return _embedding_vector(response, call_type="embedding", model=model)
 
@@ -1545,21 +1596,25 @@ def get_image_embedding(
     """
 
     def request_embedding() -> list[float]:
-        response = client.embeddings.generate(
-            model=model,
-            input=[
-                {
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{MEDIA_TYPE};base64,{screenshot_b64}"},
-                        }
-                    ]
-                }
-            ],
-            encoding_format="float",
-            retries=capped_retries(request_timeout),
-            timeout_ms=int(request_timeout * 1000),
+        response = send_within_deadline(
+            "image_embedding",
+            request_timeout,
+            lambda retries: client.embeddings.generate(
+                model=model,
+                input=[
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{MEDIA_TYPE};base64,{screenshot_b64}"},
+                            }
+                        ]
+                    }
+                ],
+                encoding_format="float",
+                retries=retries,
+                timeout_ms=int(request_timeout * 1000),
+            ),
         )
         return _embedding_vector(response, call_type="image_embedding", model=model)
 

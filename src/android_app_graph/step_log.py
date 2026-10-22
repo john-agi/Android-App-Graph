@@ -158,15 +158,25 @@ def annotate_observation(steps: Path, observation_id: str, fields: Mapping[str, 
     write_json_atomically(path, {**record, **fields}, ensure_ascii=False)
 
 
+def _damaged_image_embeddings(path: Path, damage: str) -> ValueError:
+    return ValueError(
+        f"Image embedding file {path} {damage}. Delete it to embed every screenshot again."
+    )
+
+
 def load_image_embeddings(steps: Path, *, model: str) -> dict[str, list[float]]:
     """Return the image vectors of the step log ``steps`` by observation ID, when
     ``model`` computed them.
 
     The file is tagged with the model that wrote it, since a matching dimension
-    cannot prove two vectors came from one model. A file that cannot be read or
-    parsed, has no tag, or was written by another model is empty after one warning,
-    so every observation is embedded again; a malformed or non-finite vector is
-    dropped with a warning. A step log without the file has no vectors yet.
+    cannot prove two vectors came from one model. A step log without the file has no
+    vectors yet, and a file written by another model is empty after one warning, so
+    every observation is embedded again.
+
+    A damaged file raises ``ValueError`` naming it and the damage, so damage to the
+    step log is reported instead of repaired by paying for every vector again: a file
+    that cannot be read or parsed, is not tagged, has no ``embeddings`` object, or
+    holds a malformed or non-finite vector, which the message names by observation.
     """
     path = image_embeddings_path(steps)
     try:
@@ -174,18 +184,13 @@ def load_image_embeddings(steps: Path, *, model: str) -> dict[str, list[float]]:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as exc:
-        logger.warning("Corrupt image embedding file %s; treating it as empty: %s", path, exc)
-        return {}
+        raise _damaged_image_embeddings(path, f"cannot be read or parsed: {exc}") from exc
     stored = as_object_dict(raw)
     tag = stored.get("model")
-    if not isinstance(tag, str) or not isinstance(stored.get("embeddings"), dict):
-        logger.warning(
-            "Image embedding file %s is not tagged with the model that wrote it; treating it "
-            "as empty, so every observation is embedded again with %r",
-            path,
-            model,
-        )
-        return {}
+    if not isinstance(tag, str):
+        raise _damaged_image_embeddings(path, "is not tagged with the model that wrote it")
+    if not isinstance(stored.get("embeddings"), dict):
+        raise _damaged_image_embeddings(path, "has no embeddings object")
     if tag != model:
         logger.warning(
             "Image embedding file %s was written by model %r, not the configured %r; treating "
@@ -195,15 +200,16 @@ def load_image_embeddings(steps: Path, *, model: str) -> dict[str, list[float]]:
             model,
         )
         return {}
-    embeddings: dict[str, list[float]] = {}
-    for observation_id, vector in as_object_dict(stored.get("embeddings")).items():
-        numbers = as_float_list(vector)
-        if numbers:
-            embeddings[observation_id] = numbers
-        else:
-            logger.warning(
-                "Dropping the malformed image vector of observation %s in %s", observation_id, path
-            )
+    embeddings = {
+        observation_id: as_float_list(vector)
+        for observation_id, vector in as_object_dict(stored.get("embeddings")).items()
+    }
+    malformed = [observation_id for observation_id, numbers in embeddings.items() if not numbers]
+    if malformed:
+        raise _damaged_image_embeddings(
+            path,
+            f"has a malformed or non-finite vector for observation(s) {', '.join(malformed)}",
+        )
     return embeddings
 
 

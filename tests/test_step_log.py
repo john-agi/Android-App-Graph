@@ -525,27 +525,41 @@ def test_image_vectors_round_trip_with_their_model_tag(steps: Path) -> None:
     assert load_image_embeddings(steps, model=MODEL) == {"000000": [0.5, 0.25]}
 
 
+def test_a_vector_file_from_another_model_is_empty_after_one_warning(
+    steps: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    steps.mkdir(parents=True)
+    save_image_embeddings(steps, {"000000": [0.5]}, model="other/model")
+
+    with caplog.at_level(logging.WARNING):
+        assert load_image_embeddings(steps, model=MODEL) == {}
+
+    (warning,) = caplog.messages
+    assert "image_emb.json was written by model 'other/model'" in warning
+
+
 @pytest.mark.parametrize(
-    ("content", "warning"),
+    ("content", "damage"),
     [
-        pytest.param(
-            json.dumps({"model": "other/model", "embeddings": {"000000": [0.5]}}),
-            "written by model 'other/model'",
-            id="another model",
-        ),
-        pytest.param(json.dumps({"000000": [0.5]}), "not tagged", id="no tag"),
+        pytest.param(json.dumps({"000000": [0.5]}), "is not tagged", id="no tag"),
         pytest.param(
             json.dumps({"model": [1.0], "embeddings": {"000000": [0.5]}}),
-            "not tagged",
+            "is not tagged",
             id="bad tag",
         ),
-        pytest.param("null", "not tagged", id="not an object"),
-        pytest.param("{not json", "Corrupt", id="corrupt"),
-        pytest.param(b'{"model": "x"}\xff', "Corrupt", id="not utf-8"),
+        pytest.param("null", "is not tagged", id="not an object"),
+        pytest.param(json.dumps({"model": MODEL}), "has no embeddings object", id="no embeddings"),
+        pytest.param(
+            json.dumps({"model": MODEL, "embeddings": [[0.5]]}),
+            "has no embeddings object",
+            id="embeddings not an object",
+        ),
+        pytest.param("{not json", "cannot be read or parsed", id="corrupt"),
+        pytest.param(b'{"model": "x"}\xff', "cannot be read or parsed", id="not utf-8"),
     ],
 )
-def test_an_unusable_vector_file_is_empty_after_one_warning(
-    content: str | bytes, warning: str, steps: Path, caplog: pytest.LogCaptureFixture
+def test_a_damaged_vector_file_raises_naming_the_file_and_the_damage(
+    content: str | bytes, damage: str, steps: Path
 ) -> None:
     steps.mkdir(parents=True)
     path = steps / "image_emb.json"
@@ -554,26 +568,26 @@ def test_an_unusable_vector_file_is_empty_after_one_warning(
     else:
         path.write_text(content, encoding="utf-8")
 
-    with caplog.at_level(logging.WARNING):
-        assert load_image_embeddings(steps, model=MODEL) == {}
+    with pytest.raises(ValueError, match=r"image_emb\.json") as raised:
+        load_image_embeddings(steps, model=MODEL)
 
-    assert len(caplog.records) == 1
-    assert warning in caplog.text
-    assert "image_emb.json" in caplog.text
+    assert f"Image embedding file {path} {damage}" in str(raised.value)
+    assert str(raised.value).endswith(". Delete it to embed every screenshot again.")
 
 
-def test_a_malformed_vector_is_dropped_with_a_warning(
-    steps: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_malformed_vector_raises_naming_every_such_observation(steps: Path) -> None:
     steps.mkdir(parents=True)
+    path = steps / "image_emb.json"
     vectors = {"000000": [1.0, 2.0], "000001": "not a vector", "000002": [], "000003": [1, "x"]}
-    (steps / "image_emb.json").write_text(
+    path.write_text(
         json.dumps({"model": MODEL, "embeddings": vectors}).replace('[1, "x"]', "[1, NaN]"),
         encoding="utf-8",
     )
 
-    with caplog.at_level(logging.WARNING):
-        assert load_image_embeddings(steps, model=MODEL) == {"000000": [1.0, 2.0]}
+    with pytest.raises(ValueError, match=r"image_emb\.json") as raised:
+        load_image_embeddings(steps, model=MODEL)
 
-    dropped = [message.split("observation ")[1].split()[0] for message in caplog.messages]
-    assert dropped == ["000001", "000002", "000003"]
+    assert str(raised.value) == (
+        f"Image embedding file {path} has a malformed or non-finite vector for observation(s) "
+        "000001, 000002, 000003. Delete it to embed every screenshot again."
+    )
