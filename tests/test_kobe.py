@@ -450,7 +450,12 @@ def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_re
             "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
             "edges": [
                 {"source": "s0_splash", "target": "s1_home", "actions": []},
-                {"source": "s1_home", "target": "s2_detail", "actions": [[open_detail]]},
+                {
+                    "source": "s1_home",
+                    "target": "s2_detail",
+                    "actions": [[open_detail]],
+                    "anchors": [[None]],
+                },
             ],
         },
     )

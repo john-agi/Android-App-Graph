@@ -2187,6 +2187,7 @@ def test_a_graph_file_without_setups_loads_replays_without_them_and_saves_none(
                     "target": "s1_settings",
                     "actions": [[_TAP]],
                     "num_steps": [1],
+                    "anchors": [[None]],
                 }
             ],
         },
@@ -2195,8 +2196,8 @@ def test_a_graph_file_without_setups_loads_replays_without_them_and_saves_none(
     gm.load_graph(path)
 
     assert gm.find_path("s0_home", "s1_settings") == [
-        PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", [_TAP], ()),
+        PathStep("s0_home", {}),
+        PathStep("s1_settings", [_TAP], (None,)),
     ]
     again = tmp_path / "saved" / "explored.json"
     gm.save_graph(again)
@@ -3222,35 +3223,6 @@ def test_find_path_returns_the_anchors_of_the_action_it_picks() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "anchors",
-    [
-        pytest.param(None, id="no anchors"),
-        pytest.param([], id="fewer entries than actions"),
-        pytest.param(["not a list"], id="a malformed entry"),
-    ],
-)
-def test_an_action_a_graph_file_saved_without_anchors_has_none_on_its_path(
-    anchors: list[object] | None, tmp_path: Path, write_graph_file: Callable[..., None]
-) -> None:
-    edge: dict[str, object] = {
-        "source": "s0_home",
-        "target": "s1_settings",
-        "actions": [[{"action": "tap", "x": 1, "y": 2}]],
-    }
-    if anchors is not None:
-        edge["anchors"] = anchors
-    graph_file = tmp_path / "demo.json"
-    write_graph_file(
-        graph_file, {"nodes": [{"id": "s0_home"}, {"id": "s1_settings"}], "edges": [edge]}
-    )
-    gm = make_manager()
-    gm.load_graph(graph_file)
-
-    (_, step) = gm.find_path("s0_home", "s1_settings") or []
-    assert step.anchors == ()
-
-
 def test_find_path_uses_an_empty_action_for_an_edge_without_actions() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
@@ -3282,12 +3254,14 @@ def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "row"}], setups=setups)
+    gm.graph.add_edge(
+        "s0_home", "s1_settings", actions=[{"action": "row"}], anchors=[[None]], setups=setups
+    )
 
     path = gm.find_path("s0_home", "s1_settings")
 
     assert path is not None
-    assert path[1] == PathStep("s1_settings", {"action": "row"})
+    assert path[1] == PathStep("s1_settings", {"action": "row"}, (None,))
 
 
 def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
@@ -3382,7 +3356,9 @@ def test_find_guided_path_navigates_an_edge_from_a_file_without_text_lists() -> 
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "tap"}], num_steps=[1])
+    gm.graph.add_edge(
+        "s0_home", "s1_settings", actions=[{"action": "tap"}], num_steps=[1], anchors=[[None]]
+    )
 
     steps = gm.find_guided_path("s0_home", [{"node_id": "s1_settings"}])
 
