@@ -859,6 +859,7 @@ def test_a_node_whose_description_scores_low_is_verified(vlm: FakeVlm, screen: S
     add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir, b"screenshot-b"))
     vlm.images[SHOT_B] = FAR
     gm.embed_missing_members()
+    gm = with_text_vectors(gm, screen.steps_dir)
     vlm.calls.clear()
 
     node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
@@ -1051,9 +1052,10 @@ def test_an_expected_node_that_cannot_be_compared_is_not_checked(
     add_screen(
         gm, "s1_other_app", "Home screen", package=OTHER_PACKAGE, **members(screen.steps_dir)
     )
-    add_screen(gm, "s2_no_members", "Home screen")
     gm.record_external_app_visit(screen(OTHER_APP, SHOT_B, OTHER_PACKAGE))
     gm.embed_missing_members()
+    gm = with_text_vectors(gm, screen.steps_dir)
+    add_screen(gm, "s2_no_members", "Home screen")
     vlm.calls.clear()
     vlm.descriptions.append(("Home screen", {}, []))
     vlm.verdicts.append({"same": True, "reason": "home"})
@@ -4160,6 +4162,7 @@ def test_identify_state_matches_a_node_of_the_package_under_another_activity(
         **members(screen.steps_dir),
     )
     gm.embed_missing_members()
+    gm = with_text_vectors(gm, screen.steps_dir)
 
     assert gm.identify_state(screen(activity, SHOT_A, package)) == "s0_home"
     assert gm.graph.nodes["s0_home"]["activities"] == [other_activity, activity]
