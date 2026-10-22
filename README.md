@@ -418,6 +418,14 @@ uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 Exploration writes graph files under `graphs/<app_name>/` and records every
 screenshot and action in its [step log](#step-log).
 
+Every step that counts toward `--max-steps` logs a `Step N/M: <from> --[<action>]--> <to>`
+line and then the tokens it used. `<to>` is `ext_<package>` for a step into another
+app and `ext_web` for one onto [outside web content](#external-apps-and-web-pages).
+A step that only waits shows `wait` as its action, and a step that plans Back on the
+start screen and [continues from a ranked target](#replaying-to-a-node) instead shows
+`continue`, with the node it continues from as `<to>`. A run that continues a graph
+with completed steps first logs the step it resumes from and the target total.
+
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
 every permission it requests with `adb shell pm grant`, so no permission prompt
 interrupts exploration. The grants stay on the device. Permissions that
