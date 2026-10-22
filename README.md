@@ -737,12 +737,14 @@ still resolves.
 
 Loading a graph fails with an error naming the file and what is wrong: the file
 has no `nodes` or `edges` list, a node lists no observations or its representative
-is not one of them, a representative's image is missing from `steps/`, a member of
-an in-app node has no `pixel_hash` in its record in `steps/`, or no `describe` there
-and is not [`black`](#step-log), or an edge has no actions or per-action lists (see
-[Graph edges](#graph-edges)) that do not hold one entry per action. `app-graph-plot` fails the same way, except that it
-reads no record in `steps/` and needs the image of every member, not only of the
-representative. Explore the app again into a new graph directory.
+is not one of them, a representative's image is missing from `steps/`, a node has no
+integer `replay_misses` count (see [Replaying to a node](#replaying-to-a-node)), a
+member of an in-app node has no `pixel_hash` in its record in `steps/`, or no
+`describe` there and is not [`black`](#step-log), or an edge has no actions or
+per-action lists (see [Graph edges](#graph-edges)) that do not hold one entry per
+action. `app-graph-plot` fails the same way, except that it reads neither
+`replay_misses` nor any record in `steps/` and needs the image of every member, not
+only of the representative. Explore the app again into a new graph directory.
 
 ### Graph edges
 

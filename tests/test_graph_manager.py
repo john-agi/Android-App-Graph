@@ -212,6 +212,7 @@ def add_screen(
         "interactable_elements": [],
         "last_normalized_visit_milestone": 0,
         "visit_count": 0,
+        "replay_misses": 0,
     }
     attrs.update(overrides)
     gm.graph.add_node(node_id, **attrs)
@@ -604,6 +605,7 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(
     assert list(gm.graph) == [EXTERNAL_WEB_NODE]
     assert gm.get_node(EXTERNAL_WEB_NODE) == {
         "page_description": "[external web page]",
+        "replay_misses": 0,
         "visit_count": 2,
         "observations": [article.observation_id, sign_in.observation_id],
         "representative_observation": article.observation_id,
@@ -1343,9 +1345,10 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     write_graph(
         path,
         [
-            {"id": "s0_home", **home},
+            {"id": "s0_home", "replay_misses": 0, **home},
             {
                 "id": EXTERNAL_WEB_NODE,
+                "replay_misses": 0,
                 "observations": [browser],
                 "representative_observation": browser,
             },
@@ -2600,6 +2603,7 @@ def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
         "page_description": f"[external app: {OTHER_PACKAGE}]",
         "state_schema": {},
         "visit_count": 2,
+        "replay_misses": 0,
         "is_external": True,
         "observations": [first.observation_id, second.observation_id],
         "representative_observation": first.observation_id,
@@ -4383,8 +4387,8 @@ def test_load_graph_rejects_a_node_without_members_naming_it(
     write_graph(
         path,
         [
-            {"id": "s0_home", **members(tmp_path / "steps")},
-            {"id": "s1_settings", **membership},
+            {"id": "s0_home", "replay_misses": 0, **members(tmp_path / "steps")},
+            {"id": "s1_settings", "replay_misses": 0, **membership},
         ],
     )
     gm = make_manager()
@@ -4422,6 +4426,34 @@ def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
     assert "['s1_settings']" in str(excinfo.value)
     assert str(tmp_path / "steps") in str(excinfo.value)
     assert "no member observations" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "count", [{}, {"replay_misses": "0"}], ids=["no-count", "count-not-an-int"]
+)
+def test_load_graph_rejects_a_node_without_a_replay_misses_count_naming_it(
+    tmp_path: Path, count: dict[str, object]
+) -> None:
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", "replay_misses": 0, **members(tmp_path / "steps")},
+            {"id": "s1_settings", **count, **members(tmp_path / "steps")},
+        ],
+    )
+    gm = make_manager()
+    add_screen(gm, "s9_stale", "Stale screen")
+
+    with pytest.raises(ValueError, match="without a replay_misses count") as excinfo:
+        gm.load_graph(path)
+
+    message = str(excinfo.value)
+    assert "['s1_settings']" in message
+    assert "s0_home" not in message
+    assert str(path) in message
+    assert "Explore the app again into a new graph directory." in message
+    assert list(gm.graph.nodes) == ["s9_stale"]
 
 
 def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
@@ -4875,6 +4907,7 @@ screen_attrs = st.fixed_dictionaries(
         ),
         "last_normalized_visit_milestone": st.integers(min_value=0, max_value=10),
         "visit_count": st.integers(min_value=0, max_value=100),
+        "replay_misses": st.integers(min_value=0, max_value=10),
     }
 )
 node_attrs = st.tuples(screen_attrs, memberships).map(lambda parts: {**parts[0], **parts[1]})
@@ -4936,6 +4969,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "interactable_elements": d.get("interactable_elements", []),
             "last_normalized_visit_milestone": d.get("last_normalized_visit_milestone", 0),
             "visit_count": d.get("visit_count", 0),
+            "replay_misses": d["replay_misses"],
             "observations": d.get("observations", []),
             "representative_observation": d.get("representative_observation"),
         }

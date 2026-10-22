@@ -827,9 +827,9 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
 
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
-    member observations with its representative among them, or whose representative has
-    no image in ``steps_dir``, and every edge without actions or whose per-action lists
-    do not hold one entry per action.
+    member observations with its representative among them, whose representative has
+    no image in ``steps_dir``, or that has no integer ``replay_misses`` count, and every
+    edge without actions or whose per-action lists do not hold one entry per action.
     """
     without_members = nodes_without_members(graph["nodes"])
     without_image = [
@@ -837,6 +837,9 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         for node in graph["nodes"]
         if node["id"] not in without_members
         and not observation_image_path(steps_dir, node["representative_observation"]).is_file()
+    ]
+    without_replay_misses = [
+        node["id"] for node in graph["nodes"] if not isinstance(node.get("replay_misses"), int)
     ]
     problems = []
     if without_members:
@@ -847,6 +850,8 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(
             f"node(s) with a representative without an image in {steps_dir}: {without_image}"
         )
+    if without_replay_misses:
+        problems.append(f"node(s) without a replay_misses count: {without_replay_misses}")
     problems.extend(edge_problems(graph["edges"]))
     if problems:
         raise unloadable_graph(path, problems)
@@ -1314,7 +1319,9 @@ class GraphManager:
         return None
 
     def _record_external_web_visit(self, observation: Observation) -> str:
-        self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+        self.graph.add_node(
+            EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0
+        )
         node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         _add_member(node_data, observation.observation_id)
@@ -1333,6 +1340,7 @@ class GraphManager:
                 page_description=f"[external app: {package}]",
                 state_schema={},
                 visit_count=0,
+                replay_misses=0,
                 is_external=True,
             )
         node_data = self.graph.nodes[node_id]
@@ -1613,6 +1621,7 @@ class GraphManager:
             interactable_elements=init_elements,
             last_normalized_visit_milestone=0,
             visit_count=0,
+            replay_misses=0,
         )
         logger.info(
             "Created new node %s: %s (%d elements)",
@@ -2642,7 +2651,7 @@ class GraphManager:
         """
         node_id = self.resolve_node_id(node_id)
         node_data = self.graph.nodes[node_id]
-        misses = node_data.get("replay_misses", 0) + 1
+        misses = node_data["replay_misses"] + 1
         node_data["replay_misses"] = misses
         logger.info("Replay missed %s %d time(s) in a row", node_id, misses)
 
@@ -2687,7 +2696,7 @@ class GraphManager:
                 node_pkg = node_data.get("package", "")
                 if node_pkg and node_pkg != package_name:
                     continue
-            if node_id != start and node_data.get("replay_misses", 0) >= REPLAY_MISSES_LEFT_OUT:
+            if node_id != start and node_data["replay_misses"] >= REPLAY_MISSES_LEFT_OUT:
                 continue
 
             elements = node_data.get("interactable_elements", [])
@@ -2761,7 +2770,7 @@ class GraphManager:
                 "interactable_elements": attrs.get("interactable_elements", []),
                 "last_normalized_visit_milestone": attrs.get("last_normalized_visit_milestone", 0),
                 "visit_count": attrs.get("visit_count", 0),
-                "replay_misses": attrs.get("replay_misses", 0),
+                "replay_misses": attrs["replay_misses"],
                 "observations": attrs.get("observations", []),
                 "representative_observation": attrs.get("representative_observation"),
             }
@@ -2809,13 +2818,14 @@ class GraphManager:
 
         A file that lacks a field the graph needs raises ``ValueError`` naming it and
         each node, member or edge that lacks one: a node must list its member
-        observations with its representative among them, the representative must have
-        an image in the step log, every member of an in-app node must have a record
-        there with its pixel hash and, unless it is of a black screenshot, its describe
-        output, and every edge must hold one entry per action in each per-action list.
-        With embedding settings, so does a damaged text-vector file, one from another
-        model, and one, missing or not, without the vector of a member of an in-app
-        node whose record holds a describe output.
+        observations with its representative among them and have an integer
+        ``replay_misses`` count, the representative must have an image in the step log,
+        every member of an in-app node must have a record there with its pixel hash
+        and, unless it is of a black screenshot, its describe output, and every edge
+        must hold one entry per action in each per-action list. With embedding
+        settings, so does a damaged text-vector file, one from another model, and one,
+        missing or not, without the vector of a member of an in-app node whose record
+        holds a describe output.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
