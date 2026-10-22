@@ -831,7 +831,7 @@ def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
         assert kind in refinement, kind
 
 
-def test_the_merge_audit_no_longer_excludes_a_page_with_its_menu_open(
+def test_the_merge_audit_does_not_exclude_a_page_with_its_menu_open(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
