@@ -642,6 +642,7 @@ class Kobe:
                 target_observation=web_node_data.get("page_description", ""),
             ),
         )
+        self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.total_steps_completed += 1
         self.save_graph()
         node, device_state = self._leave_external_web(expected_node=move.source)
@@ -774,8 +775,8 @@ class Kobe:
     def _handle_external_app(self, move: _Move, device_state: dict[str, Any]) -> dict[str, Any]:
         """Handle navigation to an external app.
 
-        Records the screen in the external app's node (no VLM calls) and the edge, and
-        returns to the app with ``return_to_app``.
+        Records the screen in the external app's node (no VLM calls) and the edge, marks
+        the planned element explored, and returns to the app with ``return_to_app``.
 
         Returns:
             The state of the app's screen that ``return_to_app`` returned to.
@@ -798,6 +799,7 @@ class Kobe:
                 target_observation=f"[left app to {external_package}]",
             ),
         )
+        self.graph.mark_element_explored(move.source, move.planned_element)
         self.logger.info(
             "Step: %s --[%s]--> %s (external)",
             move.source,

@@ -432,7 +432,9 @@ those places when it ranks below them.
 A step that opens another app records an edge to an `ext_<package>` node. A step
 that opens web content from outside the app, such as a browser or custom tab
 showing an address bar or URL, records an edge to the single shared `ext_web`
-node. Either way the explorer then presses back. A redirecting link or a browser's
+node. Either way the element the step acted on is marked explored, as after a
+step that stays in the app, and the explorer then presses back. A redirecting
+link or a browser's
 own history can keep an outside web page up, so the explorer presses back again,
 a few times at most, and if the page is still showing restarts the app as before
 a [replay](#replaying-to-a-node). Back can also leave another app in front, for
