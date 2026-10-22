@@ -30,7 +30,6 @@ SYSTEM_WINDOW = "TYPE_SYSTEM"
 APPLICATION_WINDOW = "TYPE_APPLICATION"
 # Android's accessibility title for every PopupWindow: menus, dropdowns and tooltips.
 POPUP_TITLE = "Popup Window"
-# A signature entry must be on at least this share of a node's members to be stable.
 STABLE_LAYOUT_SHARE = 0.8
 # A layout of fewer entries says too little to compare: one or two controls match
 # every screen that has them.

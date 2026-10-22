@@ -91,8 +91,6 @@ logger = logging.getLogger(__name__)
 NORMALIZE_EVERY_N_VISITS = 10
 # The verifier calls the short list may make for one screen; a checked expected node adds one.
 SHORT_LIST_VERIFICATIONS = 3
-# The layout similarity a node needs to join a screen's short list, and the one two
-# nodes' stable layouts need to be proposed for a merge.
 LAYOUT_SHORT_LIST_FLOOR = 0.55
 LAYOUT_MERGE_FLOOR = 0.80
 _FIXED_INSTRUCTION_MAX_WORDS = 6
