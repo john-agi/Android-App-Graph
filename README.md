@@ -751,8 +751,8 @@ verified once whatever proposed it. Each pair names its sources:
   [member checks](#member-checks) are set separately: a lower merge floor proposes
   more pairs, and a higher grouping floor separates more members.
 
-A near-identical image proves nothing on its own: a page and the same page with a
-menu open look alike and are different screens. Each pair is verified on its two
+A near-identical image proves nothing on its own: a start search and a destination
+search look alike and are different screens. Each pair is verified on its two
 closest members: the verifier sees the member of the more-visited node, with that
 node's description, beside the member of the other. A confirmed pair is merged into
 its lower-numbered node; a pair whose node an earlier merge removed is verified on
