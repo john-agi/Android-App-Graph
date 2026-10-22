@@ -7,8 +7,9 @@ fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE) by Yuxiang Chai.
 
 1. **Explore an app.** Android-App-Graph opens an Android app on an emulator, observes the
    current screen, chooses an exploration action, and records the result.
-2. **Build a graph.** Each app state becomes a graph node. Actions that move the
-   app between states become graph edges.
+2. **Build a graph.** Each screen of the app becomes a graph node, and what
+   changes on it, such as a scrolled list or an open menu, is that node's state.
+   Actions that move the app between states become graph edges.
 3. **Audit and plot the graph.** `app-graph-audit` finds duplicate nodes and
    mislabelled edges and can correct them on the device; `app-graph-plot` draws
    the graph.
@@ -432,6 +433,14 @@ uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 Exploration writes graph files under `graphs/<app_name>/` and records every
 screenshot and action in its [step log](#step-log).
 
+Every step that counts toward `--max-steps` logs a `Step N/M: <from> --[<action>]--> <to>`
+line and then the tokens it used. `<to>` is `ext_<package>` for a step into another
+app and `ext_web` for one onto [outside web content](#external-apps-and-web-pages).
+A step that only waits shows `wait` as its action, and a step that plans Back where
+Back leaves the app and [continues from a ranked target](#replaying-to-a-node) shows
+`continue`, with the node it continues from as `<to>`. A run that continues a graph
+with completed steps first logs the step it resumes from and the target total.
+
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
 every permission it requests with `adb shell pm grant`, so no permission prompt
 interrupts exploration. The grants stay on the device. Permissions that
@@ -446,9 +455,9 @@ For long runs, use the auto-resume wrapper:
 ### Replaying to a node
 
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
-steps, a step that plans Back on the start screen (below) and each issue that
+steps, a step that plans Back where Back leaves the app (below) and each issue that
 `app-graph-audit --re-explore` works on reach their node by replaying recorded actions
-from the app's start screen. Before every replay the
+from the screen the app opens on. Before every replay the
 app is force-stopped (`adb shell am force-stop <package_name>`) and launched again
 with its task cleared (`adb shell am start -n <component> -f 0x10008000`), so another
 app's screen left in that task, such as a search screen the app opened, does not come
@@ -456,6 +465,13 @@ back. The component is the app's `launch_activity` when the config sets one, and
 otherwise the package's launcher activity, looked up once per run; of several, the
 first is used and a warning names the others. Whatever the app holds only in memory,
 such as an unsaved form, is lost at each replay; data it has stored survives.
+
+Some apps open on the screen used last rather than on their start screen, the screen
+the app opened on when exploration began: Clock opens on the tab used last, even with
+its task cleared. So after the launch the replay identifies the screen, expecting the
+start screen. When it is another node and recorded actions lead from that node to the
+target, the replay starts there, and otherwise from the start screen; a log line names
+the node whenever it is not the start screen.
 
 The replay follows the path that sends the fewest device actions, each edge
 weighed by its cheapest action: the action's own steps and its
@@ -472,12 +488,14 @@ among the `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also
 offers the app's start screen while it has unexplored elements, in the last of
 those places when it ranks below them.
 
-Back on the start screen leaves the app for the home screen, and exploration then
-restarts the app onto the same screen. So when an exploration step plans Back there,
-or its action model answers `end`, which exploration records as Back, Back is not
-pressed. The explorer chooses a node as a checkpoint does, among the ranked nodes
-other than the start screen but without the checkpoint's merge audit, replays to it
-and continues from it. The step counts toward `max_steps`, and its log line names the
+Back on the start screen leaves the app for the home screen, as does Back on the
+screen an app opens on instead, and exploration then restarts the app onto the same
+screen. So when an exploration step plans Back on the start screen or on a screen with
+an edge by Back to an `ext_` node, where Back has already left the app, or its action
+model answers `end` there, which exploration records as Back, Back is not pressed.
+The explorer chooses a node as a checkpoint does, among the ranked nodes other than
+the step's screen but without the checkpoint's merge audit, replays to it and
+continues from it. The step counts toward `max_steps`, and its log line names the
 node. In the step log, the replay's records have the `source` `navigation_replay` and
 the screen read after it `coverage_checkpoint`. When no other node is ranked, Back is
 pressed.
@@ -516,8 +534,8 @@ the same error if the restart does not bring the app back.
 Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
 package. A dialog's node is therefore never a target of
-`--resume-from auto` or the coverage checkpoint, which replay from the app's start
-screen. A node without a recorded package, other than an `ext_` one, takes the
+`--resume-from auto` or the coverage checkpoint, which replay from the screen the app
+opens on. A node without a recorded package, other than an `ext_` one, takes the
 graph file's `package_name`, or the app's configured `package_name` when the file
 has none, so a graph file whose nodes record no package loads and resumes too.
 
@@ -623,6 +641,23 @@ reuse each other's numbers.
 
 ### Graph nodes
 
+A node is a screen by its purpose. What changes on a screen without changing its
+purpose is the node's state, which the screen description model records on each
+visit: whether the on-screen keyboard is shown (`keyboard_visible`), the focused
+field (`focused_field`), how far a list is scrolled (`first_visible_item` and
+`last_visible_item`), the overflow menu, dropdown, picker, popup or context menu
+open over the screen (`open_menu`, naming the menu, or `null`), and which sections
+are expanded (`expanded_sections`). The verifier counts screens that differ only in
+these as the same screen. So opening or closing a menu is a self-loop whose
+`schema_deltas` entry records `open_menu`, choosing an option that keeps the screen
+is a self-loop recording the value it changed, and choosing one that leaves the
+screen is an edge to where it leads. A menu's options join the screen's elements as
+rows revealed by scrolling do, and an option's action records the tap that opened
+the menu in its [setup](#graph-edges), so a replay opens the menu before choosing
+the option. A dialog, bottom sheet or full-screen picker that has its own purpose,
+such as a data usage warning dialog, is a node of its own, and a menu open over it
+is that node's state.
+
 Each node lists the observations assigned to it in `observations`, in step
 order, and names one of them `representative_observation`:
 
@@ -670,7 +705,8 @@ what each step found.
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later
-   rejections refine nothing.
+   rejections refine nothing. Refined descriptions, like every description, leave out
+   the state listed in [Graph nodes](#graph-nodes), such as an open menu.
 
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.
@@ -701,9 +737,9 @@ An action's entry in `setups` is the list of device actions exploration sent on
 the edge's source node before it, since it last arrived at that node from
 elsewhere; a [replay](#replaying-to-a-node) sends them first. They are the
 node's self-loops, such as a swipe that scrolled a list down to the tapped row,
+or opening a form's dropdown and choosing the option that shows the tapped field,
 and its round trips, actions that left the node and came back to it, such as
-opening a form's dropdown and choosing the option that shows the tapped field,
-or opening one of a list's rows and pressing Back. Exploration keeps the nodes
+opening one of a list's rows and pressing Back. Exploration keeps the nodes
 it arrived at in order: coming back to one of them ends a round trip, and
 arriving at any other node starts that node's setup empty, `[]`.
 `app-graph-audit --re-explore` records setups the same way. The entry is `null`
@@ -717,6 +753,17 @@ when the setup is unknown or too long:
 
 An action recorded again keeps the shorter of its known setups. A graph file
 without `setups` loads unchanged, and its actions replay without a setup.
+
+Edge normalization asks the page-detail model to generalize an edge's
+instructions into `instruction_templates`, in the passes listed under
+[Requests and recovery](#requests-and-recovery). Each time it asks
+about an edge, it stores a SHA-256 of the instructions it sent in
+`normalized_instructions_hash`, whatever the answer: a template, no template, or
+the fallback for a reply that was cut off or timed out. A later pass skips an
+edge whose instructions still match that hash, so an edge is asked again only
+after it gains, loses or changes an instruction; an edge without the hash is
+asked on the next pass. A pass also skips an edge with a single instruction of
+at most six words and no quote or digit, which keeps no template.
 
 ## Visualize or Audit a Graph
 
@@ -775,8 +822,8 @@ verified once whatever proposed it. Each pair names its sources:
   [member checks](#member-checks) are set separately: a lower merge floor proposes
   more pairs, and a higher grouping floor separates more members.
 
-A near-identical image proves nothing on its own: a page and the same page with a
-menu open look alike and are different screens. Each pair is verified on its two
+A near-identical image proves nothing on its own: a start search and a destination
+search look alike and are different screens. Each pair is verified on its two
 closest members: the verifier sees the member of the more-visited node, with that
 node's description, beside the member of the other. A confirmed pair is merged into
 its lower-numbered node; a pair whose node an earlier merge removed is verified on
@@ -854,9 +901,10 @@ an action drops its instruction templates, which the final normalization rebuild
 
 Last, without a model call or a device, the audit adds `no_path_to_start` to
 `<app_name>_audit.json`: the nodes of the final audited graph from which no
-recorded edges lead back to `start_node`, the screen every
-[replay](#replaying-to-a-node) begins from. It logs how many it found, as a
-warning when `in_app` is not empty, and changes nothing in the graph.
+recorded edges lead back to `start_node`, the screen a
+[replay](#replaying-to-a-node) begins from when the app opens on it. It logs how
+many it found, as a warning when `in_app` is not empty, and changes nothing in the
+graph.
 
 - `in_app` lists the app's own screens whose way back was never recorded.
 - `external` lists the `ext_` nodes. They keep no outgoing edge, so every one of

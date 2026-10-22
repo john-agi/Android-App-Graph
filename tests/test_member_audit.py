@@ -1,9 +1,9 @@
 """The audit from members: one set of merge proposals from the model's text and from
 close member images, and the split and move checks on each node's member groups.
 
-Every graph here has synthetic image and text vectors, and the verifier and the text
-embedding are scripted fakes; describing a screen fails the test, since the audit works
-from the describe output the step log stores.
+Every graph here has synthetic image and text vectors, and the verifier, the text
+embedding and the edge normalizer are scripted fakes; describing a screen fails the
+test, since the audit works from the describe output the step log stores.
 """
 
 from __future__ import annotations
@@ -64,12 +64,14 @@ def _member(image_b64: str) -> str:
 @dataclass
 class FakeModels:
     """A verifier that confirms the member pairs in ``same`` and records each pair it
-    is shown as ``(existing, new)``, and a text embedding that records each text."""
+    is shown as ``(existing, new)``, a text embedding that records each text, and an
+    edge normalizer whose every template is ``template``."""
 
     same: set[frozenset[str]] = field(default_factory=set)
     shown: list[tuple[str, str]] = field(default_factory=list)
     descriptions: list[str] = field(default_factory=list)
     embedded: list[str] = field(default_factory=list)
+    template: str = "before"
 
     def confirm(self, first: str, second: str) -> None:
         self.same.add(frozenset((first, second)))
@@ -94,6 +96,9 @@ class FakeModels:
         self.embedded.append(text)
         return [1.0, 0.0]
 
+    def normalize_edge(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {"is_template": True, "instruction_template": self.template}
+
 
 def _no_describe(*_args: object, **_kwargs: object) -> NoReturn:
     msg = "the audit must not describe a screen"
@@ -105,6 +110,7 @@ def models(monkeypatch: pytest.MonkeyPatch) -> FakeModels:
     fake = FakeModels()
     monkeypatch.setattr(graph_manager, "verify_same_node", fake.verify_same_node)
     monkeypatch.setattr(graph_manager, "get_embedding", fake.get_embedding)
+    monkeypatch.setattr(graph_manager, "normalize_edge", fake.normalize_edge)
     monkeypatch.setattr(graph_manager, "describe_page_and_state", _no_describe)
     return fake
 
@@ -478,6 +484,68 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
         ("s1_list", {"image": pytest.approx(LINKED), "text": pytest.approx(LINKED)}),
         ("s2_menu", {"image": pytest.approx(0.0), "text": pytest.approx(0.0)}),
     ]
+
+
+def _templates_around_member_checks(
+    graph: GraphManager, path: Path, models: FakeModels
+) -> dict[tuple[str, str], list[str]]:
+    """Normalize every edge, check the members, normalize again, and return each edge's
+    templates: ``before`` as the first pass wrote them, ``after`` as the second did."""
+    graph.normalize_all_edges()
+    _check_members(graph, path, {})
+    models.template = "after"
+    graph.normalize_all_edges()
+    return {
+        (s, t): [template["template"] for template in data["instruction_templates"]]
+        for s, t, data in graph.graph.edges(data=True)
+    }
+
+
+@pytest.mark.parametrize("instruction", ["do 1", ""], ids=["instructed", "no-instruction"])
+def test_a_split_has_only_the_edges_whose_actions_it_changes_normalized_again(
+    instruction: str,
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """An edge that loses an action, with an instruction or without one, and every edge
+    of the new node are sent again. An edge whose actions all stay is not, even when its
+    visit count drops, and neither is an edge of another node."""
+    home_to_list, *other_edges = SPLIT_EDGES
+    edges = (
+        {**home_to_list, "instructions": ["do 0", instruction, "do 2", "do 3"]},
+        *other_edges,
+        _edge("s1_list", "s1_list", SCROLL),
+    )
+    write_member_graph(graph_path, SPLIT, edges=edges, transitions=SPLIT_TRANSITIONS)
+    graph = _load(graph_path)
+
+    templates = _templates_around_member_checks(graph, graph_path, models)
+
+    new = "s2_screen_000003"
+    assert templates == {
+        ("s0_home", "s1_list"): ["after"],
+        (new, "s1_list"): ["after"],
+        (new, new): ["after"],
+        ("s1_list", new): ["after"],
+        ("s0_home", "s0_home"): ["before"],
+        ("s1_list", "s1_list"): ["before"],
+    }
+
+
+def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """The edge the moved member's action joins is sent again; another edge of the node
+    the member joins is not."""
+    edges = (*MOVE_EDGES, _edge("s1_list", "s2_menu", TAP_B), _edge("s2_menu", "s1_list", BACK))
+    write_member_graph(graph_path, MOVE, edges=edges, transitions=MOVE_TRANSITIONS)
+    graph = _load(graph_path)
+    models.confirm("000004", "000003")
+
+    templates = _templates_around_member_checks(graph, graph_path, models)
+
+    assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
