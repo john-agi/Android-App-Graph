@@ -473,9 +473,10 @@ def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Pa
         )
     if problems:
         msg = (
-            f"{path}: node(s) with {'; '.join(problems)}. Graphs saved before nodes listed "
-            "their member observations, or before observations kept their accessibility "
-            "tree, cannot be loaded: explore the app again into a new graph directory."
+            f"{path}: node(s) with {'; '.join(problems)}. A graph whose nodes do not list "
+            "their member observations, or whose representatives have no tree and no "
+            "recorded reason, cannot be loaded: explore the app again into a new graph "
+            "directory."
         )
         raise ValueError(msg)
 
