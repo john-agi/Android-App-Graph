@@ -71,7 +71,6 @@ graph TD;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
-    gm --> pkgs["android_app_graph.android_packages"];
     gm --> gf;
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
@@ -363,9 +362,9 @@ first rejection refined it to (`identify.refinement.new_description`), which als
 the node the screen starts when every check rejects it. An exact match copies its
 member's vector without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
-member whose record holds a `describe` output: a missing file, one tagged with another
-model, or one without such a member's vector stops exploration or the audit as it
-loads the graph, with an error naming the file and the problem.
+member of an in-app node: a missing file, one tagged with another model, or one
+without such a member's vector stops exploration or the audit as it loads the graph,
+with an error naming the file and the problem.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no image vector is embedded first, as when `image_emb.json` is
@@ -476,9 +475,12 @@ the node whenever it is not the start screen.
 The replay follows the path that sends the fewest device actions, each edge
 weighed by its cheapest action: the action's own steps and its
 [setup](#graph-edges), so a path whose actions need no setup is preferred. On
-each edge it sends that action's setup first, such as the swipe that scrolled a
-list or the dropdown choice that filled in a form, so the action finds the screen
-as exploration did. Exploration's log names each setup action, as in
+each edge it sends that action's setup first, the actions that put the screen
+in the state exploration sent the action in, such as the swipe that scrolled a
+list, the tap that opened the menu an option is on, or the choice in a dialog
+that filled in a form. What exploration did on the screen and undid before the
+action, such as opening a row and pressing Back, is not part of the setup, so
+the replay does not send it. Exploration's log names each setup action, as in
 `Replay 2/3: setup 1/1 on s30_apps via swipe`.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
@@ -535,9 +537,7 @@ Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
 package. A dialog's node is therefore never a target of
 `--resume-from auto` or the coverage checkpoint, which replay from the screen the app
-opens on. A node without a recorded package, other than an `ext_` one, takes the
-graph file's `package_name`, or the app's configured `package_name` when the file
-has none, so a graph file whose nodes record no package loads and resumes too.
+opens on.
 
 ### Step log
 
@@ -715,13 +715,16 @@ The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
-Loading a graph fails, naming the nodes, when a node lists no observations, its
-representative is not one of them, the representative's image is missing from
-`steps/`, or the representative has neither its tree there nor a record whose
-`ui_tree_error` says why it has none. Only the representative is checked. A graph
-whose nodes do not list their observations, or whose representatives have no tree
-and no recorded reason, cannot be loaded: explore the app again into a new graph
-directory.
+Loading a graph fails with an error naming the file and what is wrong: the file
+has no `nodes` or `edges` list, a node lists no observations or its representative
+is not one of them, a representative's image is missing from `steps/`, a
+representative has neither its tree there nor a record whose `ui_tree_error` says
+why it has none, a member of an in-app node has no `pixel_hash` or `describe` in
+its record in `steps/`, or an edge has no actions or per-action lists (see
+[Graph edges](#graph-edges)) that do not hold one entry per action. `app-graph-plot`
+fails the same way, except that it reads no record or tree in `steps/` and needs
+the image of every member, not only of the representative. Explore the app again
+into a new graph directory.
 
 ### Graph edges
 
@@ -733,26 +736,37 @@ that list, and an action that recorded no state change has `null` in
 `schema_deltas`; only self-loop actions record one. Skip those entries when you
 read an edge.
 
-An action's entry in `setups` is the list of device actions exploration sent on
-the edge's source node before it, since it last arrived at that node from
-elsewhere; a [replay](#replaying-to-a-node) sends them first. They are the
-node's self-loops, such as a swipe that scrolled a list down to the tapped row,
-or opening a form's dropdown and choosing the option that shows the tapped field,
-and its round trips, actions that left the node and came back to it, such as
-opening one of a list's rows and pressing Back. Exploration keeps the nodes
-it arrived at in order: coming back to one of them ends a round trip, and
-arriving at any other node starts that node's setup empty, `[]`.
-`app-graph-audit --re-explore` records setups the same way. The entry is `null`
-when the setup is unknown or too long:
+An action's entry in `setups` is the list of device actions a
+[replay](#replaying-to-a-node) sends on the edge's source node before the
+action, so that the node is in the state the action was sent in. They are the
+actions exploration sent on that node since it last arrived there from
+elsewhere whose effect on the node's [state](#graph-nodes) is in force when the
+action is sent: the node's self-loops, such as a swipe that scrolled a list down
+to the tapped row, the tap that opened the menu whose option the action
+chooses, or choosing the option that shows the tapped field, and its round
+trips, actions that left the node and came back to it, such as a dialog that
+set one of a form's fields. Exploration keeps the nodes it arrived at in order:
+coming back to one of them ends a round trip, and arriving at any other node
+starts that node's setup empty, `[]`.
+
+A setup leaves out what was undone. Exploration keeps the state each action
+left the node in, and when the node comes back to a state it was in since
+exploration arrived there, the actions in between are left out of the setup of
+every later action on the node. Examples are a row of a list opened and left by
+Back with the list as it was, a menu opened and closed again, a field typed and
+cleared, and a tap that changed nothing. Two states are the same when they
+agree on every key, a key one of them lacks counting as `null`, as in
+`schema_deltas`. `app-graph-audit --re-explore` records setups the same way.
+The entry is `null` when the setup is unknown or too long:
 
 - How the device came to be on a screen is unknown on the screen a run begins
   on without a replay, after a step that leaves the app, and after a replay that
   ends elsewhere than its node, until exploration arrives at that screen from
   another one.
-- A setup of more than 8 actions is dropped, and the log says so.
+- A setup of more than 8 actions, counted without what was undone, is dropped,
+  and the log says so.
 
-An action recorded again keeps the shorter of its known setups. A graph file
-without `setups` loads unchanged, and its actions replay without a setup.
+An action recorded again keeps the shorter of its known setups.
 
 Edge normalization asks the page-detail model to generalize an edge's
 instructions into `instruction_templates`, in the passes listed under
@@ -779,8 +793,7 @@ uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 In the HTML view, each node's label ends with the number of screenshots the node
 holds, such as `[12 screenshots]`. Clicking a node opens a panel with its member
 screenshots, oldest first and at most ten, with Previous and Next buttons and the
-position, such as `3 / 10`. A member whose image is missing from `steps/` is
-skipped. Clicking the background or an edge closes the panel.
+position, such as `3 / 10`. Clicking the background or an edge closes the panel.
 
 Hovering a node shows its ID, full page description, activity, visits, state keys,
 explored element count and first ten unexplored elements, then its representative
@@ -842,9 +855,8 @@ verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reu
 After the merges, the members of each in-app node are grouped by their screenshot
 vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
 and the groups are the connected components of those links, single-linkage
-clustering. Only members with a vector and a stored describe output (`describe` in
-their [record](#step-log)) are grouped. The group that holds the representative is
-the node's home.
+clustering. Only members with a vector are grouped. The group that holds the
+representative is the node's home.
 
 - A node whose home holds fewer than half of its members is `diffuse` and is left
   alone, without a verifier call.
