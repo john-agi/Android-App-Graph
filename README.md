@@ -703,8 +703,7 @@ number; it adds no element of its own. When the screenshot has no tree, the tree
 lists no element, or one web view or one node that draws its own content (a `View`,
 `SurfaceView`, `TextureView` or `GLSurfaceView` without children) covers more than
 half of a window the user can act on, the model finds the elements itself instead,
-and they have no locator. In the 69 trees of a 60-step exploration of Settings the
-smallest screens, one-row dropdown menus, list their one element, and none is thin.
+and they have no locator.
 
 A node stores each element as `locator`, `description`, `position` (the third of
 the screen, across and down, that holds the element's centre, such as `top left`,
