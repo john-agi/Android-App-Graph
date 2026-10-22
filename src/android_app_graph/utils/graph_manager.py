@@ -1427,9 +1427,8 @@ class GraphManager:
         """Normalize *edges* into templates, sending their calls concurrently.
 
         The skip rules choose the edges that need a call, and the results are written and
-        logged in the order of *edges*, both on this thread, so the graph and its edge lines
-        in the log are those of calls sent one at a time. Returns the number of edges that
-        produced a template.
+        logged in the order of *edges*, both on this thread, whichever call returns first.
+        Returns the number of edges that produced a template.
         """
         client, settings = self._require_page_detail()
         chosen = [self._edge_to_normalize(source, target) for source, target in edges]

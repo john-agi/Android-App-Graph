@@ -242,9 +242,6 @@ class TokenTracker:
 
 token_tracker = TokenTracker()
 
-# Normalizing the 245 edges of a 300-step Settings graph with openai/gpt-6.1-sol on
-# 2026-10-21 took 6.9, 3.4 and 1.9 minutes at 4, 8 and 16 requests at once, against 28
-# minutes one at a time, with no HTTP 429 and no retry at any of them.
 MAX_REQUESTS_IN_FLIGHT = 16
 
 

@@ -2463,8 +2463,8 @@ def test_maybe_normalize_node_edges_for_a_missing_node_returns_false() -> None:
     assert make_manager().maybe_normalize_node_edges("s9_missing") is False
 
 
-# How long a call waits for the other calls of its batch. Calls sent one at a time never
-# meet, so they fail after this instead of hanging.
+# How long a call waits for the other calls of its batch before it fails the test instead
+# of hanging.
 MEET_TIMEOUT = 10.0
 
 
@@ -2580,13 +2580,13 @@ class YieldingUsage(ChatUsage):
         return super().__getattribute__(name)
 
 
-def test_normalize_all_edges_counts_the_usage_a_sequential_run_counts(
+def test_normalize_all_edges_counts_the_usage_of_every_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     usage = YieldingUsage.model_validate(
         {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10, "cost": 0.25}
     )
-    concurrent, sequential = TokenTracker(), TokenTracker()
+    concurrent, expected = TokenTracker(), TokenTracker()
     gm = make_manager()
     instructions = _edges_needing_a_call(gm, 2 * MAX_REQUESTS_IN_FLIGHT)
     batch = threading.Barrier(MAX_REQUESTS_IN_FLIGHT, timeout=MEET_TIMEOUT)
@@ -2602,9 +2602,9 @@ def test_normalize_all_edges_counts_the_usage_a_sequential_run_counts(
 
     gm.normalize_all_edges()
     for _ in instructions:
-        sequential.record("normalize_edge", PAGE_DETAIL.model, usage)
+        expected.record("normalize_edge", PAGE_DETAIL.model, usage)
 
-    assert concurrent.summary() == sequential.summary()
+    assert concurrent.summary() == expected.summary()
 
 
 class CreditsExhaustedError(RuntimeError):
