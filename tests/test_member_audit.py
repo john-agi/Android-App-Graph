@@ -27,7 +27,13 @@ from android_app_graph.graph_files import graph_steps_dir, text_embeddings_path
 from android_app_graph.member_groups import GROUPING_FLOOR, MERGE_FLOOR
 from android_app_graph.step_log import read_exploration_transitions
 from android_app_graph.utils import ModelSettings, graph_manager
-from android_app_graph.utils.graph_manager import GraphManager, MemberVerdicts, Merge
+from android_app_graph.utils.graph_manager import (
+    GraphManager,
+    MemberQuestion,
+    MemberVerdict,
+    MemberVerdicts,
+    Merge,
+)
 
 FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
@@ -76,7 +82,8 @@ class FakeModels:
     edge normalizer whose every template is ``template``.
 
     A pair in ``meetings`` is answered only once every question its barrier counts has
-    been asked, so a round asked one question at a time breaks the barrier.
+    been asked, so a round asked one question at a time breaks the barrier. A pair in
+    ``refused`` raises, as a request refused for lack of credit does.
     """
 
     same: set[frozenset[str]] = field(default_factory=set)
@@ -85,6 +92,7 @@ class FakeModels:
     embedded: list[str] = field(default_factory=list)
     template: str = "before"
     meetings: dict[frozenset[str], threading.Barrier] = field(default_factory=dict)
+    refused: set[frozenset[str]] = field(default_factory=set)
 
     def confirm(self, first: str, second: str) -> None:
         self.same.add(frozenset((first, second)))
@@ -103,6 +111,9 @@ class FakeModels:
         **_settings: object,
     ) -> dict[str, Any]:
         pair = (_member(screenshot_existing_b64), _member(screenshot_new_b64))
+        if frozenset(pair) in self.refused:
+            msg = f"the verifier refused {pair}"
+            raise RuntimeError(msg)
         meeting = self.meetings.get(frozenset(pair))
         if meeting is not None:
             meeting.wait()
@@ -799,6 +810,27 @@ def test_a_round_s_questions_are_in_flight_together(
 
     assert (report.rounds, report.asked, report.merges) == (1, 3, [])
     assert len(models.shown) == 3
+
+
+def test_a_refused_question_raises_once_the_answers_before_it_are_kept(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    write_member_graph(graph_path, _one_member_nodes(0.0, 0.5, 1.0))
+    graph = _load(graph_path)
+    models.confirm("000001", "000002")
+    models.refused.add(frozenset(("000001", "000003")))
+    verdicts: MemberVerdicts = {}
+    questions = [
+        MemberQuestion("000001", "000002", "Node s0_screen"),
+        MemberQuestion("000001", "000003", "Node s0_screen"),
+    ]
+
+    with pytest.raises(RuntimeError, match="refused"):
+        graph.verify_member_pairs(questions, verdicts)
+
+    assert verdicts == {
+        frozenset(("000001", "000002")): MemberVerdict(same=True, reason="scripted")
+    }
 
 
 # Three screens over six nodes; the edges between them merge in the order the merges run.
