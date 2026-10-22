@@ -98,12 +98,6 @@ logger = logging.getLogger(__name__)
 NORMALIZE_EVERY_N_VISITS = 10
 # The verifier calls the short list may make for one screen; a checked expected node adds one.
 SHORT_LIST_VERIFICATIONS = 3
-# A screen joins a node the verifier gave no answer on only when the cosines of its image
-# vector and its description vector with those of the node's closest member both reach these.
-# No pair the verifier called different in a recorded 300-step Settings exploration reached
-# both: a wrong match is harder to undo than a duplicate node.
-NEAR_IDENTICAL_IMAGE_COSINE = 0.993
-NEAR_IDENTICAL_TEXT_COSINE = 0.80
 _FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
@@ -446,7 +440,6 @@ class _Decision:
     candidates: list[dict[str, object]] = field(default_factory=list)
     verifications: list[dict[str, object]] = field(default_factory=list)
     refinement: dict[str, object] | None = None
-    unverified: bool = False
 
     def as_record(self, node_id: str) -> dict[str, object]:
         return {
@@ -456,7 +449,6 @@ class _Decision:
             "candidates": self.candidates,
             "verifications": self.verifications,
             "refinement": self.refinement,
-            "unverified": self.unverified,
             "node": node_id,
         }
 
@@ -976,11 +968,9 @@ class GraphManager:
         4. The short list's candidates are verified in order against their closest
            members, up to ``SHORT_LIST_VERIFICATIONS``.
 
-        The first confirmation decides. A check the verifier gives no answer on decides
-        too when the screen is near-identical to the node's closest member, by the cosine
-        of their image vectors and of their description vectors; otherwise it counts as a
-        rejection. A screen every check rejects starts a new node, and the step's first
-        rejection refines the two descriptions.
+        The first confirmation decides, and a check the verifier gives no answer on
+        counts as a rejection. A screen every check rejects starts a new node, and the
+        step's first rejection refines the two descriptions.
         """
         client, page_detail = self._require_page_detail()
         self._require_embedding()
@@ -1161,7 +1151,7 @@ class GraphManager:
         excluded: set[str] = set()
         if expected is not None:
             closest = self.closest_member(expected, identification.image_vector)
-            confirmed = self._verify(identification, expected, closest)
+            confirmed = self._verify(identification, expected, closest.observation_id)
             if confirmed is not None:
                 identification.decision.stage = "expected"
                 return confirmed
@@ -1191,7 +1181,9 @@ class GraphManager:
         )
         for candidate in candidates[:SHORT_LIST_VERIFICATIONS]:
             node_id = self.resolve_node_id(candidate.node_id)
-            confirmed = self._verify(identification, node_id, candidate.closest_member)
+            confirmed = self._verify(
+                identification, node_id, candidate.closest_member.observation_id
+            )
             if confirmed is not None:
                 identification.decision.stage = "short_list"
                 return confirmed
@@ -1215,14 +1207,10 @@ class GraphManager:
                 candidate.sources[source.name] = score
         return sorted(candidates.values(), key=_short_list_order)
 
-    def _verify(
-        self, identification: _Identification, node_id: str, closest: ClosestMember
-    ) -> str | None:
-        """Ask the verifier whether the identified screen is ``node_id``'s ``closest``
-        member, and return ``node_id`` when it says so, or when it gives no answer on a
-        near-identical screen ``identify_state`` described. The first rejection of such a
-        screen refines both descriptions."""
-        member = closest.observation_id
+    def _verify(self, identification: _Identification, node_id: str, member: str) -> str | None:
+        """Ask the verifier whether the identified screen is ``node_id``'s ``member``, and
+        return ``node_id`` when it says so; no answer counts as a rejection, and the first
+        rejection refines both descriptions."""
         description = self.graph.nodes[node_id].get("page_description", "")
         verdict = self._verifier_reply(identification, member, description)
         same = verdict.get("same") is True
@@ -1250,9 +1238,14 @@ class GraphManager:
             logger.info(
                 "Verifier rejected node %s against member %s: reason: %s", node_id, member, reason
             )
-        elif self._joins_without_answer(identification, node_id, closest, reason):
-            identification.decision.unverified = True
-            return node_id
+        else:
+            logger.warning(
+                "Verifier gave no answer on node %s against member %s (%s); it counts as a "
+                "rejection",
+                node_id,
+                member,
+                reason,
+            )
         if identification.verdicts is None and not identification.rejected:
             identification.rejected = True
             self._refine(identification, node_id, verdict)
@@ -1310,44 +1303,6 @@ class GraphManager:
         if verdict.answered:
             verdicts[pair] = verdict
         return verdict
-
-    def _joins_without_answer(
-        self, identification: _Identification, node_id: str, closest: ClosestMember, reason: str
-    ) -> bool:
-        """Return whether the identified screen joins ``node_id`` although the verifier gave
-        no answer: only when ``identify_state`` described it and it is near-identical to
-        the ``closest`` member, the cosine of their image vectors and that of their
-        description vectors both reaching their cut-offs. For a member the audit identifies
-        again, a check without an answer counts as a rejection."""
-        if identification.verdicts is not None:
-            logger.warning(
-                "Verifier gave no answer on node %s against member %s (%s); it counts as a "
-                "rejection",
-                node_id,
-                closest.observation_id,
-                reason,
-            )
-            return False
-        text_score = cosine_similarity(
-            identification.text_vector, self._text_vectors[closest.observation_id]
-        )
-        near_identical = (
-            closest.score >= NEAR_IDENTICAL_IMAGE_COSINE
-            and text_score >= NEAR_IDENTICAL_TEXT_COSINE
-        )
-        logger.warning(
-            "Verifier gave no answer on node %s against member %s (%s): image cosine %.3f, "
-            "text cosine %.3f; %s",
-            node_id,
-            closest.observation_id,
-            reason,
-            closest.score,
-            text_score,
-            "near-identical, so the screen joins the node unverified"
-            if near_identical
-            else "not near-identical, so it counts as a rejection",
-        )
-        return near_identical
 
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]

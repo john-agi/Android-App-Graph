@@ -276,9 +276,7 @@ each one as `node_verify: no answer` with its cause. No answer changes nothing i
 the audit: a merge check, the audit's or the coverage checkpoint's, keeps the two
 nodes apart, and a split or move check leaves the node whole (see
 [Merge proposals](#merge-proposals) and [Member checks](#member-checks)). Screen
-matching counts it as a rejection unless the screen's screenshot and description are
-near-identical to those of the member the verifier was shown (see
-[Screen matching](#screen-matching)).
+matching counts it as a rejection (see [Screen matching](#screen-matching)).
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),
@@ -601,8 +599,6 @@ node:
   `answered` (`false` when the verifier gave no answer) and the `reason`;
 - `refinement`: the descriptions the step's first rejection refined, and what the
   rejected node was renamed to, or `null`;
-- `unverified`: `true` when the screen joined `node` without the verifier's answer,
-  as near-identical;
 - `node`, the node the screen joined, under its ID at that moment.
 
 `source` names the part of the run that took the step: `main_loop`,
@@ -690,11 +686,8 @@ what each step found.
    the state listed in [Graph nodes](#graph-nodes), such as an open menu.
 
 A verifier call that gives no answer (see
-[Requests and recovery](#requests-and-recovery)) is logged as such. The screen still
-joins that node, as an unverified match, when it is near-identical to the member the
-call compared, the node's closest member by image: the image cosine of the two is at
-least 0.993, and the cosine of the screen's description vector and that member's is
-at least 0.80. Otherwise the call counts as a rejection, and matching goes on.
+[Requests and recovery](#requests-and-recovery)) is logged as such and counts as a
+rejection, and matching goes on.
 
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.
@@ -841,8 +834,7 @@ the node's home.
     home member, the member goes through the short list of
     [screen matching](#screen-matching) again, without the node it leaves, with its
     stored describe output in place of the describe call and its description vector
-    in place of the description's embedding, with no description refined, and with a
-    call without an answer counted as a rejection even on a near-identical node. It
+    in place of the description's embedding, and with no description refined. It
     moves to the first node the verifier confirms, or to a new node.
   - a split or move check the verifier gives no answer on (see
     [Requests and recovery](#requests-and-recovery)) leaves the node whole: every

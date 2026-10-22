@@ -539,15 +539,15 @@ def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
     assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
 
 
-def test_a_moving_member_without_an_answer_on_a_near_identical_node_does_not_join_it(
+def test_a_moving_member_without_an_answer_on_a_candidate_goes_on_to_the_next(
     graph_path: Path,
     models: FakeModels,
     write_member_graph: Callable[..., None],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """List's member has the moving member's image vector and description vector, so
-    screen matching would keep the member there without an answer. A member the audit
-    moves counts the check as a rejection, and its record says no answer."""
+    List is the first candidate; the check on it gets no answer, counts as a rejection
+    and is recorded as no answer."""
     write_member_graph(
         graph_path,
         {**MOVE, "s1_list": [("000004", Y)]},
@@ -577,7 +577,6 @@ def test_a_moving_member_without_an_answer_on_a_near_identical_node_does_not_joi
     assert "Verifier gave no answer on node s1_list against member 000004 (timed out); " in (
         caplog.text
     )
-    assert "unverified" not in caplog.text
     assert check["change"]["to"] == "s3_screen_000003"
     assert models.shown == [("000002", "000003"), ("000004", "000003"), ("000005", "000003")]
 
