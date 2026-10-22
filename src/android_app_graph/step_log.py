@@ -117,6 +117,42 @@ class Transition:
     to_node: str
 
 
+@dataclass(frozen=True, slots=True)
+class TransitionRecord:
+    """A transition as its record in the step log keeps it: the observations before
+    and after the action, the action, and the nodes both were assigned to then."""
+
+    before: str
+    after: str
+    action: object
+    from_node: str
+    to_node: str
+
+
+def read_exploration_transitions(steps: Path) -> list[TransitionRecord]:
+    """Return the transition records exploration runs wrote to the step log ``steps``,
+    in step order.
+
+    An explored graph holds the edges of its exploration runs only: the audit's
+    re-exploration records its transitions against the audited copy.
+    """
+    paths = [path for path in steps.glob("*.json") if path.stem.isascii() and path.stem.isdigit()]
+    transitions: list[TransitionRecord] = []
+    for path in sorted(paths, key=lambda path: (len(path.stem), path.stem)):
+        record = as_object_dict(json.loads(path.read_text(encoding="utf-8")))
+        if record.get("kind") == "transition" and record.get("run_kind") == "explore":
+            transitions.append(
+                TransitionRecord(
+                    before=as_str(record.get("before"), ""),
+                    after=as_str(record.get("after"), ""),
+                    action=record.get("action"),
+                    from_node=as_str(record.get("from_node"), ""),
+                    to_node=as_str(record.get("to_node"), ""),
+                )
+            )
+    return transitions
+
+
 def read_observation_record(steps: Path, observation_id: str) -> dict[str, object] | None:
     """Return the record of observation ``observation_id`` in the step log ``steps``, or
     ``None`` when it has none."""
@@ -127,23 +163,20 @@ def read_observation_record(steps: Path, observation_id: str) -> dict[str, objec
     return as_object_dict(json.loads(text))
 
 
-def read_observation_tree(steps: Path, observation_id: str) -> UiTree | None:
-    """Return the accessibility tree of observation ``observation_id`` in the step log
-    ``steps``, or ``None`` when its record says why it has none.
+def read_observation_tree(steps: Path, observation_id: str) -> tuple[UiTree | None, str | None]:
+    """Return the tree of an observation in the step log ``steps`` and no reason, or no
+    tree and the reason its record gives for having none.
 
-    A tree missing without a recorded reason raises ``FileNotFoundError``: every
-    observation has one or the other, so a missing one means the step log was changed
-    by hand.
+    A tree missing without a reason raises ``FileNotFoundError``: ``StepRecorder.get_state``
+    records the tree or the reason for every observation, so a missing tree means the
+    step log was changed by hand.
     """
     path = observation_tree_path(steps, observation_id)
-    try:
-        document = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    if not path.is_file():
         record = read_observation_record(steps, observation_id) or {}
-        if as_str(record.get("ui_tree_error"), ""):
-            return None
-        raise
-    return parse_tree(document)
+        if reason := as_str(record.get("ui_tree_error"), ""):
+            return None, reason
+    return parse_tree(path.read_text(encoding="utf-8")), None
 
 
 def annotate_observation(steps: Path, observation_id: str, fields: Mapping[str, object]) -> None:
