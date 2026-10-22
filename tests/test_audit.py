@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import io
+import itertools
 import json
 import logging
 from collections.abc import Callable, Iterator
@@ -1114,31 +1115,49 @@ def test_the_flagged_action_taps_its_element_where_the_screen_before_it_shows_it
     assert transition["anchors"][0]["bounds"] == [0, 699, 1344, 917]
 
 
+@pytest.mark.parametrize("hops", [1, 2], ids=["one tap", "two taps"])
 @pytest.mark.usefixtures("_fake_device")
 def test_the_audit_s_replay_taps_each_element_where_the_screen_shows_it_now(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    hops: int,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    graph = _graph_with_nodes(
-        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
-    )
+    """The replay's first tap is aimed by the capture that identified the screen the app
+    opened on, so the screen is captured once before it, not twice; a later tap is aimed
+    by a capture taken just before it."""
+    nodes = ["s0_home", "s1_detail", "s2_more"][: hops + 1]
+    graph = _graph_with_nodes(*((node, {"page_description": node}) for node in nodes))
     recorded, details = _network_row_tapped_higher_up()
-    graph.add_edge("s0_home", "s1_detail", [recorded], details=details)
+    for source, target in itertools.pairwise(nodes):
+        graph.add_edge(source, target, [recorded], details=details)
     reached = iter(["s0_home"])
-    monkeypatch.setattr(
-        graph, "identify_state", lambda *_args, **_kwargs: next(reached, "s1_detail")
-    )
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached, nodes[-1]))
     controller = _SettingsHome("com.demo")
 
     (result,) = _re_explore(
         graph,
-        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        [{"type": "explore_node", "node": nodes[-1], "expected_pages": []}],
         controller,
         client,
         tmp_path,
     )
 
-    assert result["navigated_to"] == "s1_detail"
-    assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP]
+    assert result["navigated_to"] == nodes[-1]
+    assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP] * hops
+    replay = [
+        record
+        for record in step_records(tmp_path / "steps")
+        if record["source"] == "navigation_replay"
+    ]
+    assert [record["kind"] for record in replay] == [
+        *(["observation", "action"] * hops),
+        "observation",
+    ]
+    assert [replay[i + 1]["observation"] for i in range(0, 2 * hops, 2)] == [
+        replay[i]["id"] for i in range(0, 2 * hops, 2)
+    ]
 
 
 def _setup_tapping_the_network_row() -> EdgeDetails:

@@ -491,17 +491,19 @@ A replayed tap or long press, a setup's included, goes to the element it recorde
 its [anchor](#what-an-action-acted-on), where the screen shows that element now, so a
 list that loaded more items or stopped at another scroll position does not move the
 tap onto a neighbour. The replay reads the screen first, a [capture](#step-log) like
-any other, and looks for the anchor's locator among the visible, enabled nodes of
-the windows the user can act on, counting only the nodes that take taps when some
-do. When it finds exactly one, and a tap at the centre of that node's current bounds
-reaches it, the action goes to that centre; a long press keeps its duration.
+any other: for its first action, the capture that identified the screen the app
+opened on, and for each later one, a capture taken just before it. It looks for the
+anchor's locator among the visible, enabled nodes of the windows the user can act
+on, counting only the nodes that take taps when some do. When it finds exactly one,
+and a tap at the centre of that node's current bounds reaches it, the action goes to
+that centre; a long press keeps its duration.
 Otherwise the action goes to its recorded coordinates. The log says which way each
 tap went: `anchor`, or `recorded coordinates:` and the reason, `no_anchor` (the edge
 recorded none), `no_tree`, `no_match`, `ambiguous` (more than one element) or
 `covered` (a dialog, the keyboard where it draws or another element lies over its
 centre, as the [hit test](#what-an-action-acted-on) decides). Typing, swipes, Back,
-Home, Enter and waits replay as recorded, without a look. Each anchored tap makes a
-replay one capture longer.
+Home, Enter and waits replay as recorded, without a look. Each anchored tap after
+the replay's first action makes a replay one capture longer.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
@@ -608,11 +610,12 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, [what it acted on](#what-an-action-acted-on) as `anchors`, `hits` and `action_flags`, one entry per sub-action, and `from_node` and `to_node` as they were then |
 
 An action or transition record takes `activity` and `package` from the screenshot
-it was taken from. A [replay](#replaying-to-a-node) reads the screen before each tap
-or long press that has an anchor, and that action names that screenshot; any other
-replayed action is sent without a look and names the last screenshot before it,
-which can predate the app restart. The planner's instruction can differ from the
-edge's: an action-model `end` is recorded on the edge as "Press back".
+it was taken from. A [replay](#replaying-to-a-node) records the screen the app opened
+on first, so its first action names that screenshot. Each later tap or long press
+that has an anchor names the screenshot the replay reads just before it, and any
+other replayed action is sent without a look and names the last screenshot before
+it. The planner's instruction can differ from the edge's: an action-model `end` is
+recorded on the edge as "Press back".
 
 The status bar's clock and icons change on their own, so `pixel_hash` leaves them
 out. It is the SHA-256 of the image's decoded pixels, mode and size below its top

@@ -318,9 +318,14 @@ def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
     return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
-def _replay_setup(recorder: StepRecorder, setup: Setup) -> None:
-    for action, anchor in zip(setup.actions, setup.anchors, strict=True):
-        replay_action(recorder, action, (anchor,), logger=logger)
+def _replay_setup(recorder: StepRecorder, setup: Setup, screen: Observation | None) -> None:
+    """Send ``setup``, the first action on ``screen`` when the caller has just read it."""
+    for number, (action, anchor) in enumerate(
+        zip(setup.actions, setup.anchors, strict=True), start=1
+    ):
+        replay_action(
+            recorder, action, (anchor,), logger=logger, screen=screen if number == 1 else None
+        )
 
 
 def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
@@ -333,7 +338,8 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         logger.warning("No path from %s to %s", start, target_node)
         return None
 
-    opened_on = _identify(run, run.recorder.get_state(), expected_node=start)
+    opened = run.recorder.get_state()
+    opened_on = _identify(run, opened, expected_node=start)
     start, target_node = run.graph.resolve_node_id(start), run.graph.resolve_node_id(target_node)
     if opened_on != start:
         logger.info(
@@ -343,9 +349,14 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
 
     actual = opened_on
     if len(path) > 1:
+        # The first action starts on the screen just identified, so it is not read again.
+        screen: Observation | None = Observation.from_state(opened)
         for step in path[1:]:
-            _replay_setup(run.recorder, step.setup)
-            replay_action(run.recorder, step.action, step.anchors, logger=logger)
+            _replay_setup(run.recorder, step.setup, screen)
+            if step.setup.actions:
+                screen = None
+            replay_action(run.recorder, step.action, step.anchors, logger=logger, screen=screen)
+            screen = None
         actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
     if actual != target_node:
         logger.warning(
@@ -580,7 +591,7 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, recorded, anchors = found
 
-    _replay_setup(run.recorder, run.graph.action_setup(source, target, index))
+    _replay_setup(run.recorder, run.graph.action_setup(source, target, index), None)
     before = run.recorder.get_state()
     before_observation = Observation.from_state(before)
     action = replay_action(

@@ -396,7 +396,9 @@ class Kobe:
             raise NoPathError(msg)
 
         restart_app(self.controller, self.app_launch, self.logger)
-        opened_on, _ = self._identify(self.controller.get_state(), expected_node=start_node)
+        opened_on, opened_state = self._identify(
+            self.controller.get_state(), expected_node=start_node
+        )
         start_node = self.graph.resolve_node_id(start_node)
         target_node = self.graph.resolve_node_id(target_node)
         if opened_on != start_node:
@@ -414,8 +416,12 @@ class Kobe:
             target_node,
         )
 
+        # The first action starts on the screen just identified, so it is not read again.
+        screen: Observation | None = Observation.from_state(opened_state)
         for i, step in enumerate(path[1:], start=1):
-            self._replay_setup(step.setup, path[i - 1].node, f"{i}/{len(path) - 1}")
+            self._replay_setup(step.setup, path[i - 1].node, f"{i}/{len(path) - 1}", screen)
+            if step.setup.actions:
+                screen = None
             action = step.action
             self.logger.info(
                 "  Replay %d/%d: %s --> %s via %s",
@@ -427,7 +433,8 @@ class Kobe:
                 if isinstance(action, list)
                 else action.get("action", "?"),
             )
-            replay_action(self.controller, action, step.anchors, logger=self.logger)
+            replay_action(self.controller, action, step.anchors, logger=self.logger, screen=screen)
+            screen = None
 
         actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
         return self._report_arrival(actual_node, target_node)
@@ -447,9 +454,12 @@ class Kobe:
 
         return actual_node
 
-    def _replay_setup(self, setup: Setup, node: str, progress: str) -> None:
+    def _replay_setup(
+        self, setup: Setup, node: str, progress: str, screen: Observation | None
+    ) -> None:
         """Send ``setup``, the setup of the replay's next action, on ``node``, each action
-        as ``replay_action`` sends it, so a tap goes to the element it recorded."""
+        as ``replay_action`` sends it, so a tap goes to the element it recorded.
+        ``screen``, when given, is the screen the first action starts on."""
         for number, (setup_action, anchor) in enumerate(
             zip(setup.actions, setup.anchors, strict=True), start=1
         ):
@@ -461,7 +471,13 @@ class Kobe:
                 node,
                 setup_action.get("action", "?"),
             )
-            replay_action(self.controller, setup_action, (anchor,), logger=self.logger)
+            replay_action(
+                self.controller,
+                setup_action,
+                (anchor,),
+                logger=self.logger,
+                screen=screen if number == 1 else None,
+            )
 
     def explore(
         self,
