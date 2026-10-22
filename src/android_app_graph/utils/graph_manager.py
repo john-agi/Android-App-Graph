@@ -218,7 +218,6 @@ class SetupTrail:
 @dataclass(frozen=True)
 class _ScreenDescription:
     page_description: str
-    embedding: list[float]
     detail_snapshot: dict[str, object]
     elements: list[dict[str, str]]
 
@@ -451,8 +450,9 @@ class _Decision:
 
 @dataclass(slots=True)
 class _Identification:
-    """One described screen on its way through ``identify_state``: its description,
-    which the step's first rejection refines, and the decision its record gets.
+    """One described screen on its way through ``identify_state``: its description and
+    that description's vector, which the step's first rejection refines, and the
+    decision its record gets.
 
     A member the audit identifies again from its stored describe output carries the
     run's ``verdicts``, which its verifier calls reuse and add to; it refines no
@@ -462,6 +462,7 @@ class _Identification:
     observation: Observation
     image_vector: list[float]
     screen: _ScreenDescription
+    text_vector: list[float]
     decision: _Decision
     rejected: bool = False
     verdicts: MemberVerdicts | None = None
@@ -978,20 +979,20 @@ class GraphManager:
             list(described.state.keys()) if described.state else "[]",
             len(described.elements),
         )
-        screen = _ScreenDescription(
-            described.page_description, [], described.state, described.elements
-        )
         decision = _Decision(expected_node)
-        identification = _Identification(observation, image_vector, screen, decision)
         if described.is_external_web:
             decision.stage = "external_web"
             node_id = self._record_external_web_visit(observation)
         else:
-            identification.screen = replace(
-                screen, embedding=self._embed(described.page_description)
+            screen = _ScreenDescription(
+                described.page_description, described.state, described.elements
+            )
+            text_vector = self._embed(described.page_description)
+            identification = _Identification(
+                observation, image_vector, screen, text_vector, decision
             )
             node_id = self._assign(identification)
-            self._text_vectors[observation.observation_id] = identification.screen.embedding
+            self._text_vectors[observation.observation_id] = identification.text_vector
             self._stored_screens[observation.observation_id] = _StoredScreen(
                 observation.pixel_hash, described
             )
@@ -1149,7 +1150,7 @@ class GraphManager:
             for node_id in self._same_package_nodes(identification.observation.package).node_ids
             if node_id not in excluded
         ]
-        query = ScreenQuery(identification.image_vector, identification.screen.embedding)
+        query = ScreenQuery(identification.image_vector, identification.text_vector)
         candidates = self.short_list(query, node_ids)
         identification.decision.candidates = [candidate.as_record() for candidate in candidates]
         logger.info(
@@ -1273,11 +1274,8 @@ class GraphManager:
         ):
             renamed = self.rename_node(node_id, refined_existing)
         if refined_new:
-            identification.screen = replace(
-                identification.screen,
-                page_description=refined_new,
-                embedding=self._embed(refined_new),
-            )
+            identification.screen = replace(identification.screen, page_description=refined_new)
+            identification.text_vector = self._embed(refined_new)
         if renamed != node_id or refined_new:
             identification.decision.refinement = {
                 "node": node_id,
@@ -1760,16 +1758,12 @@ class GraphManager:
             pixel_hash=stored.pixel_hash,
         )
         described = stored.described
-        screen = _ScreenDescription(
-            described.page_description,
-            self._text_vectors[member],
-            described.state,
-            described.elements,
-        )
+        screen = _ScreenDescription(described.page_description, described.state, described.elements)
         return _Identification(
             observation,
             self._image_vectors[member],
             screen,
+            self._text_vectors[member],
             _Decision(expected_node=None),
             verdicts=verdicts,
         )
@@ -1783,9 +1777,7 @@ class GraphManager:
         earliest of them, its representative: its description and its elements."""
         earliest = min(members, key=_step_order)
         described = self._stored_screens[earliest].described
-        screen = _ScreenDescription(
-            described.page_description, [], described.state, described.elements
-        )
+        screen = _ScreenDescription(described.page_description, described.state, described.elements)
         new_node = self._add_screen_node(
             screen,
             as_str(self.graph.nodes[node_id].get("package"), ""),
