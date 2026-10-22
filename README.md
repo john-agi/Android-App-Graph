@@ -276,9 +276,9 @@ handled like any other empty or partial reply.
 Node verification also reports no answer for a reply it cannot parse, and logs
 each one as `node_verify: no answer` with its cause. No answer changes nothing in
 the audit: a merge check, the audit's or the coverage checkpoint's, keeps the two
-nodes apart, and a split or move check leaves the node whole (see
-[Merge proposals](#merge-proposals) and [Member checks](#member-checks)). Screen
-matching counts it as a rejection (see [Screen matching](#screen-matching)).
+nodes apart and decides no other pair, and a split or move check leaves the node
+whole (see [Merge proposals](#merge-proposals) and [Member checks](#member-checks)).
+Screen matching counts it as a rejection (see [Screen matching](#screen-matching)).
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),
@@ -864,6 +864,11 @@ Asked in that order, a pair is asked exactly when the answers on the pairs befor
 leave it open, so a round never asks a pair whose answer could contradict the answers
 before it.
 
+A pair the verifier gives no answer on (see
+[Requests and recovery](#requests-and-recovery)) is neither "same" nor "different":
+it decides no other pair, and it is neither asked again nor deduced. Its two nodes
+stay apart unless "same" answers on other pairs join them.
+
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage
 checkpoint's merge audit verifies the model's pairs the same way and proposes none
@@ -877,10 +882,11 @@ earlier one kept apart.
 - `pairs`: every pair with `node_a` and `node_b`, the `sources` and what each found in
   `findings` (the model's `issue`, or the image `members` and their `score`), the
   closest `members` by node and their `image_score`, whether it was `asked`, the
-  `round` that asked it or after which it was deduced, the answer `same`, the
-  verifier's `reason` and `reused` for an asked pair or the asked pairs it is
-  `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
-  `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
+  `round` that asked it or after which it was deduced, the answer `same` (`null`
+  when the verifier gave no answer), the verifier's `reason` and `reused` for an
+  asked pair or the asked pairs it is `deduced_from`, and the `status`: `merged`,
+  with the node both are `kept` in, `kept_separate`, or `skipped` with the `reason`
+  the pair cannot be verified.
 
 #### Member checks
 

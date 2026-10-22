@@ -3114,7 +3114,7 @@ class GraphManager:
         return MergeReport(
             pairs=results,
             rounds=rounds.rounds,
-            asked=len(rounds.asked),
+            asked=len(rounds.asked) + len(rounds.unanswered),
             deduced=len(rounds.deduced),
             merges=merges,
         )
@@ -3155,12 +3155,14 @@ class GraphManager:
             )
             answers = self.verify_member_pairs([checks[i].question for i in questions], verdicts)
             for index, answer in zip(questions, answers, strict=True):
-                rounds.record(index, same=answer.same)
+                same = answer.same if answer.answered else None
+                outcome = "no answer" if same is None else ("same" if same else "different")
+                rounds.record(index, same=same)
                 check = checks[index]
                 check.result.update(
                     asked=True,
                     round=rounds.rounds,
-                    same=answer.same,
+                    same=same,
                     reason=answer.reason,
                     reused=answer.reused,
                 )
@@ -3169,7 +3171,7 @@ class GraphManager:
                     *check.nodes,
                     check.question.existing,
                     check.question.new,
-                    "same" if answer.same else "different",
+                    outcome,
                     answer.reason,
                 )
         for index, deduction in rounds.deduced.items():
