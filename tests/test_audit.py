@@ -1796,24 +1796,29 @@ def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
 
     assert audit.main(["-c", str(config)]) == 0
 
-    outcome = (
-        {"status": "merged", "kept": "s0_home", "removed": "s1_home"}
-        if same
-        else {"status": "kept_separate"}
-    )
-    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == [
-        {
-            "node_a": "s0_home",
-            "node_b": "s1_home",
-            "sources": ["text_audit"],
-            "findings": [{"source": "text_audit", "issue": issue}],
-            "members": {"s0_home": "s0_home-observation", "s1_home": "s1_home-observation"},
-            "image_score": 0.0,
-            "reason": "r",
-            "reused": False,
-            **outcome,
-        }
-    ]
+    outcome = {"status": "merged", "kept": "s0_home"} if same else {"status": "kept_separate"}
+    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == {
+        "rounds": 1,
+        "asked": 1,
+        "deduced": 0,
+        "merges": [{"kept": "s0_home", "removed": ["s1_home"]}] if same else [],
+        "pairs": [
+            {
+                "node_a": "s0_home",
+                "node_b": "s1_home",
+                "sources": ["text_audit"],
+                "findings": [{"source": "text_audit", "issue": issue}],
+                "members": {"s0_home": "s0_home-observation", "s1_home": "s1_home-observation"},
+                "image_score": 0.0,
+                "asked": True,
+                "round": 1,
+                "same": same,
+                "reason": "r",
+                "reused": False,
+                **outcome,
+            }
+        ],
+    }
     assert (app_dir / "demo_audited.json").exists() == same
 
 

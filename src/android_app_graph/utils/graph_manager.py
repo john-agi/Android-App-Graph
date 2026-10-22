@@ -25,9 +25,10 @@ observed values.
 A node holds no image. It lists the step-log observations assigned to it, in
 order, and names one of them its representative: the screen the plot shows, read
 from the step log when it needs it. The audit compares nodes on their members:
-merge proposals from the model's text and from close member images, each verified
-once on its closest members, and member groups whose closest pair the verifier
-tells apart, split off or moved to the node screen matching confirms.
+merge proposals from the model's text and from close member images, verified in
+rounds on their closest members with every answer that follows from earlier ones
+deduced, and member groups whose closest pair the verifier tells apart, split off or
+moved to the node screen matching confirms.
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ from android_app_graph.member_groups import (
     plan_member_checks,
     unit_vector,
 )
+from android_app_graph.merge_rounds import NodePair, PairRounds
 from android_app_graph.payloads import (
     as_int_list,
     as_object_dict,
@@ -462,6 +464,15 @@ class MemberVerdict(NamedTuple):
 type MemberVerdicts = dict[frozenset[str], MemberVerdict]
 
 
+class MemberQuestion(NamedTuple):
+    """Whether member observation ``existing``, of the node ``description`` describes,
+    and member observation ``new`` show one screen."""
+
+    existing: str
+    new: str
+    description: str
+
+
 class ShownMembers(NamedTuple):
     """The member of each node a merge check shows the verifier, and the cosine of
     their images; ``None`` when a node has no image vector and its representative
@@ -506,6 +517,54 @@ class MergeProposal:
     @property
     def sources(self) -> list[str]:
         return list(dict.fromkeys(as_str(finding.get("source"), "") for finding in self.findings))
+
+
+class Merge(NamedTuple):
+    """A cluster of nodes merged into its lowest-numbered node, ``kept``."""
+
+    kept: str
+    removed: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class MergeReport:
+    """What verifying merge proposals found: each proposal's result in proposal order,
+    the rounds the questions took, the pairs asked and deduced, and the merges made."""
+
+    pairs: list[dict[str, object]]
+    rounds: int
+    asked: int
+    deduced: int
+    merges: list[Merge]
+
+    @property
+    def merged_count(self) -> int:
+        """The number of nodes merged into another."""
+        return sum(len(merge.removed) for merge in self.merges)
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "rounds": self.rounds,
+            "asked": self.asked,
+            "deduced": self.deduced,
+            "merges": [merge._asdict() for merge in self.merges],
+            "pairs": self.pairs,
+        }
+
+
+class _MergeCheck(NamedTuple):
+    """A proposed pair the rounds decide: its two nodes, the question it asks the
+    verifier, the image cosine of the members that question shows, and the pair's
+    result in the report."""
+
+    nodes: NodePair
+    question: MemberQuestion
+    score: float | None
+    result: dict[str, object]
+
+
+def _most_alike_first(check: _MergeCheck) -> tuple[bool, float]:
+    return check.score is None, -(check.score or 0.0)
 
 
 @dataclass(slots=True)
@@ -1407,23 +1466,60 @@ class GraphManager:
         """Ask the verifier whether member observations ``existing``, of the node
         ``description`` describes, and ``new`` show one screen, and keep the answer in
         ``verdicts``; a pair ``verdicts`` already holds is answered from there."""
-        pair = frozenset((existing, new))
-        known = verdicts.get(pair)
-        if known is not None:
-            logger.info("Reusing the verifier's answer on members %s and %s", existing, new)
-            return known._replace(reused=True)
+        (verdict,) = self.verify_member_pairs(
+            [MemberQuestion(existing, new, description)], verdicts
+        )
+        return verdict
+
+    def verify_member_pairs(
+        self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts
+    ) -> list[MemberVerdict]:
+        """Ask the verifier ``questions`` at once, up to ``MAX_REQUESTS_IN_FLIGHT`` at a
+        time, keep each answer in ``verdicts``, and return the answers in order.
+
+        A pair ``verdicts`` already holds, or an earlier question names too, is answered
+        from there and marked ``reused``. When a call raises, the answers already
+        returned are kept in ``verdicts`` before the error is raised.
+        """
+        first_asked: dict[frozenset[str], int] = {}
+        for index, question in enumerate(questions):
+            pair = frozenset((question.existing, question.new))
+            if pair not in verdicts:
+                first_asked.setdefault(pair, index)
+        if first_asked:
+            self._ask_verifier([questions[index] for index in first_asked.values()], verdicts)
+        answers: list[MemberVerdict] = []
+        for index, question in enumerate(questions):
+            pair = frozenset((question.existing, question.new))
+            if first_asked.get(pair) == index:
+                answers.append(verdicts[pair])
+                continue
+            logger.info(
+                "Reusing the verifier's answer on members %s and %s",
+                question.existing,
+                question.new,
+            )
+            answers.append(verdicts[pair]._replace(reused=True))
+        return answers
+
+    def _ask_verifier(self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts) -> None:
         client, page_detail = self._require_page_detail()
         steps_dir = self._require_steps_dir()
-        reply = verify_same_node(
-            client,
-            screenshot_new_b64=observation_image_b64(steps_dir, new),
-            screenshot_existing_b64=observation_image_b64(steps_dir, existing),
-            existing_description=description,
-            settings=page_detail,
-        )
-        verdict = MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
-        verdicts[pair] = verdict
-        return verdict
+
+        def ask(question: MemberQuestion) -> MemberVerdict:
+            reply = verify_same_node(
+                client,
+                screenshot_new_b64=observation_image_b64(steps_dir, question.new),
+                screenshot_existing_b64=observation_image_b64(steps_dir, question.existing),
+                existing_description=question.description,
+                settings=page_detail,
+            )
+            return MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
+
+        def keep(question: MemberQuestion, verdict: MemberVerdict) -> None:
+            verdicts[frozenset((question.existing, question.new))] = verdict
+
+        call_concurrently("node_verify", ask, questions, keep)
 
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
@@ -2952,15 +3048,18 @@ class GraphManager:
 
     def verify_merge_proposals(
         self, proposals: Iterable[MergeProposal], verdicts: MemberVerdicts
-    ) -> list[dict[str, object]]:
-        """Verify each proposed pair once, on its two closest members, merge the pairs
-        the verifier confirms, and return each pair's result.
+    ) -> MergeReport:
+        """Verify the proposed pairs in rounds, deducing every answer that follows from
+        earlier ones, merge each cluster of nodes the answers make into its
+        lowest-numbered node, and report each pair; README.md#merge-proposals.
 
-        A pair's nodes are followed through earlier merges. The verifier is shown the
-        member of the more-visited node, with that node's description, and the member
-        of the other; the lower-numbered node is kept.
+        A pair's nodes are followed through merges made before this call. A question
+        shows the verifier the closest members of the pair's two nodes: the member of
+        the more-visited node, with that node's description, and the member of the
+        other. The pairs whose members are most alike come first.
         """
         results: list[dict[str, object]] = []
+        checks: list[_MergeCheck] = []
         for proposal in proposals:
             result: dict[str, object] = {
                 "node_a": proposal.node_a,
@@ -2968,49 +3067,110 @@ class GraphManager:
                 "sources": proposal.sources,
                 "findings": proposal.findings,
             }
-            result.update(self._verify_merge(proposal, verdicts))
             results.append(result)
-        return results
+            check = self._merge_check(proposal, result)
+            if check is not None:
+                checks.append(check)
+        rounds = self._ask_merge_rounds(sorted(checks, key=_most_alike_first), verdicts)
+        merges = self._merge_clusters(checks, rounds.clusters(self._node_numeric_order))
+        return MergeReport(
+            pairs=results,
+            rounds=rounds.rounds,
+            asked=len(rounds.asked),
+            deduced=len(rounds.deduced),
+            merges=merges,
+        )
 
-    def _verify_merge(self, proposal: MergeProposal, verdicts: MemberVerdicts) -> dict[str, object]:
+    def _merge_check(
+        self, proposal: MergeProposal, result: dict[str, object]
+    ) -> _MergeCheck | None:
         node_a = self.resolve_node_id(proposal.node_a)
         node_b = self.resolve_node_id(proposal.node_b)
         skip_reason = self._merge_skip_reason(node_a, node_b)
         if skip_reason is not None:
             logger.warning("Skipping merge %s + %s — %s", node_a, node_b, skip_reason)
-            return {"status": "skipped", "reason": skip_reason}
+            result.update(status="skipped", reason=skip_reason)
+            return None
         existing, new = sorted(
             (node_a, node_b),
             key=lambda n: (-self.graph.nodes[n].get("visit_count", 0), self._node_numeric_order(n)),
         )
         shown = self.closest_members(existing, new)
-        logger.info(
-            "Verifying merge of %s + %s (sources: %s) on members %s and %s",
-            node_a,
-            node_b,
-            ", ".join(proposal.sources),
-            shown.existing,
-            shown.new,
-        )
-        verdict = self.verify_members(
-            shown.existing,
-            shown.new,
-            description=self.graph.nodes[existing].get("page_description", ""),
-            verdicts=verdicts,
-        )
-        outcome: dict[str, object] = {
-            "members": {existing: shown.existing, new: shown.new},
-            "image_score": shown.score,
-            "reason": verdict.reason,
-            "reused": verdict.reused,
-        }
-        if not verdict.same:
-            logger.info("Kept separate: %s + %s — reason: %s", node_a, node_b, verdict.reason)
-            return {"status": "kept_separate", **outcome}
-        keep, remove = sorted((node_a, node_b), key=self._node_numeric_order)
-        self.merge_nodes(keep, remove)
-        logger.info("Merged %s into %s — reason: %s", remove, keep, verdict.reason)
-        return {"status": "merged", "kept": keep, "removed": remove, **outcome}
+        result.update(members={existing: shown.existing, new: shown.new}, image_score=shown.score)
+        description = self.graph.nodes[existing].get("page_description", "")
+        question = MemberQuestion(shown.existing, shown.new, description)
+        return _MergeCheck((node_a, node_b), question, shown.score, result)
+
+    def _ask_merge_rounds(
+        self, checks: Sequence[_MergeCheck], verdicts: MemberVerdicts
+    ) -> PairRounds:
+        """Ask the verifier the rounds of questions on ``checks``, ordered most likely
+        one screen first, and add each pair's answer, asked or deduced, to its result."""
+        rounds = PairRounds([check.nodes for check in checks])
+        while questions := rounds.next_round():
+            logger.info(
+                "Merge round %d: %d question(s), %d of %d pair(s) decided before it",
+                rounds.rounds,
+                len(questions),
+                len(rounds.asked) + len(rounds.deduced),
+                len(checks),
+            )
+            answers = self.verify_member_pairs([checks[i].question for i in questions], verdicts)
+            for index, answer in zip(questions, answers, strict=True):
+                rounds.record(index, same=answer.same)
+                check = checks[index]
+                check.result.update(
+                    asked=True,
+                    round=rounds.rounds,
+                    same=answer.same,
+                    reason=answer.reason,
+                    reused=answer.reused,
+                )
+                logger.info(
+                    "Merge check of %s + %s on members %s and %s: %s, reason: %s",
+                    *check.nodes,
+                    check.question.existing,
+                    check.question.new,
+                    "same" if answer.same else "different",
+                    answer.reason,
+                )
+        for index, deduction in rounds.deduced.items():
+            basis = [list(checks[i].nodes) for i in deduction.basis]
+            checks[index].result.update(
+                asked=False, round=deduction.after, same=deduction.same, deduced_from=basis
+            )
+            logger.info(
+                "Deduced %s + %s: %s, from %s",
+                *checks[index].nodes,
+                "same" if deduction.same else "different",
+                "; ".join(" + ".join(pair) for pair in basis),
+            )
+        return rounds
+
+    def _merge_clusters(
+        self, checks: Sequence[_MergeCheck], clusters: Sequence[list[str]]
+    ) -> list[Merge]:
+        """Merge each cluster into its first node, and give each pair its status.
+
+        The pairs inside a cluster are merged in proposal order, each into the
+        lower-numbered of its two nodes, so the action lists of edges that land on one
+        another are appended in proposal order, whatever order the rounds asked in.
+        """
+        cluster_of = {node: cluster for cluster in clusters for node in cluster}
+        for check in checks:
+            first, second = check.nodes
+            cluster = cluster_of[first]
+            if second not in cluster:
+                check.result["status"] = "kept_separate"
+                continue
+            check.result.update(status="merged", kept=cluster[0])
+            keep, remove = sorted(
+                (self.resolve_node_id(first), self.resolve_node_id(second)),
+                key=self._node_numeric_order,
+            )
+            if keep != remove:
+                self.merge_nodes(keep, remove)
+        return [Merge(cluster[0], cluster[1:]) for cluster in clusters if len(cluster) > 1]
 
     def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
         """Run a lightweight node-merge audit and merge verified duplicates.
@@ -3033,17 +3193,16 @@ class GraphManager:
             settings=settings._replace(request_timeout=self.audit_timeout),
         )
         issues = audit_result.get("issues", [])
-        results = self.verify_merge_proposals(self.merge_proposals(issues, sources=()), {})
+        report = self.verify_merge_proposals(self.merge_proposals(issues, sources=()), {})
 
-        merged_count = sum(1 for result in results if result.get("status") == "merged")
         logger.info(
-            "Node merge audit complete: %d issue(s), %d merge(s)",
+            "Node merge audit complete: %d issue(s), %d node(s) merged",
             len(issues),
-            merged_count,
+            report.merged_count,
         )
         return {
             "issues": issues,
-            "results": results,
-            "merged_count": merged_count,
+            "results": report.pairs,
+            "merged_count": report.merged_count,
             "summary": audit_result.get("summary", ""),
         }
