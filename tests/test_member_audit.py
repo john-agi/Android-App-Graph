@@ -995,6 +995,47 @@ def test_two_confirmed_pairs_decide_the_third_and_all_three_nodes_merge(
     assert graph.graph.nodes["s0_screen"]["observations"] == ["000001", "000002", "000003"]
 
 
+def test_a_merge_check_without_an_answer_decides_no_other_pair(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """No answer on s0 + s1 is neither "same" nor "different", so with s1 = s2 it says
+    nothing about s0 + s2: the next round asks it."""
+    write_member_graph(graph_path, _one_member_nodes(0.0, 0.5, 1.0))
+    graph = _load(graph_path)
+    models.give_no_answer("000001", "000002")
+    models.confirm("000002", "000003")
+    issues = [
+        _merge_issue("s0_screen", "s2_screen"),
+        _merge_issue("s0_screen", "s1_screen"),
+        _merge_issue("s1_screen", "s2_screen"),
+    ]
+
+    report = graph.verify_merge_proposals(graph.merge_proposals(issues, sources=()), {})
+
+    assert sorted(models.shown) == [
+        ("000001", "000002"),
+        ("000001", "000003"),
+        ("000002", "000003"),
+    ]
+    assert (report.rounds, report.asked, report.deduced) == (2, 3, 0)
+    far, unanswered, _ = report.pairs
+    assert {key: unanswered[key] for key in ("asked", "round", "same", "reason", "status")} == {
+        "asked": True,
+        "round": 1,
+        "same": None,
+        "reason": "timed out",
+        "status": "kept_separate",
+    }
+    assert {key: far[key] for key in ("asked", "round", "same", "status")} == {
+        "asked": True,
+        "round": 2,
+        "same": False,
+        "status": "kept_separate",
+    }
+    assert report.merges == [Merge("s1_screen", ["s2_screen"])]
+    assert list(graph.graph) == ["s0_screen", "s1_screen"]
+
+
 def test_a_round_s_questions_are_in_flight_together(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
