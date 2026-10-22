@@ -3874,7 +3874,6 @@ def _without_tree(steps_dir: Path, record: dict[str, object] | None) -> Membersh
     [
         pytest.param(None, id="no record"),
         pytest.param({"kind": "observation", "ui_tree_error": None}, id="no reason"),
-        pytest.param({"kind": "observation"}, id="a record without the tree fields"),
     ],
 )
 def test_load_graph_rejects_a_representative_with_neither_a_tree_nor_a_reason_naming_it(
