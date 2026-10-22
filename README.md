@@ -455,8 +455,16 @@ otherwise the package's launcher activity, looked up once per run; of several, t
 first is used and a warning names the others. Whatever the app holds only in memory,
 such as an unsaved form, is lost at each replay; data it has stored survives.
 
-A replayed tap or long press goes to the element it recorded, its
-[anchor](#what-an-action-acted-on), where the screen shows that element now, so a
+The replay follows the path that sends the fewest device actions, each edge
+weighed by its cheapest action: the action's own steps and its
+[setup](#graph-edges), so a path whose actions need no setup is preferred. On
+each edge it sends that action's setup first, such as the swipe that scrolled a
+list or the dropdown choice that filled in a form, so the action finds the screen
+as exploration did. Exploration's log names each setup action, as in
+`Replay 2/3: setup 1/1 on s30_apps via swipe`.
+
+A replayed tap or long press, a setup's included, goes to the element it recorded,
+its [anchor](#what-an-action-acted-on), where the screen shows that element now, so a
 list that loaded more items or stopped at another scroll position does not move the
 tap onto a neighbour. The replay reads the screen first, a [capture](#step-log) like
 any other, and looks for the anchor's locator among the visible, enabled nodes of
@@ -569,7 +577,7 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `ui_tree_error`, `null` when `<id>.xml` exists and otherwise why there is no tree, `ui_tree_retakes`, how many times the screenshot was taken again, and `ui_tree_settled`, whether the two dumps around the kept screenshot agreed; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
+| `observation` | each screenshot | `width` and `height` of its image, `screen_size`, the width and height of the screenshot as the device took it, in the screen pixels of its tree's bounds, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `ui_tree_error`, `null` when `<id>.xml` exists and otherwise why there is no tree, `ui_tree_retakes`, how many times the screenshot was taken again, and `ui_tree_settled`, whether the two dumps around the kept screenshot agreed; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, [what it acted on](#what-an-action-acted-on) as `anchors`, `hits` and `action_flags`, one entry per sub-action, and `from_node` and `to_node` as they were then |
 
@@ -639,13 +647,16 @@ order, and names one of them `representative_observation`:
 - a new node's representative is its first observation;
 - a later visit matched to the node joins the list and keeps the representative;
 - a screen the verifier rejects starts a new node with itself as representative;
-- a merge unites both lists in step order and keeps the kept node's representative.
+- a merge unites both lists in step order and keeps the kept node's representative;
+- a node the audit makes for members it splits off or moves takes the earliest of
+  them as representative, and the node they leave keeps its own (see
+  [Member checks](#member-checks)).
 
-Screen matching verifies a screen against a node's member closest to it by image.
-The audit's merge checks compare the two nodes' representative images in `steps/`,
-and `app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
+Screen matching verifies a screen against a node's member closest to it by image, and
+the audit's merge checks verify a pair of nodes on their two closest members.
+`app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
 `ext_<package>` nodes list the screens that reached them as well; neither screen
-matching nor the merge checks compare them.
+matching nor the audit compares them.
 
 #### Screen matching
 
@@ -725,8 +736,7 @@ number; it adds no element of its own. When the screenshot has no tree, the tree
 lists no element, or one web view or one node that draws its own content (a `View`,
 `SurfaceView`, `TextureView` or `GLSurfaceView` without children) covers more than
 half of a window the user can act on, the model finds the elements itself instead,
-and they have no locator. In the 69 trees of a 60-step exploration of Settings the
-smallest screens, one-row dropdown menus, list their one element, and none is thin.
+and they have no locator.
 
 A node stores each element as `locator`, `description`, `position` (the third of
 the screen, across and down, that holds the element's centre, such as `top left`,
@@ -748,13 +758,37 @@ checkpoint ranks and shows nodes by the same unexplored elements.
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations`, `schema_deltas`, `anchors` and
-`action_flags` lists hold one entry per action, in the same order, so entry *i* of
-each describes `actions[i]`. An action that recorded no instruction or observation
+`instructions`, `target_observations`, `schema_deltas`, `setups`, `setup_anchors`,
+`anchors` and `action_flags` lists hold one entry per action, in the same order, so
+entry *i* of each describes `actions[i]`. An action that recorded no instruction or observation
 has `""` in that list, and an action that recorded no state change has `null` in
 `schema_deltas`; only self-loop actions record one. An entry of `anchors` and of
 `action_flags` is itself a list with one item per sub-action of its action, `null`
 for a sub-action that recorded none. Skip those entries when you read an edge.
+
+An action's entry in `setups` is the list of device actions exploration sent on
+the edge's source node before it, since it last arrived at that node from
+elsewhere; a [replay](#replaying-to-a-node) sends them first. They are the
+node's self-loops, such as a swipe that scrolled a list down to the tapped row,
+and its round trips, actions that left the node and came back to it, such as
+opening a form's dropdown and choosing the option that shows the tapped field,
+or opening one of a list's rows and pressing Back. Exploration keeps the nodes
+it arrived at in order: coming back to one of them ends a round trip, and
+arriving at any other node starts that node's setup empty, `[]`.
+`app-graph-audit --re-explore` records setups the same way. The entry is `null`
+when the setup is unknown or too long:
+
+- How the device came to be on a screen is unknown on the screen a run begins
+  on without a replay, after a step that leaves the app, and after a replay that
+  ends elsewhere than its node, until exploration arrives at that screen from
+  another one.
+- A setup of more than 8 actions is dropped, and the log says so.
+
+An action's entry in `setup_anchors` holds the [anchor](#what-an-action-acted-on)
+of each action of its setup, in the same order, `null` for one without, and is `null`
+when the setup is. An action recorded again keeps the shorter of its known setups,
+with its anchors. A graph file without `setups` loads unchanged, and its actions
+replay without a setup.
 
 #### What an action acted on
 
@@ -850,10 +884,100 @@ uv run app-graph-audit -c configs/explore.yaml --app <app_name>
 
 The audit asks the page-detail model for issues in a text dump of the graph and
 saves them to `graphs/<app_name>/<app_name>_audit.json`. It merges the duplicate
-nodes that a comparison of their representatives confirms, normalizes edge
-templates and saves the result to `<app_name>_audited.json`; the explored graph
-file is never changed. Without `--re-explore`, no flagged edge is replayed or
-corrected.
+nodes the verifier confirms (see [Merge proposals](#merge-proposals)), then splits
+off or moves the members the verifier tells apart from the rest of their node (see
+[Member checks](#member-checks)). Both work from the step log, without a device. It
+then normalizes edge templates and saves the result to `<app_name>_audited.json`;
+the explored graph file is never changed. Without `--re-explore`, no flagged edge is
+replayed or corrected.
+
+#### Merge proposals
+
+The audit collects the node pairs that may be one screen in one set, so each pair is
+verified once whatever proposed it. Each pair names its sources:
+
+- `text_audit`: the model's `merge_nodes` issues;
+- `image`: two in-app nodes of one package whose closest members reach a cosine of
+  0.67, the merge floor, between their screenshot vectors (see
+  [Embedding caches](#embedding-caches)). The merge floor and the grouping floor of
+  [member checks](#member-checks) are set separately: a lower merge floor proposes
+  more pairs, and a higher grouping floor separates more members.
+
+A near-identical image proves nothing on its own: a page and the same page with a
+menu open look alike and are different screens. Each pair is verified on its two
+closest members: the verifier sees the member of the more-visited node, with that
+node's description, beside the member of the other. A confirmed pair is merged into
+its lower-numbered node; a pair whose node an earlier merge removed is verified on
+the node that kept it. The coverage checkpoint's merge audit verifies the model's
+pairs the same way and proposes none from images, since every checkpoint would
+otherwise propose again each pair an earlier one kept apart.
+
+`<app_name>_merge.json` lists every pair: `node_a` and `node_b`, the `sources` and
+what each found in `findings` (the model's `issue`, or the image `members` and their
+`score`), the `members` the verifier was shown by node and their `image_score`, the
+`status` (`merged`, `kept_separate`, or `skipped` with the `reason` the pair cannot be
+verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reused`.
+
+#### Member checks
+
+After the merges, the members of each in-app node are grouped by their screenshot
+vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
+and the groups are the connected components of those links, single-linkage
+clustering. Only members with a vector and a stored describe output (`describe` in
+their [record](#step-log)) are grouped. The group that holds the representative is
+the node's home.
+
+- A node whose home holds fewer than half of its members is `diffuse` and is left
+  alone, without a verifier call.
+- Every other group is checked against home on the closest pair across them, the
+  strongest evidence that the two are one screen:
+  - a group of two or more members is a split check. When the verifier tells the
+    pair apart, the group becomes a new node.
+  - a lone member is a move check. When the verifier tells it apart from its closest
+    home member, the member goes through the short list of
+    [screen matching](#screen-matching) again, without the node it leaves, with its
+    stored describe output in place of the describe call, and with no description
+    refined. It moves to the first node the verifier confirms, or to a new node.
+- A node gets three checks at most, larger groups first; the rest are `unchecked`.
+  A node of one member is never checked. Since home holds at least half the members,
+  a node of fewer than four is never split: of two or three, only a member can move.
+- Every split check runs before any move check, so a member can move to a node a
+  split made. A verifier answer on a pair of members is reused within the run.
+  Two merged nodes whose closest members fall below the grouping floor, a pair from
+  `text_audit` or one the images propose between the merge floor and the grouping
+  floor, are two groups of the merged node: their split check is the pair the merge
+  was verified on, so it reuses that answer and the node stays whole.
+
+A node a split or a move makes takes its description and elements from the stored
+describe output of its earliest member, its representative, and its state schema
+from all its members' states; its description is embedded once. Members carry their
+visits, states and activities; the node they leave keeps its description,
+representative, state schema and elements. No node ID changes, so no alias is
+recorded: a node's `observations` say where each observation belongs.
+
+Edge actions follow the members. An action on an edge of the node is matched to each
+exploration transition (see [Step log](#step-log)) with the same action whose
+screenshots belong to the edge's endpoints: the node that lists each screenshot, or,
+for one no node lists, the node the transition recorded. Once the members have moved,
+the action is kept on every edge its transitions give, so an action taken from both
+groups stays on both edges, and an action no transition matches stays where it is.
+An action takes its entry in every per-action list with it, its
+[setup](#graph-edges) as recorded: the setup was sent on the screen the action was
+taken from, and the action stays with that screen. An action that now leads to
+another node takes that node's description as its observation, and an edge that lost
+an action drops its instruction templates, which the final normalization rebuilds.
+
+`<app_name>_members.json` holds the `grouping_floor`, `home_share` and
+`checks_per_node`, and:
+
+- `checks`: each check's `kind` (`split` or `move`), its `node` and `group`, the
+  `members` compared (a home member, then one of the group) and their `image_score`,
+  the verifier's `same` and `reason`, and `reused`. A check the verifier answered
+  "different" adds the `change`: `from`, `to`, `new_node`, the `members` moved, the
+  `edge_actions` moved, each with its `edge`, `action` and the edges it is on `now`,
+  and, for a move, the `short_list`'s `candidates` and `verifications`;
+- `diffuse`: each diffuse node with its groups;
+- `unchecked`: each node with the groups past its three checks.
 
 Last, without a model call or a device, the audit adds `no_path_to_start` to
 `<app_name>_audit.json`: the nodes of the final audited graph from which no
@@ -878,9 +1002,9 @@ instruction looks wrong for where it leads, it:
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action
    recorded at the same position (see [Graph edges](#graph-edges));
-3. executes that action once, a tap on the element it recorded as a
-   [replay](#replaying-to-a-node) finds it in the screen read before it, and
-   corrects the edge by the screen it reaches:
+3. executes that action once, after its [setup](#graph-edges), each tap on the
+   element it recorded as a [replay](#replaying-to-a-node) finds it in the screen
+   read before it, and corrects the edge by the screen it reaches:
    - another node: the action moves, with its entry in every per-action list, to
      the edge toward that node, which is created if needed, and its observation
      becomes that node's description. The flagged edge is removed once no action

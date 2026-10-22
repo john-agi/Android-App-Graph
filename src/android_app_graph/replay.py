@@ -35,7 +35,8 @@ def replay_action(
     screen: Observation | None = None,
 ) -> list[dict[str, Any]]:
     """Send ``action``, an edge's recorded action, whose sub-actions have ``anchors``,
-    then wait a second for the screen to settle, and return the sub-actions as sent.
+    one each, then wait a second for the screen to settle, and return the sub-actions
+    as sent.
 
     Before a tap or long press with an anchor, the screen is read through ``recorder``,
     so the step log keeps it under the recorder's source, and the action goes to the
@@ -45,13 +46,13 @@ def replay_action(
     press logs which way it went. ``screen`` is the observation of the screen the
     action starts on when the caller has just taken it; the first sub-action uses it
     instead of reading the screen again. The sub-actions of a compound action are half
-    a second apart, and ``{}``, an action an edge was saved without, sends nothing.
+    a second apart, and ``{}``, the action ``find_path`` gives for an edge without
+    actions, sends nothing.
     """
     sub_actions = action if isinstance(action, list) else [action] if action else []
     sent: list[dict[str, Any]] = []
     current = screen
-    for position, sub_action in enumerate(sub_actions):
-        anchor = anchors[position] if position < len(anchors) else None
+    for sub_action, anchor in zip(sub_actions, anchors, strict=True):
         resolved = _resolved(recorder, sub_action, anchor, current, logger)
         recorder.exe_action(resolved)
         sent.append(resolved)

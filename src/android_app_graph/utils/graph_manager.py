@@ -21,14 +21,19 @@ used to update the node's state schema — discovering new keys and accumulating
 observed values.
 
 A node holds no image. It lists the step-log observations assigned to it, in
-order, and names one of them its representative: the screen the merge audit
-compares against and the plot shows, read from the step log when they need it.
+order, and names one of them its representative: the screen the plot shows, read
+from the step log when it needs it. The audit compares nodes on their members:
+merge proposals from the model's text and from close member images, each verified
+once on its closest members, and member groups whose closest pair the verifier
+tells apart, split off or moved to the node screen matching confirms.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -46,6 +51,15 @@ from android_app_graph.graph_files import (
     require_known_edge_endpoints,
     write_json_atomically,
 )
+from android_app_graph.member_groups import (
+    GROUPING_FLOOR,
+    MERGE_FLOOR,
+    MemberPair,
+    MemberPlan,
+    closest_pair,
+    plan_member_checks,
+    unit_vector,
+)
 from android_app_graph.payloads import (
     as_float_list,
     as_int_list,
@@ -56,10 +70,13 @@ from android_app_graph.payloads import (
 from android_app_graph.step_log import (
     ActionEffect,
     Observation,
+    TransitionRecord,
     annotate_observation,
     load_image_embeddings,
     read_observation_record,
+    read_observation_tree,
     save_image_embeddings,
+    screen_size_of,
     tree_elements,
 )
 from android_app_graph.ui_tree import Anchor, Locator, TreeElement
@@ -90,6 +107,8 @@ _BOUNDS_COORDINATES = 4
 EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
 EXTERNAL_WEB_BACK_PRESSES = 3
+# A longer setup is an excursion, not a recipe for the state an action needs.
+MAX_SETUP_ACTIONS = 8
 
 
 class _SamePackageNodes(NamedTuple):
@@ -109,14 +128,25 @@ class PathToStart(NamedTuple):
     external: list[str]
 
 
+class Setup(NamedTuple):
+    """An action's setup as a replay sends it: the device actions sent before it on the
+    node it leaves, and the anchor of each, ``None`` for one without."""
+
+    actions: tuple[dict[str, Any], ...]
+    anchors: tuple[Anchor | None, ...]
+
+
 class PathStep(NamedTuple):
     """One step of a path ``find_path`` returns: the node it reaches, the recorded action
-    that reaches it, and that action's anchors, one per sub-action, ``None`` for one
-    without. The first step is the path's start, with the action ``{}`` and no anchors."""
+    that reaches it with its anchors, one per sub-action, ``None`` for one without, and
+    that action's setup, the device actions sent before it on the node the step leaves,
+    with theirs. The first step is the path's start, with the action ``{}``, no anchors
+    and no setup."""
 
     node: str
     action: dict[str, Any] | list[dict[str, Any]]
-    anchors: tuple[Anchor | None, ...]
+    anchors: tuple[Anchor | None, ...] = ()
+    setup: Setup = Setup((), ())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -135,6 +165,11 @@ class EdgeDetails:
         effect: What the action did: the element each sub-action acted on goes into
             ``anchors`` and its mis-tap or no-visible-effect flag into
             ``action_flags``. If None, each sub-action records neither.
+        setup: The device actions sent on the source node before the action since
+            the traversal last arrived there from elsewhere, as ``SetupTrail`` reads
+            them; None when they are unknown.
+        setup_anchors: The anchor of each action of ``setup``, as ``anchors`` stores a
+            sub-action's, ``None`` for one without. If None, none of them has one.
     """
 
     instruction: str | None = None
@@ -142,6 +177,80 @@ class EdgeDetails:
     schema_delta: dict[str, Any] | None = None
     num_steps: int | None = None
     effect: ActionEffect | None = None
+    setup: Sequence[dict[str, Any]] | None = None
+    setup_anchors: Sequence[dict[str, object] | None] | None = None
+
+
+class SetupTrail:
+    """The device actions an exploration sent since it began on a screen, from which it
+    reads each action's setup: the actions sent on the action's source node since the
+    trail last arrived there from elsewhere.
+
+    The trail keeps the nodes it arrived at in order. Arriving at one of them again, such
+    as a form after one of its dropdowns, ends a round trip: the nodes after it are left
+    behind, and the round trip's actions join its setup, as a self-loop's do. Arriving at
+    any other node starts its setup empty. Node IDs are compared through
+    ``resolve_node_id``, so a node renamed or merged while the trail holds it still matches.
+    """
+
+    def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
+        self._resolve_node_id = resolve_node_id
+        self._actions: list[dict[str, Any]] = []
+        self._anchors: list[dict[str, object] | None] = []
+        # Each node with the index into _actions where its setup starts, or None when
+        # the trail began on it without knowing how the device came to be there.
+        self._arrivals: list[tuple[str, int | None]] = []
+
+    def begin(self, node: str, *, arrived: bool) -> None:
+        """Begin the trail again on ``node``, forgetting every action before.
+
+        ``arrived`` says the device has just arrived at ``node`` from elsewhere, as when a
+        replay reaches the node it replays to, so the setup on it starts empty. Otherwise
+        the setup of every action sent on ``node`` is unknown until the trail arrives
+        there from elsewhere again.
+        """
+        self._actions = []
+        self._anchors = []
+        self._arrivals = [(node, 0 if arrived else None)]
+
+    def setup(self, node: str) -> list[dict[str, Any]] | None:
+        """Return the setup of an action sent on ``node`` now, or None when it is unknown."""
+        start = self._setup_start(node)
+        return None if start is None else self._actions[start:]
+
+    def setup_anchors(self, node: str) -> list[dict[str, object] | None] | None:
+        """Return the anchor of each action of ``setup(node)``, ``None`` for one without,
+        or None when the setup is unknown."""
+        start = self._setup_start(node)
+        return None if start is None else self._anchors[start:]
+
+    def step(
+        self,
+        actions: Sequence[dict[str, Any]],
+        reached: str,
+        anchors: Sequence[dict[str, object] | None] | None = None,
+    ) -> None:
+        """Add ``actions``, sent on the node the trail is on, with ``anchors``, the anchor
+        each acted on as ``ActionEffect.anchor_records`` gives them (none when None), and
+        ``reached``, the node they led to."""
+        self._actions.extend(actions)
+        self._anchors.extend([None] * len(actions) if anchors is None else anchors)
+        position = self._position(reached)
+        if position is None:
+            self._arrivals.append((reached, len(self._actions)))
+        else:
+            del self._arrivals[position + 1 :]
+
+    def _setup_start(self, node: str) -> int | None:
+        position = self._position(node)
+        return None if position is None else self._arrivals[position][1]
+
+    def _position(self, node: str) -> int | None:
+        resolved = self._resolve_node_id(node)
+        for position in reversed(range(len(self._arrivals))):
+            if self._resolve_node_id(self._arrivals[position][0]) == resolved:
+                return position
+        return None
 
 
 @dataclass(frozen=True)
@@ -285,6 +394,64 @@ def _short_list_order(candidate: Candidate) -> tuple[int, float]:
     return candidate.best_rank, -candidate.closest_member.score
 
 
+class MemberVerdict(NamedTuple):
+    """The verifier's answer on whether two member observations show one screen;
+    ``reused`` when an earlier check of the same pair in the run gave it."""
+
+    same: bool
+    reason: str
+    reused: bool = False
+
+
+type MemberVerdicts = dict[frozenset[str], MemberVerdict]
+
+
+class ShownMembers(NamedTuple):
+    """The member of each node a merge check shows the verifier, and the cosine of
+    their images; ``None`` when a node has no image vector and its representative
+    is shown."""
+
+    existing: str
+    new: str
+    score: float | None
+
+
+type MergePairs = Callable[[GraphManager], list[tuple[str, str, dict[str, object]]]]
+
+
+@dataclass(frozen=True, slots=True)
+class MergeSource:
+    """One named way of finding node pairs that may be one screen; ``pairs`` returns
+    each pair with what the source found."""
+
+    name: str
+    pairs: MergePairs
+
+
+def _close_member_images(graph: GraphManager) -> list[tuple[str, str, dict[str, object]]]:
+    return [
+        (node_a, node_b, {"members": [pair.first, pair.second], "score": pair.score})
+        for node_a, node_b, pair in graph.close_member_pairs()
+    ]
+
+
+MERGE_SOURCES = (MergeSource("image", _close_member_images),)
+
+
+@dataclass(slots=True)
+class MergeProposal:
+    """A node pair that may be one screen, and the finding of every source that
+    proposed it, each naming its ``source``."""
+
+    node_a: str
+    node_b: str
+    findings: list[dict[str, object]] = field(default_factory=list)
+
+    @property
+    def sources(self) -> list[str]:
+        return list(dict.fromkeys(as_str(finding.get("source"), "") for finding in self.findings))
+
+
 @dataclass(slots=True)
 class _Decision:
     """What decided a screen's node, as the ``identify`` field of its record keeps it."""
@@ -311,13 +478,19 @@ class _Decision:
 @dataclass(slots=True)
 class _Identification:
     """One described screen on its way through ``identify_state``: its description,
-    which the step's first rejection refines, and the decision its record gets."""
+    which the step's first rejection refines, and the decision its record gets.
+
+    A member the audit identifies again from its stored describe output carries the
+    run's ``verdicts``, which its verifier calls reuse and add to; it refines no
+    description.
+    """
 
     observation: Observation
     image_vector: list[float]
     screen: _ScreenDescription
     decision: _Decision
     rejected: bool = False
+    verdicts: MemberVerdicts | None = None
 
 
 def _node_id(value: object) -> str:
@@ -468,6 +641,11 @@ def _add_member(node_data: dict[str, Any], observation_id: str) -> None:
     node_data.setdefault("representative_observation", observation_id)
 
 
+def _step_order(step_id: str) -> tuple[int, str]:
+    # Step IDs are zero-padded integers, so a longer ID is a later step.
+    return len(step_id), step_id
+
+
 def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
     """Fold a removed node's visits, members, activities, state schema and elements into
     the kept one.
@@ -476,8 +654,7 @@ def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any
     """
     keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
     members = {*keep_data.get("observations", []), *remove_data.get("observations", [])}
-    # Step IDs are zero-padded integers, so a longer ID is a later step.
-    keep_data["observations"] = sorted(members, key=lambda step_id: (len(step_id), step_id))
+    keep_data["observations"] = sorted(members, key=_step_order)
     _merge_activities(keep_data, remove_data)
     _merge_schema_values(keep_data, remove_data)
     _merge_elements(keep_data, remove_data.get("interactable_elements", []))
@@ -492,13 +669,8 @@ def _sub_action_placeholders(action: object) -> list[None]:
 
 
 def _action_anchors(edge_data: Mapping[str, Any], index: int) -> tuple[Anchor | None, ...]:
-    """Return the anchors of action ``index`` of an edge, one per sub-action; an action
-    recorded without them, as in a graph explored before anchors, has none."""
-    entries = edge_data.get("anchors", [])
-    entry = entries[index] if index < len(entries) else None
-    if not isinstance(entry, list):
-        return ()
-    return tuple(Anchor.from_record(record) for record in entry)
+    """Return the anchors of action ``index`` of an edge, one per sub-action."""
+    return tuple(Anchor.from_record(record) for record in edge_data["anchors"][index])
 
 
 def _had_no_visible_effect(flags: object) -> bool:
@@ -513,25 +685,107 @@ def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
     """Readers pair entry i of every per-action list with actions[i] and skip placeholders.
 
     An entry of ``anchors`` and ``action_flags`` is itself a list, with one entry per
-    sub-action of its action.
+    sub-action of its action. ``add_edge`` records both with every action, so neither
+    list is padded.
     """
     actions = list(edge_data.get("actions", []))
     num_steps = list(edge_data.get("num_steps", []))
     num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
-    aligned: dict[str, list[Any]] = {"actions": actions, "num_steps": num_steps}
-    for key in ("anchors", "action_flags"):
-        values = list(edge_data.get(key, []))
-        values.extend(_sub_action_placeholders(action) for action in actions[len(values) :])
-        aligned[key] = values
+    aligned: dict[str, list[Any]] = {
+        "actions": actions,
+        "num_steps": num_steps,
+        "anchors": list(edge_data.get("anchors", [])),
+        "action_flags": list(edge_data.get("action_flags", [])),
+    }
     for key, placeholder in (
         ("instructions", ""),
         ("target_observations", ""),
         ("schema_deltas", None),
+        ("setups", None),
+        ("setup_anchors", None),
     ):
         values = list(edge_data.get(key, []))
         values.extend([placeholder] * (len(actions) - len(values)))
         aligned[key] = values
     return aligned
+
+
+def _same_action(entry: object, action: object) -> bool:
+    """Whether an edge's action entry is a transition record's action; an edge keeps
+    a single action as a one-action sequence."""
+    return entry in (action, [action])
+
+
+def _without_entries(
+    aligned: dict[str, list[Any]], indices: Collection[int]
+) -> dict[str, list[Any]]:
+    return {
+        key: [value for index, value in enumerate(values) if index not in indices]
+        for key, values in aligned.items()
+    }
+
+
+def _setup_actions(entry: object) -> tuple[dict[str, Any], ...]:
+    """Return an action's entry of ``setups`` as its device actions; an entry that is not
+    a list of actions, such as the placeholder of a setup not recorded, gives none."""
+    if not isinstance(entry, list) or not all(isinstance(action, dict) for action in entry):
+        return ()
+    return tuple(as_str_dict(action) for action in entry)
+
+
+def _recorded_setup(
+    setup: Sequence[dict[str, Any]] | None, source: str, target: str
+) -> list[dict[str, Any]] | None:
+    """Return ``setup`` as the edge from ``source`` to ``target`` records it: one longer
+    than ``MAX_SETUP_ACTIONS`` is logged as dropped and recorded as unknown."""
+    if setup is None:
+        return None
+    if len(setup) > MAX_SETUP_ACTIONS:
+        logger.info(
+            "Dropped the setup of an action on %s -> %s: %d actions, more than %d",
+            source,
+            target,
+            len(setup),
+            MAX_SETUP_ACTIONS,
+        )
+        return None
+    return list(setup)
+
+
+def _count_repeat(
+    edge_data: dict[str, Any],
+    action: dict[str, Any] | list[dict[str, Any]],
+    setup: list[dict[str, Any]] | None,
+    setup_anchors: list[dict[str, object] | None] | None,
+) -> bool:
+    """Count one more visit when the edge already holds ``action``, and return whether it
+    does. A known ``setup`` replaces the action's recorded one, with its
+    ``setup_anchors``, when that is unknown or longer."""
+    for index, recorded_action in enumerate(edge_data.get("actions", [])):
+        if recorded_action == action:
+            edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
+            aligned = _aligned_lists(edge_data)
+            recorded = aligned["setups"][index]
+            if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
+                aligned["setups"][index] = setup
+                aligned["setup_anchors"][index] = setup_anchors
+                edge_data["setups"] = aligned["setups"]
+                edge_data["setup_anchors"] = aligned["setup_anchors"]
+            return True
+    return False
+
+
+def _action_costs(edge_data: dict[str, Any]) -> list[int]:
+    """Return how many device actions a replay of each action of an edge sends: the
+    action's steps and its setup's."""
+    aligned = _aligned_lists(edge_data)
+    steps = as_int_list(aligned["num_steps"]) or [
+        _default_num_steps(action) for action in aligned["actions"]
+    ]
+    return [
+        own + len(_setup_actions(setup))
+        for own, setup in zip(steps, aligned["setups"], strict=False)
+    ]
 
 
 def _member_observations(node: dict[str, Any]) -> list[str]:
@@ -581,9 +835,10 @@ def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Pa
         )
     if problems:
         msg = (
-            f"{path}: node(s) with {'; '.join(problems)}. Graphs saved before nodes listed "
-            "their member observations, or before observations kept their accessibility "
-            "tree, cannot be loaded: explore the app again into a new graph directory."
+            f"{path}: node(s) with {'; '.join(problems)}. A graph whose nodes do not list "
+            "their member observations, or whose representatives have no tree and no "
+            "recorded reason, cannot be loaded: explore the app again into a new graph "
+            "directory."
         )
         raise ValueError(msg)
 
@@ -630,6 +885,7 @@ class GraphManager:
         self._next_id = 0
         self._node_aliases: dict[str, str] = {}
         self._image_vectors: dict[str, list[float]] = {}
+        self._unit_vectors: dict[str, list[float]] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
         self.total_steps_completed = 0
 
@@ -742,14 +998,57 @@ class GraphManager:
         )
         return ClosestMember(member, score)
 
-    def representative_image_b64(self, node_id: str) -> str:
-        """Return the WebP image of a node's representative observation as base64."""
-        if self.steps_dir is None:
-            msg = "GraphManager needs a steps_dir to read observation images"
-            raise RuntimeError(msg)
-        return observation_image_b64(
-            self.steps_dir, self.graph.nodes[node_id]["representative_observation"]
+    def _member_units(self, members: Iterable[str]) -> dict[str, list[float]]:
+        """Return the image vectors of ``members`` scaled to length 1, leaving out those
+        without a vector or with a zero one; each is scaled once per loaded graph."""
+        units: dict[str, list[float]] = {}
+        for member in members:
+            unit = self._unit_vectors.get(member)
+            vector = self._image_vectors.get(member)
+            if unit is None and vector is not None:
+                unit = unit_vector(vector)
+            if unit is not None:
+                units[member] = self._unit_vectors[member] = unit
+        return units
+
+    def close_member_pairs(self, floor: float = MERGE_FLOOR) -> list[tuple[str, str, MemberPair]]:
+        """Return every pair of in-app nodes of one package whose closest members, by
+        image, reach the cosine ``floor``, with those members, in node order."""
+        by_package: dict[str, list[str]] = {}
+        for raw_id, data in self.graph.nodes(data=True):
+            node_id = _node_id(raw_id)
+            if not self._is_external(node_id):
+                by_package.setdefault(as_str(data.get("package"), ""), []).append(node_id)
+        units = self._member_units(self._in_app_members())
+        found: list[tuple[str, str, MemberPair]] = []
+        for node_ids in by_package.values():
+            ordered = sorted(node_ids, key=self._node_numeric_order)
+            for node_a, node_b in itertools.combinations(ordered, 2):
+                pair = closest_pair(
+                    _member_observations(self.graph.nodes[node_a]),
+                    _member_observations(self.graph.nodes[node_b]),
+                    units,
+                )
+                if pair is not None and pair.score >= floor:
+                    found.append((node_a, node_b, pair))
+        return found
+
+    def closest_members(self, existing: str, new: str) -> ShownMembers:
+        """Return the member of node ``existing`` and the member of node ``new`` whose
+        images are the most similar, or both representatives when either node has no
+        member with an image vector."""
+        existing_members = _member_observations(self.graph.nodes[existing])
+        new_members = _member_observations(self.graph.nodes[new])
+        pair = closest_pair(
+            existing_members, new_members, self._member_units([*existing_members, *new_members])
         )
+        if pair is None:
+            return ShownMembers(
+                self.graph.nodes[existing]["representative_observation"],
+                self.graph.nodes[new]["representative_observation"],
+                None,
+            )
+        return ShownMembers(pair.first, pair.second, pair.score)
 
     def _in_app_members(self) -> Iterator[str]:
         for node_id, data in self.graph.nodes(data=True):
@@ -1063,15 +1362,8 @@ class GraphManager:
     def _verify(self, identification: _Identification, node_id: str, member: str) -> str | None:
         """Ask the verifier whether the identified screen is ``node_id``'s ``member``, and
         return ``node_id`` when it says so; the first rejection refines both descriptions."""
-        client, page_detail = self._require_page_detail()
         description = self.graph.nodes[node_id].get("page_description", "")
-        verdict = verify_same_node(
-            client,
-            screenshot_new_b64=identification.observation.screenshot_b64,
-            screenshot_existing_b64=observation_image_b64(self._require_steps_dir(), member),
-            existing_description=description,
-            settings=page_detail,
-        )
+        verdict = self._verifier_reply(identification, member, description)
         same = verdict.get("same") is True
         reason = as_str(verdict.get("reason"), "")
         identification.decision.verifications.append(
@@ -1089,10 +1381,55 @@ class GraphManager:
         logger.info(
             "Verifier rejected node %s against member %s: reason: %s", node_id, member, reason
         )
-        if not identification.rejected:
+        if identification.verdicts is None and not identification.rejected:
             identification.rejected = True
             self._refine(identification, node_id, verdict)
         return None
+
+    def _verifier_reply(
+        self, identification: _Identification, member: str, description: str
+    ) -> dict[str, Any]:
+        verdicts = identification.verdicts
+        if verdicts is not None:
+            known = self.verify_members(
+                member,
+                identification.observation.observation_id,
+                description=description,
+                verdicts=verdicts,
+            )
+            return {"same": known.same, "reason": known.reason}
+        client, page_detail = self._require_page_detail()
+        return verify_same_node(
+            client,
+            screenshot_new_b64=identification.observation.screenshot_b64,
+            screenshot_existing_b64=observation_image_b64(self._require_steps_dir(), member),
+            existing_description=description,
+            settings=page_detail,
+        )
+
+    def verify_members(
+        self, existing: str, new: str, *, description: str, verdicts: MemberVerdicts
+    ) -> MemberVerdict:
+        """Ask the verifier whether member observations ``existing``, of the node
+        ``description`` describes, and ``new`` show one screen, and keep the answer in
+        ``verdicts``; a pair ``verdicts`` already holds is answered from there."""
+        pair = frozenset((existing, new))
+        known = verdicts.get(pair)
+        if known is not None:
+            logger.info("Reusing the verifier's answer on members %s and %s", existing, new)
+            return known._replace(reused=True)
+        client, page_detail = self._require_page_detail()
+        steps_dir = self._require_steps_dir()
+        reply = verify_same_node(
+            client,
+            screenshot_new_b64=observation_image_b64(steps_dir, new),
+            screenshot_existing_b64=observation_image_b64(steps_dir, existing),
+            existing_description=description,
+            settings=page_detail,
+        )
+        verdict = MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
+        verdicts[pair] = verdict
+        return verdict
 
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
@@ -1410,7 +1747,11 @@ class GraphManager:
             details: What this traversal recorded next to its action; none by default.
 
         If an edge with the same action already exists, it is not duplicated.
-        Instead, a visit counter is incremented.
+        Instead, a visit counter is incremented, and a known setup replaces the
+        action's recorded one when that is unknown or longer.
+
+        A setup of more than ``MAX_SETUP_ACTIONS`` actions is logged as dropped and
+        recorded as unknown.
 
         The edge is dropped with a warning when either endpoint is missing, or when the
         source is an ``ext_`` node: one such node stands for every screen of an outside
@@ -1432,13 +1773,15 @@ class GraphManager:
         num_steps = details.num_steps
         if num_steps is None:
             num_steps = _default_num_steps(action)
+        setup = _recorded_setup(details.setup, source, target)
+        setup_anchors = (
+            None if setup is None else list(details.setup_anchors or [None] * len(setup))
+        )
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            for a in edge_data.get("actions", []):
-                if a == action:
-                    edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-                    return
+            if _count_repeat(edge_data, action, setup, setup_anchors):
+                return
         else:
             self.graph.add_edge(source, target, visit_count=1)
             edge_data = self.graph[source][target]
@@ -1458,6 +1801,8 @@ class GraphManager:
                 "action_flags",
                 _sub_action_placeholders(action) if effect is None else effect.flag_records(),
             ),
+            ("setups", setup),
+            ("setup_anchors", setup_anchors),
         ):
             edge_data[key].append(value)
 
@@ -1498,6 +1843,17 @@ class GraphManager:
             if recorded_instruction == instruction:
                 return index, action, _action_anchors(edge_data, index)
         return None
+
+    def action_setup(self, source: str, target: str, index: int) -> Setup:
+        """Return the setup of action *index* of source→target, the device actions a replay
+        sends on *source* before it, with their anchors; an action recorded without a setup
+        has none."""
+        aligned = _aligned_lists(self.graph[source][target])
+        actions = _setup_actions(aligned["setups"][index])
+        if not actions:
+            return Setup((), ())
+        anchors = aligned["setup_anchors"][index]
+        return Setup(actions, tuple(Anchor.from_record(record) for record in anchors))
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
         """Move action *index* of source→target, with its entry in every per-action list, to
@@ -1542,6 +1898,269 @@ class GraphManager:
         edge_data.update(_aligned_lists(edge_data))
         edge_data["instructions"][index] = instruction
         edge_data["instruction_templates"] = []
+
+    def member_plans(self, floor: float = GROUPING_FLOOR) -> list[tuple[str, MemberPlan]]:
+        """Return, in node order, the groups of the members of every in-app node at the
+        cosine ``floor`` and the checks to make on them.
+
+        Only members with an image vector and a stored describe output are grouped,
+        since a member can leave its node only with both; a node whose representative
+        lacks either has no plan.
+        """
+        plans: list[tuple[str, MemberPlan]] = []
+        for raw_id, data in sorted(
+            self.graph.nodes(data=True),
+            key=lambda item: self._node_numeric_order(_node_id(item[0])),
+        ):
+            node_id = _node_id(raw_id)
+            if self._is_external(node_id):
+                continue
+            members = [m for m in _member_observations(data) if m in self._stored_screens]
+            plan = plan_member_checks(
+                members,
+                as_str(data.get("representative_observation"), ""),
+                self._member_units(members),
+                floor=floor,
+            )
+            if plan is not None:
+                plans.append((node_id, plan))
+        return plans
+
+    def split_members(
+        self, node_id: str, members: Sequence[str], transitions: Sequence[TransitionRecord]
+    ) -> dict[str, object]:
+        """Move ``members`` of ``node_id`` to a new node built from their stored describe
+        output, move the edge actions their ``transitions`` took, and return the change."""
+        new_node = self._node_from_stored(node_id, members)
+        return {"new_node": True, **self._relocate(node_id, members, new_node, transitions)}
+
+    def move_member(
+        self,
+        node_id: str,
+        member: str,
+        *,
+        verdicts: MemberVerdicts,
+        transitions: Sequence[TransitionRecord],
+    ) -> dict[str, object]:
+        """Move ``member`` out of ``node_id`` to the node screen matching's short list
+        confirms for it, or to a new node when none does, move the edge actions its
+        ``transitions`` took, and return the change.
+
+        The member's stored describe output stands in for the describe call, so the
+        short list costs one text embedding and its verifier calls; the node it leaves
+        is not on the list, and no description is refined. The member's tree, or the
+        reason it has none, is read from the step log.
+        """
+        identification = self._stored_identification(node_id, member, verdicts)
+        destination = self._verify_short_list(identification, excluded={node_id})
+        new_node = destination is None
+        if destination is None:
+            destination = self._node_from_stored(node_id, [member], identification.screen.embedding)
+        decision = identification.decision
+        return {
+            "new_node": new_node,
+            **self._relocate(node_id, [member], destination, transitions),
+            "short_list": {
+                "candidates": decision.candidates,
+                "verifications": decision.verifications,
+            },
+        }
+
+    def _stored_identification(
+        self, node_id: str, member: str, verdicts: MemberVerdicts
+    ) -> _Identification:
+        steps_dir = self._require_steps_dir()
+        stored = self._stored_screens[member]
+        record = read_observation_record(steps_dir, member) or {}
+        tree, tree_error = read_observation_tree(steps_dir, member)
+        observation = Observation(
+            observation_id=member,
+            screenshot_b64=observation_image_b64(steps_dir, member),
+            activity=as_str(record.get("activity"), ""),
+            package=as_str(self.graph.nodes[node_id].get("package"), ""),
+            pixel_hash=stored.pixel_hash,
+            screen_size=screen_size_of(record),
+            ui_tree=tree,
+            ui_tree_error=tree_error,
+            ui_tree_settled=record.get("ui_tree_settled") is True,
+        )
+        described = stored.described
+        screen = _ScreenDescription(
+            described.page_description,
+            self._embed(described.page_description),
+            described.state,
+            described.elements,
+        )
+        return _Identification(
+            observation,
+            self._image_vectors[member],
+            screen,
+            _Decision(expected_node=None),
+            verdicts=verdicts,
+        )
+
+    def _member_activity(self, member: str) -> str:
+        record = read_observation_record(self._require_steps_dir(), member) or {}
+        return as_str(record.get("activity"), "")
+
+    def _node_from_stored(
+        self, node_id: str, members: Sequence[str], embedding: list[float] | None = None
+    ) -> str:
+        """Add a node for ``members`` of ``node_id`` from the stored describe output of the
+        earliest of them, its representative: its description, embedded unless
+        ``embedding`` is given, and its elements."""
+        earliest = min(members, key=_step_order)
+        described = self._stored_screens[earliest].described
+        if embedding is None:
+            embedding = self._embed(described.page_description)
+        screen = _ScreenDescription(
+            described.page_description, embedding, described.state, described.elements
+        )
+        new_node = self._add_screen_node(
+            screen,
+            as_str(self.graph.nodes[node_id].get("package"), ""),
+            self._member_activity(earliest),
+        )
+        _merge_elements(self.graph.nodes[new_node], described.elements)
+        self.graph.nodes[new_node]["representative_observation"] = earliest
+        return new_node
+
+    def _relocate(
+        self,
+        node_id: str,
+        members: Sequence[str],
+        destination: str,
+        transitions: Sequence[TransitionRecord],
+    ) -> dict[str, object]:
+        matched = self._matched_transitions(node_id, transitions)
+        self._move_members(node_id, members, destination)
+        edge_actions = self._reassign_actions(matched)
+        logger.info(
+            "Moved %d member(s) of %s to %s, and %d edge action(s) with them",
+            len(members),
+            node_id,
+            destination,
+            len(edge_actions),
+        )
+        return {
+            "from": node_id,
+            "to": destination,
+            "members": list(members),
+            "edge_actions": edge_actions,
+        }
+
+    def _move_members(self, node_id: str, members: Sequence[str], destination: str) -> None:
+        """Move ``members`` and their visits from ``node_id`` to ``destination``, which
+        also takes their states and activities."""
+        source_data = self.graph.nodes[node_id]
+        target_data = self.graph.nodes[destination]
+        moving = set(members)
+        source_data["observations"] = [
+            m for m in _member_observations(source_data) if m not in moving
+        ]
+        target_data["observations"] = sorted(
+            {*_member_observations(target_data), *moving}, key=_step_order
+        )
+        source_data["visit_count"] = max(0, source_data.get("visit_count", 0) - len(moving))
+        target_data["visit_count"] = target_data.get("visit_count", 0) + len(moving)
+        schema = target_data.setdefault("state_schema", {})
+        for member in sorted(moving, key=_step_order):
+            _merge_into_schema(schema, dict(self._stored_screens[member].described.state))
+            self._add_activity(destination, self._member_activity(member))
+
+    def _transition_nodes(self, transitions: Iterable[TransitionRecord]) -> list[tuple[str, str]]:
+        """Return the nodes each transition's observations belong to now: the node that
+        lists each, or, for one no node lists, the node it was recorded with."""
+        members_of = {
+            member: _node_id(node)
+            for node, data in self.graph.nodes(data=True)
+            for member in _member_observations(data)
+        }
+        return [
+            (
+                members_of.get(transition.before) or self.resolve_node_id(transition.from_node),
+                members_of.get(transition.after) or self.resolve_node_id(transition.to_node),
+            )
+            for transition in transitions
+        ]
+
+    def _matched_transitions(
+        self, node_id: str, transitions: Sequence[TransitionRecord]
+    ) -> dict[tuple[str, str, int], list[TransitionRecord]]:
+        """Return the transitions behind each action on an edge of ``node_id``, by edge and
+        action index: those whose action equals it and whose observations belong to the
+        edge's endpoints. Each transition backs the first such action only."""
+        endpoints = self._transition_nodes(transitions)
+        claimed: set[int] = set()
+        matched: dict[tuple[str, str, int], list[TransitionRecord]] = {}
+        edges = {*self.graph.in_edges(node_id), *self.graph.out_edges(node_id)}
+        for source, target in sorted(edges):
+            for index, entry in enumerate(self.graph[source][target].get("actions", [])):
+                found = [
+                    t
+                    for t, transition in enumerate(transitions)
+                    if t not in claimed
+                    and endpoints[t] == (source, target)
+                    and _same_action(entry, transition.action)
+                ]
+                if found:
+                    claimed.update(found)
+                    matched[source, target, index] = [transitions[t] for t in found]
+        return matched
+
+    def _reassign_actions(
+        self, matched: Mapping[tuple[str, str, int], list[TransitionRecord]]
+    ) -> list[dict[str, object]]:
+        """Put each matched action on every edge its transitions now give, take it off
+        its edge when they no longer give that one, and return each action moved."""
+        before = {(s, t): _aligned_lists(self.graph[s][t]) for s, t, _ in matched}
+        dropped: dict[tuple[str, str], set[int]] = {}
+        departed: Counter[tuple[str, str]] = Counter()
+        moved: list[dict[str, object]] = []
+        for (source, target, index), found in matched.items():
+            now = Counter(self._transition_nodes(found))
+            if set(now) == {(source, target)}:
+                continue
+            for (new_source, new_target), traversals in now.items():
+                if (new_source, new_target) == (source, target):
+                    continue
+                entry = {key: [values[index]] for key, values in before[source, target].items()}
+                if new_target != target:
+                    entry["target_observations"] = [
+                        self.graph.nodes[new_target].get("page_description", "")
+                    ]
+                self._merge_edge_data(new_source, new_target, {**entry, "visit_count": traversals})
+                departed[source, target] += traversals
+            indices = dropped.setdefault((source, target), set())
+            if (source, target) not in now:
+                indices.add(index)
+            moved.append(
+                {
+                    "edge": [source, target],
+                    "action": before[source, target]["actions"][index],
+                    "now": sorted([*pair] for pair in now),
+                }
+            )
+        for (source, target), indices in dropped.items():
+            self._drop_actions(source, target, indices, departed[source, target])
+        return moved
+
+    def _drop_actions(
+        self, source: str, target: str, indices: Collection[int], traversals: int
+    ) -> None:
+        """Remove the actions at ``indices`` from source→target, and ``traversals`` from
+        its visit count; the edge goes once no action is left on it."""
+        edge_data = self.graph[source][target]
+        remaining = _without_entries(_aligned_lists(edge_data), indices)
+        if not remaining["actions"]:
+            self.graph.remove_edge(source, target)
+            return
+        edge_data.update(remaining)
+        if indices:
+            edge_data["instruction_templates"] = []
+        edge_data["visit_count"] = max(
+            len(remaining["actions"]), edge_data.get("visit_count", 0) - traversals
+        )
 
     def _edge_to_normalize(self, source: str, target: str) -> _EdgeToNormalize | None:
         """Return the edge's normalize_edge inputs, or None when the skip rules spare it a call."""
@@ -1704,10 +2323,11 @@ class GraphManager:
         """
         edges = []
         for _, target, data in self.graph.out_edges(node_id, data=True):
-            flags = data.get("action_flags", [])
             recorded = [
-                (instruction, index < len(flags) and _had_no_visible_effect(flags[index]))
-                for index, instruction in enumerate(data.get("instructions", []))
+                (instruction, _had_no_visible_effect(flags))
+                for instruction, flags in zip(
+                    data.get("instructions", []), data.get("action_flags", []), strict=True
+                )
                 if instruction
             ]
             edge_info = {
@@ -1733,24 +2353,25 @@ class GraphManager:
 
     @staticmethod
     def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
-        """Return the minimum num_steps for an edge (used as path weight)."""
-        steps = as_int_list(edge_data.get("num_steps"))
-        return min(steps) if steps else 1
+        """Return the fewest device actions a replay of one of the edge's actions sends,
+        its setup's included (used as path weight)."""
+        costs = _action_costs(edge_data)
+        return min(costs) if costs else 1
 
     def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
 
-        Edge weight = minimum num_steps recorded for that edge, so paths
-        with fewer total action steps are preferred.
+        An edge weighs as its cheapest action: the fewest steps, its setup's included,
+        so a path whose actions need no setup is preferred.
 
         Returns:
-            The path's steps, the first being the source itself. A step's action is
-            the edge action with the fewest steps, a single dict or a list of dicts
-            (compound action), with its anchors; an edge without actions gives ``{}``.
+            The path's steps, the first being the source itself. A step's action is the
+            edge's cheapest action, a single dict or a list of dicts (compound action),
+            with its anchors and its setup; an edge without actions gives ``{}``.
             Returns None if no path exists.
         """
         if source == target:
-            return [PathStep(source, {}, ())]
+            return [PathStep(source, {})]
 
         if source not in self.graph or target not in self.graph:
             return None
@@ -1765,19 +2386,21 @@ class GraphManager:
         except nx.NetworkXNoPath:
             return None
 
-        result = [PathStep(_node_id(node_path[0]), {}, ())]
+        result = [PathStep(_node_id(node_path[0]), {})]
         for i in range(len(node_path) - 1):
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
-            actions = edge_data.get("actions", [])
-            steps_list = edge_data.get("num_steps", [1] * len(actions))
-            if actions:
-                best_idx = steps_list.index(min(steps_list)) if steps_list else 0
+            costs = _action_costs(edge_data)
+            if costs:
+                best_idx = costs.index(min(costs))
                 step = PathStep(
-                    _node_id(t), actions[best_idx], _action_anchors(edge_data, best_idx)
+                    _node_id(t),
+                    edge_data["actions"][best_idx],
+                    _action_anchors(edge_data, best_idx),
+                    self.action_setup(_node_id(s), _node_id(t), best_idx),
                 )
             else:
-                step = PathStep(_node_id(t), {}, ())
+                step = PathStep(_node_id(t), {})
             result.append(step)
 
         return result
@@ -1802,7 +2425,8 @@ class GraphManager:
         Returns:
             A list of path steps:
             [
-                {"type": "navigate", "from": src, "to": tgt, "actions": [action, ...]},
+                {"type": "navigate", "from": src, "to": tgt,
+                 "setup": [action, ...], "action": action},
                 {"type": "self_loop", "node": n, "instruction": str,
                  "actions": action_seq, "schema_delta": {...},
                  "required_schema": {"key": "value"}},
@@ -1824,7 +2448,7 @@ class GraphManager:
                     return None
 
                 for i in range(1, len(nav_path)):
-                    node_id, action, _anchors = nav_path[i]
+                    node_id, action, _anchors, setup = nav_path[i]
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
                     instruction = ""
@@ -1840,6 +2464,7 @@ class GraphManager:
                             "type": "navigate",
                             "from": prev_node,
                             "to": node_id,
+                            "setup": list(setup.actions),
                             "action": action,
                             "instruction": instruction,
                             "target_observation": target_obs,
@@ -2096,9 +2721,9 @@ class GraphManager:
                 "action_flags": attrs.get("action_flags", []),
                 "visit_count": attrs.get("visit_count", 0),
             }
-            schema_deltas = attrs.get("schema_deltas")
-            if schema_deltas:
-                edge_data["schema_deltas"] = schema_deltas
+            for key in ("schema_deltas", "setups", "setup_anchors"):
+                if attrs.get(key):
+                    edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
 
         write_json_atomically(path, data, indent=2, ensure_ascii=False)
@@ -2158,6 +2783,7 @@ class GraphManager:
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.steps_dir = steps_dir
         self._image_vectors = image_vectors
+        self._unit_vectors = {}
         self._stored_screens = stored_screens
         self._node_aliases = {
             old: new
@@ -2202,9 +2828,9 @@ class GraphManager:
                 "action_flags": edge_data.get("action_flags", []),
                 "visit_count": edge_data.get("visit_count", 0),
             }
-            schema_deltas = edge_data.get("schema_deltas")
-            if schema_deltas:
-                edge_attrs["schema_deltas"] = schema_deltas
+            for key in ("schema_deltas", "setups", "setup_anchors"):
+                if edge_data.get(key):
+                    edge_attrs[key] = edge_data[key]
             self.graph.add_edge(
                 edge_data["source"],
                 edge_data["target"],
@@ -2374,13 +3000,18 @@ class GraphManager:
 
         return result
 
-    def merge_skip_reason(self, node_a: str, node_b: str) -> str | None:
-        """Return why a merge candidate pair cannot be verified, or ``None`` when both
-        representatives can be compared.
+    def _merge_skip_reason(self, node_a: str, node_b: str) -> str | None:
+        """Return why a proposed pair cannot be verified, or ``None`` when its members can
+        be compared.
 
         An ``ext_`` node stands for every screen of another app or the web, so its
-        representative is no screen of the app to compare with.
+        members are no screens of the app to compare with.
         """
+        if node_a not in self.graph or node_b not in self.graph:
+            return "node missing"
+        # A source can name one node twice, and it would verify as "same".
+        if node_a == node_b:
+            return "same node"
         if self._is_external(node_a) or self._is_external(node_b):
             return "external node"
         pair = (node_a, node_b)
@@ -2396,8 +3027,101 @@ class GraphManager:
                 return int(num), node_id
         return 10**9, node_id
 
+    def merge_proposals(
+        self,
+        text_issues: Iterable[Mapping[str, object]],
+        *,
+        sources: Sequence[MergeSource] = MERGE_SOURCES,
+    ) -> list[MergeProposal]:
+        """Return the node pairs that may be one screen, once per unordered pair, each
+        with the finding of every source that proposed it: the model's ``merge_nodes``
+        issues as ``text_audit``, then each of ``sources``.
+
+        A pair names its lower-numbered node first, the one a merge keeps.
+        """
+        proposals: dict[tuple[str, str], MergeProposal] = {}
+
+        def add(node_a: str, node_b: str, finding: dict[str, object]) -> None:
+            first, second = sorted((node_a, node_b), key=self._node_numeric_order)
+            proposal = proposals.setdefault((first, second), MergeProposal(first, second))
+            proposal.findings.append(finding)
+
+        for issue in text_issues:
+            node_a, node_b = as_str(issue.get("node_a"), ""), as_str(issue.get("node_b"), "")
+            add(node_a, node_b, {"source": "text_audit", "issue": dict(issue)})
+        for source in sources:
+            for node_a, node_b, found in source.pairs(self):
+                add(node_a, node_b, {"source": source.name, **found})
+        return list(proposals.values())
+
+    def verify_merge_proposals(
+        self, proposals: Iterable[MergeProposal], verdicts: MemberVerdicts
+    ) -> list[dict[str, object]]:
+        """Verify each proposed pair once, on its two closest members, merge the pairs
+        the verifier confirms, and return each pair's result.
+
+        A pair's nodes are followed through earlier merges. The verifier is shown the
+        member of the more-visited node, with that node's description, and the member
+        of the other; the lower-numbered node is kept.
+        """
+        results: list[dict[str, object]] = []
+        for proposal in proposals:
+            result: dict[str, object] = {
+                "node_a": proposal.node_a,
+                "node_b": proposal.node_b,
+                "sources": proposal.sources,
+                "findings": proposal.findings,
+            }
+            result.update(self._verify_merge(proposal, verdicts))
+            results.append(result)
+        return results
+
+    def _verify_merge(self, proposal: MergeProposal, verdicts: MemberVerdicts) -> dict[str, object]:
+        node_a = self.resolve_node_id(proposal.node_a)
+        node_b = self.resolve_node_id(proposal.node_b)
+        skip_reason = self._merge_skip_reason(node_a, node_b)
+        if skip_reason is not None:
+            logger.warning("Skipping merge %s + %s — %s", node_a, node_b, skip_reason)
+            return {"status": "skipped", "reason": skip_reason}
+        existing, new = sorted(
+            (node_a, node_b),
+            key=lambda n: (-self.graph.nodes[n].get("visit_count", 0), self._node_numeric_order(n)),
+        )
+        shown = self.closest_members(existing, new)
+        logger.info(
+            "Verifying merge of %s + %s (sources: %s) on members %s and %s",
+            node_a,
+            node_b,
+            ", ".join(proposal.sources),
+            shown.existing,
+            shown.new,
+        )
+        verdict = self.verify_members(
+            shown.existing,
+            shown.new,
+            description=self.graph.nodes[existing].get("page_description", ""),
+            verdicts=verdicts,
+        )
+        outcome: dict[str, object] = {
+            "members": {existing: shown.existing, new: shown.new},
+            "image_score": shown.score,
+            "reason": verdict.reason,
+            "reused": verdict.reused,
+        }
+        if not verdict.same:
+            logger.info("Kept separate: %s + %s — reason: %s", node_a, node_b, verdict.reason)
+            return {"status": "kept_separate", **outcome}
+        keep, remove = sorted((node_a, node_b), key=self._node_numeric_order)
+        self.merge_nodes(keep, remove)
+        logger.info("Merged %s into %s — reason: %s", remove, keep, verdict.reason)
+        return {"status": "merged", "kept": keep, "removed": remove, **outcome}
+
     def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
-        """Run a lightweight node-merge audit and merge verified duplicates."""
+        """Run a lightweight node-merge audit and merge verified duplicates.
+
+        Only the model's pairs are verified: image proposals would bring back at every
+        checkpoint each pair an earlier one kept apart.
+        """
         page_detail = self._page_detail()
         if page_detail is None:
             logger.warning("No page_detail settings — cannot run node merge audit")
@@ -2413,84 +3137,7 @@ class GraphManager:
             settings=settings._replace(request_timeout=self.audit_timeout),
         )
         issues = audit_result.get("issues", [])
-        results = []
-
-        for issue in issues:
-            node_a = issue.get("node_a", "")
-            node_b = issue.get("node_b", "")
-            if node_a not in self.graph or node_b not in self.graph:
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "skipped",
-                        "reason": "node missing",
-                    }
-                )
-                continue
-
-            # An auditor can name one node twice, and it would verify as "same".
-            if node_a == node_b:
-                logger.warning("Skipping merge candidate %s + itself", node_a)
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "skipped",
-                        "reason": "same node",
-                    }
-                )
-                continue
-
-            skip_reason = self.merge_skip_reason(node_a, node_b)
-            if skip_reason is not None:
-                results.append({"issue": issue, "status": "skipped", "reason": skip_reason})
-                continue
-
-            data_a = self.graph.nodes[node_a]
-            data_b = self.graph.nodes[node_b]
-
-            desc_a = data_a.get("page_description", "")
-            desc_b = data_b.get("page_description", "")
-            visits_a = data_a.get("visit_count", 0)
-            visits_b = data_b.get("visit_count", 0)
-            ref_desc = desc_a if visits_a >= visits_b else desc_b
-
-            logger.info(
-                "Verifying node merge candidate: %s ('%s') + %s ('%s')",
-                node_a,
-                desc_a,
-                node_b,
-                desc_b,
-            )
-            verify_result = verify_same_node(
-                client,
-                screenshot_new_b64=self.representative_image_b64(node_b),
-                screenshot_existing_b64=self.representative_image_b64(node_a),
-                existing_description=ref_desc,
-                settings=settings,
-            )
-            if verify_result.get("same", False):
-                keep, remove = sorted(
-                    (node_a, node_b),
-                    key=self._node_numeric_order,
-                )
-                self.merge_nodes(keep, remove)
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "merged",
-                        "kept": keep,
-                        "removed": remove,
-                        "reason": verify_result.get("reason", ""),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "issue": issue,
-                        "status": "kept_separate",
-                        "reason": verify_result.get("reason", ""),
-                    }
-                )
+        results = self.verify_merge_proposals(self.merge_proposals(issues, sources=()), {})
 
         merged_count = sum(1 for result in results if result.get("status") == "merged")
         logger.info(

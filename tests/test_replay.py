@@ -135,7 +135,7 @@ def test_an_anchored_tap_reads_the_screen_and_goes_to_its_element_s_current_cent
 
 
 _APPS = _anchor("Apps")
-# A row the screen no longer shows.
+# A row the screen does not show.
 _DISPLAY = dataclasses.replace(_APPS, locator=dataclasses.replace(_APPS.locator, label="Display"))
 
 
@@ -259,7 +259,7 @@ def test_the_screen_the_caller_just_read_serves_the_first_sub_action_only(tmp_pa
 @pytest.mark.parametrize(
     ("action", "anchors", "sent", "sleeps"),
     [
-        pytest.param({"action": "back"}, [], [{"action": "back"}], [1], id="one action"),
+        pytest.param({"action": "back"}, [None], [{"action": "back"}], [1], id="one action"),
         pytest.param(
             [{"action": "back"}, {"action": "back"}],
             [None, None],
@@ -267,14 +267,7 @@ def test_the_screen_the_caller_just_read_serves_the_first_sub_action_only(tmp_pa
             [0.5, 0.5, 1],
             id="a compound action",
         ),
-        pytest.param({}, [], [], [1], id="an edge saved without actions"),
-        pytest.param(
-            [_RECORDED_TAP, {"action": "back"}],
-            [],
-            [_RECORDED_TAP, {"action": "back"}],
-            [0.5, 0.5, 1],
-            id="fewer anchors than sub-actions",
-        ),
+        pytest.param({}, [], [], [1], id="an edge without actions"),
     ],
 )
 def test_sub_actions_are_half_a_second_apart_and_the_screen_settles_a_second_after(
