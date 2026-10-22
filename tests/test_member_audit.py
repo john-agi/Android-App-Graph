@@ -388,6 +388,24 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
     assert models.embedded == ["Screen 000003"]
 
 
+@pytest.mark.usefixtures("models")
+def test_a_graph_saved_after_a_split_loads_with_the_new_node_s_representative(
+    graph_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    """The node a split builds takes its earliest member as representative, a recorded
+    observation with its tree, so the graph saved after the split meets the loading rule
+    on representatives."""
+    write_member_graph(graph_path, SPLIT)
+    graph = _load(graph_path)
+    _check_members(graph, graph_path, {})
+    audited = graph_path.with_name("demo_audited.json")
+    graph.save_graph(audited)
+
+    loaded = _load(audited)
+
+    assert loaded.graph.nodes["s2_screen_000003"]["representative_observation"] == "000003"
+
+
 def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:

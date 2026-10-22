@@ -26,6 +26,7 @@ from android_app_graph.step_log import (
     load_image_embeddings,
     read_exploration_transitions,
     read_observation_record,
+    read_observation_tree,
     save_image_embeddings,
 )
 from android_app_graph.ui_tree import IDLE_FAILURE, UiTree, parse_tree, xml_document
@@ -503,6 +504,29 @@ def test_observation_from_state_reads_a_recorded_state_with_its_tree_or_the_reas
         ui_tree=tree,
         ui_tree_error=reason,
     )
+
+
+@pytest.mark.parametrize(
+    ("capture", "tree", "reason"),
+    [
+        pytest.param(CAPTURED, parse_tree(DOCUMENT), None, id="a tree"),
+        pytest.param({"xml": None, "ui_tree_error": IDLE_FAILURE}, None, IDLE_FAILURE, id="none"),
+    ],
+)
+def test_read_observation_tree_reads_the_recorded_tree_or_the_reason(
+    capture: dict[str, object], tree: UiTree | None, reason: str | None, steps: Path
+) -> None:
+    _recorder(_Device(_png((40, 30), "white"), capture=capture), steps).get_state()
+
+    assert read_observation_tree(steps, "000000") == (tree, reason)
+
+
+def test_reading_a_tree_missing_without_a_reason_raises(device: _Device, steps: Path) -> None:
+    _recorder(device, steps).get_state()
+    (steps / "000000.xml").unlink()
+
+    with pytest.raises(FileNotFoundError):
+        read_observation_tree(steps, "000000")
 
 
 def test_observation_from_state_rejects_a_state_the_recorder_did_not_return(
