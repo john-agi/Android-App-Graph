@@ -28,6 +28,7 @@ from android_app_graph.step_log import (
     read_observation_record,
     read_observation_tree,
     save_image_embeddings,
+    screen_size_of,
 )
 from android_app_graph.ui_tree import IDLE_FAILURE, Locator, UiTree, parse_tree, xml_document
 
@@ -540,7 +541,9 @@ def test_the_screen_size_is_the_screenshot_s_before_it_is_shrunk(steps: Path) ->
 
     assert state["screen_size"] == [1344, 2992]
     assert Observation.from_state(state).screen_size == (1344, 2992)
-    assert _record(steps, "000000")["height"] < 2992
+    record = _record(steps, "000000")
+    assert screen_size_of(record) == (1344, 2992)
+    assert record["height"] < 2992
 
 
 @pytest.mark.parametrize("size", [None, [1344], ["wide", "tall"]])
