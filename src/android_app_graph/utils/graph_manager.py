@@ -493,7 +493,7 @@ def _sub_action_placeholders(action: object) -> list[None]:
 
 def _action_anchors(edge_data: Mapping[str, Any], index: int) -> tuple[Anchor | None, ...]:
     """Return the anchors of action ``index`` of an edge, one per sub-action; an action
-    recorded without them, as in a graph explored before anchors, has none."""
+    the edge holds without anchors has none."""
     entries = edge_data.get("anchors", [])
     entry = entries[index] if index < len(entries) else None
     if not isinstance(entry, list):

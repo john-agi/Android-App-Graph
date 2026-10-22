@@ -131,7 +131,7 @@ def test_an_anchored_tap_reads_the_screen_and_goes_to_its_element_s_current_cent
 
 
 _APPS = _anchor("Apps")
-# A row the screen no longer shows.
+# A row the screen does not show.
 _DISPLAY = dataclasses.replace(_APPS, locator=dataclasses.replace(_APPS.locator, label="Display"))
 
 
