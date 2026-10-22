@@ -31,7 +31,7 @@ from openrouter import OpenRouter
 from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
-from android_app_graph.payloads import as_object_dict
+from android_app_graph.graph_files import save_embeddings, text_embeddings_path
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
@@ -142,25 +142,6 @@ def members(steps_dir: Path, *images: bytes) -> Membership:
     return {"observations": observation_ids, "representative_observation": observation_ids[0]}
 
 
-def describe_members(steps_dir: Path, observations: list[str], description: str) -> None:
-    """Give each of ``observations`` the ``describe`` output identify_state records for a
-    screen it described as ``description``."""
-    for observation_id in observations:
-        path = steps_dir / f"{observation_id}.json"
-        record = (
-            as_object_dict(json.loads(path.read_text("utf-8")))
-            if path.exists()
-            else {"id": observation_id}
-        )
-        record["describe"] = {
-            "page_description": description,
-            "state": {},
-            "elements": [],
-            "is_external_web": False,
-        }
-        path.write_text(json.dumps(record), "utf-8")
-
-
 def fake_pixel_hash(screenshot: str) -> str:
     """Stands in for the hash of a screenshot's pixels: equal screenshots hash alike."""
     return hashlib.sha256(screenshot.encode("ascii")).hexdigest()
@@ -200,9 +181,7 @@ def add_screen(
     activity: str = HOME,
     **overrides: object,
 ) -> None:
-    """Insert a node with the attribute set identify_state would create. In a manager
-    with a step log, each member's record gets the describe output identify_state
-    records, so ``embed_missing_members`` embeds ``description`` for it."""
+    """Insert a node with the attribute set identify_state would create."""
     attrs: dict[str, object] = {
         "package": PACKAGE,
         "activity": activity,
@@ -216,9 +195,23 @@ def add_screen(
     }
     attrs.update(overrides)
     gm.graph.add_node(node_id, **attrs)
-    observations = attrs.get("observations")
-    if gm.steps_dir is not None and isinstance(observations, list):
-        describe_members(gm.steps_dir, [str(member) for member in observations], description)
+
+
+def with_text_vectors(gm: GraphManager, steps_dir: Path) -> GraphManager:
+    """Return ``gm`` loaded back from a graph file beside ``steps_dir`` that gives each
+    member a text vector, the embedding of its node's description, as exploration
+    gives each screen it describes."""
+    path = steps_dir.parent / "graph.json"
+    gm.save_graph(path)
+    vectors = {
+        member: EMBEDDINGS.get(data["page_description"], UNKNOWN_EMBEDDING)
+        for _, data in gm.graph.nodes(data=True)
+        for member in data.get("observations", [])
+    }
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+    loaded = make_manager()
+    loaded.load_graph(path)
+    return loaded
 
 
 @dataclass
@@ -790,33 +783,6 @@ def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(
     assert vlm.calls[1][1]["existing_keys"] == ["tab", "sort", "filter"]
 
 
-def test_the_text_source_skips_a_member_without_a_text_vector_without_a_stale_warning(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
-) -> None:
-    """A member whose record holds no describe output has no description to embed."""
-    vlm.descriptions.append(("Home screen", {}, []))
-    vlm.verdicts.append({"same": True, "reason": "same page"})
-    gm = make_manager()
-    # Without a step log, add_screen leaves the member's record without a describe output.
-    add_screen(gm, "s0_undescribed", "Home screen", **members(screen.steps_dir, b"undescribed"))
-    gm.steps_dir = screen.steps_dir
-    add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
-    vlm.images[b64(b"undescribed")] = FAR
-    gm.embed_missing_members()
-    observation = screen(HOME, SHOT_A, PACKAGE)
-
-    with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(observation)
-
-    assert node_id == "s1_home"
-    candidates = screen.record(observation)["identify"]["candidates"]
-    assert [(c["node"], sorted(c["sources"])) for c in candidates] == [
-        ("s1_home", ["image", "text"]),
-        ("s0_undescribed", ["image"]),
-    ]
-    assert "stale" not in caplog.text
-
-
 def test_the_text_source_skips_text_vectors_of_another_dimension_with_one_warning(
     vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens, tmp_path: Path
 ) -> None:
@@ -829,12 +795,10 @@ def test_the_text_source_skips_text_vectors_of_another_dimension_with_one_warnin
     gm.embed_missing_members()
     path = tmp_path / "graph.json"
     gm.save_graph(path)
-    text_vectors = tmp_path / "graph_text_emb.json"
-    stored = json.loads(text_vectors.read_text("utf-8"))
-    stored["embeddings"].update(
-        {member: [1.0, 0.0] for member in gm.graph.nodes["s0_stale"]["observations"]}
-    )
-    text_vectors.write_text(json.dumps(stored), "utf-8")
+    (home,) = gm.graph.nodes["s1_home"]["observations"]
+    vectors = {member: [1.0, 0.0] for member in gm.graph.nodes["s0_stale"]["observations"]}
+    vectors[home] = EMBEDDINGS["Home feed"]
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
     loaded = make_manager()
     loaded.load_graph(path)
     vlm.descriptions.append(("Home screen", {}, []))
@@ -891,10 +855,13 @@ def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
 ) -> None:
     """Its description scores 0 and its representative looks unlike the screen; its other
     member is the screen's look-alike."""
-    gm = make_manager(screen.steps_dir)
-    add_screen(gm, "s0_settings", "Settings page", **members(screen.steps_dir, b"rep", b"twin"))
+    explored = make_manager(screen.steps_dir)
+    add_screen(
+        explored, "s0_settings", "Settings page", **members(screen.steps_dir, b"rep", b"twin")
+    )
     vlm.images.update({b64(b"rep"): FAR, b64(b"twin"): NEAR, SHOT_A: NEAR})
-    gm.embed_missing_members()
+    explored.embed_missing_members()
+    gm = with_text_vectors(explored, screen.steps_dir)
     vlm.calls.clear()
     vlm.descriptions.append(("Search results", {}, []))
     vlm.verdicts.append({"same": True, "reason": "a scrolled list"})
@@ -908,9 +875,10 @@ def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
     assert candidate["sources"] == {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}
 
 
-def _three_image_matches_and_a_text_match(gm: GraphManager, vlm: FakeVlm, steps_dir: Path) -> None:
+def _three_image_matches_and_a_text_match(vlm: FakeVlm, steps_dir: Path) -> GraphManager:
     """s0-s2 look like the screen and are described otherwise; s3 is described as it is
     and looks unlike it."""
+    gm = make_manager(steps_dir)
     for number, image in enumerate((b"a", b"b", b"c")):
         add_screen(gm, f"s{number}_lookalike", "Settings page", **members(steps_dir, image))
         vlm.images[b64(image)] = NEAR
@@ -920,13 +888,13 @@ def _three_image_matches_and_a_text_match(gm: GraphManager, vlm: FakeVlm, steps_
     gm.embed_missing_members()
     vlm.calls.clear()
     vlm.descriptions.append(("Search results", {}, []))
+    return with_text_vectors(gm, steps_dir)
 
 
 def test_the_best_text_match_is_verified_within_the_cap_behind_three_image_matches(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the results"}])
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -943,8 +911,7 @@ def test_the_best_text_match_is_verified_within_the_cap_behind_three_image_match
 
 
 def test_verification_stops_at_the_first_confirmation(vlm: FakeVlm, screen: Screens) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.append({"same": True, "reason": "the same list"})
 
     assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == "s0_lookalike"
@@ -955,8 +922,7 @@ def test_verification_stops_at_the_first_confirmation(vlm: FakeVlm, screen: Scre
 def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend(_rejection(node) for node in ("s0", "s3", "s1"))
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -988,8 +954,7 @@ def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once
 def test_an_expected_node_is_verified_right_after_the_describe_call_and_skips_the_short_list(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.append({"same": True, "reason": "the page the replay leads to"})
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -1005,8 +970,7 @@ def test_an_expected_node_is_verified_right_after_the_describe_call_and_skips_th
 def test_a_rejected_expected_node_stays_off_the_short_list(vlm: FakeVlm, screen: Screens) -> None:
     """The order of model calls: image embedding, describe, text embedding, the expected
     node, the short list."""
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the same list"}])
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -1025,8 +989,7 @@ def test_a_rejected_expected_node_stays_off_the_short_list(vlm: FakeVlm, screen:
 
 
 def test_an_expected_node_adds_one_verifier_call_to_the_cap(vlm: FakeVlm, screen: Screens) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend(_rejection(node) for node in ("s2", "s0", "s3", "s1"))
 
     gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_node="s2_lookalike")
@@ -1184,6 +1147,31 @@ def test_a_described_screen_s_text_vector_is_saved_beside_the_graph_and_loaded_b
     assert loaded.text_vector(observation.observation_id) == EMBEDDINGS["Home screen"]
 
 
+def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
+    tmp_path: Path,
+) -> None:
+    steps_dir = tmp_path / "steps"
+    member = members(steps_dir, b"kept", b"lost")
+    kept, lost = member["observations"]
+    describe = {"page_description": "Home screen", "state": {}, "elements": []}
+    for observation_id in (kept, lost):
+        record = {"pixel_hash": f"hash-{observation_id}", "describe": describe}
+        (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
+    )
+    vectors = {kept: EMBEDDINGS["Home screen"]}
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+
+    with pytest.raises(ValueError, match=r"graph_text_emb\.json has no vector") as raised:
+        make_manager().load_graph(path)
+
+    assert str(raised.value).endswith(
+        f"for observation(s) {lost}. Explore the app again into a new graph directory."
+    )
+
+
 def test_an_exact_match_records_its_member_s_text_vector_without_a_request(
     vlm: FakeVlm, screen: Screens, tmp_path: Path
 ) -> None:
@@ -1223,30 +1211,6 @@ def test_a_screen_keeps_the_vector_of_the_description_its_first_rejection_refine
     gm.identify_state(overlay)
 
     assert gm.text_vector(overlay.observation_id) == EMBEDDINGS["Promo overlay"]
-
-
-def test_an_exact_match_of_a_member_without_a_text_vector_records_none(
-    vlm: FakeVlm, tmp_path: Path
-) -> None:
-    """A loaded graph's members have none until ``embed_missing_members`` embeds them."""
-    steps_dir = tmp_path / "steps"
-    member = members(steps_dir)
-    (observation_id,) = member["observations"]
-    record = {"pixel_hash": fake_pixel_hash(SHOT_A)}
-    (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-    describe_members(steps_dir, [observation_id], "Home screen")
-    path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
-    )
-    gm = make_manager()
-    gm.load_graph(path)
-    copy = Screens(steps_dir)(HOME, SHOT_A, PACKAGE)
-
-    assert gm.identify_state(copy) == "s0_home"
-
-    assert vlm.kinds() == ["image"]
-    assert gm.text_vector(copy.observation_id) is None
 
 
 @pytest.mark.parametrize(
@@ -1301,99 +1265,16 @@ def test_embed_missing_members_embeds_each_in_app_member_once_and_saves_the_vect
     vlm.images.update({b64(b"home"): NEAR, b64(b"home-2"): FAR})
 
     with caplog.at_level(logging.INFO, logger=gm_module.logger.name):
-        gm.embed_missing_members()
-        gm.embed_missing_members()
+        assert gm.embed_missing_members() == 2
+        assert gm.embed_missing_members() == 0
 
-    assert [call["screenshot"] for kind, call in vlm.calls if kind == "image"] == [
-        b64(b"home"),
-        b64(b"home-2"),
-    ]
+    assert [call["screenshot"] for _, call in vlm.calls] == [b64(b"home"), b64(b"home-2")]
     stored = json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8"))
     assert stored["model"] == IMAGE_EMBEDDING.model
     home, home_2 = gm.graph.nodes["s0_home"]["observations"]
     assert stored["embeddings"] == {home: NEAR, home_2: FAR}
     assert "Embedding the images of 2 member observation(s)" in caplog.text
     assert "Embedded 2 member image(s) for $0.000000" in caplog.text
-
-
-def test_described_members_without_a_text_vector_are_embedded_once_per_description(
-    vlm: FakeVlm, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    steps_dir = tmp_path / "steps"
-    member = members(steps_dir, b"home", b"home-2", b"feed")
-    home, home_2, feed = member["observations"]
-    describe_members(steps_dir, [home, home_2], "Home screen")
-    describe_members(steps_dir, [feed], "Home feed")
-    path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
-    )
-    gm = make_manager()
-    gm.load_graph(path)
-
-    with caplog.at_level(logging.INFO, logger=gm_module.logger.name):
-        gm.embed_missing_members()
-        gm.embed_missing_members()
-    gm.save_graph(path)
-    reloaded = make_manager()
-    reloaded.load_graph(path)
-    reloaded.embed_missing_members()
-
-    assert [call["text"] for kind, call in vlm.calls if kind == "embed"] == [
-        "Home screen",
-        "Home feed",
-    ]
-    assert json.loads((tmp_path / "graph_text_emb.json").read_text("utf-8")) == {
-        "model": EMBEDDING.model,
-        "embeddings": {
-            home: EMBEDDINGS["Home screen"],
-            home_2: EMBEDDINGS["Home screen"],
-            feed: EMBEDDINGS["Home feed"],
-        },
-    }
-    assert "Embedding the descriptions of 3 member observation(s)" in caplog.text
-    assert "Embedded 2 description(s) for $0.000000" in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("copied_from", "copy_ended_with"),
-    [
-        pytest.param("refined", "Promo overlay", id="the refined member"),
-        pytest.param("copy", "Home screen", id="itself"),
-        pytest.param("000099", "Home screen", id="a member without a record"),
-    ],
-)
-@pytest.mark.usefixtures("vlm")
-def test_the_backfill_embeds_the_description_each_member_ended_with(
-    copied_from: str, copy_ended_with: str, tmp_path: Path
-) -> None:
-    """The step's first rejection refined one member's description; the other is an
-    exact copy, which ends with what the member it names ended with."""
-    steps_dir = tmp_path / "steps"
-    member = members(steps_dir, b"refined", b"copy")
-    refined, copy = member["observations"]
-    named = {"refined": refined, "copy": copy}.get(copied_from, copied_from)
-    describe = {"page_description": "Home screen", "state": {}, "elements": []}
-    records = {
-        refined: {
-            "describe": describe,
-            "identify": {"refinement": {"new_description": "Promo overlay"}},
-        },
-        copy: {"describe": {**describe, "copied_from": named}, "identify": {"refinement": None}},
-    }
-    for observation_id, record in records.items():
-        (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-    path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
-    )
-    gm = make_manager()
-    gm.load_graph(path)
-
-    gm.embed_missing_members()
-
-    assert gm.text_vector(refined) == EMBEDDINGS["Promo overlay"]
-    assert gm.text_vector(copy) == EMBEDDINGS[copy_ended_with]
 
 
 def test_embed_missing_members_keeps_the_vectors_it_paid_for_when_one_fails(
@@ -1516,7 +1397,7 @@ def test_the_short_list_orders_ties_in_rank_by_image_score(vlm: FakeVlm, tmp_pat
     gm.embed_missing_members()
 
     query = ScreenQuery(image_vector=NEAR, description_embedding=EMBEDDINGS["Search results"])
-    ranked = gm.short_list(query, ["s0_text", "s1_image"])
+    ranked = with_text_vectors(gm, steps_dir).short_list(query, ["s0_text", "s1_image"])
 
     assert [(c.node_id, c.best_rank, c.sources) for c in ranked] == [
         ("s1_image", 0, {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}),
@@ -4666,62 +4547,3 @@ def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path
     with pytest.raises(TypeError, match="must be an object") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
-
-
-def test_the_description_backfill_logs_what_its_requests_cost(
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    embedding_body: dict[str, object],
-    write_image_vectors: Callable[..., None],
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    steps_dir = tmp_path / "steps"
-    member = members(steps_dir)
-    describe_members(steps_dir, member["observations"], "Home screen")
-    write_image_vectors(steps_dir, member["observations"], IMAGE_EMBEDDING.model)
-    path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
-    )
-    manager = GraphManager(
-        client=router_client,
-        page_detail=PAGE_DETAIL,
-        embedding=EMBEDDING,
-        image_embedding=IMAGE_EMBEDDING,
-    )
-    manager.load_graph(path)
-    router_responses.append(httpx.Response(200, json=embedding_body))
-
-    with caplog.at_level(logging.INFO, logger=gm_module.logger.name):
-        manager.embed_missing_members()
-
-    assert manager.text_vector(member["representative_observation"]) == [0.25, 0.75]
-    assert "Embedded 1 description(s) for $0.000010" in caplog.text
-
-
-def test_text_vectors_of_another_embedding_model_are_embedded_again(
-    vlm: FakeVlm, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    steps_dir = tmp_path / "steps"
-    gm = make_manager(steps_dir)
-    add_screen(gm, "s0_home", "Home screen", **members(steps_dir))
-    gm.embed_missing_members()
-    path = tmp_path / "graph.json"
-    gm.save_graph(path)
-    vlm.calls.clear()
-    other_model = ModelSettings("provider/other-embedding")
-    reloaded = GraphManager(
-        client=FAKE_CLIENT,
-        page_detail=PAGE_DETAIL,
-        embedding=other_model,
-        image_embedding=IMAGE_EMBEDDING,
-    )
-
-    with caplog.at_level(logging.WARNING):
-        reloaded.load_graph(path)
-    reloaded.embed_missing_members()
-
-    assert [(kind, call["model"]) for kind, call in vlm.calls] == [("embed", other_model.model)]
-    assert f"was written by model {EMBEDDING.model!r}" in caplog.text
-    assert "graph_text_emb.json" in caplog.text

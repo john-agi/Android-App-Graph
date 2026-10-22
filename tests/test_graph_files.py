@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import os
 import stat
 from pathlib import Path
@@ -275,22 +274,10 @@ def test_an_explored_graph_and_its_audited_copy_keep_their_own_text_vectors(
 TEXT_MODEL = "provider/embedding"
 
 
-def test_a_text_vector_file_from_another_model_is_empty_after_one_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    path = graph_files.text_embeddings_path(tmp_path / "demo.json")
-    graph_files.save_embeddings(path, {"000000": [0.5]}, model="other/model")
-
-    with caplog.at_level(logging.WARNING):
-        assert graph_files.load_embeddings(path, model=TEXT_MODEL, kind="text") == {}
-
-    (warning,) = caplog.messages
-    assert f"Text embedding file {path} was written by model 'other/model'" in warning
-
-
 @pytest.mark.parametrize(
-    ("content", "damage"),
+    ("content", "problem"),
     [
+        pytest.param(None, "is missing", id="missing"),
         pytest.param("{not json", "cannot be read or parsed", id="corrupt"),
         pytest.param(
             json.dumps({"embeddings": {"000000": [0.5]}}),
@@ -301,23 +288,35 @@ def test_a_text_vector_file_from_another_model_is_empty_after_one_warning(
             json.dumps({"model": TEXT_MODEL}), "has no embeddings object", id="no embeddings"
         ),
         pytest.param(
+            json.dumps({"model": "other/model", "embeddings": {"000000": [0.5]}}),
+            f"was written by model 'other/model', not the configured {TEXT_MODEL!r}",
+            id="another model",
+        ),
+        pytest.param(
             json.dumps({"model": TEXT_MODEL, "embeddings": {"000000": [0.5], "000001": []}}),
             "has a malformed or non-finite vector for observation(s) 000001",
             id="malformed vector",
         ),
+        pytest.param(
+            json.dumps({"model": TEXT_MODEL, "embeddings": {"000001": [0.5]}}),
+            "has no vector for observation(s) 000000",
+            id="a required vector missing",
+        ),
     ],
 )
-def test_a_damaged_text_vector_file_raises_naming_the_file_and_the_damage(
-    content: str, damage: str, tmp_path: Path
+def test_an_unusable_text_vector_file_raises_naming_the_file_and_the_problem(
+    content: str | None, problem: str, tmp_path: Path
 ) -> None:
+    """Nothing embeds a description again, so the graph cannot be loaded."""
     path = graph_files.text_embeddings_path(tmp_path / "demo.json")
-    path.write_text(content, encoding="utf-8")
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"demo_text_emb\.json") as raised:
-        graph_files.load_embeddings(path, model=TEXT_MODEL, kind="text")
+        graph_files.load_embeddings(path, model=TEXT_MODEL, kind="text", required=["000000"])
 
-    assert f"Text embedding file {path} {damage}" in str(raised.value)
-    assert str(raised.value).endswith(". Delete it to embed every description again.")
+    assert f"Text embedding file {path} {problem}" in str(raised.value)
+    assert str(raised.value).endswith(". Explore the app again into a new graph directory.")
 
 
 def test_a_step_keeps_its_record_and_image_under_its_id(tmp_path: Path) -> None:

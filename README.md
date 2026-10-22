@@ -331,12 +331,11 @@ the command.
 ### Embedding caches
 
 Screenshot and description vectors are both kept by observation, in files of the form
-`{"model": model_id, "embeddings": {observation_id: vector}}`. A file tagged with
-another model counts as empty after one warning. A damaged file stops exploration or
-the audit as it loads the graph, before any member is embedded, with an error naming
-the file and the damage: the file cannot be read or parsed, has no model tag or no
-`embeddings` object, or holds a malformed or non-finite vector, named by observation.
-Nothing is pruned, since observation IDs never change.
+`{"model": model_id, "embeddings": {observation_id: vector}}`. A damaged file stops
+exploration or the audit as it loads the graph, before any member is embedded, with an
+error naming the file and the damage: the file cannot be read or parsed, has no model
+tag or no `embeddings` object, or holds a malformed or non-finite vector, named by
+observation. Nothing is pruned, since observation IDs never change.
 
 Screenshot vectors live in the [step log](#step-log), `steps/image_emb.json`, so the
 explored graph and its audited copy share them: a screenshot's vector depends only on
@@ -344,7 +343,8 @@ the screenshot and the model. Every screenshot that
 [screen matching](#screen-matching) takes is embedded once and kept. Nothing reads
 the vector of any other screenshot, so none is made for the screens of other apps,
 including one a Back press leaves in front, or for a screenshot read without being
-matched, such as the one after a wait.
+matched, such as the one after a wait. A file tagged with another model counts as
+empty after one warning.
 
 Description vectors live beside the graph file, in `<graph file stem>_text_emb.json`:
 `<app_name>_text_emb.json` for the explored graph and `<app_name>_audited_text_emb.json`
@@ -354,15 +354,16 @@ in-app screenshot the description model describes keeps the vector of the descri
 it ends with: its `describe` output's `page_description`, or the description the step's
 first rejection refined it to (`identify.refinement.new_description`), which also names
 the node the screen starts when every check rejects it. An exact match copies its
-member's vector without a request. The file is written with the graph.
+member's vector without a request. The file is written with the graph, just before it.
+Nothing embeds a description again, so a graph loads only with the vector of every
+member whose record holds a `describe` output: a missing file, one tagged with another
+model, or one without such a member's vector stops exploration or the audit as it
+loads the graph, with an error naming the file and the problem.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no image vector is embedded first, as when `image_emb.json` is
-missing or tagged with another model. So is every such member whose record holds a
-`describe` output and that has no description vector: the description it ended with is
-read from its record, an exact match's from the member its `copied_from` names, and each
-distinct description is embedded once. The log names each count before and its cost
-after. To embed every screenshot or description again, delete its file.
+missing or tagged with another model. The log names the count before and the cost
+after. To embed every screenshot again, delete the file.
 
 One 670x1490 WebP screenshot, embedded with `voyageai/voyage-multimodal-3.5`, was
 1,782 prompt tokens and $0.000599 on 2026-10-21; Voyage bills images by pixel, so a
@@ -631,11 +632,10 @@ what each step found.
    confirmation decides; a rejection leaves the node off the short list.
 5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
    each node's closest member, proposes 3, and `text`, by the highest description
-   cosine among each node's members, proposes 2; a member without a description vector
-   is left out of `text`. The nodes are taken once each, in the order of their best
-   rank in either source, ties broken by image cosine. The verifier checks them in that
-   order against each one's closest member by image and stops at the first
-   confirmation, after 3 calls at most (4 with an expected node).
+   cosine among each node's members, proposes 2. The nodes are taken once each, in the
+   order of their best rank in either source, ties broken by image cosine. The verifier
+   checks them in that order against each one's closest member by image and stops at
+   the first confirmation, after 3 calls at most (4 with an expected node).
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later

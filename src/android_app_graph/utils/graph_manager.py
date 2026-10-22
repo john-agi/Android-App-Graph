@@ -342,7 +342,7 @@ def _text_scores(
     graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
 ) -> list[tuple[str, float]]:
     """Score each node by its member whose description vector is most similar to the
-    screen's; a node none of whose members has one is not scored."""
+    screen's."""
     member_scores = score_by_cosine(
         query.description_embedding,
         [
@@ -724,29 +724,6 @@ def _stored_screens(nodes: list[dict[str, Any]], steps_dir: Path) -> dict[str, _
     return stored
 
 
-def _ended_description(steps: Path, observation_id: str) -> str | None:
-    """Return the description the screen of ``observation_id`` ended with, as the step
-    log ``steps`` records it: the one the step's first rejection refined it to, else its
-    describe output's, and for an exact copy what the member it copied ended with.
-    ``None`` when its record holds no describe output."""
-    record = read_observation_record(steps, observation_id)
-    described = _Described.from_record(record) if record is not None else None
-    if described is None:
-        return None
-    followed = {observation_id}
-    while record is not None:
-        refinement = as_object_dict(as_object_dict(record.get("identify")).get("refinement"))
-        refined = as_str(refinement.get("new_description"), "")
-        if refined:
-            return refined
-        member = as_object_dict(record.get("describe")).get("copied_from")
-        if not isinstance(member, str) or member in followed:
-            break
-        followed.add(member)
-        record = read_observation_record(steps, member)
-    return described.page_description
-
-
 class GraphManager:
     """Manages a directed graph of app UI states and transitions."""
 
@@ -772,8 +749,9 @@ class GraphManager:
         self._node_aliases: dict[str, str] = {}
         self._image_vectors: dict[str, list[float]] = {}
         self._unit_vectors: dict[str, list[float]] = {}
-        # By observation ID, the vector of the description an in-app screen ended with,
-        # which ``_ended_description`` reads back from its record.
+        # By observation ID, the vector of the description each described in-app screen
+        # ended with: its describe output's, or the one its step's first rejection
+        # refined it to.
         self._text_vectors: dict[str, list[float]] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
         self.total_steps_completed = 0
@@ -923,24 +901,18 @@ class GraphManager:
             if not self._is_external(node_id):
                 yield from _member_observations(data)
 
-    def embed_missing_members(self) -> None:
+    def embed_missing_members(self) -> int:
         """Embed the image of every member of an in-app node that has no image vector,
-        and the description of every such member that has a describe output and no text
-        vector.
+        save the vectors to the step log, and return how many were embedded.
 
-        The image vectors are saved to the step log at once, the text vectors with the
-        graph. A member has no vector when its file is missing, holds none for it, or is
-        tagged with another embedding model.
+        A member has none when the step log's ``image_emb.json`` is missing, holds no
+        vector for it, or is tagged with another image-embedding model.
         """
-        self._embed_missing_images()
-        self._embed_missing_descriptions()
-
-    def _embed_missing_images(self) -> None:
         _, image_embedding = self._require_image_embedding()
         steps_dir = self._require_steps_dir()
         missing = [m for m in dict.fromkeys(self._in_app_members()) if m not in self._image_vectors]
         if not missing:
-            return
+            return 0
         logger.info(
             "Embedding the images of %d member observation(s) without an image vector: "
             "one %s request each",
@@ -958,35 +930,7 @@ class GraphManager:
             save_image_embeddings(steps_dir, self._image_vectors, model=image_embedding.model)
         cost = token_tracker.summary().get(usage_key, {}).get("cost", 0.0) - cost_before
         logger.info("Embedded %d member image(s) for $%.6f", len(missing), cost)
-
-    def _embed_missing_descriptions(self) -> None:
-        """Embed, once each, the descriptions that the in-app members whose record holds
-        a describe output and that have no text vector ended with."""
-        _, embedding = self._require_embedding()
-        steps_dir = self._require_steps_dir()
-        missing: dict[str, list[str]] = {}
-        for member in dict.fromkeys(self._in_app_members()):
-            if member in self._text_vectors:
-                continue
-            description = _ended_description(steps_dir, member)
-            if description is not None:
-                missing.setdefault(description, []).append(member)
-        if not missing:
-            return
-        logger.info(
-            "Embedding the descriptions of %d member observation(s) without a text vector: "
-            "one %s request for each of %d distinct description(s)",
-            sum(len(observations) for observations in missing.values()),
-            embedding.model,
-            len(missing),
-        )
-        usage_key = f"embedding:{embedding.model}"
-        cost_before = token_tracker.summary().get(usage_key, {}).get("cost", 0.0)
-        for description, observations in missing.items():
-            vector = self._embed(description)
-            self._text_vectors.update(dict.fromkeys(observations, vector))
-        cost = token_tracker.summary().get(usage_key, {}).get("cost", 0.0) - cost_before
-        logger.info("Embedded %d description(s) for $%.6f", len(missing), cost)
+        return len(missing)
 
     def identify_state(self, observation: Observation, *, expected_node: str | None = None) -> str:
         """Return the node the screen in ``observation`` belongs to, creating one when
@@ -1128,9 +1072,7 @@ class GraphManager:
         self._stored_screens[observation.observation_id] = _StoredScreen(
             observation.pixel_hash, described
         )
-        text_vector = self._text_vectors.get(member)
-        if text_vector is not None:
-            self._text_vectors[observation.observation_id] = text_vector
+        self._text_vectors[observation.observation_id] = self._text_vectors[member]
         decision = _Decision(expected_node, "exact", exact_match=member)
         annotate_observation(
             self._require_steps_dir(),
@@ -2524,12 +2466,14 @@ class GraphManager:
                     edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
 
-        write_json_atomically(path, data, indent=2, ensure_ascii=False)
-
+        # Before the graph: loading requires a text vector for every described member,
+        # so a crash between the two writes must not leave a member without one.
         if self.embedding is not None and self._text_vectors:
             save_embeddings(
                 text_embeddings_path(path), self._text_vectors, model=self.embedding.model
             )
+        write_json_atomically(path, data, indent=2, ensure_ascii=False)
+
         if self.image_embedding is not None and self._image_vectors:
             save_image_embeddings(
                 graph_steps_dir(path), self._image_vectors, model=self.image_embedding.model
@@ -2547,7 +2491,8 @@ class GraphManager:
 
         ``default_package_name`` stands in for the ``package_name`` of a file that has
         none. A node without member observations, or whose representative has no image
-        in the step log, raises ``ValueError`` naming it.
+        in the step log, raises ``ValueError`` naming it, and so does a text-vector file
+        without the vector of every member with a stored screen.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2565,7 +2510,12 @@ class GraphManager:
             else {}
         )
         text_vectors = (
-            load_embeddings(text_embeddings_path(path), model=self.embedding.model, kind="text")
+            load_embeddings(
+                text_embeddings_path(path),
+                model=self.embedding.model,
+                kind="text",
+                required=stored_screens.keys(),
+            )
             if self.embedding is not None
             else {}
         )
