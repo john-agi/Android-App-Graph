@@ -1,5 +1,6 @@
 """The audit from members: one set of merge proposals from the model's text and from
-close member images, and the split and move checks on each node's member groups.
+close member images, verified in rounds, and the split and move checks on each node's
+member groups.
 
 Every graph here has synthetic image and text vectors, and the verifier, the text
 embedding and the edge normalizer are scripted fakes; describing a screen fails the
@@ -9,6 +10,7 @@ test, since the audit works from the describe output the step log stores.
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import math
 import threading
@@ -25,7 +27,7 @@ from android_app_graph.graph_files import graph_steps_dir, text_embeddings_path
 from android_app_graph.member_groups import GROUPING_FLOOR, MERGE_FLOOR
 from android_app_graph.step_log import read_exploration_transitions
 from android_app_graph.utils import ModelSettings, graph_manager
-from android_app_graph.utils.graph_manager import GraphManager, MemberVerdicts
+from android_app_graph.utils.graph_manager import GraphManager, MemberVerdicts, Merge
 
 FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
@@ -178,7 +180,7 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
         models.confirm("000002", "000004")
 
     (proposal,) = graph.merge_proposals([])
-    (result,) = graph.verify_merge_proposals([proposal], {})
+    (result,) = graph.verify_merge_proposals([proposal], {}).pairs
 
     assert (proposal.node_a, proposal.node_b, proposal.sources) == ("s0_home", "s1_home", ["image"])
     assert proposal.findings == [
@@ -187,11 +189,7 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
     assert (models.shown, models.descriptions) == ([("000004", "000002")], ["Node s1_home"])
     assert result["members"] == {"s0_home": "000002", "s1_home": "000004"}
     if same:
-        assert (result["status"], result["kept"], result["removed"]) == (
-            "merged",
-            "s0_home",
-            "s1_home",
-        )
+        assert (result["status"], result["kept"]) == ("merged", "s0_home")
         assert list(graph.graph) == ["s0_home"]
         assert graph.graph.nodes["s0_home"]["observations"] == [
             "000001",
@@ -212,7 +210,7 @@ def test_a_pair_the_model_and_the_images_propose_is_verified_once_naming_both_so
     issue = {"type": "merge_nodes", "node_a": "s1_home", "node_b": "s0_home"}
 
     proposals = graph.merge_proposals([issue])
-    (result,) = graph.verify_merge_proposals(proposals, {})
+    (result,) = graph.verify_merge_proposals(proposals, {}).pairs
 
     assert result["sources"] == ["text_audit", "image"]
     assert [finding["source"] for finding in proposals[0].findings] == ["text_audit", "image"]
@@ -223,8 +221,8 @@ def test_a_pair_the_model_and_the_images_propose_is_verified_once_naming_both_so
 def test_a_pair_whose_node_an_earlier_merge_removed_is_verified_on_the_node_that_kept_it(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
-    """A pair whose two nodes earlier merges made one is skipped without a verifier
-    call."""
+    """A pair is verified on the nodes that merges before the call left, so a pair whose
+    two nodes earlier merges made one is skipped without a verifier call."""
     write_member_graph(
         graph_path,
         {"s0_home": [("000001", X)], "s1_home": [("000002", Y)], "s2_home": [("000003", Z)]},
@@ -232,18 +230,19 @@ def test_a_pair_whose_node_an_earlier_merge_removed_is_verified_on_the_node_that
     graph = _load(graph_path)
     models.confirm("000001", "000002")
     models.confirm("000001", "000003")
+    earlier = [{"node_a": "s0_home", "node_b": "s1_home"}]
+    graph.verify_merge_proposals(graph.merge_proposals(earlier), {})
     issues = [
-        {"node_a": "s0_home", "node_b": "s1_home"},
         {"node_a": "s1_home", "node_b": "s2_home"},
-        {"node_a": "s2_home", "node_b": "s0_home"},
+        {"node_a": "s1_home", "node_b": "s0_home"},
     ]
 
-    results = graph.verify_merge_proposals(graph.merge_proposals(issues), {})
+    report = graph.verify_merge_proposals(graph.merge_proposals(issues), {})
 
-    assert [result["status"] for result in results] == ["merged", "merged", "skipped"]
-    assert results[1]["members"] == {"s0_home": "000001", "s2_home": "000003"}
-    assert (results[1]["kept"], results[1]["removed"]) == ("s0_home", "s2_home")
-    assert results[2]["reason"] == "same node"
+    assert [pair["status"] for pair in report.pairs] == ["merged", "skipped"]
+    assert report.pairs[0]["members"] == {"s0_home": "000001", "s2_home": "000003"}
+    assert report.merges == [Merge("s0_home", ["s2_home"])]
+    assert report.pairs[1]["reason"] == "same node"
     assert models.shown == [("000001", "000002"), ("000001", "000003")]
     assert list(graph.graph) == ["s0_home"]
 
@@ -686,7 +685,7 @@ def test_a_merge_below_the_grouping_floor_is_not_split_again(
     verdicts: MemberVerdicts = {}
 
     (proposal,) = graph.merge_proposals(issues)
-    (merge,) = graph.verify_merge_proposals([proposal], verdicts)
+    (merge,) = graph.verify_merge_proposals([proposal], verdicts).pairs
     (check,) = _check_members(graph, graph_path, verdicts).checks
 
     assert proposal.sources == sources
@@ -736,6 +735,132 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
         encoding="utf-8"
     )
     assert json.loads(audited_vectors) == json.loads(explored_vectors)
+
+
+def _merge_issue(node_a: str, node_b: str) -> dict[str, str]:
+    return {"type": "merge_nodes", "node_a": node_a, "node_b": node_b}
+
+
+def _one_member_nodes(*angles: float) -> dict[str, list[tuple[str, list[float]]]]:
+    """Nodes ``s<n>_screen`` of one member each, ``00000<n+1>``, at ``angles[n]`` radians
+    from X toward Y, so the closest members of two nodes have the cosine of the angle
+    between them."""
+    return {
+        f"s{number}_screen": [(f"{number + 1:06d}", _turned(angle))]
+        for number, angle in enumerate(angles)
+    }
+
+
+def test_two_confirmed_pairs_decide_the_third_and_all_three_nodes_merge(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """The pair whose members are least alike comes last; the two before it are one
+    round, and their answers decide it."""
+    write_member_graph(graph_path, _one_member_nodes(0.0, 0.5, 1.0))
+    graph = _load(graph_path)
+    models.confirm("000001", "000002")
+    models.confirm("000002", "000003")
+    issues = [
+        _merge_issue("s0_screen", "s2_screen"),
+        _merge_issue("s0_screen", "s1_screen"),
+        _merge_issue("s1_screen", "s2_screen"),
+    ]
+
+    report = graph.verify_merge_proposals(graph.merge_proposals(issues, sources=()), {})
+
+    assert sorted(models.shown) == [("000001", "000002"), ("000002", "000003")]
+    assert (report.rounds, report.asked, report.deduced) == (1, 2, 1)
+    assert report.merges == [Merge("s0_screen", ["s1_screen", "s2_screen"])]
+    deduced = report.pairs[0]
+    assert deduced["image_score"] == pytest.approx(math.cos(1.0))
+    assert {key: deduced[key] for key in ("asked", "round", "same", "deduced_from")} == {
+        "asked": False,
+        "round": 1,
+        "same": True,
+        "deduced_from": [["s0_screen", "s1_screen"], ["s1_screen", "s2_screen"]],
+    }
+    assert [(pair["status"], pair["kept"]) for pair in report.pairs] == [
+        ("merged", "s0_screen")
+    ] * 3
+    assert list(graph.graph) == ["s0_screen"]
+    assert graph.graph.nodes["s0_screen"]["observations"] == ["000001", "000002", "000003"]
+
+
+def test_a_round_s_questions_are_in_flight_together(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Three pairs with no node in common are one round."""
+    write_member_graph(graph_path, _one_member_nodes(0.0, 0.1, 1.0, 1.1, 2.0, 2.1))
+    graph = _load(graph_path)
+    models.meet(("000001", "000002"), ("000003", "000004"), ("000005", "000006"))
+    issues = [_merge_issue(f"s{n}_screen", f"s{n + 1}_screen") for n in (0, 2, 4)]
+
+    report = graph.verify_merge_proposals(graph.merge_proposals(issues, sources=()), {})
+
+    assert (report.rounds, report.asked, report.merges) == (1, 3, [])
+    assert len(models.shown) == 3
+
+
+# Three screens over six nodes; the edges between them merge in the order the merges run.
+SCREEN_OF = {
+    "s0_screen": 0,
+    "s1_screen": 1,
+    "s2_screen": 0,
+    "s3_screen": 1,
+    "s4_screen": 0,
+    "s5_screen": 2,
+}
+SCREEN_EDGES = (
+    _edge("s0_screen", "s1_screen", TAP_A),
+    _edge("s2_screen", "s1_screen", TAP_B),
+    _edge("s4_screen", "s3_screen", TAP_C),
+    _edge("s1_screen", "s0_screen", BACK),
+    _edge("s3_screen", "s2_screen", BACK),
+    _edge("s2_screen", "s4_screen", TAP_D),
+    _edge("s4_screen", "s5_screen", SCROLL),
+    _edge("s3_screen", "s3_screen", SCROLL),
+)
+SCREEN_PAIRS = [
+    ("s2_screen", "s4_screen"),
+    ("s0_screen", "s1_screen"),
+    ("s0_screen", "s4_screen"),
+    ("s1_screen", "s3_screen"),
+    ("s0_screen", "s2_screen"),
+    ("s3_screen", "s4_screen"),
+    ("s4_screen", "s5_screen"),
+    ("s2_screen", "s3_screen"),
+]
+
+
+def _number(node_id: str) -> int:
+    return int(node_id.split("_", 1)[0][1:])
+
+
+def test_consistent_answers_give_the_graph_that_verifying_one_pair_at_a_time_gives(
+    tmp_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """One pair at a time, each proposal is verified on the nodes earlier merges left, and
+    a confirmed pair is merged at once into its lower-numbered node."""
+    path = tmp_path / "graphs" / "demo" / "demo.json"
+    write_member_graph(path, _one_member_nodes(0.0, 1.4, 0.3, 1.0, 0.6, 2.0), edges=SCREEN_EDGES)
+    for first, second in itertools.combinations(SCREEN_OF, 2):
+        if SCREEN_OF[first] == SCREEN_OF[second]:
+            models.confirm(f"{_number(first) + 1:06d}", f"{_number(second) + 1:06d}")
+    graph, one_at_a_time = _load(path), _load(path)
+    issues = [_merge_issue(*pair) for pair in SCREEN_PAIRS]
+
+    report = graph.verify_merge_proposals(graph.merge_proposals(issues, sources=()), {})
+    for pair in SCREEN_PAIRS:
+        first, second = sorted(map(one_at_a_time.resolve_node_id, pair), key=_number)
+        if first != second and SCREEN_OF[first] == SCREEN_OF[second]:
+            one_at_a_time.merge_nodes(first, second)
+
+    assert report.asked < len(SCREEN_PAIRS)
+    assert list(graph.graph.nodes(data=True)) == list(one_at_a_time.graph.nodes(data=True))
+    assert list(graph.graph.edges(data=True)) == list(one_at_a_time.graph.edges(data=True))
+    assert [graph.resolve_node_id(node) for node in SCREEN_OF] == [
+        one_at_a_time.resolve_node_id(node) for node in SCREEN_OF
+    ]
 
 
 def _split_node(first: int) -> list[tuple[str, list[float]]]:

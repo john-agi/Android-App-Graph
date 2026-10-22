@@ -4311,7 +4311,6 @@ def test_run_node_merge_audit_merges_a_confirmed_duplicate(
     assert result["merged_count"] == 1
     assert result["summary"] == "one pair"
     assert result["results"][0]["kept"] == "s0_home"
-    assert result["results"][0]["removed"] == "s2_home_two"
     assert list(gm.graph.nodes) == ["s0_home"]
     assert gm.graph.nodes["s0_home"]["observations"][1:] == removed_members
     # The description of the more-visited node is the verifier's reference.

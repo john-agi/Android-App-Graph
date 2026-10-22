@@ -876,14 +876,19 @@ def _verify_merges(
         len(proposals),
         ", ".join(f"{source} {count}" for source, count in sorted(by_source.items())),
     )
-    merge_results = graph.verify_merge_proposals(proposals, verdicts)
+    report = graph.verify_merge_proposals(proposals, verdicts)
     merge_path = _app_file(run.graph_dir, app_name, "_merge")
-    _write_json(merge_path, merge_results)
-    logger.info("Merge results saved to %s", merge_path)
-
-    merged_count = sum(1 for r in merge_results if r["status"] == "merged")
-    if merged_count:
-        _save_audited_graph(run, graph, app_name, f"{merged_count} merge(s)")
+    _write_json(merge_path, report.as_record())
+    logger.info(
+        "Merge results saved to %s: %d round(s), %d pair(s) asked, %d deduced, %d node(s) merged",
+        merge_path,
+        report.rounds,
+        report.asked,
+        report.deduced,
+        report.merged_count,
+    )
+    if report.merged_count:
+        _save_audited_graph(run, graph, app_name, f"{report.merged_count} node(s) merged")
 
 
 def _check_members(
