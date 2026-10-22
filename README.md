@@ -696,7 +696,11 @@ its `identify` stage is `black`, and its record holds no `describe` output, so i
 no description vector. The `text` source never ranks a node by a black member, and an
 exact match never copies one: a screenshot black only below the status bar is
 described. Each secure screen of an app gets a node per activity, so flows that reach
-different secure screens stay apart.
+different secure screens stay apart. The [merge proposals](#merge-proposals), at each
+coverage checkpoint and in `app-graph-audit`, keep them apart too: the verifier would
+see two identical black images, so a pair of nodes whose members are all black, of
+different activities, is skipped without a verifier call, with the reason `black
+screens of different activities`, whether the model or the images proposed it.
 
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.

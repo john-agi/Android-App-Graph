@@ -1562,6 +1562,60 @@ def test_a_graph_loads_with_black_members_that_have_no_describe_output_or_descri
     assert loaded.graph.nodes[pattern_node]["observations"] == [pattern.observation_id]
 
 
+def _merge_audit_proposes(monkeypatch: pytest.MonkeyPatch, node_a: str, node_b: str) -> None:
+    proposal = FakeAudit(result={"issues": [{"node_a": node_a, "node_b": node_b}]})
+    monkeypatch.setattr(gm_module, "audit_merge_nodes", proposal)
+
+
+def test_the_merge_audit_keeps_black_nodes_of_different_activities_apart_unverified(
+    vlm: FakeVlm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The verifier would compare two identical black images, and call them the same."""
+    vlm.verdicts.append({"same": True, "reason": "both screens are black"})
+    steps_dir = tmp_path / "steps"
+    pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PIN))
+    gm = make_manager(steps_dir)
+    pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
+    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+
+    with caplog.at_level(logging.WARNING, logger=gm_module.logger.name):
+        result = gm.run_node_merge_audit()
+
+    assert result["merged_count"] == 0
+    assert result["results"][0]["status"] == "skipped"
+    assert result["results"][0]["reason"] == "black screens of different activities"
+    assert {pattern_node, pin_node} <= set(gm.graph)
+    assert "verify" not in vlm.kinds()
+    assert (
+        f"Skipping merge {pattern_node} + {pin_node} — black screens of different activities"
+    ) in caplog.messages
+
+
+@pytest.mark.parametrize("pin_node_holds", ["a shown screen", "a black screen of both activities"])
+def test_the_merge_audit_verifies_a_black_node_and_one_not_all_black_or_sharing_its_activity(
+    pin_node_holds: str, vlm: FakeVlm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A screen with pixels to compare, or black members of one activity left in two nodes
+    by a merge and a split, leave the verifier something to decide."""
+    vlm.descriptions.append(("Choose a PIN", {}, []))
+    vlm.verdicts.extend([{"same": False, "reason": "different screens"}] * 2)
+    shown = pin_node_holds == "a shown screen"
+    pin_screen = (SET_PIN, _screen_with_clock(1), PACKAGE) if shown else _secure(SET_PIN)
+    steps_dir = tmp_path / "steps"
+    pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), pin_screen)
+    gm = make_manager(steps_dir)
+    pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
+    if not shown:
+        gm.graph.nodes[pin_node]["observations"].append(pattern.observation_id)
+    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+    vlm.calls.clear()
+
+    result = gm.run_node_merge_audit()
+
+    assert result["results"][0]["status"] == "kept_separate"
+    assert vlm.kinds() == ["verify"]
+
+
 def test_embed_missing_members_embeds_each_in_app_member_once_and_saves_the_vectors(
     vlm: FakeVlm, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

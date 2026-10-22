@@ -273,6 +273,35 @@ def test_the_coverage_checkpoint_verifies_the_model_s_pairs_on_closest_members_a
     assert result["merged_count"] == 0
 
 
+SET_PATTERN = "com.demo.password.ChooseLockPattern"
+SET_PIN = "com.demo.password.ChooseLockPassword"
+
+
+def test_two_black_nodes_of_different_activities_are_kept_apart_unverified_whoever_proposes_them(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Every black capture looks the same, so the images propose the pair, and the
+    verifier would compare two identical black images and call them one screen."""
+    write_member_graph(
+        graph_path,
+        {"s0_pattern": [("000001", X)], "s1_pin": [("000002", X)]},
+        black={"000001": SET_PATTERN, "000002": SET_PIN},
+    )
+    graph = _load(graph_path)
+    models.confirm("000001", "000002")
+    issue = {"type": "merge_nodes", "node_a": "s0_pattern", "node_b": "s1_pin"}
+
+    (result,) = graph.verify_merge_proposals(graph.merge_proposals([issue]), {})
+
+    assert result["sources"] == ["text_audit", "image"]
+    assert (result["status"], result["reason"]) == (
+        "skipped",
+        "black screens of different activities",
+    )
+    assert models.shown == []
+    assert list(graph.graph) == ["s0_pattern", "s1_pin"]
+
+
 # Home is the first two members; the last two look alike, and nothing like home.
 SPLIT = {
     "s0_home": [

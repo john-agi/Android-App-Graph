@@ -2856,7 +2856,9 @@ class GraphManager:
         be compared.
 
         An ``ext_`` node stands for every screen of another app or the web, so its
-        members are no screens of the app to compare with.
+        members are no screens of the app to compare with. Two nodes whose members are
+        all black, of different activities, would show the verifier two identical black
+        images, so they stay apart as screen matching keeps them.
         """
         if node_a not in self.graph or node_b not in self.graph:
             return "node missing"
@@ -2868,7 +2870,21 @@ class GraphManager:
         pair = (node_a, node_b)
         if not all(self.graph.nodes[n].get("representative_observation") for n in pair):
             return "missing screenshot"
+        black_a, black_b = self._black_activities(node_a), self._black_activities(node_b)
+        if black_a and black_b and black_a.isdisjoint(black_b):
+            return "black screens of different activities"
         return None
+
+    def _black_activities(self, node_id: str) -> set[str] | None:
+        """Return the activities of ``node_id``'s members when every one is black, or
+        ``None`` when one is not or the node has none."""
+        activities: set[str] = set()
+        for member in _member_observations(self.graph.nodes[node_id]):
+            stored = self._stored_screens.get(member)
+            if stored is None or stored.black_activity is None:
+                return None
+            activities.add(stored.black_activity)
+        return activities or None
 
     @staticmethod
     def _node_numeric_order(node_id: str) -> tuple[int, str]:
