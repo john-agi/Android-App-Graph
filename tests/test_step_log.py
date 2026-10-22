@@ -1,5 +1,5 @@
-"""Tests for android_app_graph.step_log: the recorder writes every screenshot and
-action of the controller it wraps into the step log, callers add transitions and
+"""Tests for android_app_graph.step_log: the recorder writes every screenshot, tree
+and action of the controller it wraps into the step log, callers add transitions and
 annotate observations, and the step log keeps its observations' image vectors."""
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from PIL import Image, ImageDraw
 
+from android_app_graph import step_log
 from android_app_graph.device import DeviceController
 from android_app_graph.screen_image import encode_screenshot, pixel_hash
 from android_app_graph.step_log import (
@@ -25,10 +26,24 @@ from android_app_graph.step_log import (
     load_image_embeddings,
     read_exploration_transitions,
     read_observation_record,
+    read_observation_tree,
     save_image_embeddings,
 )
+from android_app_graph.ui_tree import IDLE_FAILURE, UiTree, parse_tree, xml_document
 
 HOME = {"activity": "com.demo.Home", "package": "com.demo"}
+# The tree AdbController keeps for a settled capture: a trimmed dump of Settings' home.
+DOCUMENT = xml_document(
+    (Path(__file__).parent / "data" / "uiautomator_windows_plain_list.txt").read_text(
+        encoding="utf-8"
+    )
+)
+CAPTURED: dict[str, object] = {
+    "xml": DOCUMENT,
+    "ui_tree_error": None,
+    "ui_tree_retakes": 0,
+    "ui_tree_settled": True,
+}
 
 
 def _encoded(image: Image.Image) -> str:
@@ -42,19 +57,26 @@ def _png(size: tuple[int, int], color: str) -> str:
 
 
 class _Device:
-    """A device that shows one screen and logs the actions it is sent."""
+    """A device that shows one screen, captured as ``capture`` says, and logs the actions
+    it is sent."""
 
     w = 1080
     h = 1920
 
-    def __init__(self, screenshot: str, status_bar: object = None) -> None:
+    def __init__(
+        self,
+        screenshot: str,
+        status_bar: object = None,
+        capture: dict[str, object] | None = None,
+    ) -> None:
         self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
         self.screenshot = screenshot
         self.status_bar = status_bar
+        self.capture = CAPTURED if capture is None else capture
         self.actions: list[dict[str, Any]] = []
 
     def get_state(self) -> dict[str, Any]:
-        state = {**HOME, "xml": "<hierarchy/>", "screenshot": self.screenshot}
+        state = {**HOME, **self.capture, "screenshot": self.screenshot}
         return state if self.status_bar is None else {**state, "status_bar": self.status_bar}
 
     def exe_action(self, action: dict[str, Any]) -> None:
@@ -90,20 +112,26 @@ def test_the_recorder_stands_in_for_the_controller_it_wraps(device: _Device, ste
     assert recorder.config is device.config
 
 
-def test_get_state_records_one_webp_image_and_one_observation(device: _Device, steps: Path) -> None:
+def test_get_state_records_one_webp_image_one_tree_and_one_observation(
+    device: _Device, steps: Path
+) -> None:
     recorder = _recorder(device, steps)
 
     state = recorder.get_state()
 
     webp = encode_screenshot(device.screenshot)
-    assert _files(steps) == ["000000.json", "000000.webp"]
+    assert _files(steps) == ["000000.json", "000000.webp", "000000.xml"]
     assert (steps / "000000.webp").read_bytes() == webp
+    assert (steps / "000000.xml").read_text(encoding="utf-8") == DOCUMENT
     assert state == {
         **HOME,
-        "xml": "<hierarchy/>",
+        "ui_tree_error": None,
+        "ui_tree_retakes": 0,
+        "ui_tree_settled": True,
         "screenshot": base64.b64encode(webp).decode("ascii"),
         "observation_id": "000000",
         "pixel_hash": pixel_hash(webp, 0),
+        "ui_tree": parse_tree(DOCUMENT),
     }
     record = _record(steps, "000000")
     timestamp = record.pop("timestamp")
@@ -120,7 +148,78 @@ def test_get_state_records_one_webp_image_and_one_observation(device: _Device, s
         "status_bar": None,
         "status_bar_rows": 0,
         "pixel_hash": pixel_hash(webp, 0),
+        "ui_tree_error": None,
+        "ui_tree_retakes": 0,
+        "ui_tree_settled": True,
     }
+
+
+def test_get_state_writes_the_image_the_tree_and_the_record_in_that_order(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every record names files that exist, even after a crash between two writes."""
+    written: list[str] = []
+    write_bytes, write_json = step_log.write_bytes_atomically, step_log.write_json_atomically
+
+    def bytes_then_log(path: Path, data: bytes) -> None:
+        write_bytes(path, data)
+        written.append(path.name)
+
+    def json_then_log(
+        path: Path, payload: object, *, indent: int | None = None, ensure_ascii: bool = True
+    ) -> None:
+        write_json(path, payload, indent=indent, ensure_ascii=ensure_ascii)
+        written.append(path.name)
+
+    monkeypatch.setattr(step_log, "write_bytes_atomically", bytes_then_log)
+    monkeypatch.setattr(step_log, "write_json_atomically", json_then_log)
+
+    _recorder(device, steps).get_state()
+
+    assert written == ["000000.webp", "000000.xml", "000000.json"]
+
+
+def test_a_retaken_capture_records_its_retakes_and_whether_it_settled(steps: Path) -> None:
+    capture: dict[str, object] = {**CAPTURED, "ui_tree_retakes": 2, "ui_tree_settled": False}
+
+    _recorder(_Device(_png((40, 30), "white"), capture=capture), steps).get_state()
+
+    record = _record(steps, "000000")
+    assert (record["ui_tree_error"], record["ui_tree_retakes"], record["ui_tree_settled"]) == (
+        None,
+        2,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("capture", "reason"),
+    [
+        pytest.param(
+            {"xml": None, "ui_tree_error": IDLE_FAILURE, "ui_tree_retakes": 0},
+            IDLE_FAILURE,
+            id="the controller's reason",
+        ),
+        pytest.param(
+            {"xml": "<hierarchy/>"}, "root is <hierarchy>, not <displays>", id="unusable xml"
+        ),
+        pytest.param({}, "the device state has no tree", id="no xml"),
+    ],
+)
+def test_a_capture_without_a_tree_writes_no_tree_and_records_why(
+    capture: dict[str, object], reason: str, steps: Path
+) -> None:
+    state = _recorder(_Device(_png((40, 30), "white"), capture=capture), steps).get_state()
+
+    assert _files(steps) == ["000000.json", "000000.webp"]
+    assert (state["ui_tree"], state["ui_tree_error"]) == (None, reason)
+    assert "xml" not in state
+    record = _record(steps, "000000")
+    assert (record["ui_tree_error"], record["ui_tree_retakes"], record["ui_tree_settled"]) == (
+        reason,
+        0,
+        False,
+    )
 
 
 def _screen(size: tuple[int, int]) -> Image.Image:
@@ -239,18 +338,21 @@ def test_a_second_recorder_continues_the_numbering_as_another_run(
     assert (record["run_kind"], record["source"]) == ("audit", "re_explore")
 
 
-def test_an_image_without_a_record_is_ignored_and_its_number_reused(
+def test_an_image_and_a_tree_without_a_record_are_ignored_and_their_number_reused(
     device: _Device, steps: Path
 ) -> None:
-    """A crash between publishing an image and its record leaves the image alone; the
-    next run takes that number again and replaces the image."""
+    """A crash between publishing an image or a tree and its record leaves them alone;
+    the next run takes that number again and replaces them."""
     _recorder(device, steps).get_state()
     (steps / "000001.webp").write_bytes(b"left by a crash")
+    (steps / "000001.xml").write_bytes(b"left by a crash")
+    (steps / "000002.xml").write_bytes(b"left by a crash")
 
     state = _recorder(device, steps).get_state()
 
     assert state["observation_id"] == "000001"
     assert (steps / "000001.webp").read_bytes() == encode_screenshot(device.screenshot)
+    assert (steps / "000001.xml").read_text(encoding="utf-8") == DOCUMENT
     assert _record(steps, "000001")["kind"] == "observation"
 
 
@@ -381,8 +483,17 @@ def test_a_step_log_that_does_not_exist_has_no_transitions(steps: Path) -> None:
     assert read_exploration_transitions(steps) == []
 
 
-def test_observation_from_state_reads_a_recorded_state(device: _Device, steps: Path) -> None:
-    state = _recorder(device, steps).get_state()
+@pytest.mark.parametrize(
+    ("capture", "tree", "reason"),
+    [
+        pytest.param(CAPTURED, parse_tree(DOCUMENT), None, id="a tree"),
+        pytest.param({"xml": None, "ui_tree_error": IDLE_FAILURE}, None, IDLE_FAILURE, id="none"),
+    ],
+)
+def test_observation_from_state_reads_a_recorded_state_with_its_tree_or_the_reason(
+    capture: dict[str, object], tree: UiTree | None, reason: str | None, steps: Path
+) -> None:
+    state = _recorder(_Device(_png((40, 30), "white"), capture=capture), steps).get_state()
 
     assert Observation.from_state(state) == Observation(
         observation_id="000000",
@@ -390,7 +501,32 @@ def test_observation_from_state_reads_a_recorded_state(device: _Device, steps: P
         activity=HOME["activity"],
         package=HOME["package"],
         pixel_hash=state["pixel_hash"],
+        ui_tree=tree,
+        ui_tree_error=reason,
     )
+
+
+@pytest.mark.parametrize(
+    ("capture", "tree", "reason"),
+    [
+        pytest.param(CAPTURED, parse_tree(DOCUMENT), None, id="a tree"),
+        pytest.param({"xml": None, "ui_tree_error": IDLE_FAILURE}, None, IDLE_FAILURE, id="none"),
+    ],
+)
+def test_read_observation_tree_reads_the_recorded_tree_or_the_reason(
+    capture: dict[str, object], tree: UiTree | None, reason: str | None, steps: Path
+) -> None:
+    _recorder(_Device(_png((40, 30), "white"), capture=capture), steps).get_state()
+
+    assert read_observation_tree(steps, "000000") == (tree, reason)
+
+
+def test_reading_a_tree_missing_without_a_reason_raises(device: _Device, steps: Path) -> None:
+    _recorder(device, steps).get_state()
+    (steps / "000000.xml").unlink()
+
+    with pytest.raises(FileNotFoundError):
+        read_observation_tree(steps, "000000")
 
 
 def test_observation_from_state_rejects_a_state_the_recorder_did_not_return(

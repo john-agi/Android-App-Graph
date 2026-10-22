@@ -319,9 +319,10 @@ def test_an_unusable_text_vector_file_raises_naming_the_file_and_the_problem(
     assert str(raised.value).endswith(". Explore the app again into a new graph directory.")
 
 
-def test_a_step_keeps_its_record_and_image_under_its_id(tmp_path: Path) -> None:
+def test_a_step_keeps_its_record_image_and_tree_under_its_id(tmp_path: Path) -> None:
     assert graph_files.step_record_path(tmp_path, "000007") == tmp_path / "000007.json"
     assert graph_files.observation_image_path(tmp_path, "000007") == tmp_path / "000007.webp"
+    assert graph_files.observation_tree_path(tmp_path, "000007") == tmp_path / "000007.xml"
 
 
 def test_observation_image_b64_reads_and_encodes_the_image(tmp_path: Path) -> None:

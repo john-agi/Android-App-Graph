@@ -45,7 +45,12 @@ depends_on = [
     "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.screen_image",
+    "android_app_graph.ui_tree",
 ]
+
+[[modules]]
+path = "android_app_graph.ui_tree"
+depends_on = []
 
 [[modules]]
 path = "android_app_graph.cli"
@@ -97,7 +102,7 @@ depends_on = []
 
 [[modules]]
 path = "android_app_graph.device"
-depends_on = []
+depends_on = ["android_app_graph.ui_tree"]
 
 [[modules]]
 path = "android_app_graph.payloads"

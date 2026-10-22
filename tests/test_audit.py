@@ -21,6 +21,7 @@ from android_app_graph.device import DeviceController
 from android_app_graph.graph_files import (
     graph_steps_dir,
     observation_image_path,
+    observation_tree_path,
     save_embeddings,
     text_embeddings_path,
 )
@@ -291,11 +292,12 @@ def _identifying(
 
 def _write_representative(graph_path: Path, node_id: str) -> None:
     """Put the representative a node of ``graph_path`` names in its step log: its image,
-    and its record with a pixel hash and a describe output."""
+    its tree, and its record with a pixel hash and a describe output."""
     steps_dir = graph_steps_dir(graph_path)
     steps_dir.mkdir(exist_ok=True)
     observation_id = f"{node_id}-observation"
     observation_image_path(steps_dir, observation_id).write_bytes(encode_screenshot(_png(0)))
+    observation_tree_path(steps_dir, observation_id).write_text("<displays />", encoding="utf-8")
     record = {
         "id": observation_id,
         "kind": "observation",

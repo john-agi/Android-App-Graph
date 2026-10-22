@@ -52,6 +52,7 @@ from android_app_graph.graph_files import (
     nodes_without_members,
     observation_image_b64,
     observation_image_path,
+    observation_tree_path,
     require_known_edge_endpoints,
     save_embeddings,
     text_embeddings_path,
@@ -79,6 +80,7 @@ from android_app_graph.step_log import (
     annotate_observation,
     load_image_embeddings,
     read_observation_record,
+    read_observation_tree,
     save_image_embeddings,
 )
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
@@ -747,11 +749,21 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
     return members if len(members) == len(observations) else []
 
 
+def _has_tree_or_reason(steps_dir: Path, observation_id: str) -> bool:
+    """Return whether an observation in ``steps_dir`` has its tree, or a record that
+    says why it has none."""
+    if observation_tree_path(steps_dir, observation_id).is_file():
+        return True
+    record = read_observation_record(steps_dir, observation_id)
+    return record is not None and bool(as_str(record.get("ui_tree_error"), ""))
+
+
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
     member observations with its representative among them, or whose representative has
-    no image in ``steps_dir``, and every edge without actions or whose per-action lists
-    do not hold one entry per action.
+    no image in ``steps_dir`` or neither a tree there nor a record that says why it has
+    none, and every edge without actions or whose per-action lists do not hold one entry
+    per action.
     """
     without_members = nodes_without_members(graph["nodes"])
     without_image = [
@@ -759,6 +771,12 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         for node in graph["nodes"]
         if node["id"] not in without_members
         and not observation_image_path(steps_dir, node["representative_observation"]).is_file()
+    ]
+    without_tree = [
+        node["id"]
+        for node in graph["nodes"]
+        if node["id"] not in without_members
+        and not _has_tree_or_reason(steps_dir, node["representative_observation"])
     ]
     problems = []
     if without_members:
@@ -768,6 +786,11 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
     if without_image:
         problems.append(
             f"node(s) with a representative without an image in {steps_dir}: {without_image}"
+        )
+    if without_tree:
+        problems.append(
+            f"node(s) with a representative with neither a tree nor a recorded reason in "
+            f"{steps_dir}: {without_tree}"
         )
     problems.extend(edge_problems(graph["edges"]))
     if problems:
@@ -1800,7 +1823,7 @@ class GraphManager:
         The member's stored describe output stands in for the describe call and its text
         vector for the description's embedding, so the short list costs only its
         verifier calls; the node it leaves is not on the list, and no description is
-        refined.
+        refined. The member's tree, or the reason it has none, is read from the step log.
         """
         identification = self._stored_identification(node_id, member, verdicts)
         destination = self._verify_short_list(identification, excluded={node_id})
@@ -1822,12 +1845,15 @@ class GraphManager:
     ) -> _Identification:
         steps_dir = self._require_steps_dir()
         stored = self._stored_screens[member]
+        tree, tree_error = read_observation_tree(steps_dir, member)
         observation = Observation(
             observation_id=member,
             screenshot_b64=observation_image_b64(steps_dir, member),
             activity=self._member_activity(member),
             package=as_str(self.graph.nodes[node_id].get("package"), ""),
             pixel_hash=stored.pixel_hash,
+            ui_tree=tree,
+            ui_tree_error=tree_error,
         )
         described = stored.described
         screen = _ScreenDescription(described.page_description, described.state, described.elements)
@@ -2540,11 +2566,12 @@ class GraphManager:
         A file that lacks a field the graph needs raises ``ValueError`` naming it and
         each node, member or edge that lacks one: a node must list its member
         observations with its representative among them, the representative must have
-        an image in the step log, every member of an in-app node must have a record
-        there with its pixel hash and describe output, and every edge must hold one
-        entry per action in each per-action list. With embedding settings, so does a
-        damaged text-vector file, one from another model, and one, missing or not,
-        without the vector of a member of an in-app node.
+        an image in the step log and a tree there or a record that says why it has
+        none, every member of an in-app node must have a record there with its pixel
+        hash and describe output, and every edge must hold one entry per action in each
+        per-action list. With embedding settings, so does a damaged text-vector file, one
+        from another model, and one, missing or not, without the vector of a member of an
+        in-app node.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:

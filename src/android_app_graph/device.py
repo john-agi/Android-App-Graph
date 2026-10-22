@@ -17,8 +17,18 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
+
+from android_app_graph.ui_tree import (
+    IDLE_FAILURE,
+    UiTree,
+    UnusableDumpError,
+    parse_tree,
+    same_screen,
+    xml_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +167,32 @@ _READ_TIMEOUT_SECONDS = 30
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
 _CLEAR_KEY_PRESSES = 20
+# The first release whose uiautomator dumps every window (Build.VERSION_CODES.R).
+_MIN_API_LEVEL = 30
+_UI_DUMP = "uiautomator dump --windows /dev/stdout"
+_MAX_RETAKES = 2
+_DUMP_TIMED_OUT = "adb timed out twice"
+_DUMP_ERRORS_NOT_RETRIED = frozenset({IDLE_FAILURE, _DUMP_TIMED_OUT})
+
+
+@dataclass(frozen=True, slots=True)
+class _Dump:
+    """One ``uiautomator dump``: its XML document and tree, or the reason it has none."""
+
+    document: str | None
+    tree: UiTree | None
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PairedCapture:
+    """A screenshot, the dump kept with it, how many times the screenshot was retaken
+    and whether the dumps around the kept screenshot agreed."""
+
+    png: bytes
+    dump: _Dump
+    retakes: int
+    settled: bool
 
 
 class AdbController:
@@ -165,7 +201,22 @@ class AdbController:
     def __init__(self, config: dict[str, Any], logger: logging.Logger) -> None:
         self.config = config
         self._logger = logger
-        self._serial = ["-s", config["device"]["udid"]]
+        udid = config["device"]["udid"]
+        self._serial = ["-s", udid]
+        sdk = run_adb(
+            [*self._serial, "shell", "getprop", "ro.build.version.sdk"],
+            output="capture",
+            check=True,
+        ).stdout.strip()
+        if not re.fullmatch(r"[0-9]+", sdk):
+            msg = f"Failed to read the API level of {udid}: {sdk!r}"
+            raise ValueError(msg)
+        if int(sdk) < _MIN_API_LEVEL:
+            msg = (
+                f"{udid} runs API level {sdk}; capturing every window with uiautomator "
+                f"needs API level {_MIN_API_LEVEL} (Android 11) or later"
+            )
+            raise RuntimeError(msg)
         size = run_adb([*self._serial, "shell", "wm", "size"], output="capture", check=True)
         match = re.search(r"(\d+)x(\d+)", size.stdout)
         if match is None:
@@ -175,23 +226,88 @@ class AdbController:
         self.h = int(match.group(2))
 
     def get_state(self) -> dict[str, Any]:
-        """Return the UI hierarchy XML, a base64 PNG screenshot, the focused package and
-        activity, both ``"unknown"`` when ``dumpsys window`` names none, and the
-        ``status_bar`` frame that ``status_bar_frame`` reads from the same dump.
+        """Return a base64 PNG screenshot with the accessibility tree of every window
+        paired with it, the focused package and activity, both ``"unknown"`` when
+        ``dumpsys window`` names none, and the ``status_bar`` frame that
+        ``status_bar_frame`` reads from the same dump.
+
+        ``"xml"`` is the kept dump's XML document, or ``None`` with the reason in
+        ``"ui_tree_error"``; ``"ui_tree_retakes"`` counts the screenshot's retakes and
+        ``"ui_tree_settled"`` says whether the dumps around it agreed.
         """
-        xml = self._read(
-            _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"]
-        )
-        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"])
+        capture = self._paired_capture()
         dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"])
         package, activity = _focused_package_activity(dumpsys)
         return {
-            "xml": xml,
-            "screenshot": base64.b64encode(png).decode("ascii"),
+            "xml": capture.dump.document,
+            "ui_tree_error": capture.dump.error,
+            "ui_tree_retakes": capture.retakes,
+            "ui_tree_settled": capture.settled,
+            "screenshot": base64.b64encode(capture.png).decode("ascii"),
             "package": package,
             "activity": activity,
             "status_bar": status_bar_frame(dumpsys),
         }
+
+    def _paired_capture(self) -> _PairedCapture:
+        """Dump, take the screenshot, and dump again; while the two dumps show different
+        screens, take the screenshot and the dump again, at most ``_MAX_RETAKES`` times,
+        the last dump becoming the first of the new pair.
+
+        The dump waits for one quiet second before it reads the screen, so the
+        screenshot right after it usually shows the settled screen; the second dump
+        confirms nothing changed in between. The kept dump is the one before the kept
+        screenshot. Without a first dump there is no pair, and the screenshot is kept
+        without a tree.
+        """
+        before = self._dump()
+        png = self._screencap()
+        retakes = 0
+        while before.tree is not None:
+            after = self._dump()
+            if after.tree is None:
+                break
+            if same_screen(before.tree, after.tree):
+                return _PairedCapture(png, before, retakes, settled=True)
+            if retakes == _MAX_RETAKES:
+                break
+            retakes += 1
+            png = self._screencap()
+            before = after
+        return _PairedCapture(png, before, retakes, settled=False)
+
+    def _screencap(self) -> bytes:
+        return self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"])
+
+    def _dump(self) -> _Dump:
+        """Dump every window, and once more when the dump is unusable, except after an
+        idle failure or a timeout.
+
+        An idle failure has already waited ten seconds for a quiet second, and a dump
+        right after it fails the same way; ``_read`` has already run a dump that timed
+        out once more.
+        """
+        dump = self._dump_once()
+        if dump.tree is None and dump.error not in _DUMP_ERRORS_NOT_RETRIED:
+            dump = self._dump_once()
+        return dump
+
+    def _dump_once(self) -> _Dump:
+        try:
+            output = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", _UI_DUMP])
+        except subprocess.TimeoutExpired:
+            return _Dump(None, None, _DUMP_TIMED_OUT)
+        except subprocess.CalledProcessError as exc:
+            return _Dump(None, None, f"adb exited with status {exc.returncode}")
+        try:
+            text = output.decode("utf-8")
+        except UnicodeDecodeError:
+            return _Dump(None, None, "output is not UTF-8")
+        try:
+            tree = parse_tree(text)
+        except UnusableDumpError as exc:
+            return _Dump(None, None, exc.reason)
+        return _Dump(xml_document(text), tree, None)
 
     def _read[T](self, read: Callable[[Sequence[str], float], T], args: Sequence[str]) -> T:
         """Return ``read(args, timeout)``, logging a warning and running it once more

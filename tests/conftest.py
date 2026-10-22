@@ -27,6 +27,7 @@ from android_app_graph.device import DeviceController
 from android_app_graph.graph_files import (
     graph_steps_dir,
     observation_image_path,
+    observation_tree_path,
     save_embeddings,
     text_embeddings_path,
 )
@@ -310,6 +311,10 @@ def embedding_body() -> dict[str, object]:
     }
 
 
+# The smallest document the tree parser accepts: a dump that found no window.
+_EMPTY_TREE = "<displays />"
+
+
 def _png_b64(color: str) -> str:
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
@@ -344,9 +349,9 @@ def write_image_vectors() -> Callable[..., None]:
 
 @pytest.fixture
 def add_representative(png_screenshot: str) -> Callable[..., None]:
-    """Give a node of a manager one member observation, its representative, with an image
-    and a record in the manager's step log; ``image`` defaults to ``png_screenshot`` as
-    WebP.
+    """Give a node of a manager one member observation, its representative, with an image,
+    a tree and a record in the manager's step log; ``image`` defaults to ``png_screenshot``
+    as WebP.
 
     The observation ID is not a step number, so a StepRecorder on the same step log
     never reuses it.
@@ -360,6 +365,7 @@ def add_representative(png_screenshot: str) -> Callable[..., None]:
         observation_image_path(steps_dir, observation_id).write_bytes(
             encode_screenshot(png_screenshot) if image is None else image
         )
+        observation_tree_path(steps_dir, observation_id).write_text(_EMPTY_TREE, encoding="utf-8")
         _write_member_record(steps_dir, observation_id)
         graph.graph.nodes[node_id]["observations"] = [observation_id]
         graph.graph.nodes[node_id]["representative_observation"] = observation_id
@@ -398,10 +404,10 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
     """Write ``document`` as a graph file that ``load_graph`` accepts, with what exploration
     records where ``document`` gives none: every node but an ``ext_`` one gets the package
     ``com.demo``, every node gets one member observation, its representative, with an
-    image and a record holding a pixel hash and a describe output in the step log beside
-    it, every member of a node but an ``ext_`` one gets a text vector in the file beside
-    the graph, tagged with ``embedding_model``, and every edge gets the per-action lists
-    ``add_edge`` records."""
+    image, a tree and a record holding a pixel hash and a describe output in the step
+    log beside it, every member of a node but an ``ext_`` one gets a text vector in the
+    file beside the graph, tagged with ``embedding_model``, and every edge gets the
+    per-action lists ``add_edge`` records."""
 
     def write(
         path: Path, document: dict[str, Any], embedding_model: str = "google/gemini-embedding-2"
@@ -414,6 +420,9 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
             observation_id = f"{node['id']}-observation"
             observation_image_path(steps_dir, observation_id).write_bytes(
                 encode_screenshot(png_screenshot)
+            )
+            observation_tree_path(steps_dir, observation_id).write_text(
+                _EMPTY_TREE, encoding="utf-8"
             )
             _write_member_record(steps_dir, observation_id)
             in_app = not node["id"].startswith("ext_")
@@ -437,9 +446,9 @@ type Members = dict[str, list[tuple[str, list[float]]]]
 
 @pytest.fixture
 def write_member_graph() -> Callable[..., None]:
-    """Write a graph file of ``com.demo`` nodes whose members have an image, an image
-    vector and a stored describe output in the step log beside it and a text vector in
-    the file beside the graph, and the exploration transitions
+    """Write a graph file of ``com.demo`` nodes whose members have an image, a tree, an
+    image vector and a stored describe output in the step log beside it and a text
+    vector in the file beside the graph, and the exploration transitions
     ``(before, after, action, from_node, to_node)``.
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
@@ -464,6 +473,9 @@ def write_member_graph() -> Callable[..., None]:
                 vectors[observation_id] = vector
                 observation_image_path(steps_dir, observation_id).write_bytes(
                     observation_id.encode("ascii")
+                )
+                observation_tree_path(steps_dir, observation_id).write_text(
+                    _EMPTY_TREE, encoding="utf-8"
                 )
                 record = {
                     "id": observation_id,

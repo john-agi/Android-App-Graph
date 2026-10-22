@@ -34,6 +34,7 @@ from PIL import Image, ImageDraw
 
 from android_app_graph.graph_files import PER_ACTION_LISTS, save_embeddings, text_embeddings_path
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
+from android_app_graph.ui_tree import parse_tree
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
@@ -118,12 +119,17 @@ def make_manager(steps_dir: Path | None = None) -> GraphManager:
     return gm
 
 
+# The smallest document the tree parser accepts: a dump that found no window.
+EMPTY_TREE = "<displays />"
+
+
 def write_observation_image(steps_dir: Path, image: bytes) -> str:
-    """Write an observation image into ``steps_dir`` under the next free step ID, as a
-    StepRecorder would, and return the ID."""
+    """Write an observation image and its tree into ``steps_dir`` under the next free
+    step ID, as a StepRecorder would, and return the ID."""
     steps_dir.mkdir(parents=True, exist_ok=True)
     observation_id = f"{len(list(steps_dir.glob('*.webp'))):06d}"
     (steps_dir / f"{observation_id}.webp").write_bytes(image)
+    (steps_dir / f"{observation_id}.xml").write_text(EMPTY_TREE, encoding="utf-8")
     return observation_id
 
 
@@ -180,7 +186,15 @@ class Screens:
             "pixel_hash": pixel_hash,
         }
         (self.steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-        return Observation(observation_id, screenshot, activity, package, pixel_hash)
+        return Observation(
+            observation_id,
+            screenshot,
+            activity,
+            package,
+            pixel_hash,
+            parse_tree(EMPTY_TREE),
+            None,
+        )
 
     def record(self, observation: Observation) -> dict[str, Any]:
         path = self.steps_dir / f"{observation.observation_id}.json"
@@ -3636,6 +3650,7 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     assert sorted(path.name for path in steps_dir.iterdir()) == [
         f"{observation.observation_id}.json",
         f"{observation.observation_id}.webp",
+        f"{observation.observation_id}.xml",
         "image_emb.json",
     ]
     assert json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8")) == {
@@ -3948,6 +3963,83 @@ def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
     assert "['s1_settings']" in str(excinfo.value)
     assert str(tmp_path / "steps") in str(excinfo.value)
     assert "no member observations" not in str(excinfo.value)
+
+
+def _without_tree(steps_dir: Path, tree_fields: dict[str, object] | None) -> Membership:
+    """The membership fields of a node whose one observation has an image and no tree,
+    and no record when ``tree_fields`` is ``None``, or else the record exploration leaves
+    for a member with ``tree_fields`` added."""
+    membership = members(steps_dir)
+    observation_id = membership["representative_observation"]
+    (steps_dir / f"{observation_id}.xml").unlink()
+    record_path = steps_dir / f"{observation_id}.json"
+    if tree_fields is None:
+        record_path.unlink()
+    else:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record_path.write_text(json.dumps(record | tree_fields), encoding="utf-8")
+    return membership
+
+
+@pytest.mark.parametrize(
+    "tree_fields",
+    [
+        pytest.param(None, id="no record"),
+        pytest.param({"ui_tree_error": None}, id="no reason"),
+    ],
+)
+def test_load_graph_rejects_a_representative_with_neither_a_tree_nor_a_reason_naming_it(
+    tmp_path: Path, tree_fields: dict[str, object] | None
+) -> None:
+    steps_dir = tmp_path / "steps"
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", **members(steps_dir)},
+            {"id": "s1_settings", **_without_tree(steps_dir, tree_fields)},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="neither a tree nor a recorded reason") as excinfo:
+        make_manager().load_graph(path)
+
+    message = str(excinfo.value)
+    assert message.startswith(f"{path}: ")
+    assert f"in {steps_dir}: ['s1_settings']" in message
+    assert "s0_home" not in message
+    assert message.endswith(". Explore the app again into a new graph directory.")
+
+
+def test_load_graph_accepts_a_representative_whose_record_says_why_it_has_no_tree(
+    tmp_path: Path,
+) -> None:
+    steps_dir = tmp_path / "steps"
+    path = tmp_path / "graph.json"
+    tree_fields: dict[str, object] = {"ui_tree_error": "ERROR: could not get idle state."}
+    membership = _without_tree(steps_dir, tree_fields)
+    write_graph(path, [{"id": "s0_home", **membership}])
+    write_text_vectors(path, membership)
+    gm = make_manager()
+
+    gm.load_graph(path)
+
+    assert list(gm.graph.nodes) == ["s0_home"]
+
+
+def test_load_graph_checks_only_the_representative_for_a_tree(tmp_path: Path) -> None:
+    """Only the representative needs a tree or a reason, as only it needs an image."""
+    steps_dir = tmp_path / "steps"
+    path = tmp_path / "graph.json"
+    membership = members(steps_dir, b"screenshot-a", b"screenshot-b")
+    (steps_dir / f"{membership['observations'][1]}.xml").unlink()
+    write_graph(path, [{"id": "s0_home", **membership}])
+    write_text_vectors(path, membership)
+    gm = make_manager()
+
+    gm.load_graph(path)
+
+    assert gm.graph.nodes["s0_home"]["observations"] == membership["observations"]
 
 
 def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
@@ -4498,6 +4590,9 @@ def test_save_then_load_round_trips(
         for observation_id in attrs["observations"]:
             write_member_record(path.parent / "steps", observation_id)
         (path.parent / "steps" / f"{attrs['representative_observation']}.webp").write_bytes(b"x")
+        (path.parent / "steps" / f"{attrs['representative_observation']}.xml").write_text(
+            EMPTY_TREE, encoding="utf-8"
+        )
 
     gm.save_graph(path)
     loaded = GraphManager()

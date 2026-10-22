@@ -141,6 +141,11 @@ def observation_image_path(steps: Path, observation_id: str) -> Path:
     return steps / f"{observation_id}.webp"
 
 
+def observation_tree_path(steps: Path, observation_id: str) -> Path:
+    """Return where the step log ``steps`` keeps the accessibility tree of an observation."""
+    return steps / f"{observation_id}.xml"
+
+
 def image_embeddings_path(steps: Path) -> Path:
     """Return where the step log ``steps`` keeps its observations' image vectors."""
     return steps / "image_emb.json"
