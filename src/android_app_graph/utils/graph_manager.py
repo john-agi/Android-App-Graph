@@ -44,15 +44,18 @@ from typing import Any, Literal, NamedTuple
 import networkx as nx
 from openrouter import OpenRouter
 
-from android_app_graph.android_packages import saved_node_package
 from android_app_graph.graph_files import (
+    PER_ACTION_LISTS,
+    edge_problems,
     graph_steps_dir,
     load_embeddings,
+    nodes_without_members,
     observation_image_b64,
     observation_image_path,
     require_known_edge_endpoints,
     save_embeddings,
     text_embeddings_path,
+    unloadable_graph,
     write_json_atomically,
 )
 from android_app_graph.member_groups import (
@@ -583,20 +586,7 @@ def _default_num_steps(action: object) -> int:
 
 def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
     """Readers pair entry i of every per-action list with actions[i] and skip placeholders."""
-    actions = list(edge_data.get("actions", []))
-    num_steps = list(edge_data.get("num_steps", []))
-    num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
-    aligned: dict[str, list[Any]] = {"actions": actions, "num_steps": num_steps}
-    for key, placeholder in (
-        ("instructions", ""),
-        ("target_observations", ""),
-        ("schema_deltas", None),
-        ("setups", None),
-    ):
-        values = list(edge_data.get(key, []))
-        values.extend([placeholder] * (len(actions) - len(values)))
-        aligned[key] = values
-    return aligned
+    return {key: list(edge_data.get(key, [])) for key in ("actions", *PER_ACTION_LISTS)}
 
 
 def _same_action(entry: object, action: object) -> bool:
@@ -616,7 +606,7 @@ def _without_entries(
 
 def _setup_actions(entry: object) -> tuple[dict[str, Any], ...]:
     """Return an action's entry of ``setups`` as its device actions; an entry that is not
-    a list of actions, such as the placeholder of a setup not recorded, gives none."""
+    a list of actions, such as the ``None`` of an unknown setup, gives none."""
     if not isinstance(entry, list) or not all(isinstance(action, dict) for action in entry):
         return ()
     return tuple(as_str_dict(action) for action in entry)
@@ -652,11 +642,10 @@ def _count_repeat(
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-            setups = _aligned_lists(edge_data)["setups"]
+            setups = edge_data["setups"]
             recorded = setups[index]
             if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
                 setups[index] = setup
-                edge_data["setups"] = setups
             return True
     return False
 
@@ -696,47 +685,61 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
     return members if len(members) == len(observations) else []
 
 
-def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Path) -> None:
-    """Raise ``ValueError`` naming every saved node without member observations, or
-    whose representative is not one of them or has no image in ``steps_dir``.
+def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
+    """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
+    member observations with its representative among them, or whose representative has
+    no image in ``steps_dir``, and every edge without actions or whose per-action lists
+    do not hold one entry per action.
     """
-    without_members: list[str] = []
-    without_image: list[str] = []
-    for node in nodes:
-        representative = node.get("representative_observation")
-        if not isinstance(representative, str) or representative not in _member_observations(node):
-            without_members.append(node["id"])
-        elif not observation_image_path(steps_dir, representative).is_file():
-            without_image.append(node["id"])
+    without_members = nodes_without_members(graph["nodes"])
+    without_image = [
+        node["id"]
+        for node in graph["nodes"]
+        if node["id"] not in without_members
+        and not observation_image_path(steps_dir, node["representative_observation"]).is_file()
+    ]
     problems = []
     if without_members:
-        problems.append(f"no member observations with a representative: {without_members}")
-    if without_image:
-        problems.append(f"a representative without an image in {steps_dir}: {without_image}")
-    if problems:
-        msg = (
-            f"{path}: node(s) with {'; '.join(problems)}. Graphs saved before nodes listed "
-            "their member observations cannot be loaded: explore the app again into a new "
-            "graph directory."
+        problems.append(
+            f"node(s) with no member observations with a representative: {without_members}"
         )
-        raise ValueError(msg)
+    if without_image:
+        problems.append(
+            f"node(s) with a representative without an image in {steps_dir}: {without_image}"
+        )
+    problems.extend(edge_problems(graph["edges"]))
+    if problems:
+        raise unloadable_graph(path, problems)
 
 
-def _stored_screens(nodes: list[dict[str, Any]], steps_dir: Path) -> dict[str, _StoredScreen]:
+def _stored_screens(
+    nodes: list[dict[str, Any]], path: Path, steps_dir: Path
+) -> dict[str, _StoredScreen]:
     """Read the pixel hash and describe output of every member of the saved in-app
-    ``nodes`` whose record in ``steps_dir`` holds both."""
+    ``nodes`` from its record in ``steps_dir``.
+
+    A member whose record holds no pixel hash or no describe output raises
+    ``ValueError`` naming ``path`` and every such member.
+    """
     stored: dict[str, _StoredScreen] = {}
+    undescribed: list[str] = []
     for node in nodes:
         if node["id"].startswith("ext_") or node.get("is_external"):
             continue
         for member in _member_observations(node):
-            record = read_observation_record(steps_dir, member)
-            if record is None:
-                continue
+            record = read_observation_record(steps_dir, member) or {}
             described = _Described.from_record(record)
             pixel_hash = as_str(record.get("pixel_hash"), "")
-            if described is not None and pixel_hash:
+            if described is None or not pixel_hash:
+                undescribed.append(member)
+            else:
                 stored[member] = _StoredScreen(pixel_hash, described)
+    if undescribed:
+        problem = (
+            f"member(s) whose record in {steps_dir} holds no pixel hash or no describe "
+            f"output: {undescribed}"
+        )
+        raise unloadable_graph(path, [problem])
     return stored
 
 
@@ -752,7 +755,6 @@ class GraphManager:
         audit_timeout: float = DEFAULT_AUDIT_TIMEOUT,
     ) -> None:
         self.graph = nx.DiGraph()
-        self.package_name = ""
         self.client = client
         self.page_detail = page_detail
         self.embedding = embedding
@@ -1630,11 +1632,7 @@ class GraphManager:
         if not instruction or not self.graph.has_edge(source, target):
             return None
         edge_data = self.graph[source][target]
-        # A graph loaded from JSON can hold more actions than instructions; an action
-        # without an instruction matches nothing, so a shorter list is not an error.
-        recorded = zip(
-            edge_data.get("actions", []), edge_data.get("instructions", []), strict=False
-        )
+        recorded = zip(edge_data["actions"], edge_data["instructions"], strict=True)
         for index, (action, recorded_instruction) in enumerate(recorded):
             if recorded_instruction == instruction:
                 return index, action
@@ -1642,9 +1640,8 @@ class GraphManager:
 
     def action_setup(self, source: str, target: str, index: int) -> tuple[dict[str, Any], ...]:
         """Return the setup of action *index* of source→target, the device actions a replay
-        sends on *source* before it; an action recorded without a setup has none."""
-        setups = self.graph[source][target].get("setups", [])
-        return _setup_actions(setups[index]) if index < len(setups) else ()
+        sends on *source* before it; an action whose setup is unknown has none."""
+        return _setup_actions(self.graph[source][target]["setups"][index])
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
         """Move action *index* of source→target, with its entry in every per-action list, to
@@ -1686,7 +1683,6 @@ class GraphManager:
         this replaces, and the next normalization rebuilds them.
         """
         edge_data = self.graph[source][target]
-        edge_data.update(_aligned_lists(edge_data))
         edge_data["instructions"][index] = instruction
         _drop_templates(edge_data)
 
@@ -1694,9 +1690,8 @@ class GraphManager:
         """Return, in node order, the groups of the members of every in-app node at the
         cosine ``floor`` and the checks to make on them.
 
-        Only members with an image vector and a stored describe output are grouped,
-        since a member can leave its node only with both; a node whose representative
-        lacks either has no plan.
+        Only members with an image vector are grouped; a node whose representative has
+        none has no plan.
         """
         plans: list[tuple[str, MemberPlan]] = []
         for raw_id, data in sorted(
@@ -1706,7 +1701,7 @@ class GraphManager:
             node_id = _node_id(raw_id)
             if self._is_external(node_id):
                 continue
-            members = [m for m in _member_observations(data) if m in self._stored_screens]
+            members = _member_observations(data)
             plan = plan_member_checks(
                 members,
                 as_str(data.get("representative_observation"), ""),
@@ -2119,8 +2114,7 @@ class GraphManager:
     def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
         """Return the fewest device actions a replay of one of the edge's actions sends,
         its setup's included (used as path weight)."""
-        costs = _action_costs(edge_data)
-        return min(costs) if costs else 1
+        return min(_action_costs(edge_data))
 
     def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
@@ -2131,7 +2125,7 @@ class GraphManager:
         Returns:
             The path's steps, the first being the source itself. A step's action is the
             edge's cheapest action, a single dict or a list of dicts (compound action),
-            with its setup; an edge without actions gives ``{}``.
+            with its setup.
             Returns None if no path exists.
         """
         if source == target:
@@ -2155,16 +2149,14 @@ class GraphManager:
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
             costs = _action_costs(edge_data)
-            if costs:
-                best_idx = costs.index(min(costs))
-                step = PathStep(
+            best_idx = costs.index(min(costs))
+            result.append(
+                PathStep(
                     _node_id(t),
                     edge_data["actions"][best_idx],
                     self.action_setup(_node_id(s), _node_id(t), best_idx),
                 )
-            else:
-                step = PathStep(_node_id(t), {}, ())
-            result.append(step)
+            )
 
         return result
 
@@ -2214,14 +2206,6 @@ class GraphManager:
                     node_id, action, setup = nav_path[i]
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
-                    instruction = ""
-                    instructions = edge_data.get("instructions", [])
-                    if instructions:
-                        instruction = instructions[0]
-                    target_obs = ""
-                    target_observations = edge_data.get("target_observations", [])
-                    if target_observations:
-                        target_obs = target_observations[0]
                     path_steps.append(
                         {
                             "type": "navigate",
@@ -2229,8 +2213,8 @@ class GraphManager:
                             "to": node_id,
                             "setup": list(setup),
                             "action": action,
-                            "instruction": instruction,
-                            "target_observation": target_obs,
+                            "instruction": edge_data["instructions"][0],
+                            "target_observation": edge_data["target_observations"][0],
                         }
                     )
 
@@ -2271,9 +2255,6 @@ class GraphManager:
         target_observations = edge_data.get("target_observations", [])
         actions = edge_data.get("actions", [])
 
-        if not deltas:
-            return None
-
         best_idx = -1
         best_score = 0
 
@@ -2291,11 +2272,9 @@ class GraphManager:
         return {
             "type": "self_loop",
             "node": node_id,
-            "instruction": instructions[best_idx] if best_idx < len(instructions) else "",
-            "target_observation": target_observations[best_idx]
-            if best_idx < len(target_observations)
-            else "",
-            "action": actions[best_idx] if best_idx < len(actions) else [],
+            "instruction": instructions[best_idx],
+            "target_observation": target_observations[best_idx],
+            "action": actions[best_idx],
             "schema_delta": deltas[best_idx],
             "required_schema": required_schema,
         }
@@ -2431,7 +2410,6 @@ class GraphManager:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
-            "package_name": self.package_name,
             "next_id": self._next_id,
             "total_steps_completed": self.total_steps_completed,
             "node_aliases": dict(self._node_aliases),
@@ -2467,10 +2445,11 @@ class GraphManager:
                 "target_observations": attrs.get("target_observations", []),
                 "num_steps": attrs.get("num_steps", []),
                 "visit_count": attrs.get("visit_count", 0),
+                "schema_deltas": attrs.get("schema_deltas", []),
+                "setups": attrs.get("setups", []),
             }
-            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
-                if attrs.get(key):
-                    edge_data[key] = attrs[key]
+            if attrs.get("normalized_instructions_hash"):
+                edge_data["normalized_instructions_hash"] = attrs["normalized_instructions_hash"]
             data["edges"].append(edge_data)
 
         # Before the graph: loading requires a text vector for every described member,
@@ -2490,16 +2469,20 @@ class GraphManager:
             "Graph saved to %s (%d nodes, %d edges)", path, len(data["nodes"]), len(data["edges"])
         )
 
-    def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
+    def load_graph(self, path: str | Path) -> None:
         """Load graph from a JSON file, with its members' text vectors when the manager
         has embedding settings, the step log beside it as the manager's ``steps_dir``,
         its image vectors when the manager has image-embedding settings, and its
         members' stored screens.
 
-        ``default_package_name`` stands in for the ``package_name`` of a file that has
-        none. A node without member observations, or whose representative has no image
-        in the step log, raises ``ValueError`` naming it, and so does a text-vector file
-        without the vector of every member with a stored screen.
+        A file that lacks a field the graph needs raises ``ValueError`` naming it and
+        each node, member or edge that lacks one: a node must list its member
+        observations with its representative among them, the representative must have
+        an image in the step log, every member of an in-app node must have a record
+        there with its pixel hash and describe output, and every edge must hold one
+        entry per action in each per-action list. With embedding settings, so does a
+        damaged text-vector file, one from another model, and one, missing or not,
+        without the vector of a member of an in-app node.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2509,8 +2492,8 @@ class GraphManager:
         # untouched, not wipe them partway through the node loop.
         data = require_known_edge_endpoints(raw, path)
         steps_dir = graph_steps_dir(path)
-        _require_node_members(data["nodes"], path, steps_dir)
-        stored_screens = _stored_screens(data["nodes"], steps_dir)
+        _require_saved_fields(data, path, steps_dir)
+        stored_screens = _stored_screens(data["nodes"], path, steps_dir)
         image_vectors = (
             load_image_embeddings(steps_dir, model=self.image_embedding.model)
             if self.image_embedding is not None
@@ -2527,7 +2510,6 @@ class GraphManager:
             else {}
         )
 
-        self.package_name = as_str(data.get("package_name"), "") or default_package_name
         self._next_id = data.get("next_id", 0)
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.steps_dir = steps_dir
@@ -2542,12 +2524,12 @@ class GraphManager:
         }
         self.graph.clear()
 
-        for node_data in data.get("nodes", []):
+        for node_data in data["nodes"]:
             node_id = node_data["id"]
-            activities = node_data.get("activities", [node_data.get("activity", "")])
+            activities = node_data.get("activities", [])
             self.graph.add_node(
                 node_id,
-                package=saved_node_package(node_data, self.package_name),
+                package=as_str(node_data.get("package"), ""),
                 activity=activities[0] if activities else "",
                 activities=activities,
                 page_description=node_data.get("page_description", ""),
@@ -2556,26 +2538,23 @@ class GraphManager:
                 interactable_elements=node_data.get("interactable_elements", []),
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
-                observations=_member_observations(node_data),
+                observations=node_data["observations"],
                 representative_observation=node_data["representative_observation"],
             )
 
-        for edge_data in data.get("edges", []):
-            edge_attrs = {
-                "actions": edge_data.get("actions", []),
-                "instructions": edge_data.get("instructions", []),
-                "instruction_templates": edge_data.get("instruction_templates", []),
-                "target_observations": edge_data.get("target_observations", []),
-                "num_steps": edge_data.get("num_steps", []),
-                "visit_count": edge_data.get("visit_count", 0),
-            }
-            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
-                if edge_data.get(key):
-                    edge_attrs[key] = edge_data[key]
+        for edge_data in data["edges"]:
+            hashed = (
+                {"normalized_instructions_hash": edge_data["normalized_instructions_hash"]}
+                if edge_data.get("normalized_instructions_hash")
+                else {}
+            )
             self.graph.add_edge(
                 edge_data["source"],
                 edge_data["target"],
-                **edge_attrs,
+                **{key: edge_data[key] for key in ("actions", *PER_ACTION_LISTS)},
+                instruction_templates=edge_data.get("instruction_templates", []),
+                visit_count=edge_data.get("visit_count", 0),
+                **hashed,
             )
 
         logger.info(
@@ -2603,10 +2582,7 @@ class GraphManager:
         actions = []
         for i in range(len(path) - 1):
             source, target = path[i], path[i + 1]
-            edge_data = self.graph[source][target]
-            edge_actions = edge_data.get("actions", [])
-            if edge_actions:
-                actions.append(edge_actions[0])
+            actions.append(self.graph[source][target]["actions"][0])
         return actions
 
     def summary(self) -> dict[str, Any]:
@@ -2657,10 +2633,9 @@ class GraphManager:
             target_desc = self.graph.nodes[target].get("page_description", "")
 
             lines.append(f'  {source} ("{source_desc}") → {target} ("{target_desc}"){is_self}:')
-            for i, instr in enumerate(instructions):
+            for instr, obs in zip(instructions, observations, strict=True):
                 if not instr:
                     continue
-                obs = observations[i] if i < len(observations) else ""
                 obs_str = f" → {obs}" if obs else ""
                 lines.append(f'    - "{instr}"{obs_str}')
 

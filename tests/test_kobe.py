@@ -201,99 +201,15 @@ def test_exploration_uses_the_client_it_is_given_and_leaves_it_open(
     assert router_client.sdk_configuration.client is router_http
 
 
-@pytest.mark.parametrize("saved_package", [None, "com.stale"])
-def test_exploration_records_the_configured_package_name(
-    saved_package: str | None,
-    tmp_path: Path,
-    png_screenshot: str,
-    router_client: OpenRouter,
-) -> None:
-    """The configured package wins over whatever, if anything, an earlier graph saved."""
-    if saved_package is not None:
-        graph_path = tmp_path / "demo" / "demo.json"
-        graph_path.parent.mkdir()
-        graph_path.write_text(
-            json.dumps({"package_name": saved_package, "nodes": [], "edges": []}),
-            encoding="utf-8",
-        )
-    built = Kobe(
-        _Device({"activity": "com.demo.Home", "screenshot": png_screenshot}),
-        ExplorerConfig(
-            app_name="demo",
-            package_name="com.demo",
-            graph_dir=tmp_path,
-            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
-        ),
-        client=router_client,
-        logger=logging.getLogger("test"),
-    )
-    built.save_graph()
-    saved = json.loads((tmp_path / "demo" / "demo.json").read_text(encoding="utf-8"))
-    assert saved["package_name"] == "com.demo"
-
-
 class _ReplayedError(Exception):
     """Ends exploration once it has chosen the node to replay to."""
-
-
-@pytest.mark.parametrize("saved_package", [None, "com.whatsapp"])
-def test_resume_from_auto_replays_to_a_node_of_a_graph_saved_without_node_packages(
-    saved_package: str | None,
-    tmp_path: Path,
-    router_client: OpenRouter,
-    monkeypatch: pytest.MonkeyPatch,
-    write_graph_file: Callable[[Path, dict[str, object]], None],
-    write_image_vectors: Callable[..., None],
-) -> None:
-    """A graph whose nodes record no package resumes at a node of ``com.whatsapp``,
-    although no activity's first three dot-segments equal the package."""
-    document: dict[str, object] = {
-        "nodes": [
-            {"id": "s0_home", "activity": "com.whatsapp.home.ui.HomeActivity"},
-            {"id": "s1_conversation", "activity": "com.whatsapp.Conversation"},
-        ],
-        "edges": [{"source": "s0_home", "target": "s1_conversation"}],
-    }
-    if saved_package is not None:
-        document["package_name"] = saved_package
-    graph_path = tmp_path / "whatsapp" / "whatsapp.json"
-    graph_path.parent.mkdir()
-    write_graph_file(graph_path, document)
-    write_image_vectors(
-        graph_path.parent / "steps",
-        ["s0_home-observation", "s1_conversation-observation"],
-        model="provider/embedding",
-    )
-    explorer = Kobe(
-        _Device(AssertionError("the replay must start before the device is read")),
-        ExplorerConfig(
-            app_name="whatsapp",
-            package_name="com.whatsapp",
-            graph_dir=tmp_path,
-            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
-        ),
-        client=router_client,
-        logger=logging.getLogger("test"),
-    )
-    replayed: list[str] = []
-
-    def replay(node_id: str) -> str:
-        replayed.append(node_id)
-        raise _ReplayedError
-
-    monkeypatch.setattr(explorer, "navigate_to_node", replay)
-
-    with pytest.raises(_ReplayedError):
-        explorer.explore(max_steps=1, resume_from="auto")
-
-    assert replayed == ["s1_conversation"]
 
 
 def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
     tmp_path: Path,
     router_client: OpenRouter,
     monkeypatch: pytest.MonkeyPatch,
-    write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
     """``auto`` resumes at the form with unexplored fields, not at the dialog with no
@@ -308,14 +224,14 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
             {"id": "s2_dialog", "activity": "com.demo.Form"},
         ],
         "edges": [
-            {"source": "s0_home", "target": "s1_form"},
-            {"source": "s0_home", "target": "s2_dialog"},
-            {"source": "s1_form", "target": "s0_home"},
+            {"source": "s0_home", "target": "s1_form", "actions": [{"action": "tap"}]},
+            {"source": "s0_home", "target": "s2_dialog", "actions": [{"action": "swipe"}]},
+            {"source": "s1_form", "target": "s0_home", "actions": [{"action": "back"}]},
         ],
     }
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir()
-    write_graph_file(graph_path, document)
+    write_graph_file(graph_path, document, embedding_model="provider/embedding")
     write_image_vectors(
         graph_path.parent / "steps",
         [f"{node}-observation" for node in ("s0_home", "s1_form", "s2_dialog")],
@@ -431,34 +347,6 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
     with pytest.raises(ValueError, match="No path from s0_home to s1_orphan"):
         replaying_kobe.navigate_to_node("s1_orphan")
     assert device_log == []
-
-
-@pytest.mark.usefixtures("no_sleep")
-def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_rest(
-    replaying_kobe: Kobe,
-    device_log: list[object],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    write_graph_file: Callable[[Path, dict[str, object]], None],
-) -> None:
-    """A loaded graph file can hold an edge with no actions; the replay passes over it."""
-    open_detail = {"action": "tap", "coordinate": [30, 40]}
-    graph_file = tmp_path / "hand_edited.json"
-    write_graph_file(
-        graph_file,
-        {
-            "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
-            "edges": [
-                {"source": "s0_splash", "target": "s1_home", "actions": []},
-                {"source": "s1_home", "target": "s2_detail", "actions": [[open_detail]]},
-            ],
-        },
-    )
-    replaying_kobe.graph.load_graph(graph_file)
-    _identifying(replaying_kobe, monkeypatch, "s0_splash", "s2_detail")
-
-    assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
-    assert device_log == [*_FIRST_RESTART, open_detail]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1839,6 +1727,13 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
 
 
 @pytest.mark.usefixtures("no_sleep")
+def _settings_and_detail(explorer: Kobe) -> None:
+    """Give ``explorer`` the path home → settings → detail, one tap each."""
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])
+    explorer.graph.add_edge("s0_home", "s1_settings", action=[{"action": "tap", "x": 1, "y": 2}])
+    explorer.graph.add_edge("s1_settings", "s2_detail", action=[{"action": "tap", "x": 3, "y": 4}])
+
+
 def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continues_there(
     tmp_path: Path,
     router_client: OpenRouter,
@@ -1855,8 +1750,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     }
     device = _ReplayScript(device_log, launcher, _in_app("Home", "white"))
     explorer = _explorer(device, tmp_path, router_client, launch_activity="com.demo/.Main")
-    explorer.graph.graph.add_edge("s0_home", "s1_settings")
-    explorer.graph.graph.add_edge("s1_settings", "s2_detail")
+    _settings_and_detail(explorer)
     router_responses.extend(
         [
             chat_response(content=_NO_DUPLICATES),
@@ -1930,8 +1824,7 @@ def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_sta
 ) -> None:
     """Neither failure changes the screen, so the step's node and state still hold."""
     explorer = _explorer(_ReplayScript(device_log), tmp_path, router_client)
-    explorer.graph.graph.add_edge("s0_home", "s1_settings")
-    explorer.graph.graph.add_edge("s1_settings", "s2_detail")
+    _settings_and_detail(explorer)
     router_responses.extend(
         [
             chat_response(content=_NO_DUPLICATES),
@@ -2672,7 +2565,7 @@ def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
-    write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
     """The home screen was embedded before; the list never was, and the other app's
@@ -2680,7 +2573,9 @@ def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir()
     nodes = [{"id": "s0_home"}, {"id": "s1_list"}, {"id": "ext_com.other", "is_external": True}]
-    write_graph_file(graph_path, {"nodes": nodes, "edges": []})
+    write_graph_file(
+        graph_path, {"nodes": nodes, "edges": []}, embedding_model="provider/embedding"
+    )
     steps_dir = graph_path.parent / "steps"
     write_image_vectors(steps_dir, ["s0_home-observation"], model="provider/embedding")
     router_responses.append(httpx.Response(200, json=embedding_body))
@@ -2703,12 +2598,16 @@ def test_exploration_embeds_every_member_again_when_the_vectors_are_from_another
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     embedding_body: dict[str, object],
-    write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir()
-    write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}, {"id": "s1_list"}], "edges": []})
+    write_graph_file(
+        graph_path,
+        {"nodes": [{"id": "s0_home"}, {"id": "s1_list"}], "edges": []},
+        embedding_model="provider/embedding",
+    )
     steps_dir = graph_path.parent / "steps"
     members = ["s0_home-observation", "s1_list-observation"]
     write_image_vectors(steps_dir, members, model="provider/older-embedding")

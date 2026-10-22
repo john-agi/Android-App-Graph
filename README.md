@@ -69,7 +69,6 @@ graph TD;
     kobe --> utils;
     kobe --> gm;
     kobe --> vlm;
-    gm --> pkgs["android_app_graph.android_packages"];
     gm --> gf;
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
@@ -357,9 +356,9 @@ first rejection refined it to (`identify.refinement.new_description`), which als
 the node the screen starts when every check rejects it. An exact match copies its
 member's vector without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
-member whose record holds a `describe` output: a missing file, one tagged with another
-model, or one without such a member's vector stops exploration or the audit as it
-loads the graph, with an error naming the file and the problem.
+member of an in-app node: a missing file, one tagged with another model, or one
+without such a member's vector stops exploration or the audit as it loads the graph,
+with an error naming the file and the problem.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no image vector is embedded first, as when `image_emb.json` is
@@ -529,9 +528,7 @@ Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
 package. A dialog's node is therefore never a target of
 `--resume-from auto` or the coverage checkpoint, which replay from the screen the app
-opens on. A node without a recorded package, other than an `ext_` one, takes the
-graph file's `package_name`, or the app's configured `package_name` when the file
-has none, so a graph file whose nodes record no package loads and resumes too.
+opens on.
 
 ### Step log
 
@@ -684,10 +681,14 @@ The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
-Loading a graph fails, naming the nodes, when a node lists no observations, its
-representative is not one of them, or the representative's image is missing from
-`steps/`. A graph whose nodes do not list their observations cannot be loaded:
-explore the app again into a new graph directory.
+Loading a graph fails with an error naming the file and what is wrong: the file
+has no `nodes` or `edges` list, a node lists no observations or its representative
+is not one of them, a representative's image is missing from `steps/`, a member of
+an in-app node has no `pixel_hash` or `describe` in its record in `steps/`, or an
+edge has no actions or per-action lists (see [Graph edges](#graph-edges)) that do
+not hold one entry per action. `app-graph-plot` fails the same way, except that it
+reads no record in `steps/` and needs the image of every member, not only of the
+representative. Explore the app again into a new graph directory.
 
 ### Graph edges
 
@@ -717,8 +718,7 @@ when the setup is unknown or too long:
   another one.
 - A setup of more than 8 actions is dropped, and the log says so.
 
-An action recorded again keeps the shorter of its known setups. A graph file
-without `setups` loads unchanged, and its actions replay without a setup.
+An action recorded again keeps the shorter of its known setups.
 
 Edge normalization asks the page-detail model to generalize an edge's
 instructions into `instruction_templates`, in the passes listed under
@@ -745,8 +745,7 @@ uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 In the HTML view, each node's label ends with the number of screenshots the node
 holds, such as `[12 screenshots]`. Clicking a node opens a panel with its member
 screenshots, oldest first and at most ten, with Previous and Next buttons and the
-position, such as `3 / 10`. A member whose image is missing from `steps/` is
-skipped. Clicking the background or an edge closes the panel.
+position, such as `3 / 10`. Clicking the background or an edge closes the panel.
 
 Hovering a node shows its ID, full page description, activity, visits, state keys,
 explored element count and first ten unexplored elements, then its representative
@@ -808,9 +807,8 @@ verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reu
 After the merges, the members of each in-app node are grouped by their screenshot
 vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
 and the groups are the connected components of those links, single-linkage
-clustering. Only members with a vector and a stored describe output (`describe` in
-their [record](#step-log)) are grouped. The group that holds the representative is
-the node's home.
+clustering. Only members with a vector are grouped. The group that holds the
+representative is the node's home.
 
 - A node whose home holds fewer than half of its members is `diffuse` and is left
   alone, without a verifier call.

@@ -185,12 +185,11 @@ class Kobe:
         self.graph.steps_dir = steps_dir
 
         if self.graph_path.exists():
-            self.graph.load_graph(self.graph_path, default_package_name=self.package_name)
+            self.graph.load_graph(self.graph_path)
             self.logger.info("Graph loaded from %s", self.graph_path)
             self.graph.embed_missing_members()
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
-        self.graph.package_name = self.package_name
         self.controller = StepRecorder(
             controller, steps_dir, run_kind="explore", source="main_loop"
         )
@@ -424,9 +423,7 @@ class Kobe:
                     node_id,
                     action.get("action", "?"),
                 )
-                # find_path yields {} for an edge a loaded graph file holds without actions.
-                if action:
-                    self.controller.exe_action(action)
+                self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
         actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
