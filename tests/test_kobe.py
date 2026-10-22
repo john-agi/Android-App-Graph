@@ -178,7 +178,8 @@ def test_exploration_resolves_all_role_models_before_device_access(
     assert agent.instruction.model == "provider/instruction"
     assert (agent.action.model, agent.action.temperature) == ("provider/action", 0.0)
     assert agent.action.request_timeout == 9.0
-    assert agent.graph.embedding_model == "provider/embedding"
+    assert agent.graph.embedding is not None
+    assert agent.graph.embedding.model == "provider/embedding"
     assert agent.graph.image_embedding == agent.graph.embedding
     assert agent.graph.page_detail == agent.page_detail
     assert agent.client is agent.graph.client is router_client

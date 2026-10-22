@@ -313,12 +313,6 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     return fake
 
 
-def test_a_manager_without_embedding_settings_rejects_reading_its_model() -> None:
-    gm = GraphManager(client=FAKE_CLIENT)
-    with pytest.raises(RuntimeError, match="needs embedding settings"):
-        _ = gm.embedding_model
-
-
 def test_network_guard_blocks_outbound_connections() -> None:
     with pytest.raises(RuntimeError, match="network access is disabled"):
         socket.create_connection(("127.0.0.1", 9), timeout=0.1)

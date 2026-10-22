@@ -778,13 +778,6 @@ class GraphManager:
         self._stored_screens: dict[str, _StoredScreen] = {}
         self.total_steps_completed = 0
 
-    @property
-    def embedding_model(self) -> str:
-        if self.embedding is None:
-            msg = "GraphManager needs embedding settings for this operation"
-            raise RuntimeError(msg)
-        return self.embedding.model
-
     def _page_detail(self) -> tuple[OpenRouter, ModelSettings] | None:
         if self.client is None or self.page_detail is None:
             return None
