@@ -112,7 +112,8 @@ def run_audit(graph: GraphManager, app_name: str, report_path: Path) -> dict[str
 
 
 def normalize_and_save_audited_graph(graph: GraphManager, audited_graph_path: Path) -> int:
-    """Normalize every edge's templates in one batch, then save audited graph.
+    """Normalize, in one batch, the templates of every edge whose instructions changed since
+    its last normalization, then save audited graph.
 
     This runs after audit merges and optional re-exploration, so templates are
     generated from the final graph topology rather than stale pre-merge edges.
@@ -323,19 +324,29 @@ def _replay_setup(recorder: StepRecorder, setup: Setup) -> None:
 
 
 def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
-    """Navigate to target node by replaying shortest path, each action after its setup.
-    Returns actual node reached."""
+    """Navigate the app, just restarted, to target node by replaying the shortest path from
+    the node of the screen it opened on, when one leads from it, and otherwise from the
+    start node, each action after its setup. Returns actual node reached."""
     start = run.graph.resolve_node_id(run.start_node)
     path = run.graph.find_path(start, target_node)
     if path is None:
         logger.warning("No path from %s to %s", start, target_node)
         return None
 
-    for step in path[1:]:
-        _replay_setup(run.recorder, step.setup)
-        replay_action(run.recorder, step.action, step.anchors, logger=logger)
+    opened_on = _identify(run, run.recorder.get_state(), expected_node=start)
+    start, target_node = run.graph.resolve_node_id(start), run.graph.resolve_node_id(target_node)
+    if opened_on != start:
+        logger.info(
+            "%s opened on %s, not on the start node %s", run.target.app_name, opened_on, start
+        )
+        path = run.graph.find_path(opened_on, target_node) or path
 
-    actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
+    actual = opened_on
+    if len(path) > 1:
+        for step in path[1:]:
+            _replay_setup(run.recorder, step.setup)
+            replay_action(run.recorder, step.action, step.anchors, logger=logger)
+        actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
     if actual != target_node:
         logger.warning(
             "Expected to reach %s but arrived at %s",
@@ -693,7 +704,11 @@ def _explore_node(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
         f"Check if any elements on this screen should be interacted with."
     )
     step_results = _explore_steps(
-        run, actual, run.session.steps_per_issue, hint=hint, arrived=actual == node
+        run,
+        actual,
+        run.session.steps_per_issue,
+        hint=hint,
+        arrived=actual == run.graph.resolve_node_id(node),
     )
 
     return {
