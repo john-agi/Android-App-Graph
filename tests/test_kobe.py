@@ -2107,6 +2107,57 @@ def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     }
 
 
+def test_exploration_embeds_every_member_again_when_the_vectors_are_from_another_model(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}, {"id": "s1_list"}], "edges": []})
+    steps_dir = graph_path.parent / "steps"
+    members = ["s0_home-observation", "s1_list-observation"]
+    write_image_vectors(steps_dir, members, model="provider/older-embedding")
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in members)
+
+    _explorer(_Device(AssertionError("loading must not read the device")), tmp_path, router_client)
+
+    assert len(router_requests) == len(members)
+    assert json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8")) == {
+        "model": "provider/embedding",
+        "embeddings": {member: [0.25, 0.75] for member in members},
+    }
+
+
+def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, object]], None],
+) -> None:
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}], "edges": []})
+    vector_file = graph_path.parent / "steps" / "image_emb.json"
+    truncated = '{"model": "provider/embedding", "embeddings": {"s0_home-observation": [1.0,'
+    vector_file.write_text(truncated, encoding="utf-8")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+
+    with pytest.raises(ValueError, match=r"image_emb\.json cannot be read or parsed"):
+        _explorer(
+            _Device(AssertionError("loading must not read the device")), tmp_path, router_client
+        )
+
+    assert router_requests == []
+    assert vector_file.read_text(encoding="utf-8") == truncated
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_every_screen_identify_state_takes_is_embedded_and_annotated(
     tmp_path: Path,

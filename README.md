@@ -325,10 +325,12 @@ graph and its audited copy share them. Every screenshot that
 [screen matching](#screen-matching) takes is embedded once and kept. Nothing reads
 the vector of any other screenshot, so none is made for the screens of other apps,
 including one a Back press leaves in front, or for a screenshot read without being
-matched, such as the one after a wait. A file without a model tag, tagged with
-another model, or unreadable counts as empty after one warning, and a malformed
-vector is dropped with a warning. Nothing is pruned, since observation IDs never
-change.
+matched, such as the one after a wait. A file tagged with another model counts as
+empty after one warning. A damaged file stops exploration or the audit as it loads
+the graph, before any member is embedded, with an error naming the file and the
+damage: the file cannot be read or parsed, has no model tag or no `embeddings`
+object, or holds a malformed or non-finite vector, named by observation. Nothing is
+pruned, since observation IDs never change.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no vector is embedded first, as when `image_emb.json` is missing
