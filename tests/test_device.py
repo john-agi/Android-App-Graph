@@ -8,12 +8,12 @@ import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 import pytest
 
 from android_app_graph import device
-from android_app_graph.ui_tree import IDLE_FAILURE, xml_document
+from android_app_graph.ui_tree import IDLE_FAILURE, parse_tree, xml_document
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _PM = ["adb", "-s", "test-device", "shell", "pm"]
@@ -249,26 +249,19 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
 
     monkeypatch.setattr(device.shutil, "which", lambda name: f"/opt/platform-tools/{name}")
     monkeypatch.setattr(device.subprocess, "run", run)
-    device.run_adb(
-        ["shell", "dumpsys", "input_method"],
-        output="capture",
-        errors="replace",
-        timeout=3,
-        check=True,
-    )
+    device.run_adb(["shell", "wm", "size"], output="capture", timeout=3, check=True)
     device.run_adb(["shell", "am", "force-stop", "com.demo"], output="discard", check=False)
 
     adb = "/opt/platform-tools/adb"
     assert calls == [
         (
-            [adb, "shell", "dumpsys", "input_method"],
+            [adb, "shell", "wm", "size"],
             {
                 "capture_output": True,
                 "stdout": None,
                 "stderr": None,
                 "text": True,
                 "encoding": "utf-8",
-                "errors": "replace",
                 "timeout": 3,
                 "check": True,
             },
@@ -281,7 +274,6 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
                 "stderr": subprocess.DEVNULL,
                 "text": True,
                 "encoding": "utf-8",
-                "errors": None,
                 "timeout": None,
                 "check": False,
             },
@@ -289,113 +281,26 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
     ]
 
 
-class _CompletedProcess:
-    """The subset of subprocess.CompletedProcess the probe reads."""
+_KEYBOARD_SHOWN = "Soft keyboard is visible; a text field is focused and ready for typing."
+_NO_KEYBOARD_SIGNAL = (
+    "No OS keyboard signal detected. Still inspect the screenshot: "
+    "a bottom input/keyboard bar can mean a text field is active."
+)
 
-    def __init__(self, stdout: str) -> None:
-        self.stdout = stdout
+
+def test_a_tree_with_the_keyboard_window_gives_the_keyboard_sentence_and_note() -> None:
+    tree = parse_tree(_uiautomator("windows_keyboard"))
+    assert device.keyboard_status(tree) == _KEYBOARD_SHOWN
+    assert "soft keyboard is currently visible" in device.keyboard_hint(tree)
 
 
-@pytest.mark.usefixtures("adb_on_path")
-def test_soft_keyboard_hint_asks_the_named_device_when_several_are_connected(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("tree", ["windows_plain_list", None], ids=["no keyboard", "no tree"])
+def test_a_tree_without_the_keyboard_window_or_no_tree_gives_no_keyboard_signal(
+    tree: str | None,
 ) -> None:
-    """With more than one device connected, adb refuses a command that names none, so
-    the probe names the device it asks with ``-s``."""
-    commands: list[list[str]] = []
-
-    def several_devices(command: list[str], **_kwargs: object) -> _CompletedProcess:
-        commands.append(command)
-        names_a_device = command[1:3] == ["-s", "emulator-5558"]
-        return _CompletedProcess("mInputShown=true" if names_a_device else "")
-
-    monkeypatch.setattr(device.subprocess, "run", several_devices)
-    hint = device.soft_keyboard_hint("emulator-5558")
-    assert "soft keyboard is currently visible" in hint
-    assert commands == [["adb", "-s", "emulator-5558", "shell", "dumpsys", "input_method"]]
-
-
-@pytest.mark.usefixtures("adb_on_path")
-def test_soft_keyboard_hint_when_the_keyboard_is_shown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        device.subprocess, "run", lambda *_a, **_k: _CompletedProcess("mInputShown=true")
-    )
-    hint = device.soft_keyboard_hint("test-device")
-    assert "soft keyboard is currently visible" in hint
-
-
-@pytest.mark.usefixtures("adb_on_path")
-def test_soft_keyboard_hint_when_the_keyboard_is_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(device.subprocess, "run", lambda *_a, **_k: _CompletedProcess(""))
-    assert device.soft_keyboard_hint("test-device") == ""
-
-
-@pytest.mark.usefixtures("adb_on_path")
-def test_soft_keyboard_hint_survives_a_missing_adb(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _no_adb(*_args: object, **_kwargs: object) -> _CompletedProcess:
-        msg = "adb"
-        raise FileNotFoundError(msg)
-
-    monkeypatch.setattr(device.subprocess, "run", _no_adb)
-    assert device.soft_keyboard_hint("test-device") == ""
-
-
-def test_soft_keyboard_hint_is_empty_when_adb_is_not_on_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
-        msg = "adb ran although it is not on PATH"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(device.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(device.subprocess, "run", must_not_run)
-    assert device.soft_keyboard_hint("test-device") == ""
-
-
-@pytest.mark.usefixtures("adb_on_path")
-def test_soft_keyboard_hint_survives_undecodable_dumpsys_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``text=True`` decodes adb's stdout; undecodable bytes must not raise out of a
-    probe that has to stay best-effort.
-    """
-
-    def _bad_bytes(*_args: object, **_kwargs: object) -> _CompletedProcess:
-        msg = "invalid start byte"
-        encoding = "utf-8"
-        raise UnicodeDecodeError(encoding, b"\xff", 0, 1, msg)
-
-    monkeypatch.setattr(device.subprocess, "run", _bad_bytes)
-    assert device.soft_keyboard_hint("test-device") == ""
-
-
-@pytest.mark.usefixtures("adb_on_path")
-def test_soft_keyboard_hint_reads_past_a_replacement_character(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With ``errors="replace"`` a decode failure yields a replacement character
-    (U+FFFD) next to the real output instead of raising; the hint is still found.
-    """
-    monkeypatch.setattr(
-        device.subprocess,
-        "run",
-        lambda *_a, **_k: _CompletedProcess("�mInputShown=true"),
-    )
-    hint = device.soft_keyboard_hint("test-device")
-    assert "soft keyboard is currently visible" in hint
-
-
-def test_keyboard_status_when_the_keyboard_is_shown() -> None:
-    assert device.keyboard_status(" (Note: the soft keyboard is visible.)") == (
-        "Soft keyboard is visible; a text field is focused and ready for typing."
-    )
-
-
-def test_keyboard_status_when_the_keyboard_is_hidden() -> None:
-    assert device.keyboard_status("") == (
-        "No OS keyboard signal detected. Still inspect the screenshot: "
-        "a bottom input/keyboard bar can mean a text field is active."
-    )
+    parsed = parse_tree(_uiautomator(tree)) if tree is not None else None
+    assert device.keyboard_status(parsed) == _NO_KEYBOARD_SIGNAL
+    assert device.keyboard_hint(parsed) == ""
 
 
 @pytest.mark.parametrize(

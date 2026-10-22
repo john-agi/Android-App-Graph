@@ -42,11 +42,11 @@ from android_app_graph.device import (
     DeviceController,
     grant_runtime_permissions,
     is_outside_app,
+    keyboard_hint,
     keyboard_status,
     launch_app,
     restart_app,
     return_to_app,
-    soft_keyboard_hint,
 )
 from android_app_graph.graph_files import graph_steps_dir
 from android_app_graph.member_groups import (
@@ -56,10 +56,12 @@ from android_app_graph.member_groups import (
     MemberCheck,
 )
 from android_app_graph.step_log import (
+    ActionEffect,
     Observation,
     StepRecorder,
     Transition,
     TransitionRecord,
+    action_effect,
     read_exploration_transitions,
 )
 from android_app_graph.utils import (
@@ -288,7 +290,8 @@ class _Step:
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
     wrote, which differs when an ``end`` is recorded as a back press. ``setup`` is what
-    ``SetupTrail.setup`` read for the action, ``None`` when unknown.
+    ``SetupTrail.setup`` read for the action, ``None`` when unknown, and
+    ``setup_anchors`` what ``SetupTrail.setup_anchors`` read.
     """
 
     before: Observation
@@ -297,6 +300,7 @@ class _Step:
     element: int | None
     action: dict[str, Any]
     setup: list[dict[str, Any]] | None = None
+    setup_anchors: list[dict[str, object] | None] | None = None
 
 
 def _identify(
@@ -389,10 +393,6 @@ def _plan_and_act(
     before = Observation.from_state(device_state)
     explored_edges = run.graph.get_all_edges_from_node(node)
 
-    # Check before planning so the planner can choose type vs tap.
-    keyboard_hint = soft_keyboard_hint(run.recorder.config["device"]["udid"])
-    input_status = keyboard_status(keyboard_hint)
-
     planned_instruction, element = plan_next_action(
         client=run.client,
         request=PlanRequest(
@@ -400,7 +400,7 @@ def _plan_and_act(
             page_description=page_description,
             explored_edges=explored_edges,
             app_name=run.target.app_name,
-            input_status=input_status,
+            input_status=keyboard_status(before.ui_tree),
         ),
         settings=run.session.instruction,
     )
@@ -409,7 +409,7 @@ def _plan_and_act(
         client=run.client,
         request=ActionRequest(
             screenshot_b64=before.screenshot_b64,
-            instruction=planned_instruction + keyboard_hint,
+            instruction=planned_instruction + keyboard_hint(before.ui_tree),
             screen_w=run.recorder.w,
             screen_h=run.recorder.h,
             action_history=[],
@@ -446,9 +446,10 @@ def _record_step(
     step: _Step,
     device_state: dict[str, Any],
     step_number: int,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], ActionEffect]:
     """Record the edge *step* took from *source* to the screen *device_state* shows and
-    save the graph. Returns the node the next step starts from, with the step's result.
+    save the graph. Returns the node the next step starts from, with the step's result
+    and what its action did.
     """
     instruction, action = step.instruction, step.action
     after = Observation.from_state(device_state)
@@ -458,12 +459,18 @@ def _record_step(
     new_node_data = run.graph.get_node(new_node)
     target_obs = new_node_data.get("page_description", "") if new_node_data else ""
 
+    effect = action_effect(step.before, after, [action], planned=None, self_loop=new_node == source)
     run.graph.add_edge(
         source,
         new_node,
         action=[action],
         details=EdgeDetails(
-            instruction=instruction, target_observation=target_obs, num_steps=1, setup=step.setup
+            instruction=instruction,
+            target_observation=target_obs,
+            num_steps=1,
+            effect=effect,
+            setup=step.setup,
+            setup_anchors=step.setup_anchors,
         ),
     )
     run.recorder.record_transition(
@@ -474,6 +481,7 @@ def _record_step(
             element=step.element,
             element_locator=None,
             action=action,
+            effect=effect,
             from_node=source,
             to_node=new_node,
         )
@@ -499,8 +507,8 @@ def _record_step(
     run.graph.save_graph(run.target.graph_path)
     if new_node == EXTERNAL_WEB_NODE:
         logger.warning("Opened an external web page during re-explore, pressing back")
-        return _leave_external_web(run, source), step_result
-    return new_node, step_result
+        return _leave_external_web(run, source), step_result, effect
+    return new_node, step_result, effect
 
 
 def _explore_steps(
@@ -540,13 +548,19 @@ def _explore_steps(
             trail.begin(current_node, arrived=False)
             continue
 
-        step = replace(step, setup=trail.setup(current_node))
-        current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
+        step = replace(
+            step,
+            setup=trail.setup(current_node),
+            setup_anchors=trail.setup_anchors(current_node),
+        )
+        current_node, step_result, effect = _record_step(
+            run, current_node, step, device_state, step_i + 1
+        )
         step_results.append(step_result)
         if step_result["to"] == EXTERNAL_WEB_NODE:
             trail.begin(current_node, arrived=False)
         else:
-            trail.step([step.action], current_node)
+            trail.step([step.action], current_node, effect.anchor_records())
 
     return step_results
 
@@ -580,14 +594,25 @@ def _correct_flagged_edge(
         else _identify(run, after, expected_node=target)
     )
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
+    before_observation, after_observation = (
+        Observation.from_state(before),
+        Observation.from_state(after),
+    )
     run.recorder.record_transition(
         Transition(
-            before=Observation.from_state(before),
-            after=Observation.from_state(after),
+            before=before_observation,
+            after=after_observation,
             instruction=instruction,
             element=None,
             element_locator=None,
             action=action,
+            effect=action_effect(
+                before_observation,
+                after_observation,
+                action if isinstance(action, list) else [action],
+                planned=None,
+                self_loop=reached == source,
+            ),
             from_node=source,
             to_node=reached,
         )

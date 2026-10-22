@@ -72,6 +72,7 @@ from android_app_graph.payloads import (
     as_str_dict,
 )
 from android_app_graph.step_log import (
+    ActionEffect,
     Observation,
     TransitionRecord,
     annotate_observation,
@@ -80,14 +81,9 @@ from android_app_graph.step_log import (
     read_observation_tree,
     save_image_embeddings,
     screen_size_of,
+    tree_elements,
 )
-from android_app_graph.ui_tree import (
-    Bounds,
-    Locator,
-    TreeElement,
-    actionable_elements,
-    thin_tree_reason,
-)
+from android_app_graph.ui_tree import Locator, TreeElement
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     DescribeRequest,
@@ -160,16 +156,23 @@ class EdgeDetails:
             Format: {"key": {"before": old_val, "after": new_val}, ...}
         num_steps: Number of action steps the edge takes to traverse.
             If None, defaults to len(action) for lists or 1 for single actions.
+        effect: What the action did: the element each sub-action acted on goes into
+            ``anchors`` and its mis-tap or no-visible-effect flag into
+            ``action_flags``. If None, each sub-action records neither.
         setup: The device actions sent on the source node before the action since
             the traversal last arrived there from elsewhere, as ``SetupTrail`` reads
             them; None when they are unknown.
+        setup_anchors: The anchor of each action of ``setup``, as ``anchors`` stores a
+            sub-action's, ``None`` for one without. If None, none of them has one.
     """
 
     instruction: str | None = None
     target_observation: str | None = None
     schema_delta: dict[str, Any] | None = None
     num_steps: int | None = None
+    effect: ActionEffect | None = None
     setup: Sequence[dict[str, Any]] | None = None
+    setup_anchors: Sequence[dict[str, object] | None] | None = None
 
 
 class SetupTrail:
@@ -187,6 +190,7 @@ class SetupTrail:
     def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
         self._resolve_node_id = resolve_node_id
         self._actions: list[dict[str, Any]] = []
+        self._anchors: list[dict[str, object] | None] = []
         # Each node with the index into _actions where its setup starts, or None when
         # the trail began on it without knowing how the device came to be there.
         self._arrivals: list[tuple[str, int | None]] = []
@@ -200,25 +204,40 @@ class SetupTrail:
         there from elsewhere again.
         """
         self._actions = []
+        self._anchors = []
         self._arrivals = [(node, 0 if arrived else None)]
 
     def setup(self, node: str) -> list[dict[str, Any]] | None:
         """Return the setup of an action sent on ``node`` now, or None when it is unknown."""
-        position = self._position(node)
-        if position is None:
-            return None
-        start = self._arrivals[position][1]
+        start = self._setup_start(node)
         return None if start is None else self._actions[start:]
 
-    def step(self, actions: Sequence[dict[str, Any]], reached: str) -> None:
-        """Add ``actions``, sent on the node the trail is on, and ``reached``, the node
-        they led to."""
+    def setup_anchors(self, node: str) -> list[dict[str, object] | None] | None:
+        """Return the anchor of each action of ``setup(node)``, ``None`` for one without,
+        or None when the setup is unknown."""
+        start = self._setup_start(node)
+        return None if start is None else self._anchors[start:]
+
+    def step(
+        self,
+        actions: Sequence[dict[str, Any]],
+        reached: str,
+        anchors: Sequence[dict[str, object] | None] | None = None,
+    ) -> None:
+        """Add ``actions``, sent on the node the trail is on, with ``anchors``, the anchor
+        each acted on as ``ActionEffect.anchor_records`` gives them (none when None), and
+        ``reached``, the node they led to."""
         self._actions.extend(actions)
+        self._anchors.extend([None] * len(actions) if anchors is None else anchors)
         position = self._position(reached)
         if position is None:
             self._arrivals.append((reached, len(self._actions)))
         else:
             del self._arrivals[position + 1 :]
+
+    def _setup_start(self, node: str) -> int | None:
+        position = self._position(node)
+        return None if position is None else self._arrivals[position][1]
 
     def _position(self, node: str) -> int | None:
         resolved = self._resolve_node_id(node)
@@ -652,17 +671,40 @@ def _default_num_steps(action: object) -> int:
     return len(action) if isinstance(action, list) else 1
 
 
+def _sub_action_placeholders(action: object) -> list[None]:
+    return [None] * _default_num_steps(action)
+
+
+def _had_no_visible_effect(flags: object) -> bool:
+    """Return whether ``flags``, an action's entry of ``action_flags``, flags one of its
+    sub-actions as having no visible effect."""
+    if not isinstance(flags, list):
+        return False
+    return any(as_object_dict(flag).get("no_visible_effect") is True for flag in flags)
+
+
 def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
-    """Readers pair entry i of every per-action list with actions[i] and skip placeholders."""
+    """Readers pair entry i of every per-action list with actions[i] and skip placeholders.
+
+    An entry of ``anchors`` and ``action_flags`` is itself a list, with one entry per
+    sub-action of its action. ``add_edge`` records both with every action, so neither
+    list is padded.
+    """
     actions = list(edge_data.get("actions", []))
     num_steps = list(edge_data.get("num_steps", []))
     num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
-    aligned: dict[str, list[Any]] = {"actions": actions, "num_steps": num_steps}
+    aligned: dict[str, list[Any]] = {
+        "actions": actions,
+        "num_steps": num_steps,
+        "anchors": list(edge_data.get("anchors", [])),
+        "action_flags": list(edge_data.get("action_flags", [])),
+    }
     for key, placeholder in (
         ("instructions", ""),
         ("target_observations", ""),
         ("schema_deltas", None),
         ("setups", None),
+        ("setup_anchors", None),
     ):
         values = list(edge_data.get(key, []))
         values.extend([placeholder] * (len(actions) - len(values)))
@@ -716,18 +758,21 @@ def _count_repeat(
     edge_data: dict[str, Any],
     action: dict[str, Any] | list[dict[str, Any]],
     setup: list[dict[str, Any]] | None,
+    setup_anchors: list[dict[str, object] | None] | None,
 ) -> bool:
     """Count one more visit when the edge already holds ``action``, and return whether it
-    does. A known ``setup`` replaces the action's recorded one when that is unknown or
-    longer."""
+    does. A known ``setup`` replaces the action's recorded one, with its
+    ``setup_anchors``, when that is unknown or longer."""
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-            setups = _aligned_lists(edge_data)["setups"]
-            recorded = setups[index]
+            aligned = _aligned_lists(edge_data)
+            recorded = aligned["setups"][index]
             if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
-                setups[index] = setup
-                edge_data["setups"] = setups
+                aligned["setups"][index] = setup
+                aligned["setup_anchors"][index] = setup_anchors
+                edge_data["setups"] = aligned["setups"]
+                edge_data["setup_anchors"] = aligned["setup_anchors"]
             return True
     return False
 
@@ -828,17 +873,6 @@ def _stored_screens(nodes: list[dict[str, Any]], steps_dir: Path) -> dict[str, _
             if described is not None and pixel_hash:
                 stored[member] = _StoredScreen(pixel_hash, described)
     return stored
-
-
-def _tree_elements(observation: Observation) -> tuple[list[TreeElement], str | None]:
-    """Return the elements of the observation's tree, and why the tree is too thin to
-    list them, or ``None`` when it is not."""
-    tree = observation.ui_tree
-    if tree is None:
-        return [], f"no tree: {observation.ui_tree_error}"
-    width, height = observation.screen_size
-    elements = actionable_elements(tree, observation.package, Bounds(0, 0, width, height))
-    return elements, thin_tree_reason(tree, observation.package, elements)
 
 
 class GraphManager:
@@ -1080,7 +1114,7 @@ class GraphManager:
         if exact is not None:
             return self._record_exact_match(observation, *exact, expected_node=expected_node)
 
-        tree_elements, thin_tree = _tree_elements(observation)
+        listed, thin_tree = tree_elements(observation)
         if thin_tree is not None:
             logger.info("Thin tree (%s); the description model finds the elements", thin_tree)
         page_description, state, elements, is_external_web = describe_page_and_state(
@@ -1089,7 +1123,7 @@ class GraphManager:
                 screenshot_b64=observation.screenshot_b64,
                 existing_nodes=same_package.descriptions or None,
                 existing_keys=same_package.keys or None,
-                tree_elements=None if thin_tree else [e.summary() for e in tree_elements],
+                tree_elements=None if thin_tree else [e.summary() for e in listed],
             ),
             settings=page_detail,
         )
@@ -1098,7 +1132,7 @@ class GraphManager:
             if thin_tree
             else [
                 _tree_element(element, reply["description"])
-                for element, reply in zip(tree_elements, elements, strict=True)
+                for element, reply in zip(listed, elements, strict=True)
             ]
         )
         described = _Described(page_description, state, stored, is_external_web, thin_tree)
@@ -1575,6 +1609,21 @@ class GraphManager:
             return None
         return dict(unexplored[number - 1])
 
+    def element_with_locator(self, node_id: str, found: Locator) -> dict[str, Any] | None:
+        """Return a copy of the element of ``node_id`` that ``found``, a node's locator,
+        names: the element with that locator, or the list item it is a row of; ``None``
+        when the node lists none."""
+        listed = (
+            self.graph.nodes[node_id].get("interactable_elements", [])
+            if node_id in self.graph
+            else []
+        )
+        for element in listed:
+            own = Locator.from_record(element.get("locator"))
+            if own is not None and own.matches(found):
+                return dict(element)
+        return None
+
     def mark_element_explored(self, node_id: str, element: Mapping[str, object] | None) -> None:
         """Mark the element of ``node_id`` that ``element``, one ``planned_element``
         returned, names: the one with its locator, or for an element without one, with
@@ -1712,22 +1761,35 @@ class GraphManager:
         if num_steps is None:
             num_steps = _default_num_steps(action)
         setup = _recorded_setup(details.setup, source, target)
+        setup_anchors = (
+            None if setup is None else list(details.setup_anchors or [None] * len(setup))
+        )
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            if _count_repeat(edge_data, action, setup):
+            if _count_repeat(edge_data, action, setup, setup_anchors):
                 return
         else:
             self.graph.add_edge(source, target, visit_count=1)
             edge_data = self.graph[source][target]
         edge_data.update(_aligned_lists(edge_data))
+        effect = details.effect
         for key, value in (
             ("actions", action),
             ("num_steps", num_steps),
             ("instructions", details.instruction or ""),
             ("target_observations", details.target_observation or ""),
             ("schema_deltas", details.schema_delta),
+            (
+                "anchors",
+                _sub_action_placeholders(action) if effect is None else effect.anchor_records(),
+            ),
+            (
+                "action_flags",
+                _sub_action_placeholders(action) if effect is None else effect.flag_records(),
+            ),
             ("setups", setup),
+            ("setup_anchors", setup_anchors),
         ):
             edge_data[key].append(value)
 
@@ -1905,6 +1967,7 @@ class GraphManager:
             screen_size=screen_size_of(record),
             ui_tree=tree,
             ui_tree_error=tree_error,
+            ui_tree_settled=record.get("ui_tree_settled") is True,
         )
         described = stored.described
         screen = _ScreenDescription(described.page_description, described.state, described.elements)
@@ -2227,14 +2290,26 @@ class GraphManager:
         return normalized_count
 
     def get_all_edges_from_node(self, node_id: str) -> list[dict[str, Any]]:
-        """Return all outgoing edges from a node as a list of dicts."""
+        """Return all outgoing edges from a node as a list of dicts.
+
+        ``no_visible_change`` is aligned with ``instructions``: whether the action
+        recorded with each instruction was flagged as having no visible effect.
+        """
         edges = []
         for _, target, data in self.graph.out_edges(node_id, data=True):
+            recorded = [
+                (instruction, _had_no_visible_effect(flags))
+                for instruction, flags in zip(
+                    data.get("instructions", []), data.get("action_flags", []), strict=True
+                )
+                if instruction
+            ]
             edge_info = {
                 "target": target,
                 "target_description": self.graph.nodes[target].get("page_description", ""),
                 "actions": data.get("actions", []),
-                "instructions": [i for i in data.get("instructions", []) if i],
+                "instructions": [instruction for instruction, _ in recorded],
+                "no_visible_change": [unchanged for _, unchanged in recorded],
                 "instruction_templates": data.get("instruction_templates", []),
                 "target_observations": [o for o in data.get("target_observations", []) if o],
                 "visit_count": data.get("visit_count", 0),
@@ -2601,9 +2676,11 @@ class GraphManager:
                 "instruction_templates": attrs.get("instruction_templates", []),
                 "target_observations": attrs.get("target_observations", []),
                 "num_steps": attrs.get("num_steps", []),
+                "anchors": attrs.get("anchors", []),
+                "action_flags": attrs.get("action_flags", []),
                 "visit_count": attrs.get("visit_count", 0),
             }
-            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
+            for key in ("schema_deltas", "setups", "setup_anchors", "normalized_instructions_hash"):
                 if attrs.get(key):
                     edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
@@ -2703,9 +2780,11 @@ class GraphManager:
                 "instruction_templates": edge_data.get("instruction_templates", []),
                 "target_observations": edge_data.get("target_observations", []),
                 "num_steps": edge_data.get("num_steps", []),
+                "anchors": edge_data.get("anchors", []),
+                "action_flags": edge_data.get("action_flags", []),
                 "visit_count": edge_data.get("visit_count", 0),
             }
-            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
+            for key in ("schema_deltas", "setups", "setup_anchors", "normalized_instructions_hash"):
                 if edge_data.get(key):
                     edge_attrs[key] = edge_data[key]
             self.graph.add_edge(

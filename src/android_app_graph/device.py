@@ -25,6 +25,7 @@ from android_app_graph.ui_tree import (
     IDLE_FAILURE,
     UiTree,
     UnusableDumpError,
+    keyboard_shown,
     parse_tree,
     same_screen,
     xml_document,
@@ -76,7 +77,6 @@ def run_adb(
     args: Sequence[str],
     *,
     output: Literal["capture", "discard"],
-    errors: str | None = None,
     timeout: float | None = None,
     check: bool,
 ) -> subprocess.CompletedProcess[str]:
@@ -94,7 +94,6 @@ def run_adb(
         stderr=sink,
         text=True,
         encoding="utf-8",
-        errors=errors,
         timeout=timeout,
         check=check,
     )
@@ -688,32 +687,16 @@ def _start_failed(started: subprocess.CompletedProcess[str]) -> bool:
     return started.returncode != 0 or any(line.startswith("Error") for line in lines)
 
 
-def soft_keyboard_hint(udid: str) -> str:
-    """Return a note that the soft keyboard on the device ``udid`` is visible, or ``""``
-    otherwise.
-
-    Shells out to adb rather than going through ``DeviceController``, which has no
-    shell method.
-    """
-    try:
-        kb_check = run_adb(
-            ["-s", udid, "shell", "dumpsys", "input_method"],
-            output="capture",
-            # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
-            # best-effort probe; replace bad bytes instead of failing to decode them.
-            errors="replace",
-            timeout=3,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        logger.debug("Soft keyboard probe failed: %s", exc)
-        return ""
-    return _SOFT_KEYBOARD_HINT if "mInputShown=true" in kb_check.stdout else ""
+def keyboard_hint(tree: UiTree | None) -> str:
+    """Return a note for the action model that the soft keyboard is visible in ``tree``,
+    a screen's tree, or ``""`` when it is not or the screen has no tree."""
+    return _SOFT_KEYBOARD_HINT if tree is not None and keyboard_shown(tree) else ""
 
 
-def keyboard_status(hint: str) -> str:
-    """Return the planner-prompt sentence for ``hint`` from ``soft_keyboard_hint``."""
-    if hint:
+def keyboard_status(tree: UiTree | None) -> str:
+    """Return the planner-prompt sentence on whether the soft keyboard is visible in
+    ``tree``, a screen's tree; a screen without one gives no keyboard signal."""
+    if tree is not None and keyboard_shown(tree):
         return "Soft keyboard is visible; a text field is focused and ready for typing."
     return (
         "No OS keyboard signal detected. Still inspect the screenshot: "

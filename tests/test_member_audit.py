@@ -295,6 +295,8 @@ def _edge(source: str, target: str, *actions: dict[str, Any], **extra: object) -
         "instructions": [f"do {index}" for index in range(len(actions))],
         "target_observations": [f"{target} after {index}" for index in range(len(actions))],
         "num_steps": [1] * len(actions),
+        "anchors": [[None] for _ in actions],
+        "action_flags": [[None] for _ in actions],
         "visit_count": len(actions),
         **extra,
     }
@@ -628,6 +630,71 @@ def test_an_action_that_follows_moved_members_keeps_its_setup(
     _check_members(graph, graph_path, {})
 
     assert _actions_and_setups(graph) == expected
+
+
+def _anchors_of(action: dict[str, Any]) -> list[object]:
+    """The anchors entry an action records in these tests, a button named after it."""
+    label = f"{action['action']} {action.get('x', '')}".strip()
+    locator = {"resource_id": "", "class": "android.widget.Button", "label": label}
+    return [{"locator": {**locator, "ancestor_ids": []}, "bounds": [0, 0, 10, 10]}]
+
+
+def _flags_of(action: dict[str, Any]) -> list[object]:
+    return [{"no_visible_effect": True}] if action == SCROLL else [None]
+
+
+def _marked_edge(source: str, target: str, *actions: dict[str, Any]) -> dict[str, object]:
+    return _edge(
+        source,
+        target,
+        *actions,
+        anchors=[_anchors_of(action) for action in actions],
+        action_flags=[_flags_of(action) for action in actions],
+    )
+
+
+@pytest.mark.parametrize(
+    ("nodes", "edges", "transitions", "new_edge"),
+    [
+        (
+            SPLIT,
+            (
+                _marked_edge("s0_home", "s1_list", TAP_A, TAP_B, TAP_C, TAP_D),
+                _marked_edge("s1_list", "s0_home", BACK),
+                _marked_edge("s0_home", "s0_home", SCROLL),
+            ),
+            SPLIT_TRANSITIONS,
+            ("s2_screen_000003", "s1_list"),
+        ),
+        (
+            MOVE,
+            (_marked_edge("s0_home", "s2_menu", TAP_A),),
+            MOVE_TRANSITIONS,
+            ("s3_screen_000003", "s2_menu"),
+        ),
+    ],
+    ids=["split", "move"],
+)
+@pytest.mark.usefixtures("models")
+def test_an_action_that_follows_moved_members_keeps_its_anchors_and_flags(
+    nodes: dict[str, list[tuple[str, list[float]]]],
+    edges: tuple[dict[str, object], ...],
+    transitions: tuple[tuple[str, str, object, str, str], ...],
+    new_edge: tuple[str, str],
+    graph_path: Path,
+    write_member_graph: Callable[..., None],
+) -> None:
+    write_member_graph(graph_path, nodes, edges=edges, transitions=transitions)
+    graph = _load(graph_path)
+
+    _check_members(graph, graph_path, {})
+
+    assert new_edge in graph.graph.edges
+    for _source, _target, data in graph.graph.edges(data=True):
+        for [action], anchors, flags in zip(
+            data["actions"], data["anchors"], data["action_flags"], strict=True
+        ):
+            assert (anchors, flags) == (_anchors_of(action), _flags_of(action))
 
 
 def test_single_member_diffuse_and_vectorless_nodes_get_no_check(

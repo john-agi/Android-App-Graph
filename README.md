@@ -25,7 +25,7 @@ Android-App-Graph/
 │       ├── kobe.py                    # Core app explorer
 │       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
 │       ├── step_log.py                # Records every screenshot and action in steps/
-│       ├── ui_tree.py                 # A screen's accessibility tree: parsed, compared, its elements located
+│       ├── ui_tree.py                 # A screen's accessibility tree: parsed, compared, its elements located, its taps hit-tested
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
@@ -584,7 +584,7 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 |---|---|---|
 | `observation` | each screenshot | `width` and `height` of its image, `screen_size`, the width and height of the screenshot as the device took it, in the screen pixels of its tree's bounds, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `ui_tree_error`, `null` when `<id>.xml` exists and otherwise why there is no tree, `ui_tree_retakes`, how many times the screenshot was taken again, and `ui_tree_settled`, whether the two dumps around the kept screenshot agreed; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
-| `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, and `from_node` and `to_node` as they were then |
+| `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, [what it acted on](#what-an-action-acted-on) as `anchors`, `hits` and `action_flags`, one entry per sub-action, and `from_node` and `to_node` as they were then |
 
 An action or transition record takes `activity` and `package` from the screenshot
 it was taken from. A replay acts without looking, so a replayed action names the
@@ -774,18 +774,20 @@ The exploration planner sees the node's unexplored elements numbered from 1, eac
 with its description and position, and names the number its instruction acts on.
 The step marks that element explored, found by its locator, and its transition
 record names the locator next to the number, which indexes a list that every
-marked element shortens. The coverage checkpoint ranks and shows nodes by the same
-unexplored elements.
+marked element shortens. After a [mis-tap](#what-an-action-acted-on) the step marks
+the element the tap hit instead, and the planned one stays unexplored. The coverage
+checkpoint ranks and shows nodes by the same unexplored elements.
 
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations`, `schema_deltas` and `setups` lists hold
-one entry per action, in the same order, so entry *i* of each describes
-`actions[i]`. An action that recorded no instruction or observation has `""` in
-that list, and an action that recorded no state change has `null` in
-`schema_deltas`; only self-loop actions record one. Skip those entries when you
-read an edge.
+`instructions`, `target_observations`, `schema_deltas`, `setups`, `setup_anchors`,
+`anchors` and `action_flags` lists hold one entry per action, in the same order, so
+entry *i* of each describes `actions[i]`. An action that recorded no instruction or observation
+has `""` in that list, and an action that recorded no state change has `null` in
+`schema_deltas`; only self-loop actions record one. An entry of `anchors` and of
+`action_flags` is itself a list with one item per sub-action of its action, `null`
+for a sub-action that recorded none. Skip those entries when you read an edge.
 
 An action's entry in `setups` is the list of device actions exploration sent on
 the edge's source node before it, since it last arrived at that node from
@@ -805,8 +807,59 @@ when the setup is unknown or too long:
   another one.
 - A setup of more than 8 actions is dropped, and the log says so.
 
-An action recorded again keeps the shorter of its known setups. A graph file
-without `setups` loads unchanged, and its actions replay without a setup.
+An action's entry in `setup_anchors` holds the [anchor](#what-an-action-acted-on)
+of each action of its setup, in the same order, `null` for one without, and is `null`
+when the setup is. An action recorded again keeps the shorter of its known setups,
+with its anchors. A graph file without `setups` loads unchanged, and its actions
+replay without a setup.
+
+#### What an action acted on
+
+Exploration and `app-graph-audit --re-explore` read what each action acted on from
+the [tree](#step-log) of the screen it was planned from, and store it on the edge
+with the action:
+
+- **Anchor.** A tap or long press is hit-tested at its point. The windows are taken
+  from the top layer down, and the first that holds the point takes the tap: the
+  keyboard's window gives `keyboard`, a window that is not an application's, such
+  as the status bar, gives `system`. In an application window the tap goes where
+  Android dispatches a touch: down through the nodes under the point, the one drawn
+  last first, to the deepest one that takes taps (clickable, long-clickable, or a
+  row of a list that takes its rows' taps), else the deepest node under the point.
+  The anchor is the [element](#elements) that node is part of, its `locator` and
+  its `bounds` `[left, top, right, bottom]` in screen pixels. A dialog or menu that
+  takes focus hides the screen under it from the tree, so a point outside it gives
+  `outside_dialog`: the tap dismisses it. Typing is anchored to the focused text
+  field. A swipe, Back, Home, Enter, a later sub-action of a compound action, and an
+  action planned from a screen with no tree or whose tree never settled have no
+  anchor.
+- **Mis-tap.** When the planner named an element with a locator and a tap landed
+  neither on it nor on an element inside it, the tap is a mis-tap. The edge still
+  leads where the tap went; only its instruction is wrong, so the instruction model
+  describes the action from the screenshot taken before it, as the audit does when it
+  [relabels an edge](#correcting-flagged-edges), and the edge records that
+  description (the planner's instruction when the model gives none). The flag keeps
+  both elements, `{"mis_tap": {"planned": <locator>, "hit": <locator>}}`, with what
+  the tap landed on instead (`outside_dialog`, `keyboard`, `system` or `nothing`) in
+  place of `hit`'s locator when it landed on no element of the app. The audit's
+  planner names no element, so its taps are never mis-taps.
+- **No visible effect.** A self-loop changed nothing visible when its two
+  screenshots have the same `pixel_hash`, or when both trees settled, neither is too
+  thin to list the screen's elements, and they show the same screen, the status
+  bar aside. The self-loop stays, flagged `{"no_visible_effect": true}`, and the
+  planner sees its instruction marked "(no visible change)", so it knows the action
+  was tried. A flag can hold both keys.
+
+A transition record holds the same `anchors` and `action_flags`, and `hits`: what
+each sub-action acted on, `element`, `outside_dialog`, `keyboard`, `system` or
+`nothing` for a tap, `element` or `no_focused_field` for typing, `no_tree` or
+`unsettled_tree` when the screen gave no anchor, and `null` for an action on no
+element. The transition keeps the planner's instruction, and the edge the relabelled
+one.
+
+The planner and the action model are told the soft keyboard is up when the tree of
+the screen they plan from has a `TYPE_INPUT_METHOD` window; a screen without a tree
+gives them no keyboard signal.
 
 Edge normalization asks the page-detail model to generalize an edge's
 instructions into `instruction_templates`, in the passes listed under

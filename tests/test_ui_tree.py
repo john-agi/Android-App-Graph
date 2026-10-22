@@ -1,6 +1,6 @@
 """Tests for android_app_graph.ui_tree: parsing ``uiautomator dump --windows`` output,
-deciding whether two trees show the same screen, and listing and locating the elements a
-user can act on."""
+deciding whether two trees show the same screen, listing and locating the elements a
+user can act on, and finding what a tap lands on."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ import pytest
 
 from android_app_graph.ui_tree import (
     IDLE_FAILURE,
+    Anchor,
     Bounds,
+    Hit,
     Locator,
     TreeElement,
     UiNode,
@@ -23,8 +25,12 @@ from android_app_graph.ui_tree import (
     acting_windows,
     actionable_elements,
     find_nodes,
+    focused_text_field,
+    hit_test,
+    keyboard_shown,
     locator,
     parse_tree,
+    part_of,
     region,
     same_screen,
     thin_tree_reason,
@@ -410,11 +416,15 @@ def _node(attributes: dict[str, str] | None = None, *children: str) -> str:
 
 
 def _window(
-    *roots: str, kind: str = "TYPE_APPLICATION", layer: int = 0, active: bool = True
+    *roots: str,
+    kind: str = "TYPE_APPLICATION",
+    layer: int = 0,
+    active: bool = True,
+    bounds: str = "[0,0][1000,2000]",
 ) -> str:
     flag = "true" if active else "false"
     return (
-        f'<window index="0" title="" bounds="[0,0][1000,2000]" active="{flag}" '
+        f'<window index="0" title="" bounds="{bounds}" active="{flag}" '
         f'focused="{flag}" accessibility-focused="false" id="{layer + 1}" layer="{layer}" '
         f'type="{kind}"><hierarchy rotation="0">{"".join(roots)}</hierarchy></window>'
     )
@@ -839,3 +849,262 @@ def test_a_tree_with_elements_and_no_large_drawn_node_is_not_thin(roots: tuple[s
     tree = _screen(*roots)
 
     assert thin_tree_reason(tree, _APP, actionable_elements(tree, _APP, _SCREEN)) is None
+
+
+def _hit(dump: str, point: tuple[int, int]) -> Hit:
+    return hit_test(parse_tree(_dump(dump)), point, _FIXTURE_SCREEN)
+
+
+def _element_at(tree: UiTree, package: str, label: str) -> TreeElement:
+    return next(
+        element
+        for element in actionable_elements(tree, package, _FIXTURE_SCREEN)
+        if element.label == label
+    )
+
+
+def test_a_tap_in_a_button_s_padding_resolves_to_the_button() -> None:
+    """The point is inside the "Disable app" button and outside its text."""
+    tree = parse_tree(_dump("windows_dialog_compose"))
+    button = _element_at(tree, "com.android.settings", "Disable app")
+
+    # The Compose views around the button share its locator, and none of them is clickable.
+    (node,) = [index for index in find_nodes(tree, button.locator) if tree.nodes[index].clickable]
+    assert hit_test(tree, (820, 1660), _FIXTURE_SCREEN) == Hit(
+        "element", Anchor(button.locator, Bounds(799, 1649, 1171, 1793)), node
+    )
+
+
+def test_a_tap_on_the_text_inside_a_clickable_row_resolves_to_the_row() -> None:
+    tree = parse_tree(_dump("windows_plain_list"))
+    row = _element_at(tree, "com.android.settings", "Network & internet")
+
+    hit = hit_test(tree, (400, 780), _FIXTURE_SCREEN)
+
+    (node,) = find_nodes(tree, row.locator)
+    assert hit == Hit("element", Anchor(row.locator, Bounds(0, 699, 1344, 917)), node)
+    assert hit.anchor is not None
+    assert hit.anchor.as_record() == {
+        "locator": row.locator.as_record(),
+        "bounds": [0, 699, 1344, 917],
+    }
+
+
+@pytest.mark.parametrize(
+    ("dump", "point"),
+    [
+        pytest.param("windows_dialog_compose", (672, 600), id="a dialog"),
+        pytest.param("windows_popup_menu", (100, 2000), id="a popup menu"),
+    ],
+)
+def test_a_tap_outside_an_open_dialog_resolves_to_outside_dialog(
+    dump: str, point: tuple[int, int]
+) -> None:
+    """A dialog or menu that takes focus hides the screen under it from the dump."""
+    assert _hit(dump, point) == Hit("outside_dialog")
+
+
+def test_a_tap_on_the_keyboard_resolves_to_the_keyboard_not_an_app_element() -> None:
+    """The app's window spans the whole screen under the keyboard's."""
+    assert _hit("windows_keyboard", (672, 2500)) == Hit("keyboard")
+
+
+def test_a_tap_on_the_status_bar_resolves_to_a_system_window() -> None:
+    assert _hit("windows_plain_list", (600, 50)) == Hit("system")
+
+
+def _overlapping(first: dict[str, str], second: dict[str, str]) -> UiTree:
+    """Two clickable siblings labelled "First" and "Second" that overlap at 300, 300."""
+    return _screen(
+        _node(
+            {},
+            _node({"clickable": "true", "text": "First", "bounds": "[0,0][500,500]"} | first),
+            _node({"clickable": "true", "text": "Second", "bounds": "[200,200][700,700]"} | second),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "label"),
+    [
+        pytest.param({"drawing-order": "2"}, {"drawing-order": "1"}, "First", id="drawn last"),
+        pytest.param({"drawing-order": "1"}, {"drawing-order": "1"}, "Second", id="later in dump"),
+        pytest.param({}, {"drawing-order": "3"}, "Second", id="drawn last and later"),
+    ],
+)
+def test_of_two_overlapping_siblings_the_one_drawn_last_wins(
+    first: dict[str, str], second: dict[str, str], label: str
+) -> None:
+    hit = hit_test(_overlapping(first, second), (300, 300), _SCREEN)
+
+    assert hit.anchor is not None
+    assert hit.anchor.locator.label == label
+
+
+def test_a_tap_the_sibling_drawn_last_does_not_take_reaches_the_one_under_it() -> None:
+    """Android offers the touch to the next sibling when the one drawn last keeps none."""
+    tree = _overlapping({"drawing-order": "1"}, {"drawing-order": "2", "clickable": "false"})
+
+    hit = hit_test(tree, (300, 300), _SCREEN)
+
+    assert hit.anchor is not None
+    assert hit.anchor.locator.label == "First"
+
+
+def test_a_tap_on_nothing_that_takes_taps_resolves_to_the_deepest_node_under_it() -> None:
+    """Between two rows of Settings' list, the list itself is under the point."""
+    tree = parse_tree(_dump("windows_plain_list"))
+
+    hit = hit_test(tree, (700, 1000), _FIXTURE_SCREEN)
+
+    assert hit.kind == "element"
+    assert hit.anchor is not None
+    assert hit.anchor.locator.resource_id == "com.android.settings:id/recycler_view"
+
+
+def test_a_tap_on_a_list_row_the_list_takes_resolves_to_the_row() -> None:
+    """No row of Clock's overflow menu is clickable; its ListView takes their taps."""
+    tree = parse_tree(_dump("windows_popup_menu"))
+    row = _element_at(tree, "com.google.android.deskclock", "Settings")
+    bounds = row.bounds
+    centre = ((bounds.left + bounds.right) // 2, (bounds.top + bounds.bottom) // 2)
+
+    (node,) = find_nodes(tree, row.locator)
+    assert hit_test(tree, centre, _FIXTURE_SCREEN) == Hit(
+        "element", Anchor(row.locator, bounds), node
+    )
+
+
+@pytest.mark.parametrize(
+    ("point", "label"),
+    [
+        pytest.param((700, 250), "You can find the privacy policy here", id="on the popup"),
+        pytest.param((1280, 250), "More options", id="beside it"),
+    ],
+)
+def test_a_tap_beside_a_popup_that_does_not_take_focus_reaches_the_window_below(
+    point: tuple[int, int], label: str
+) -> None:
+    hit = _hit("windows_child_popup_window", point)
+
+    assert hit.anchor is not None
+    assert hit.anchor.locator.label == label
+
+
+def test_a_tap_on_a_clickable_node_inside_one_with_its_label_resolves_to_the_outer_one() -> None:
+    """The anchor is the element ``actionable_elements`` lists, not a part of it."""
+    tree = _screen(
+        _node(
+            {"class": "android.widget.LinearLayout", "clickable": "true", "content-desc": "Forget"},
+            _node({"class": "android.widget.Button", "clickable": "true", "text": "Forget"}),
+        )
+    )
+    (element,) = actionable_elements(tree, _APP, _SCREEN)
+
+    hit = hit_test(tree, (500, 500), _SCREEN)
+
+    assert hit.anchor is not None
+    assert hit.anchor.locator == element.locator
+
+
+@pytest.mark.parametrize(
+    ("tree", "point"),
+    [
+        pytest.param(_screen(_node({"clickable": "true"})), (1000, 10), id="off the screen"),
+        pytest.param(parse_tree("<displays />"), (10, 10), id="no window"),
+        pytest.param(
+            _screen(_node({"clickable": "true", "bounds": "[0,0][10,10]"})),
+            (500, 500),
+            id="no node under it",
+        ),
+        pytest.param(
+            parse_tree(
+                '<displays><display id="0">'
+                + _window(
+                    _node({"clickable": "true", "bounds": "[0,0][10,10]"}),
+                    active=False,
+                    bounds="[0,0][10,10]",
+                )
+                + "</display></displays>"
+            ),
+            (500, 500),
+            id="no window under it and none took focus",
+        ),
+    ],
+)
+def test_a_tap_under_no_node_resolves_to_nothing(tree: UiTree, point: tuple[int, int]) -> None:
+    assert hit_test(tree, point, _SCREEN) == Hit("nothing")
+
+
+def test_the_focused_text_field_is_the_one_with_input_focus_in_the_app() -> None:
+    tree = parse_tree(_dump("windows_keyboard"))
+
+    field = focused_text_field(tree)
+
+    assert field is not None
+    assert field.locator.label == "Search settings"
+    assert field.bounds == Bounds(144, 151, 1344, 367)
+
+
+@pytest.mark.parametrize(
+    "tree",
+    [
+        pytest.param(parse_tree(_dump("windows_plain_list")), id="nothing focused"),
+        pytest.param(
+            _screen(_node({"class": "android.widget.Button", "focused": "true"})),
+            id="a focused button",
+        ),
+    ],
+)
+def test_a_screen_without_a_focused_text_field_has_none(tree: UiTree) -> None:
+    assert focused_text_field(tree) is None
+
+
+@pytest.mark.parametrize(
+    ("dump", "shown"), [("windows_keyboard", True), ("windows_plain_list", False)]
+)
+def test_the_keyboard_is_shown_when_its_window_is_in_the_tree(dump: str, shown: bool) -> None:
+    assert keyboard_shown(parse_tree(_dump(dump))) is shown
+
+
+def test_a_list_item_s_locator_matches_each_row_and_a_row_s_only_itself() -> None:
+    row = Locator("a:id/row", "android.widget.LinearLayout", "Wi-Fi", ("a:id/list",))
+    item = dataclasses.replace(row, label=None)
+    other = dataclasses.replace(row, label="Bluetooth")
+
+    assert item.matches(row)
+    assert item.matches(other)
+    assert row.matches(row)
+    assert not row.matches(other)
+    assert not row.matches(item)
+    assert not item.matches(dataclasses.replace(row, ancestor_ids=()))
+
+
+def test_a_node_is_part_of_the_element_it_is_or_lies_inside() -> None:
+    """The edit field of a date picker lies inside the picker."""
+    picker = _node(
+        {"class": "android.widget.NumberPicker", "scrollable": "true", "resource-id": "a:id/day"},
+        _node({"class": "android.widget.EditText", "clickable": "true", "text": "21"}),
+    )
+    tree = _screen(_node({}, picker), _node({"clickable": "true", "text": "Set"}))
+    day, field, done = locator(tree, 1), locator(tree, 2), locator(tree, 3)
+
+    assert part_of(tree, 1, day)
+    assert part_of(tree, 2, day)
+    assert part_of(tree, 2, field)
+    assert not part_of(tree, 1, field)
+    assert not part_of(tree, 3, day)
+    assert part_of(tree, 3, done)
+
+
+def test_a_button_is_not_part_of_the_layout_that_shares_another_button_s_locator() -> None:
+    """In the Compose dialog the views around both buttons take the label of the first
+    text inside them, "Disable app", so they share that button's locator."""
+    tree = parse_tree(_dump("windows_dialog_compose"))
+    disable = _element_at(tree, "com.android.settings", "Disable app").locator
+    cancel = _element_at(tree, "com.android.settings", "Cancel").locator
+    (cancel_node,) = [i for i in find_nodes(tree, cancel) if tree.nodes[i].clickable]
+
+    assert len(find_nodes(tree, disable)) > 1
+    assert not part_of(tree, cancel_node, disable)
+    assert part_of(tree, cancel_node, cancel)

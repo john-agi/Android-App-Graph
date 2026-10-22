@@ -1638,6 +1638,39 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     assert "1. Turn on dark mode toggle (top)\n2. Compose FAB (bottom right)\n" in prompt
 
 
+def test_the_planner_is_told_which_tried_instructions_changed_nothing(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"element": null, "instruction": "Back"}'))
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot,
+            page_description="home",
+            explored_edges=[
+                {
+                    "target_description": "home",
+                    "instructions": ["Tap the logo", "Sort by price"],
+                    "no_visible_change": [True, False],
+                },
+                {"target_description": "search", "instructions": ["Tap Search"]},
+            ],
+        ),
+        settings=PAGE_DETAIL,
+    )
+
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    assert (
+        '- "Tap the logo" → led to: "home" (no visible change)\n'
+        '- "Sort by price" → led to: "home"\n'
+        '- "Tap Search" → led to: "search"\n'
+    ) in prompt
+
+
 @pytest.mark.parametrize(
     ("reply", "instruction"),
     [

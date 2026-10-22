@@ -12,7 +12,8 @@ Window IDs change from one dump to the next, and ``layer`` is only the windows'
 order, so two dumps are compared by window type, layer and bounds.
 
 The elements a user can act on are read from the windows the user can act on, and
-each has a ``Locator`` that finds it again in another tree of the same screen.
+each has a ``Locator`` that finds it again in another tree of the same screen. A
+tap's ``hit_test`` says which element, or which other window, the tap lands on.
 """
 
 from __future__ import annotations
@@ -21,10 +22,12 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 IDLE_FAILURE = "ERROR: could not get idle state."
 SYSTEM_WINDOW = "TYPE_SYSTEM"
 APPLICATION_WINDOW = "TYPE_APPLICATION"
+INPUT_METHOD_WINDOW = "TYPE_INPUT_METHOD"
 # Chosen from the 69 trees of a 60-step Settings exploration: its smallest screens,
 # dropdown menus of one row, list that one element correctly, so only a tree that
 # lists none is too thin by count.
@@ -182,6 +185,52 @@ class Locator:
             return None
         return cls(resource_id, class_name, label, tuple(ids))
 
+    def matches(self, found: Locator) -> bool:
+        """Return whether ``found``, a node's locator, names what this locator does: the
+        same node, or for a list item one of its rows."""
+        return (
+            found.resource_id == self.resource_id
+            and found.class_name == self.class_name
+            and found.ancestor_ids == self.ancestor_ids
+            and (self.label is None or found.label == self.label)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Anchor:
+    """The element an action acted on, as the tree it was planned from shows it: its
+    locator and its bounds then."""
+
+    locator: Locator
+    bounds: Bounds
+
+    def as_record(self) -> dict[str, object]:
+        bounds = self.bounds
+        return {
+            "locator": self.locator.as_record(),
+            "bounds": [bounds.left, bounds.top, bounds.right, bounds.bottom],
+        }
+
+
+type HitKind = Literal["element", "outside_dialog", "keyboard", "system", "nothing"]
+
+
+@dataclass(frozen=True, slots=True)
+class Hit:
+    """What a tap at one point of a screen lands on.
+
+    ``kind`` is ``element`` for a node of an application window, ``anchor`` the element
+    that node is part of and ``node`` that element's index in the tree;
+    ``outside_dialog`` for a point outside a dialog or popup that took focus, where a
+    tap dismisses it; ``keyboard`` for the keyboard's window; ``system`` for any other
+    window that is not an application's, such as the status bar; and ``nothing`` for a
+    point off the screen or under no node.
+    """
+
+    kind: HitKind
+    anchor: Anchor | None = None
+    node: int | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class TreeElement:
@@ -280,14 +329,7 @@ def acting_windows(tree: UiTree, package: str) -> list[int]:
     its display, such as a popup that does not take focus. The keyboard and system
     windows are never among them, and a window that takes focus hides the windows
     below it from the dump."""
-    active = next(
-        (
-            index
-            for index, window in enumerate(tree.windows)
-            if window.active and window.window_type == APPLICATION_WINDOW
-        ),
-        None,
-    )
+    active = _active_application_window(tree)
     if active is None:
         return []
     base = tree.windows[active]
@@ -330,8 +372,75 @@ def find_nodes(tree: UiTree, wanted: Locator) -> list[int]:
         for index, node in enumerate(tree.nodes)
         if node.resource_id == wanted.resource_id
         and node.class_name == wanted.class_name
-        and _locates(wanted, locator(tree, index))
+        and wanted.matches(locator(tree, index))
     ]
+
+
+def hit_test(tree: UiTree, point: tuple[int, int], screen: Bounds) -> Hit:
+    """Return what a tap at ``point``, in the pixels of ``screen``, lands on in ``tree``.
+
+    The windows of the active application window's display are walked from the highest
+    layer down, and the first whose bounds hold the point takes the tap. In an
+    application window the tap goes where Android dispatches a touch: down through the
+    nodes under the point, the one drawn last first, to the deepest node that takes
+    taps (clickable, long-clickable, or a row of a list that takes its rows' taps), or
+    the deepest node under the point when none does. The anchor is the element that
+    node is part of, as ``actionable_elements`` lists it. A point on the screen that no
+    window holds lies outside the dialog or popup that took focus when an application
+    window took focus, since such a window hides the windows below it from the dump.
+    """
+    x, y = point
+    if not _holds(screen, x, y) or not tree.windows:
+        return Hit("nothing")
+    active = _active_application_window(tree)
+    display = tree.windows[0 if active is None else active].display_id
+    on_display = [i for i, window in enumerate(tree.windows) if window.display_id == display]
+    for index in sorted(on_display, key=lambda i: -tree.windows[i].layer):
+        window = tree.windows[index]
+        if not _holds(window.bounds, x, y):
+            continue
+        if window.window_type == INPUT_METHOD_WINDOW:
+            return Hit("keyboard")
+        if window.window_type != APPLICATION_WINDOW:
+            return Hit("system")
+        tapped = _tapped_node(tree, index, x, y)
+        if tapped is None:
+            return Hit("nothing")
+        element = _element_node(tree, tapped)
+        return Hit("element", Anchor(locator(tree, element), tree.nodes[element].bounds), element)
+    return Hit("nothing" if active is None else "outside_dialog")
+
+
+def part_of(tree: UiTree, index: int, wanted: Locator) -> bool:
+    """Return whether node ``index`` of ``tree`` is a node ``wanted`` names, or lies
+    inside an element ``wanted`` names.
+
+    Only ancestors that are elements count: a layout container takes its label from
+    the first text inside it, so in a screen without resource IDs it can share the
+    locator of the element that holds that text, and every node in the container
+    would otherwise lie inside that element.
+    """
+    if wanted.matches(locator(tree, index)):
+        return True
+    return any(
+        _acts(tree, ancestor) and wanted.matches(locator(tree, ancestor))
+        for ancestor in _ancestors(tree, index)
+    )
+
+
+def focused_text_field(tree: UiTree) -> Anchor | None:
+    """Return the anchor of the text field of an application window that has input
+    focus, where typed text goes, or ``None`` when there is none."""
+    for index, node in enumerate(tree.nodes):
+        window = tree.windows[node.window]
+        if node.focused and _is_text_field(node) and window.window_type == APPLICATION_WINDOW:
+            return Anchor(locator(tree, index), node.bounds)
+    return None
+
+
+def keyboard_shown(tree: UiTree) -> bool:
+    """Return whether the soft keyboard is on the screen: it is a window of its own."""
+    return any(window.window_type == INPUT_METHOD_WINDOW for window in tree.windows)
 
 
 def actionable_elements(tree: UiTree, package: str, screen: Bounds) -> list[TreeElement]:
@@ -422,10 +531,71 @@ def region(bounds: Bounds, screen: Bounds) -> str:
     return " ".join(word for word in (vertical, horizontal) if word) or "center"
 
 
-def _locates(wanted: Locator, found: Locator) -> bool:
-    return found.ancestor_ids == wanted.ancestor_ids and (
-        wanted.label is None or found.label == wanted.label
+def _holds(bounds: Bounds, x: int, y: int) -> bool:
+    return bounds.left <= x < bounds.right and bounds.top <= y < bounds.bottom
+
+
+def _active_application_window(tree: UiTree) -> int | None:
+    return next(
+        (
+            index
+            for index, window in enumerate(tree.windows)
+            if window.active and window.window_type == APPLICATION_WINDOW
+        ),
+        None,
     )
+
+
+def _tapped_node(tree: UiTree, window: int, x: int, y: int) -> int | None:
+    """Return the node of ``window`` a touch at ``x``, ``y`` is dispatched to.
+
+    A view group offers a touch to its children under the point, the one drawn last
+    first, and keeps it when none of them takes it; so the first node that takes taps
+    in a post-order walk of the nodes under the point, children drawn last first, is
+    the one the touch reaches. The walk keeps its own stack, as the parser does.
+    """
+    roots = [
+        i for i, node in enumerate(tree.nodes) if node.window == window and node.parent is None
+    ]
+    deepest: int | None = None
+    stack = [(root, False) for root in reversed(_under_point(tree, roots, x, y))]
+    while stack:
+        index, visited = stack.pop()
+        if not visited:
+            stack.append((index, True))
+            children = _under_point(tree, tree.nodes[index].children, x, y)
+            stack.extend((child, False) for child in reversed(children))
+            continue
+        if deepest is None:
+            deepest = index
+        if _tappable(tree, index):
+            return index
+    return deepest
+
+
+def _under_point(tree: UiTree, indices: Sequence[int], x: int, y: int) -> list[int]:
+    """Return the nodes of ``indices`` whose bounds hold the point, drawn last first; of
+    two with the same drawing order, the later one in the dump is drawn later."""
+    held = [index for index in indices if _holds(tree.nodes[index].bounds, x, y)]
+    return sorted(held, key=lambda index: (tree.nodes[index].drawing_order, index), reverse=True)
+
+
+def _element_node(tree: UiTree, index: int) -> int:
+    """Return the node ``actionable_elements`` lists node ``index`` as part of: the
+    clickable node it is in while the two have the same label, else itself."""
+    while _tappable(tree, index):
+        outer = next(
+            (
+                ancestor
+                for ancestor in _ancestors(tree, index)
+                if _tappable(tree, ancestor) and tree.nodes[ancestor].enabled
+            ),
+            None,
+        )
+        if outer is None or _label(tree, outer) != _label(tree, index):
+            break
+        index = outer
+    return index
 
 
 def _area(bounds: Bounds) -> int:
