@@ -202,13 +202,13 @@ def test_write_json_atomically_rejects_a_read_only_target_by_os_access(
 
 def test_write_json_atomically_writes_through_a_symlink(tmp_path: Path) -> None:
     """``os.replace`` over a symlink replaces the link itself: with
-    ``demo.emb.json -> shared_cache.json``, writing must land in
+    ``demo_text_emb.json -> shared_cache.json``, writing must land in
     ``shared_cache.json`` and leave the link a link, not silently detach it
     into a plain file that shadows the (unchanged) shared target.
     """
     target = tmp_path / "shared_cache.json"
     target.write_text('{"old": 1}', encoding="utf-8")
-    link = tmp_path / "demo.emb.json"
+    link = tmp_path / "demo_text_emb.json"
     link.symlink_to(target)
 
     graph_files.write_json_atomically(link, {"new": 2})
