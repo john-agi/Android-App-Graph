@@ -10,7 +10,7 @@ import os
 import socket
 import subprocess
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NoReturn
@@ -375,7 +375,8 @@ def write_image_vectors() -> Callable[..., None]:
 @pytest.fixture
 def add_representative(png_screenshot: str) -> Callable[..., None]:
     """Give a node of a manager one member observation, its representative, with an image
-    in the manager's step log; ``image`` defaults to ``png_screenshot`` as WebP.
+    and a record in the manager's step log; ``image`` defaults to ``png_screenshot`` as
+    WebP.
 
     The observation ID is not a step number, so a StepRecorder on the same step log
     never reuses it.
@@ -389,31 +390,74 @@ def add_representative(png_screenshot: str) -> Callable[..., None]:
         observation_image_path(steps_dir, observation_id).write_bytes(
             encode_screenshot(png_screenshot) if image is None else image
         )
+        _write_member_record(steps_dir, observation_id)
         graph.graph.nodes[node_id]["observations"] = [observation_id]
         graph.graph.nodes[node_id]["representative_observation"] = observation_id
 
     return add
 
 
-@pytest.fixture
-def write_graph_file(png_screenshot: str) -> Callable[[Path, dict[str, Any]], None]:
-    """Write ``document`` as a graph file that ``load_graph`` accepts: every node gets one
-    member observation, its representative, with an image in the step log beside it."""
+def _write_member_record(steps_dir: Path, observation_id: str) -> None:
+    """Write the record exploration leaves for a member observation: its pixel hash and
+    describe output."""
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "pixel_hash": f"hash-{observation_id}",
+        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
+    }
+    (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
 
-    def write(path: Path, document: dict[str, Any]) -> None:
+
+def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    """Return ``edge`` with the per-action lists ``add_edge`` records for its actions, for
+    each list it does not hold."""
+    actions = edge.get("actions", [])
+    recorded = {
+        "num_steps": [len(action) if isinstance(action, list) else 1 for action in actions],
+        "instructions": [""] * len(actions),
+        "target_observations": [""] * len(actions),
+        "schema_deltas": [None] * len(actions),
+        "setups": [None] * len(actions),
+    }
+    return {"actions": actions, **recorded, **edge}
+
+
+@pytest.fixture
+def write_graph_file(png_screenshot: str) -> Callable[..., None]:
+    """Write ``document`` as a graph file that ``load_graph`` accepts, with what exploration
+    records where ``document`` gives none: every node but an ``ext_`` one gets the package
+    ``com.demo``, every node gets one member observation, its representative, with an
+    image and a record holding a pixel hash and a describe output in the step log beside
+    it, every member of a node but an ``ext_`` one gets a text vector in the file beside
+    the graph, tagged with ``embedding_model``, and every edge gets the per-action lists
+    ``add_edge`` records."""
+
+    def write(
+        path: Path, document: dict[str, Any], embedding_model: str = "google/gemini-embedding-2"
+    ) -> None:
         steps_dir = graph_steps_dir(path)
         steps_dir.mkdir(parents=True, exist_ok=True)
         nodes: list[dict[str, Any]] = []
+        text_vectors: dict[str, list[float]] = {}
         for node in document.get("nodes", []):
             observation_id = f"{node['id']}-observation"
             observation_image_path(steps_dir, observation_id).write_bytes(
                 encode_screenshot(png_screenshot)
             )
-            nodes.append(
-                {"observations": [observation_id], "representative_observation": observation_id}
-                | node
-            )
-        path.write_text(json.dumps({**document, "nodes": nodes}), encoding="utf-8")
+            _write_member_record(steps_dir, observation_id)
+            in_app = not node["id"].startswith("ext_")
+            if in_app:
+                text_vectors[observation_id] = [1.0, 0.0]
+            recorded = {
+                "package": "com.demo" if in_app else "",
+                "observations": [observation_id],
+                "representative_observation": observation_id,
+            }
+            nodes.append(recorded | node)
+        edges = [_saved_edge(edge) for edge in document.get("edges", [])]
+        save_embeddings(text_embeddings_path(path), text_vectors, model=embedding_model)
+        path.write_text(json.dumps({**document, "nodes": nodes, "edges": edges}), "utf-8")
 
     return write
 
@@ -430,9 +474,12 @@ def write_member_graph() -> Callable[..., None]:
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
     the first its representative; the vector is the member's image vector and its text
-    vector. Node ``n`` is described as ``Node n`` and member ``m`` as ``Screen m``. Each
-    image holds its observation ID, so a fake verifier can tell which members it was
-    shown. The vectors are tagged with the model ``model_environment`` names.
+    vector. Node ``n`` is described as ``Node n`` and member ``m`` as ``Screen m``.
+    ``black`` maps each member whose screenshot is black to its activity; as screen
+    matching records a black screenshot, its record holds no describe output and it has
+    no text vector. Each image holds its observation ID, so a fake verifier can tell
+    which members it was shown. The vectors are tagged with the model
+    ``model_environment`` names.
     """
 
     def write(
@@ -441,30 +488,37 @@ def write_member_graph() -> Callable[..., None]:
         *,
         edges: tuple[dict[str, object], ...] = (),
         transitions: tuple[tuple[str, str, object, str, str], ...] = (),
+        black: Mapping[str, str] | None = None,
     ) -> None:
+        black_members = dict(black or {})
         steps_dir = graph_steps_dir(path)
         steps_dir.mkdir(parents=True, exist_ok=True)
-        vectors: dict[str, list[float]] = {}
+        image_vectors: dict[str, list[float]] = {}
+        text_vectors: dict[str, list[float]] = {}
         for members in nodes.values():
             for observation_id, vector in members:
-                vectors[observation_id] = vector
+                image_vectors[observation_id] = vector
                 observation_image_path(steps_dir, observation_id).write_bytes(
                     observation_id.encode("ascii")
                 )
-                record = {
+                black_activity = black_members.get(observation_id)
+                record: dict[str, object] = {
                     "id": observation_id,
                     "kind": "observation",
                     "run_kind": "explore",
-                    "activity": f"com.demo.Activity{observation_id}",
+                    "activity": black_activity or f"com.demo.Activity{observation_id}",
                     "package": "com.demo",
                     "pixel_hash": f"hash-{observation_id}",
-                    "describe": {
+                    "black": black_activity is not None,
+                }
+                if black_activity is None:
+                    record["describe"] = {
                         "page_description": f"Screen {observation_id}",
                         "state": {"seen_in": observation_id},
                         "elements": [{"description": f"Button {observation_id}"}],
                         "is_external_web": False,
-                    },
-                }
+                    }
+                    text_vectors[observation_id] = vector
                 (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
         for number, (before, after, action, from_node, to_node) in enumerate(transitions):
             record = {
@@ -478,10 +532,9 @@ def write_member_graph() -> Callable[..., None]:
                 "to_node": to_node,
             }
             (steps_dir / f"{900000 + number}.json").write_text(json.dumps(record), "utf-8")
-        save_image_embeddings(steps_dir, vectors, model="google/gemini-embedding-2")
-        save_embeddings(text_embeddings_path(path), vectors, model="google/gemini-embedding-2")
+        save_image_embeddings(steps_dir, image_vectors, model="google/gemini-embedding-2")
+        save_embeddings(text_embeddings_path(path), text_vectors, model="google/gemini-embedding-2")
         document = {
-            "package_name": "com.demo",
             "next_id": len(nodes),
             "nodes": [
                 {

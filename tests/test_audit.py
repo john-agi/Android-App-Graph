@@ -7,7 +7,7 @@ import copy
 import io
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NoReturn, override
 
@@ -18,7 +18,12 @@ from PIL import Image
 
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
-from android_app_graph.graph_files import graph_steps_dir, observation_image_path
+from android_app_graph.graph_files import (
+    graph_steps_dir,
+    observation_image_path,
+    save_embeddings,
+    text_embeddings_path,
+)
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import ModelSettings, graph_manager, open_client
@@ -137,9 +142,7 @@ def test_select_apps_finds_graph_folder_by_name(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir(parents=True)
     graph_path.write_text("{}", encoding="utf-8")
-    assert audit.select_apps_for_audit({}, tmp_path, app_name="demo") == [
-        {"name": "demo", "package_name": ""}
-    ]
+    assert audit.select_apps_for_audit({}, tmp_path, app_name="demo") == [{"name": "demo"}]
 
 
 def test_run_audit_writes_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,7 +247,10 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "target": "s1_detail",
                         "actions": [{"action": "tap", "coordinate": [10, 20]}],
                         "instructions": ["open the detail page"],
+                        "target_observations": [""],
                         "num_steps": [1],
+                        "schema_deltas": [None],
+                        "setups": [None],
                     }
                 ],
             }
@@ -258,29 +264,45 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
     return graph, graph_path
 
 
+type _Visit = str | tuple[str, Mapping[str, object]]
+
+
 def _identifying(
-    graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *nodes: str
+    graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *visits: _Visit
 ) -> list[str | None]:
-    """Make identify_state answer ``nodes`` in turn; return the list the expected node of
-    each call is appended to."""
+    """Make identify_state answer ``visits`` in turn, each a node, or a node with the state
+    the visit records as the node's latest; return the list the expected node of each call
+    is appended to."""
     expected: list[str | None] = []
-    answers = iter(nodes)
+    answers = iter(visits)
 
     def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
         expected.append(expected_node)
-        return next(answers)
+        visit = next(answers)
+        if isinstance(visit, str):
+            return visit
+        node, state = visit
+        graph.graph.nodes[node]["last_detail_snapshot"] = dict(state)
+        return node
 
     monkeypatch.setattr(graph, "identify_state", identify)
     return expected
 
 
 def _write_representative(graph_path: Path, node_id: str) -> None:
-    """Put the image of the representative a node of ``graph_path`` names in its step log."""
+    """Put the representative a node of ``graph_path`` names in its step log: its image,
+    and its record with a pixel hash and a describe output."""
     steps_dir = graph_steps_dir(graph_path)
     steps_dir.mkdir(exist_ok=True)
-    observation_image_path(steps_dir, f"{node_id}-observation").write_bytes(
-        encode_screenshot(_png(0))
-    )
+    observation_id = f"{node_id}-observation"
+    observation_image_path(steps_dir, observation_id).write_bytes(encode_screenshot(_png(0)))
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "pixel_hash": f"hash-{observation_id}",
+        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
+    }
+    (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), encoding="utf-8")
 
 
 @pytest.fixture
@@ -1214,42 +1236,6 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART, *_RESTART, _GEAR_TAP]
 
 
-@pytest.mark.usefixtures("_fake_device")
-def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_rest(
-    client: OpenRouter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    device_log: list[object],
-    write_graph_file: Callable[[Path, dict[str, Any]], None],
-) -> None:
-    """A loaded graph file can hold an edge with no actions; the replay passes over it."""
-    graph_path = tmp_path / "hand_edited.json"
-    write_graph_file(
-        graph_path,
-        {
-            "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
-            "edges": [
-                {"source": "s0_splash", "target": "s1_home", "actions": []},
-                {"source": "s1_home", "target": "s2_detail", "actions": [[_DETAIL_TAP]]},
-            ],
-        },
-    )
-    graph = GraphManager()
-    graph.load_graph(graph_path)
-    _identifying(graph, monkeypatch, "s0_splash", "s2_detail")
-
-    (result,) = _re_explore(
-        graph,
-        [{"type": "explore_node", "node": "s2_detail", "expected_pages": []}],
-        _LoggingController("com.demo", device_log),
-        client,
-        tmp_path,
-    )
-
-    assert (result["status"], result["navigated_to"]) == ("explored", "s2_detail")
-    assert device_log == [*_FIRST_RESTART, _DETAIL_TAP]
-
-
 _SCROLL_CLOCKS = {"action": "swipe", "x1": 540, "y1": 1200, "x2": 540, "y2": 600}
 _OPEN_ALARMS = {"action": "tap", "x": 100, "y": 1800}
 _SCROLL_ALARMS = {"action": "swipe", "x1": 540, "y1": 1500, "x2": 540, "y2": 300}
@@ -1310,30 +1296,6 @@ def test_re_explore_replays_from_the_node_the_app_opened_on(
 
 
 @pytest.mark.usefixtures("_fake_device")
-def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
-    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
-) -> None:
-    graph = _graph_with_nodes(
-        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
-    )
-    graph.graph.add_edge("s0_home", "s1_detail")
-    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
-    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
-
-    (result,) = _re_explore(
-        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
-    )
-
-    assert result == {
-        "issue": issue,
-        "status": "explored",
-        "navigated_to": "s1_detail",
-        "steps": [],
-    }
-    assert device_log == _FIRST_RESTART
-
-
-@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_replays_each_action_after_its_setup(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
@@ -1391,7 +1353,8 @@ def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_
     because the app opened on its node has reached it as one that sends its path has."""
     row_tap = {"action": "tap", "x": 540, "y": 1700}
     graph = _flagged_graph()
-    _identifying(graph, monkeypatch, *after_restart, reached, "s2_settings")
+    scrolled = {"first_visible_item": "Storage"}
+    _identifying(graph, monkeypatch, *after_restart, (reached, scrolled), "s2_settings")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     sent = iter([_SWIPE, row_tap])
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
@@ -1738,55 +1701,6 @@ def test_audit_cli_opens_one_client_and_closes_it_on_exit(
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients")
-def test_audit_of_one_app_keeps_the_package_name_it_loaded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``--app`` audits without the config's apps, so the package must come from the file."""
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    graph_dir = tmp_path / "graphs"
-    app_dir = graph_dir / "demo"
-    app_dir.mkdir(parents=True)
-    (app_dir / "demo.json").write_text(
-        json.dumps({"package_name": "com.demo.app", "nodes": [], "edges": []}), encoding="utf-8"
-    )
-    config = _write_config(tmp_path, str(graph_dir))
-    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
-
-    assert audit.main(["-c", str(config), "--app", "demo"]) == 0
-
-    audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
-    assert audited["package_name"] == "com.demo.app"
-
-
-@pytest.mark.usefixtures("model_environment", "opened_clients")
-def test_audit_gives_the_configured_package_to_a_graph_saved_without_one(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    write_graph_file: Callable[[Path, dict[str, Any]], None],
-    write_image_vectors: Callable[..., None],
-) -> None:
-    """The nodes of a graph file without a ``package_name`` get the configured package,
-    so re-exploration matches each screen with the nodes of its package."""
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
-    graph_dir = tmp_path / "graphs"
-    app_dir = graph_dir / "demo"
-    app_dir.mkdir(parents=True)
-    write_graph_file(
-        app_dir / "demo.json",
-        {"nodes": [{"id": "s0_home", "activity": "com.demo.Home"}], "edges": []},
-    )
-    write_image_vectors(app_dir / "steps", ["s0_home-observation"])
-    config = _write_config(tmp_path, str(graph_dir))
-    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
-
-    assert audit.main(["-c", str(config)]) == 0
-
-    audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
-    assert audited["package_name"] == "com.demo"
-    assert [node["package"] for node in audited["nodes"]] == ["com.demo"]
-
-
-@pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_the_audit_embeds_the_members_the_explored_graph_has_no_image_vector_for(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1882,24 +1796,29 @@ def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
 
     assert audit.main(["-c", str(config)]) == 0
 
-    outcome = (
-        {"status": "merged", "kept": "s0_home", "removed": "s1_home"}
-        if same
-        else {"status": "kept_separate"}
-    )
-    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == [
-        {
-            "node_a": "s0_home",
-            "node_b": "s1_home",
-            "sources": ["text_audit"],
-            "findings": [{"source": "text_audit", "issue": issue}],
-            "members": {"s0_home": "s0_home-observation", "s1_home": "s1_home-observation"},
-            "image_score": 0.0,
-            "reason": "r",
-            "reused": False,
-            **outcome,
-        }
-    ]
+    outcome = {"status": "merged", "kept": "s0_home"} if same else {"status": "kept_separate"}
+    assert json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8")) == {
+        "rounds": 1,
+        "asked": 1,
+        "deduced": 0,
+        "merges": [{"kept": "s0_home", "removed": ["s1_home"]}] if same else [],
+        "pairs": [
+            {
+                "node_a": "s0_home",
+                "node_b": "s1_home",
+                "sources": ["text_audit"],
+                "findings": [{"source": "text_audit", "issue": issue}],
+                "members": {"s0_home": "s0_home-observation", "s1_home": "s1_home-observation"},
+                "image_score": 0.0,
+                "asked": True,
+                "round": 1,
+                "same": same,
+                "reason": "r",
+                "reused": False,
+                **outcome,
+            }
+        ],
+    }
     assert (app_dir / "demo_audited.json").exists() == same
 
 
@@ -1922,13 +1841,20 @@ def _save_with_representatives(
     add_representative: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    """Save *graph* to *path* with a representative image and its vector for every node
-    in the step log beside it, so the audit can load it without embedding any."""
+    """Save *graph* to *path* with a representative for every node, its image and image
+    vector in the step log beside it and its text vector in the file beside the graph, so
+    the audit can load it without embedding any."""
     graph.steps_dir = graph_steps_dir(path)
     for node_id in list(graph.graph):
         add_representative(graph, node_id)
     graph.save_graph(path)
-    write_image_vectors(graph.steps_dir, [f"{node_id}-observation" for node_id in graph.graph])
+    representatives = [f"{node_id}-observation" for node_id in graph.graph]
+    write_image_vectors(graph.steps_dir, representatives)
+    save_embeddings(
+        text_embeddings_path(path),
+        {representative: [1.0, 0.0] for representative in representatives},
+        model="google/gemini-embedding-2",
+    )
 
 
 def _no_path_to_start_line(app_dir: Path, in_app: int) -> str:

@@ -32,7 +32,12 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.payloads import as_int_list, as_object_dict, as_str
-from android_app_graph.screen_image import encode_screenshot, pixel_hash, status_bar_rows
+from android_app_graph.screen_image import (
+    encode_screenshot,
+    is_black,
+    pixel_hash,
+    status_bar_rows,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,13 +62,15 @@ type StepSource = Literal[
 @dataclass(frozen=True, slots=True)
 class Observation:
     """One screen as ``StepRecorder.get_state`` captured it, with its screenshot as
-    base64 WebP and the ``pixel_hash`` of that image below the status bar."""
+    base64 WebP, the ``pixel_hash`` of that image below the status bar, and whether the
+    image is ``black``, as a secure window captures."""
 
     observation_id: str
     screenshot_b64: str
     activity: str
     package: str
     pixel_hash: str
+    black: bool
 
     @classmethod
     def from_state(cls, state: Mapping[str, object]) -> Observation:
@@ -80,6 +87,7 @@ class Observation:
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
             pixel_hash=as_str(state.get("pixel_hash"), ""),
+            black=state.get("black") is True,
         )
 
 
@@ -234,7 +242,8 @@ class StepRecorder:
 
     def get_state(self) -> dict[str, Any]:
         """Return the wrapped controller's state with its screenshot encoded as WebP,
-        the ``observation_id`` it was recorded under and its ``pixel_hash``.
+        the ``observation_id`` it was recorded under, its ``pixel_hash`` and whether it
+        is ``black``.
 
         The hash leaves out the rows of the controller's ``status_bar`` frame; a
         controller that reports none has the whole image hashed.
@@ -254,6 +263,7 @@ class StepRecorder:
             activity=as_str(state.get("activity"), ""),
             package=as_str(state.get("package"), ""),
             pixel_hash=pixel_hash(webp, band_rows),
+            black=is_black(webp),
         )
         write_bytes_atomically(observation_image_path(self.steps, observation.observation_id), webp)
         self._write_record(
@@ -266,6 +276,7 @@ class StepRecorder:
                 "status_bar": status_bar,
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
+                "black": observation.black,
             },
         )
         self._last_observation = observation
@@ -274,6 +285,7 @@ class StepRecorder:
             "screenshot": observation.screenshot_b64,
             "observation_id": observation.observation_id,
             "pixel_hash": observation.pixel_hash,
+            "black": observation.black,
         }
 
     def exe_action(self, action: dict[str, Any]) -> None:

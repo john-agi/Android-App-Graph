@@ -14,10 +14,6 @@ path = "android_app_graph"
 depends_on = ["android_app_graph.kobe"]
 
 [[modules]]
-path = "android_app_graph.android_packages"
-depends_on = []
-
-[[modules]]
 path = "android_app_graph.commands"
 depends_on = [
     "android_app_graph.device",
@@ -37,6 +33,10 @@ depends_on = ["android_app_graph.payloads"]
 
 [[modules]]
 path = "android_app_graph.member_groups"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.merge_rounds"
 depends_on = []
 
 [[modules]]
@@ -78,9 +78,9 @@ depends_on = ["android_app_graph.payloads", "android_app_graph.retrying"]
 [[modules]]
 path = "android_app_graph.utils.graph_manager"
 depends_on = [
-    "android_app_graph.android_packages",
     "android_app_graph.graph_files",
     "android_app_graph.member_groups",
+    "android_app_graph.merge_rounds",
     "android_app_graph.payloads",
     "android_app_graph.step_log",
     "android_app_graph.utils",

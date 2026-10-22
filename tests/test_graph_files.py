@@ -356,7 +356,7 @@ def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: 
     for a loader that runs later to report as a bare KeyError.
     """
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+    with pytest.raises(ValueError, match="node id must be a string") as excinfo:
         graph_files.require_known_edge_endpoints(
             {"nodes": [{"page_description": "x"}], "edges": []}, path
         )
@@ -370,25 +370,11 @@ def test_require_graph_shape_accepts_string_ids_and_endpoints() -> None:
 
 
 @pytest.mark.parametrize(
-    ("data", "expected"),
-    [
-        ({"edges": []}, {"nodes": [], "edges": []}),
-        ({"nodes": []}, {"nodes": [], "edges": []}),
-        ({}, {"nodes": [], "edges": []}),
-    ],
-)
-def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
-    data: dict[str, Any], expected: dict[str, Any]
-) -> None:
-    """An absent "nodes" or "edges" key is an empty list, not a rejection --
-    only a present non-list value (``null``, a string, an object) is.
-    """
-    assert graph_files.require_graph_shape(data, Path()) == expected
-
-
-@pytest.mark.parametrize(
     ("data", "match"),
     [
+        ({"edges": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({"nodes": []}, "must contain list fields 'nodes' and 'edges'"),
+        ({}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": None, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": [], "edges": None}, "must contain list fields 'nodes' and 'edges'"),
         ({"nodes": {}, "edges": []}, "must contain list fields 'nodes' and 'edges'"),
@@ -399,25 +385,27 @@ def test_require_graph_shape_treats_a_missing_nodes_or_edges_key_as_empty(
 def test_require_graph_shape_rejects_a_malformed_shape(
     tmp_path: Path, data: dict[str, Any], match: str
 ) -> None:
-    """Every shape failure, ``"nodes": null`` and ``"nodes": ["s0"]`` included,
-    raises a ``TypeError`` naming the path.
+    """Every shape failure, an absent ``"nodes"``, ``"nodes": null`` and
+    ``"nodes": ["s0"]`` included, raises the ``ValueError`` every load failure raises,
+    naming the path.
     """
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match=match) as excinfo:
+    with pytest.raises(ValueError, match=match) as excinfo:
         graph_files.require_graph_shape(data, path)
     assert str(path) in str(excinfo.value)
+    assert "Explore the app again into a new graph directory" in str(excinfo.value)
 
 
 def test_require_graph_shape_rejects_a_non_string_node_id(tmp_path: Path) -> None:
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+    with pytest.raises(ValueError, match="node id must be a string") as excinfo:
         graph_files.require_graph_shape({"nodes": [{"id": 5}], "edges": []}, path)
     assert str(path) in str(excinfo.value)
 
 
 def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> None:
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match="node id must be a string") as excinfo:
+    with pytest.raises(ValueError, match="node id must be a string") as excinfo:
         graph_files.require_graph_shape({"nodes": [{"page_description": "x"}], "edges": []}, path)
     assert str(path) in str(excinfo.value)
 
@@ -427,7 +415,7 @@ def test_require_graph_shape_rejects_an_empty_node_id(tmp_path: Path) -> None:
     naming the path, instead of loading as a node.
     """
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match="node id must be a non-empty string") as excinfo:
+    with pytest.raises(ValueError, match="node id must be a non-empty string") as excinfo:
         graph_files.require_graph_shape({"nodes": [{"id": ""}], "edges": []}, path)
     assert str(path) in str(excinfo.value)
 
@@ -440,7 +428,7 @@ def test_require_graph_shape_rejects_a_non_string_edge_endpoint(
     tmp_path: Path, edge: dict[str, Any]
 ) -> None:
     path = tmp_path / "demo.json"
-    with pytest.raises(TypeError, match="edge endpoint must be a string") as excinfo:
+    with pytest.raises(ValueError, match="edge endpoint must be a string") as excinfo:
         graph_files.require_graph_shape({"nodes": [], "edges": [edge]}, path)
     assert str(path) in str(excinfo.value)
 
@@ -450,6 +438,6 @@ def test_require_graph_shape_rejects_a_non_object_document(tmp_path: Path) -> No
     path, not with an AttributeError out of ``.get``.
     """
     path = tmp_path / "graph.json"
-    with pytest.raises(TypeError, match="must be an object") as excinfo:
+    with pytest.raises(ValueError, match="must be an object") as excinfo:
         graph_files.require_graph_shape([], path)
     assert str(path) in str(excinfo.value)

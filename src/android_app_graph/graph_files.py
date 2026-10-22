@@ -12,7 +12,7 @@ import logging
 import os
 import secrets
 import shutil
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 from typing import IO, Any, Literal
 
@@ -248,51 +248,41 @@ def observation_image_b64(steps: Path, observation_id: str) -> str:
 
 def require_graph_shape(data: object, path: Path) -> dict[str, Any]:
     """Return ``data`` once it is an object whose ``nodes``/``edges`` are lists
-    of objects with non-empty string ids and endpoints; raise ``TypeError``
-    naming ``path`` otherwise.
+    of objects with non-empty string ids and endpoints; raise the ``ValueError``
+    of ``unloadable_graph`` naming ``path`` otherwise.
 
-    A hand-edited or truncated file can leave ``nodes``/``edges`` ``null``, or
-    holding something other than a list of objects; every such shape failure
+    A hand-edited or truncated file can leave ``nodes``/``edges`` absent, ``null``,
+    or holding something other than a list of objects; every such shape failure
     is reported here, naming the path, rather than surfacing later as a bare
-    ``TypeError``/``AttributeError`` with no path once the loader iterates or
-    indexes into it. An absent key is an empty list, not a shape failure: a
-    graph with no edges yet is a normal, not malformed, one.
+    ``TypeError``/``AttributeError``/``KeyError`` with no path once the loader
+    iterates or indexes into it.
 
     A node id of ``""`` is a string, so it would otherwise sail past the
     string check above and load as a node; it is rejected here, naming the
     path, like every other malformed id.
     """
     if not isinstance(data, dict):
-        msg = f"Graph JSON must be an object: {path}"
-        raise TypeError(msg)
+        raise unloadable_graph(path, ["graph JSON must be an object"])
     # JSON object keys are always strings; the comprehension is what narrows the
     # loaded object to dict[str, Any] for the type checker (as payloads does).
     graph: dict[str, Any] = {key: value for key, value in data.items() if isinstance(key, str)}
-    nodes = graph.get("nodes", [])
-    edges = graph.get("edges", [])
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
     if not isinstance(nodes, list) or not isinstance(edges, list):
-        msg = f"Graph JSON must contain list fields 'nodes' and 'edges': {path}"
-        raise TypeError(msg)
-    graph["nodes"] = nodes
-    graph["edges"] = edges
+        raise unloadable_graph(path, ["graph JSON must contain list fields 'nodes' and 'edges'"])
     for node in nodes:
         if not isinstance(node, dict):
-            msg = f"Graph node must be an object: {node!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph node must be an object: {node!r}"])
         node_id = node.get("id")
         if not isinstance(node_id, str):
-            msg = f"Graph node id must be a string: {node!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph node id must be a string: {node!r}"])
         if not node_id:
-            msg = f"Graph node id must be a non-empty string: {node!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph node id must be a non-empty string: {node!r}"])
     for edge in edges:
         if not isinstance(edge, dict):
-            msg = f"Graph edge must be an object: {edge!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph edge must be an object: {edge!r}"])
         if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str):
-            msg = f"Graph edge endpoint must be a string: {edge!r} in {path}"
-            raise TypeError(msg)
+            raise unloadable_graph(path, [f"graph edge endpoint must be a string: {edge!r}"])
     return graph
 
 
@@ -317,6 +307,58 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
         if endpoint not in node_ids
     }
     if missing_ids:
-        msg = f"{path}: edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
-        raise ValueError(msg)
+        problem = f"edge(s) reference node id(s) absent from the file: {sorted(missing_ids)}"
+        raise unloadable_graph(path, [problem])
     return graph
+
+
+PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
+
+
+def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
+    """Return what keeps the saved ``edges`` from loading: the edges without actions,
+    and the edges whose per-action lists do not hold one entry per action."""
+    without_actions: list[str] = []
+    misaligned: list[str] = []
+    for edge in edges:
+        name = f"{edge['source']} -> {edge['target']}"
+        actions = edge.get("actions")
+        if not isinstance(actions, list) or not actions:
+            without_actions.append(name)
+        elif not all(
+            isinstance(edge.get(key), list) and len(edge[key]) == len(actions)
+            for key in PER_ACTION_LISTS
+        ):
+            misaligned.append(name)
+    problems = []
+    if without_actions:
+        problems.append(f"edge(s) without actions: {without_actions}")
+    if misaligned:
+        problems.append(
+            f"edge(s) without one entry per action in each of {', '.join(PER_ACTION_LISTS)}: "
+            f"{misaligned}"
+        )
+    return problems
+
+
+def nodes_without_members(nodes: Iterable[dict[str, Any]]) -> list[str]:
+    """Return the IDs of the saved ``nodes`` that do not list their member observations,
+    as a list of observation IDs with the node's representative among them."""
+    return [node["id"] for node in nodes if not _lists_members(node)]
+
+
+def _lists_members(node: dict[str, Any]) -> bool:
+    observations = node.get("observations")
+    return (
+        isinstance(observations, list)
+        and all(isinstance(observation, str) for observation in observations)
+        and node.get("representative_observation") in observations
+    )
+
+
+def unloadable_graph(path: Path, problems: Iterable[str]) -> ValueError:
+    """Return the ``ValueError`` that loading the graph at ``path`` raises for
+    ``problems``, each naming what in the file is wrong."""
+    return ValueError(
+        f"{path}: {'; '.join(problems)}. Explore the app again into a new graph directory."
+    )

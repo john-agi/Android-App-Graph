@@ -75,6 +75,8 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    MemberQuestion,
+    MemberVerdict,
     MemberVerdicts,
     MergeProposal,
     SetupTrail,
@@ -155,7 +157,7 @@ def select_apps_for_audit(
         msg = f"No graph found at {graph_path}"
         raise FileNotFoundError(msg)
 
-    return [{"name": app_name, "package_name": ""}]
+    return [{"name": app_name}]
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,23 +190,23 @@ def check_members(
     """Check the members of every in-app node, grouped at ``GROUPING_FLOOR``, against
     the group that holds its representative; README.md#member-checks.
 
-    Every split check of every node runs before any move check, so a moved member can
-    go to a node a split made. ``verdicts`` holds the run's verifier answers, which
-    the checks reuse and add to: two merged nodes whose closest members fall below
-    ``GROUPING_FLOOR`` are two groups of the merged node, and their split check is the
-    pair the merge was verified on, so the merged node stays whole without a second
-    verifier call. ``transitions`` are the exploration's transition records, by which
-    edge actions follow the members that move.
+    Every split check of every node is asked at once and applied before the move
+    checks are asked, so a moved member can go to a node a split made. ``verdicts``
+    holds the run's verifier answers, which the checks reuse and add to: two merged
+    nodes whose closest members fall below ``GROUPING_FLOOR`` are two groups of the
+    merged node, and their split check is the pair the merge was verified on, so the
+    merged node stays whole without a second verifier call. ``transitions`` are the
+    exploration's transition records, by which edge actions follow the members that
+    move.
     """
     plans = graph.member_plans()
     checks = [(node, check) for node, plan in plans for check in plan.checks]
     splits = [(node, check) for node, check in checks if len(check.group) > 1]
     moves = [(node, check) for node, check in checks if len(check.group) == 1]
+    results = _check_member_groups(graph, splits, verdicts, transitions)
+    results += _check_member_groups(graph, moves, verdicts, transitions)
     return MemberReport(
-        checks=[
-            _check_member_group(graph, node, check, verdicts, transitions)
-            for node, check in (*splits, *moves)
-        ],
+        checks=results,
         diffuse=[{"node": node, "groups": plan.groups} for node, plan in plans if plan.diffuse],
         unchecked=[
             {"node": node, "groups": plan.unchecked} for node, plan in plans if plan.unchecked
@@ -212,25 +214,39 @@ def check_members(
     )
 
 
-def _check_member_group(
+def _check_member_groups(
     graph: GraphManager,
-    node_id: str,
-    check: MemberCheck,
+    checks: Sequence[tuple[str, MemberCheck]],
     verdicts: MemberVerdicts,
     transitions: Sequence[TransitionRecord],
+) -> list[dict[str, object]]:
+    """Ask the verifier about every check's closest pair at once, then, in order, split
+    off or move each group it tells apart from its node's home. Without an answer the
+    node stays whole: a change rests on an answer, and node verification has already
+    asked twice."""
+    questions = [
+        MemberQuestion(
+            check.pair.first,
+            check.pair.second,
+            graph.graph.nodes[node_id].get("page_description", ""),
+        )
+        for node_id, check in checks
+    ]
+    results: list[dict[str, object]] = []
+    answers = graph.verify_member_pairs(questions, verdicts)
+    for (node_id, check), verdict in zip(checks, answers, strict=True):
+        result = _member_check_record(node_id, check, verdict)
+        if verdict.answered and not verdict.same:
+            result["change"] = _separate_group(graph, node_id, check, verdicts, transitions)
+        results.append(result)
+    return results
+
+
+def _member_check_record(
+    node_id: str, check: MemberCheck, verdict: MemberVerdict
 ) -> dict[str, object]:
-    """Verify ``check``'s group against its node's home on the closest pair across
-    them, and split the group off or move its member when the verifier tells them
-    apart. Without an answer the node stays whole and ``same`` is ``None``: a change
-    rests on an answer, and node verification has already asked twice."""
     kind = "split" if len(check.group) > 1 else "move"
     home_member, member = check.pair.first, check.pair.second
-    verdict = graph.verify_members(
-        home_member,
-        member,
-        description=graph.graph.nodes[node_id].get("page_description", ""),
-        verdicts=verdicts,
-    )
     if not verdict.answered:
         outcome = "no answer, so the node stays whole"
     else:
@@ -244,7 +260,7 @@ def _check_member_group(
         check.pair.score,
         outcome,
     )
-    result: dict[str, object] = {
+    return {
         "kind": kind,
         "node": node_id,
         "group": check.group,
@@ -254,13 +270,20 @@ def _check_member_group(
         "reason": verdict.reason,
         "reused": verdict.reused,
     }
-    if verdict.same or not verdict.answered:
-        return result
-    if kind == "split":
-        change = graph.split_members(node_id, check.group, transitions)
-    else:
-        change = graph.move_member(node_id, member, verdicts=verdicts, transitions=transitions)
-    return {**result, "change": change}
+
+
+def _separate_group(
+    graph: GraphManager,
+    node_id: str,
+    check: MemberCheck,
+    verdicts: MemberVerdicts,
+    transitions: Sequence[TransitionRecord],
+) -> dict[str, object]:
+    """Split ``check``'s group off its node, or move its lone member, and return the
+    change."""
+    if len(check.group) > 1:
+        return graph.split_members(node_id, check.group, transitions)
+    return graph.move_member(node_id, check.pair.second, verdicts=verdicts, transitions=transitions)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -322,7 +345,7 @@ def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[st
         for sub_action in action:
             controller.exe_action(sub_action)
             time.sleep(0.5)
-    elif action:
+    else:
         controller.exe_action(action)
     time.sleep(1)
 
@@ -507,6 +530,11 @@ def _record_step(
     return new_node, step_result
 
 
+def _last_state(run: _ReExploreRun, node: str) -> dict[str, Any]:
+    """Return the state the latest visit to ``node`` recorded."""
+    return run.graph.graph.nodes[node].get("last_detail_snapshot", {})
+
+
 def _explore_steps(
     run: _ReExploreRun,
     start_from: str,
@@ -516,11 +544,11 @@ def _explore_steps(
     arrived: bool,
 ) -> list[dict[str, Any]]:
     """Run exploration steps from a node with a hint for the planner. ``arrived`` says
-    the replay before them arrived at the node, as ``SetupTrail.begin`` takes it."""
+    the replay before them arrived at the node, so the setup of the first step is known."""
     current_node = start_from
     step_results: list[dict[str, Any]] = []
     trail = SetupTrail(run.graph.resolve_node_id)
-    trail.begin(start_from, arrived=arrived)
+    trail.begin(start_from, _last_state(run, start_from) if arrived else None)
 
     for step_i in range(num_steps):
         device_state = run.recorder.get_state()
@@ -541,16 +569,16 @@ def _explore_steps(
             with run.recorder.source("external_app_recovery"):
                 device_state = return_to_app(run.recorder, run.app_launch, logger)
             current_node = _identify(run, device_state, expected_node=current_node)
-            trail.begin(current_node, arrived=False)
+            trail.begin(current_node, None)
             continue
 
         step = replace(step, setup=trail.setup(current_node))
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
         step_results.append(step_result)
         if step_result["to"] == EXTERNAL_WEB_NODE:
-            trail.begin(current_node, arrived=False)
+            trail.begin(current_node, None)
         else:
-            trail.step([step.action], current_node)
+            trail.step([step.action], current_node, _last_state(run, current_node))
 
     return step_results
 
@@ -854,14 +882,19 @@ def _verify_merges(
         len(proposals),
         ", ".join(f"{source} {count}" for source, count in sorted(by_source.items())),
     )
-    merge_results = graph.verify_merge_proposals(proposals, verdicts)
+    report = graph.verify_merge_proposals(proposals, verdicts)
     merge_path = _app_file(run.graph_dir, app_name, "_merge")
-    _write_json(merge_path, merge_results)
-    logger.info("Merge results saved to %s", merge_path)
-
-    merged_count = sum(1 for r in merge_results if r["status"] == "merged")
-    if merged_count:
-        _save_audited_graph(run, graph, app_name, f"{merged_count} merge(s)")
+    _write_json(merge_path, report.as_record())
+    logger.info(
+        "Merge results saved to %s: %d round(s), %d pair(s) asked, %d deduced, %d node(s) merged",
+        merge_path,
+        report.rounds,
+        report.asked,
+        report.deduced,
+        report.merged_count,
+    )
+    if report.merged_count:
+        _save_audited_graph(run, graph, app_name, f"{report.merged_count} node(s) merged")
 
 
 def _check_members(
@@ -935,7 +968,6 @@ def _report_no_path_to_start(
 
 def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     app_name = app["name"]
-    package_name = app["package_name"]
 
     graph = GraphManager(
         client=run.client,
@@ -950,7 +982,7 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
         return
 
-    graph.load_graph(graph_path, default_package_name=package_name)
+    graph.load_graph(graph_path)
     logger.info(
         "Loaded graph for %s: %d nodes, %d edges",
         app_name,

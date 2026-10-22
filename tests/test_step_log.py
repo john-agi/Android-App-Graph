@@ -104,6 +104,7 @@ def test_get_state_records_one_webp_image_and_one_observation(device: _Device, s
         "screenshot": base64.b64encode(webp).decode("ascii"),
         "observation_id": "000000",
         "pixel_hash": pixel_hash(webp, 0),
+        "black": False,
     }
     record = _record(steps, "000000")
     timestamp = record.pop("timestamp")
@@ -120,7 +121,16 @@ def test_get_state_records_one_webp_image_and_one_observation(device: _Device, s
         "status_bar": None,
         "status_bar_rows": 0,
         "pixel_hash": pixel_hash(webp, 0),
+        "black": False,
     }
+
+
+def test_a_black_screenshot_is_recorded_as_black(steps: Path) -> None:
+    state = _recorder(_Device(_png((40, 30), "black")), steps).get_state()
+
+    assert state["black"] is True
+    assert _record(steps, "000000")["black"] is True
+    assert Observation.from_state(state).black is True
 
 
 def _screen(size: tuple[int, int]) -> Image.Image:
@@ -390,6 +400,7 @@ def test_observation_from_state_reads_a_recorded_state(device: _Device, steps: P
         activity=HOME["activity"],
         package=HOME["package"],
         pixel_hash=state["pixel_hash"],
+        black=False,
     )
 
 
