@@ -155,7 +155,7 @@ def select_apps_for_audit(
         msg = f"No graph found at {graph_path}"
         raise FileNotFoundError(msg)
 
-    return [{"name": app_name, "package_name": ""}]
+    return [{"name": app_name}]
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +317,7 @@ def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[st
         for sub_action in action:
             controller.exe_action(sub_action)
             time.sleep(0.5)
-    elif action:
+    else:
         controller.exe_action(action)
     time.sleep(1)
 
@@ -503,6 +503,11 @@ def _record_step(
     return new_node, step_result
 
 
+def _last_state(run: _ReExploreRun, node: str) -> dict[str, Any]:
+    """Return the state the latest visit to ``node`` recorded."""
+    return run.graph.graph.nodes[node].get("last_detail_snapshot", {})
+
+
 def _explore_steps(
     run: _ReExploreRun,
     start_from: str,
@@ -512,11 +517,11 @@ def _explore_steps(
     arrived: bool,
 ) -> list[dict[str, Any]]:
     """Run exploration steps from a node with a hint for the planner. ``arrived`` says
-    the replay before them arrived at the node, as ``SetupTrail.begin`` takes it."""
+    the replay before them arrived at the node, so the setup of the first step is known."""
     current_node = start_from
     step_results: list[dict[str, Any]] = []
     trail = SetupTrail(run.graph.resolve_node_id)
-    trail.begin(start_from, arrived=arrived)
+    trail.begin(start_from, _last_state(run, start_from) if arrived else None)
 
     for step_i in range(num_steps):
         device_state = run.recorder.get_state()
@@ -537,16 +542,16 @@ def _explore_steps(
             with run.recorder.source("external_app_recovery"):
                 device_state = return_to_app(run.recorder, run.app_launch, logger)
             current_node = _identify(run, device_state, expected_node=current_node)
-            trail.begin(current_node, arrived=False)
+            trail.begin(current_node, None)
             continue
 
         step = replace(step, setup=trail.setup(current_node))
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
         step_results.append(step_result)
         if step_result["to"] == EXTERNAL_WEB_NODE:
-            trail.begin(current_node, arrived=False)
+            trail.begin(current_node, None)
         else:
-            trail.step([step.action], current_node)
+            trail.step([step.action], current_node, _last_state(run, current_node))
 
     return step_results
 
@@ -932,7 +937,6 @@ def _report_no_path_to_start(
 
 def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     app_name = app["name"]
-    package_name = app["package_name"]
 
     graph = GraphManager(
         client=run.client,
@@ -947,7 +951,7 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         logger.warning("No graph found at %s, skipping %s", graph_path, app_name)
         return
 
-    graph.load_graph(graph_path, default_package_name=package_name)
+    graph.load_graph(graph_path)
     logger.info(
         "Loaded graph for %s: %d nodes, %d edges",
         app_name,
