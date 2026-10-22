@@ -92,7 +92,7 @@ def run_audit(graph: GraphManager, app_name: str, report_path: Path) -> dict[str
 
 
 def normalize_and_save_audited_graph(graph: GraphManager, audited_graph_path: Path) -> int:
-    """Normalize outgoing edge templates for every node, then save audited graph.
+    """Normalize every edge's templates in one batch, then save audited graph.
 
     This runs after audit merges and optional re-exploration, so templates are
     generated from the final graph topology rather than stale pre-merge edges.
@@ -101,9 +101,7 @@ def normalize_and_save_audited_graph(graph: GraphManager, audited_graph_path: Pa
         "Normalizing audited graph edge templates for %d nodes...",
         graph.graph.number_of_nodes(),
     )
-    normalized_count = 0
-    for node_id in list(graph.graph.nodes()):
-        normalized_count += graph.normalize_node_edges(node_id)
+    normalized_count = graph.normalize_all_edges()
 
     graph.save_graph(audited_graph_path)
     logger.info(
