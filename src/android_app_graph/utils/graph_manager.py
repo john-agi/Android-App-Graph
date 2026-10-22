@@ -148,9 +148,10 @@ class EdgeDetails:
             Format: {"key": {"before": old_val, "after": new_val}, ...}
         num_steps: Number of action steps the edge takes to traverse.
             If None, defaults to len(action) for lists or 1 for single actions.
-        setup: The device actions sent on the source node before the action since
-            the traversal last arrived there from elsewhere, as ``SetupTrail`` reads
-            them; None when they are unknown.
+        setup: The device actions sent on the source node before the action, since
+            the traversal last arrived there from elsewhere, whose effect on the node's
+            state is in force when the action is sent, as ``SetupTrail`` reads them;
+            None when they are unknown.
     """
 
     instruction: str | None = None
@@ -160,58 +161,119 @@ class EdgeDetails:
     setup: Sequence[dict[str, Any]] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _NodeState:
+    """A state the trail found a node in, and the index into the trail's actions where
+    the actions sent in that state start."""
+
+    start: int
+    state: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _Arrival:
+    """A node the trail arrived at and the states it found the node in since, in order;
+    ``None`` when the trail began on the node without knowing how the device came there."""
+
+    node: str
+    states: list[_NodeState] | None
+
+
+def _same_state(first: Mapping[str, object], second: Mapping[str, object]) -> bool:
+    """Return whether two states of a node agree on every key; a key one of them lacks
+    counts as null, as in a self-loop's schema delta."""
+    return all(first.get(key) == second.get(key) for key in first.keys() | second.keys())
+
+
+def _spans_in_force(states: Sequence[_NodeState]) -> list[tuple[int, int]]:
+    """Return the spans ``(start, end)`` of the trail's actions that took a node from the
+    first of ``states`` to the last, leaving out what was undone: the actions from a state
+    to a later return to the same state."""
+    spans: list[tuple[int, int]] = []
+    path = [states[0].state]
+    for before, after in itertools.pairwise(states):
+        repeated = next(
+            (index for index, state in enumerate(path) if _same_state(state, after.state)), None
+        )
+        if repeated is None:
+            spans.append((before.start, after.start))
+            path.append(after.state)
+        else:
+            del spans[repeated:]
+            del path[repeated + 1 :]
+    return spans
+
+
 class SetupTrail:
-    """The device actions an exploration sent since it began on a screen, from which it
-    reads each action's setup: the actions sent on the action's source node since the
-    trail last arrived there from elsewhere.
+    """The device actions an exploration sent since it began on a screen, and the states
+    they left each node in, from which it reads each action's setup: the actions sent on
+    the action's source node, since the trail last arrived there from elsewhere, whose
+    effect on the node's state is in force when the action is sent.
 
     The trail keeps the nodes it arrived at in order. Arriving at one of them again, such
-    as a list after one of its rows, ends a round trip: the nodes after it are left
-    behind, and the round trip's actions join its setup, as a self-loop's do. Arriving at
-    any other node starts its setup empty. Node IDs are compared through
-    ``resolve_node_id``, so a node renamed or merged while the trail holds it still matches.
+    as a form after a dialog that set one of its fields, ends a round trip: the nodes
+    after it are left behind, and the round trip's actions join its setup, as a
+    self-loop's do. Arriving at any other node starts its setup empty.
+
+    A setup leaves out what was undone: when the node comes back to a state it was in
+    since the trail arrived there, the actions in between are left out, such as a row of
+    a list opened and left by Back, a menu opened and closed again, or a field typed and
+    cleared. States compare key by key, as a self-loop's schema delta does. Node IDs are
+    compared through ``resolve_node_id``, so a node renamed or merged while the trail
+    holds it still matches.
     """
 
     def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
         self._resolve_node_id = resolve_node_id
         self._actions: list[dict[str, Any]] = []
-        # Each node with the index into _actions where its setup starts, or None when
-        # the trail began on it without knowing how the device came to be there.
-        self._arrivals: list[tuple[str, int | None]] = []
+        self._arrivals: list[_Arrival] = []
 
-    def begin(self, node: str, *, arrived: bool) -> None:
+    def begin(self, node: str, arrival_state: Mapping[str, object] | None) -> None:
         """Begin the trail again on ``node``, forgetting every action before.
 
-        ``arrived`` says the device has just arrived at ``node`` from elsewhere, as when a
-        replay reaches the node it replays to, so the setup on it starts empty. Otherwise
-        the setup of every action sent on ``node`` is unknown until the trail arrives
-        there from elsewhere again.
+        ``arrival_state`` is the node's state when the device has just arrived there from
+        elsewhere, as when a replay reaches the node it replays to; the setup on it starts
+        empty. ``None`` says how the device came to be on ``node`` is unknown: the setup of
+        every action sent on it is unknown until the trail arrives there from elsewhere
+        again.
         """
         self._actions = []
-        self._arrivals = [(node, 0 if arrived else None)]
+        states = None if arrival_state is None else [_NodeState(0, dict(arrival_state))]
+        self._arrivals = [_Arrival(node, states)]
 
     def setup(self, node: str) -> list[dict[str, Any]] | None:
-        """Return the setup of an action sent on ``node`` now, or None when it is unknown."""
+        """Return the setup of an action sent on ``node``, the node the trail is on, or
+        None when it is unknown."""
         position = self._position(node)
         if position is None:
             return None
-        start = self._arrivals[position][1]
-        return None if start is None else self._actions[start:]
+        states = self._arrivals[position].states
+        if states is None:
+            return None
+        return [
+            action for start, end in _spans_in_force(states) for action in self._actions[start:end]
+        ]
 
-    def step(self, actions: Sequence[dict[str, Any]], reached: str) -> None:
+    def step(
+        self, actions: Sequence[dict[str, Any]], reached: str, state: Mapping[str, object]
+    ) -> None:
         """Add ``actions``, sent on the node the trail is on, and ``reached``, the node
-        they led to."""
+        they led to, in ``state``."""
         self._actions.extend(actions)
+        reached_state = _NodeState(len(self._actions), dict(state))
         position = self._position(reached)
         if position is None:
-            self._arrivals.append((reached, len(self._actions)))
-        else:
-            del self._arrivals[position + 1 :]
+            self._arrivals.append(_Arrival(reached, [reached_state]))
+            return
+        del self._arrivals[position + 1 :]
+        states = self._arrivals[position].states
+        if states is not None:
+            states.append(reached_state)
 
     def _position(self, node: str) -> int | None:
         resolved = self._resolve_node_id(node)
         for position in reversed(range(len(self._arrivals))):
-            if self._resolve_node_id(self._arrivals[position][0]) == resolved:
+            if self._resolve_node_id(self._arrivals[position].node) == resolved:
                 return position
         return None
 
