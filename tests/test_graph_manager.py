@@ -180,7 +180,7 @@ class Screens:
             "pixel_hash": pixel_hash,
         }
         (self.steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-        return Observation(observation_id, screenshot, activity, package, pixel_hash)
+        return Observation(observation_id, screenshot, activity, package, pixel_hash, black=False)
 
     def record(self, observation: Observation) -> dict[str, Any]:
         path = self.steps_dir / f"{observation.observation_id}.json"
@@ -1257,6 +1257,8 @@ DESCRIBED = {"page_description": "Home", "state": {}, "elements": [], "is_extern
         pytest.param(None, id="no-record"),
         pytest.param({"describe": DESCRIBED}, id="no-pixel-hash"),
         pytest.param({"pixel_hash": "abc"}, id="no-describe"),
+        pytest.param({"pixel_hash": "abc", "black": False}, id="no-describe-not-black"),
+        pytest.param({"black": True, "activity": "com.example.app.Home"}, id="black-no-pixel-hash"),
         pytest.param(
             {"pixel_hash": "abc", "describe": {**DESCRIBED, "page_description": 3}},
             id="description",
@@ -1270,8 +1272,9 @@ DESCRIBED = {"page_description": "Home", "state": {}, "elements": [], "is_extern
 def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_output(
     record: dict[str, object] | None, tmp_path: Path
 ) -> None:
-    """Exact matching and member checks read both from every member of an in-app node; a
-    member of an ``ext_`` node needs neither."""
+    """Exact matching and member checks read both from every member of an in-app node,
+    except a black one, whose description comes from its activity; a member of an
+    ``ext_`` node needs neither."""
     steps_dir = tmp_path / "steps"
     home = members(steps_dir, b"home", b"home-2")
     undescribed = home["observations"][1]
@@ -1294,13 +1297,323 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
         ],
     )
 
-    with pytest.raises(ValueError, match="no pixel hash or no describe output") as excinfo:
+    with pytest.raises(
+        ValueError, match="no pixel hash, or no describe output and is not of a black screenshot"
+    ) as excinfo:
         make_manager().load_graph(path)
 
     message = str(excinfo.value)
     assert f"[{undescribed!r}]" in message
     assert str(path) in message
     assert "Explore the app again into a new graph directory" in message
+
+
+SET_PATTERN = "com.example.app.password.ChooseLockPattern"
+SET_PIN = "com.example.app.password.ChooseLockPassword"
+PATTERN_NODE = "s0_secure_screen:_chooselockpattern"
+GOOGLE_SIGN_IN = "com.google.android.gms.auth.api.signin.internal.SignInHubActivity"
+
+
+class _ActivityDevice:
+    """A device that shows the screens it is given in turn: each an activity, its image
+    and its package."""
+
+    w = 64
+    h = 48
+
+    def __init__(self, *screens: tuple[str, Image.Image, str]) -> None:
+        self.config: dict[str, Any] = {}
+        self._screens = list(screens)
+
+    def get_state(self) -> dict[str, Any]:
+        activity, image, package = self._screens.pop(0)
+        return {"screenshot": _png(image), "activity": activity, "package": package}
+
+    def exe_action(self, action: dict[str, Any]) -> None:
+        msg = f"No device action expected: {action}"
+        raise AssertionError(msg)
+
+
+def _black() -> Image.Image:
+    return Image.new("RGB", (64, 48), "black")
+
+
+def _secure(activity: str, package: str = PACKAGE) -> tuple[str, Image.Image, str]:
+    """A screen of ``activity`` that captures as black, as a secure window does."""
+    return activity, _black(), package
+
+
+def _captures(steps_dir: Path, *screens: tuple[str, Image.Image, str]) -> list[Observation]:
+    """Observations of ``screens`` as a StepRecorder on ``steps_dir`` captures them."""
+    recorder = StepRecorder(
+        _ActivityDevice(*screens), steps_dir, run_kind="explore", source="main_loop"
+    )
+    return [Observation.from_state(recorder.get_state()) for _ in screens]
+
+
+def test_black_screens_of_two_activities_get_a_node_each_with_no_model_call_but_the_image_embedding(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    """Every black capture has the same pixels, and the description model calls each
+    one a blank black screen."""
+    vlm.descriptions.extend([("Blank black screen", {}, [])] * 2)
+    steps_dir = tmp_path / "steps"
+    pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PIN))
+    gm = make_manager(steps_dir)
+
+    nodes = [gm.identify_state(pattern), gm.identify_state(pin)]
+
+    assert pattern.pixel_hash == pin.pixel_hash
+    assert nodes == [PATTERN_NODE, "s1_secure_screen:_chooselockpassword"]
+    assert vlm.kinds() == ["image", "image"]
+    assert gm.image_vector(pattern.observation_id) == ANY_IMAGE
+    assert gm.image_vector(pin.observation_id) == ANY_IMAGE
+
+
+def test_black_screens_of_one_activity_share_its_node(vlm: FakeVlm, tmp_path: Path) -> None:
+    steps_dir = tmp_path / "steps"
+    first, second = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PATTERN))
+    gm = make_manager(steps_dir)
+
+    assert gm.identify_state(first) == gm.identify_state(second) == PATTERN_NODE
+
+    assert vlm.kinds() == ["image", "image"]
+    node = gm.graph.nodes[PATTERN_NODE]
+    assert node["observations"] == [first.observation_id, second.observation_id]
+    assert node["representative_observation"] == first.observation_id
+    assert node["visit_count"] == 2
+    assert node["activities"] == [SET_PATTERN]
+
+
+@pytest.mark.usefixtures("vlm")
+def test_a_black_screen_is_described_from_its_activity_and_recorded_as_matched_by_it(
+    tmp_path: Path,
+) -> None:
+    steps_dir = tmp_path / "steps"
+    (pattern,) = _captures(steps_dir, _secure(SET_PATTERN))
+    gm = make_manager(steps_dir)
+
+    gm.identify_state(pattern, expected_node="s9_elsewhere")
+
+    node = gm.graph.nodes[PATTERN_NODE]
+    assert node["package"] == PACKAGE
+    assert node["page_description"] == "secure screen: ChooseLockPattern"
+    assert node["interactable_elements"] == []
+    assert node["state_schema"] == {}
+    assert gm.text_vector(pattern.observation_id) is None
+    record = json.loads((steps_dir / f"{pattern.observation_id}.json").read_text("utf-8"))
+    assert record["black"] is True
+    assert "describe" not in record
+    assert record["identify"] == {
+        "stage": "black",
+        "expected_node": "s9_elsewhere",
+        "exact_match": None,
+        "candidates": [],
+        "verifications": [],
+        "refinement": None,
+        "node": PATTERN_NODE,
+    }
+
+
+@pytest.mark.usefixtures("vlm")
+def test_the_log_names_the_activity_of_each_black_screen(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    steps_dir = tmp_path / "steps"
+    first, second = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PATTERN))
+    gm = make_manager(steps_dir)
+
+    with caplog.at_level(logging.INFO, logger=gm_module.logger.name):
+        gm.identify_state(first)
+        gm.identify_state(second)
+
+    assert [m for m in caplog.messages if m.startswith("Black screenshot")] == [
+        (
+            f"Black screenshot of {SET_PATTERN} starts {PATTERN_NODE}: no node has a black "
+            "member of that activity"
+        ),
+        (
+            f"Black screenshot of {SET_PATTERN} joins {PATTERN_NODE}, which has a black member "
+            "of that activity"
+        ),
+    ]
+
+
+def test_a_black_screen_never_joins_a_node_of_its_activity_without_a_black_member(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    vlm.descriptions.append(("Choose a pattern", {}, []))
+    steps_dir = tmp_path / "steps"
+    shown, secure = _captures(
+        steps_dir, (SET_PATTERN, _screen_with_clock(1), PACKAGE), _secure(SET_PATTERN)
+    )
+    gm = make_manager(steps_dir)
+    shown_node = gm.identify_state(shown)
+
+    assert gm.identify_state(secure) != shown_node
+
+    assert vlm.kinds() == ["image", "describe", "embed", "image"]
+
+
+def test_a_black_screen_of_another_package_starts_its_own_node(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    """A library activity runs in the package of each app that declares it."""
+    steps_dir = tmp_path / "steps"
+    in_app, other_app = _captures(
+        steps_dir, _secure(GOOGLE_SIGN_IN), _secure(GOOGLE_SIGN_IN, OTHER_PACKAGE)
+    )
+    gm = make_manager(steps_dir)
+
+    assert gm.identify_state(in_app) != gm.identify_state(other_app)
+
+    assert vlm.kinds() == ["image", "image"]
+
+
+@pytest.mark.parametrize(("level", "calls"), [(8, ["image"]), (9, ["image", "describe", "embed"])])
+def test_a_screen_is_black_while_no_channel_of_a_pixel_exceeds_the_black_level(
+    level: int, calls: list[str], vlm: FakeVlm, tmp_path: Path
+) -> None:
+    vlm.descriptions.append(("Dim screen", {}, []))
+    dim = _black()
+    dim.putpixel((40, 30), (0, level, 0))
+    steps_dir = tmp_path / "steps"
+    (observation,) = _captures(steps_dir, (SET_PATTERN, dim, PACKAGE))
+
+    make_manager(steps_dir).identify_state(observation)
+
+    assert vlm.kinds() == calls
+
+
+def test_a_screen_black_below_the_status_bar_alone_is_described_not_copied_from_a_black_member(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    """Its status bar has pixels above the black level, so it is not black, and its
+    pixels below the bar are those of a black member, whose record holds no describe
+    output to copy. The black member has no description vector either, so only the
+    image source proposes its node."""
+    vlm.descriptions.append(("Dark screen", {}, []))
+    vlm.verdicts.append({"same": False, "reason": "a clock on a dark screen"})
+    clocked = _black()
+    ImageDraw.Draw(clocked).rectangle((2, 2, 8, 6), fill=(255, 255, 255))
+    recorder = StepRecorder(
+        _StatusBarDevice(_black(), clocked),
+        tmp_path / "steps",
+        run_kind="explore",
+        source="main_loop",
+    )
+    gm = make_manager(recorder.steps)
+    black_screen = Observation.from_state(recorder.get_state())
+    black_node = gm.identify_state(black_screen)
+    observation = Observation.from_state(recorder.get_state())
+
+    assert gm.identify_state(observation) != black_node
+
+    assert not observation.black
+    assert observation.pixel_hash == black_screen.pixel_hash
+    assert vlm.kinds() == ["image", "image", "describe", "embed", "verify"]
+    record = json.loads((recorder.steps / f"{observation.observation_id}.json").read_text("utf-8"))
+    assert record["identify"]["stage"] == "new"
+    assert [(c["node"], sorted(c["sources"])) for c in record["identify"]["candidates"]] == [
+        (black_node, ["image"])
+    ]
+
+
+def test_a_reloaded_graph_joins_a_black_screen_to_the_node_of_its_activity(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    pattern, again, pin = _captures(
+        steps_dir, _secure(SET_PATTERN), _secure(SET_PATTERN), _secure(SET_PIN)
+    )
+    gm = make_manager(steps_dir)
+    node_id = gm.identify_state(pattern)
+    gm.save_graph(tmp_path / "graph.json")
+    loaded = make_manager()
+    loaded.load_graph(tmp_path / "graph.json")
+    vlm.calls.clear()
+
+    assert loaded.identify_state(again) == node_id
+    assert loaded.identify_state(pin) != node_id
+
+    assert vlm.kinds() == ["image", "image"]
+
+
+def test_a_graph_loads_with_black_members_that_have_no_describe_output_or_description_vector(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    """Loading requires a describe output and a description vector of every member of an
+    in-app node but a black one, whose description comes from its activity."""
+    vlm.descriptions.append(("Home screen", {}, []))
+    steps_dir = tmp_path / "steps"
+    home, pattern = _captures(
+        steps_dir, (HOME, _screen_with_clock(1), PACKAGE), _secure(SET_PATTERN)
+    )
+    gm = make_manager(steps_dir)
+    gm.identify_state(home)
+    pattern_node = gm.identify_state(pattern)
+    gm.save_graph(tmp_path / "graph.json")
+    loaded = make_manager()
+
+    loaded.load_graph(tmp_path / "graph.json")
+
+    assert loaded.text_vector(home.observation_id) == EMBEDDINGS["Home screen"]
+    assert loaded.text_vector(pattern.observation_id) is None
+    assert loaded.graph.nodes[pattern_node]["observations"] == [pattern.observation_id]
+
+
+def _merge_audit_proposes(monkeypatch: pytest.MonkeyPatch, node_a: str, node_b: str) -> None:
+    proposal = FakeAudit(result={"issues": [{"node_a": node_a, "node_b": node_b}]})
+    monkeypatch.setattr(gm_module, "audit_merge_nodes", proposal)
+
+
+def test_the_merge_audit_keeps_black_nodes_of_different_activities_apart_unverified(
+    vlm: FakeVlm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The verifier would compare two identical black images, and call them the same."""
+    vlm.verdicts.append({"same": True, "reason": "both screens are black"})
+    steps_dir = tmp_path / "steps"
+    pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PIN))
+    gm = make_manager(steps_dir)
+    pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
+    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+
+    with caplog.at_level(logging.WARNING, logger=gm_module.logger.name):
+        result = gm.run_node_merge_audit()
+
+    assert result["merged_count"] == 0
+    assert result["results"][0]["status"] == "skipped"
+    assert result["results"][0]["reason"] == "black screens of different activities"
+    assert {pattern_node, pin_node} <= set(gm.graph)
+    assert "verify" not in vlm.kinds()
+    assert (
+        f"Skipping merge {pattern_node} + {pin_node} — black screens of different activities"
+    ) in caplog.messages
+
+
+@pytest.mark.parametrize("pin_node_holds", ["a shown screen", "a black screen of both activities"])
+def test_the_merge_audit_verifies_a_black_node_and_one_not_all_black_or_sharing_its_activity(
+    pin_node_holds: str, vlm: FakeVlm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A screen with pixels to compare, or black members of one activity left in two nodes
+    by a merge and a split, leave the verifier something to decide."""
+    vlm.descriptions.append(("Choose a PIN", {}, []))
+    vlm.verdicts.extend([{"same": False, "reason": "different screens"}] * 2)
+    shown = pin_node_holds == "a shown screen"
+    pin_screen = (SET_PIN, _screen_with_clock(1), PACKAGE) if shown else _secure(SET_PIN)
+    steps_dir = tmp_path / "steps"
+    pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), pin_screen)
+    gm = make_manager(steps_dir)
+    pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
+    if not shown:
+        gm.graph.nodes[pin_node]["observations"].append(pattern.observation_id)
+    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+    vlm.calls.clear()
+
+    result = gm.run_node_merge_audit()
+
+    assert result["results"][0]["status"] == "kept_separate"
+    assert vlm.kinds() == ["verify"]
 
 
 def test_embed_missing_members_embeds_each_in_app_member_once_and_saves_the_vectors(

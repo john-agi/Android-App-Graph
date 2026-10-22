@@ -10,7 +10,7 @@ import os
 import socket
 import subprocess
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NoReturn
@@ -444,9 +444,12 @@ def write_member_graph() -> Callable[..., None]:
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
     the first its representative; the vector is the member's image vector and its text
-    vector. Node ``n`` is described as ``Node n`` and member ``m`` as ``Screen m``. Each
-    image holds its observation ID, so a fake verifier can tell which members it was
-    shown. The vectors are tagged with the model ``model_environment`` names.
+    vector. Node ``n`` is described as ``Node n`` and member ``m`` as ``Screen m``.
+    ``black`` maps each member whose screenshot is black to its activity; as screen
+    matching records a black screenshot, its record holds no describe output and it has
+    no text vector. Each image holds its observation ID, so a fake verifier can tell
+    which members it was shown. The vectors are tagged with the model
+    ``model_environment`` names.
     """
 
     def write(
@@ -455,30 +458,37 @@ def write_member_graph() -> Callable[..., None]:
         *,
         edges: tuple[dict[str, object], ...] = (),
         transitions: tuple[tuple[str, str, object, str, str], ...] = (),
+        black: Mapping[str, str] | None = None,
     ) -> None:
+        black_members = dict(black or {})
         steps_dir = graph_steps_dir(path)
         steps_dir.mkdir(parents=True, exist_ok=True)
-        vectors: dict[str, list[float]] = {}
+        image_vectors: dict[str, list[float]] = {}
+        text_vectors: dict[str, list[float]] = {}
         for members in nodes.values():
             for observation_id, vector in members:
-                vectors[observation_id] = vector
+                image_vectors[observation_id] = vector
                 observation_image_path(steps_dir, observation_id).write_bytes(
                     observation_id.encode("ascii")
                 )
-                record = {
+                black_activity = black_members.get(observation_id)
+                record: dict[str, object] = {
                     "id": observation_id,
                     "kind": "observation",
                     "run_kind": "explore",
-                    "activity": f"com.demo.Activity{observation_id}",
+                    "activity": black_activity or f"com.demo.Activity{observation_id}",
                     "package": "com.demo",
                     "pixel_hash": f"hash-{observation_id}",
-                    "describe": {
+                    "black": black_activity is not None,
+                }
+                if black_activity is None:
+                    record["describe"] = {
                         "page_description": f"Screen {observation_id}",
                         "state": {"seen_in": observation_id},
                         "elements": [{"description": f"Button {observation_id}"}],
                         "is_external_web": False,
-                    },
-                }
+                    }
+                    text_vectors[observation_id] = vector
                 (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
         for number, (before, after, action, from_node, to_node) in enumerate(transitions):
             record = {
@@ -492,8 +502,8 @@ def write_member_graph() -> Callable[..., None]:
                 "to_node": to_node,
             }
             (steps_dir / f"{900000 + number}.json").write_text(json.dumps(record), "utf-8")
-        save_image_embeddings(steps_dir, vectors, model="google/gemini-embedding-2")
-        save_embeddings(text_embeddings_path(path), vectors, model="google/gemini-embedding-2")
+        save_image_embeddings(steps_dir, image_vectors, model="google/gemini-embedding-2")
+        save_embeddings(text_embeddings_path(path), text_vectors, model="google/gemini-embedding-2")
         document = {
             "next_id": len(nodes),
             "nodes": [

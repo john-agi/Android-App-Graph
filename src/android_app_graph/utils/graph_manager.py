@@ -15,7 +15,8 @@ the node the caller expects, then a short list of nodes ranked by the image and 
 description similarity of their members, each checked by the verifier against its
 member closest to the screen.
 Different Android activities that display the same screen are merged into a single
-node; the node stores all observed activities.
+node; the node stores all observed activities. A black screenshot, all a secure window
+captures, shows nothing to compare, so it is matched by its activity instead.
 
 Every time a node is visited (whether new or existing), the VLM detail JSON is
 used to update the node's state schema — discovering new keys and accumulating
@@ -343,11 +344,25 @@ class _Described(NamedTuple):
         )
 
 
+def _black_screen_described(activity: str) -> _Described:
+    """Return the description a black screenshot of ``activity`` takes in place of the
+    describe call: the activity's class name, with no state and no elements."""
+    return _Described(
+        page_description=f"secure screen: {activity.rpartition('.')[2]}",
+        state={},
+        elements=[],
+        is_external_web=False,
+    )
+
+
 class _StoredScreen(NamedTuple):
-    """A member's pixel hash and the describe output an exact match copies from it."""
+    """A member's pixel hash and description: the describe output an exact match copies
+    from it, or, for a black member, the one made from its ``black_activity``, by which
+    a black screen joins its node."""
 
     pixel_hash: str
     described: _Described
+    black_activity: str | None = None
 
 
 class ClosestMember(NamedTuple):
@@ -498,7 +513,7 @@ class _Decision:
     """What decided a screen's node, as the ``identify`` field of its record keeps it."""
 
     expected_node: str | None
-    stage: Literal["exact", "expected", "short_list", "new", "external_web"] = "new"
+    stage: Literal["black", "exact", "expected", "short_list", "new", "external_web"] = "new"
     exact_match: str | None = None
     candidates: list[dict[str, object]] = field(default_factory=list)
     verifications: list[dict[str, object]] = field(default_factory=list)
@@ -777,11 +792,12 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
 def _stored_screens(
     nodes: list[dict[str, Any]], path: Path, steps_dir: Path
 ) -> dict[str, _StoredScreen]:
-    """Read the pixel hash and describe output of every member of the saved in-app
-    ``nodes`` from its record in ``steps_dir``.
+    """Read the pixel hash and description of every member of the saved in-app
+    ``nodes`` from its record in ``steps_dir``: its describe output, or, for a black
+    screenshot, the description made from its activity.
 
-    A member whose record holds no pixel hash or no describe output raises
-    ``ValueError`` naming ``path`` and every such member.
+    A member whose record holds no pixel hash, or no describe output and is not of a
+    black screenshot, raises ``ValueError`` naming ``path`` and every such member.
     """
     stored: dict[str, _StoredScreen] = {}
     undescribed: list[str] = []
@@ -790,16 +806,23 @@ def _stored_screens(
             continue
         for member in _member_observations(node):
             record = read_observation_record(steps_dir, member) or {}
-            described = _Described.from_record(record)
+            black_activity = (
+                as_str(record.get("activity"), "") if record.get("black") is True else None
+            )
+            described = (
+                _Described.from_record(record)
+                if black_activity is None
+                else _black_screen_described(black_activity)
+            )
             pixel_hash = as_str(record.get("pixel_hash"), "")
             if described is None or not pixel_hash:
                 undescribed.append(member)
             else:
-                stored[member] = _StoredScreen(pixel_hash, described)
+                stored[member] = _StoredScreen(pixel_hash, described, black_activity)
     if undescribed:
         problem = (
-            f"member(s) whose record in {steps_dir} holds no pixel hash or no describe "
-            f"output: {undescribed}"
+            f"member(s) whose record in {steps_dir} holds no pixel hash, or no describe "
+            f"output and is not of a black screenshot: {undescribed}"
         )
         raise unloadable_graph(path, [problem])
     return stored
@@ -1020,9 +1043,9 @@ class GraphManager:
         The screen is embedded by image, then compared with the members of the in-app
         nodes of its ``package``, cheapest evidence first:
 
-        1. A member with the same ``pixel_hash`` decides alone, when it belongs to one
-           node only: the screen takes that member's describe output, so neither the
-           describe call nor the verifier runs.
+        1. A member with a describe output and the same ``pixel_hash`` decides alone,
+           when it belongs to one node only: the screen takes that member's describe
+           output, so neither the describe call nor the verifier runs.
         2. The describe call describes the screen; web content from outside the app
            goes to ``EXTERNAL_WEB_NODE``.
         3. ``expected_node``, the node the caller expects the screen to be, is verified
@@ -1032,6 +1055,12 @@ class GraphManager:
 
         The first confirmation decides. A screen every check rejects starts a new node,
         and the step's first rejection refines the two descriptions.
+
+        A ``black`` screen, all a secure window captures, is matched by its activity
+        instead of steps 1 to 4: it joins the node with a black member of its activity,
+        or starts a node described from the activity's class name, with no elements. Its
+        record takes no describe output and it has no description vector, so the
+        ``text`` source never ranks a node by it.
         """
         client, page_detail = self._require_page_detail()
         self._require_embedding()
@@ -1039,6 +1068,10 @@ class GraphManager:
         same_package = self._same_package_nodes(observation.package)
         image_vector = self._embed_image(observation.screenshot_b64)
         self._image_vectors[observation.observation_id] = image_vector
+        if observation.black:
+            return self._record_black_screen(
+                observation, same_package.node_ids, expected_node=expected_node
+            )
         exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
         if exact is not None:
             return self._record_exact_match(observation, *exact, expected_node=expected_node)
@@ -1118,15 +1151,20 @@ class GraphManager:
         return _SamePackageNodes(node_ids, descriptions, keys)
 
     def _exact_match(self, pixel_hash: str, node_ids: Sequence[str]) -> tuple[str, str] | None:
-        """Return the node and member whose stored screen has ``pixel_hash``, when the
-        members that have it all belong to one of ``node_ids``; the latest such member."""
+        """Return the node and member with a describe output whose stored screen has
+        ``pixel_hash``, when the members that have it all belong to one of ``node_ids``;
+        the latest such member. A black member has no describe output to copy."""
         if not pixel_hash:
             return None
         matches: dict[str, str] = {}
         for node_id in node_ids:
             for member in self.graph.nodes[node_id].get("observations", []):
                 stored = self._stored_screens.get(member)
-                if stored is not None and stored.pixel_hash == pixel_hash:
+                if (
+                    stored is not None
+                    and stored.black_activity is None
+                    and stored.pixel_hash == pixel_hash
+                ):
                     matches[node_id] = member
         if len(matches) > 1:
             logger.info(
@@ -1163,6 +1201,53 @@ class GraphManager:
             },
         )
         return node_id
+
+    def _record_black_screen(
+        self, observation: Observation, node_ids: Sequence[str], *, expected_node: str | None
+    ) -> str:
+        """Add the black screen in ``observation`` to the node of ``node_ids`` with a black
+        member of its activity, or to a new node described from the activity's class
+        name, and record that on the screen's record. The record takes no describe
+        output, so the screen has no description vector."""
+        activity = observation.activity
+        described = _black_screen_described(activity)
+        node_id = self._black_node(activity, node_ids)
+        if node_id is None:
+            node_id = self._add_screen_node(
+                _ScreenDescription(described.page_description, detail_snapshot={}, elements=[]),
+                observation.package,
+                activity,
+            )
+            logger.info(
+                "Black screenshot of %s starts %s: no node has a black member of that activity",
+                activity,
+                node_id,
+            )
+        else:
+            logger.info(
+                "Black screenshot of %s joins %s, which has a black member of that activity",
+                activity,
+                node_id,
+            )
+        self._record_visit(node_id, {}, [], observation)
+        self._stored_screens[observation.observation_id] = _StoredScreen(
+            observation.pixel_hash, described, activity
+        )
+        annotate_observation(
+            self._require_steps_dir(),
+            observation.observation_id,
+            {"identify": _Decision(expected_node, "black").as_record(node_id)},
+        )
+        return node_id
+
+    def _black_node(self, activity: str, node_ids: Sequence[str]) -> str | None:
+        """Return the first of ``node_ids`` with a black member of ``activity``."""
+        for node_id in node_ids:
+            for member in self.graph.nodes[node_id].get("observations", []):
+                stored = self._stored_screens.get(member)
+                if stored is not None and stored.black_activity == activity:
+                    return node_id
+        return None
 
     def _record_external_web_visit(self, observation: Observation) -> str:
         self.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
@@ -1801,7 +1886,14 @@ class GraphManager:
         vector for the description's embedding, so the short list costs only its
         verifier calls; the node it leaves is not on the list, and no description is
         refined.
+
+        A black member, which has neither, moves by its activity instead, as screen
+        matching places a black screen: the short list would rank every black node
+        first, and the verifier would see identical black images.
         """
+        black_activity = self._stored_screens[member].black_activity
+        if black_activity is not None:
+            return self._move_black_member(node_id, member, black_activity, transitions)
         identification = self._stored_identification(node_id, member, verdicts)
         destination = self._verify_short_list(identification, excluded={node_id})
         new_node = destination is None
@@ -1817,6 +1909,28 @@ class GraphManager:
             },
         }
 
+    def _move_black_member(
+        self,
+        node_id: str,
+        member: str,
+        activity: str,
+        transitions: Sequence[TransitionRecord],
+    ) -> dict[str, object]:
+        """Move the black ``member`` of ``node_id`` to another node of its package with a
+        black member of ``activity``, or to a new node described from ``activity``, and
+        return the change."""
+        package = as_str(self.graph.nodes[node_id].get("package"), "")
+        others = [n for n in self._same_package_nodes(package).node_ids if n != node_id]
+        destination = self._black_node(activity, others)
+        new_node = destination is None
+        if destination is None:
+            destination = self._node_from_stored(node_id, [member])
+        return {
+            "new_node": new_node,
+            **self._relocate(node_id, [member], destination, transitions),
+            "black_activity": activity,
+        }
+
     def _stored_identification(
         self, node_id: str, member: str, verdicts: MemberVerdicts
     ) -> _Identification:
@@ -1828,6 +1942,7 @@ class GraphManager:
             activity=self._member_activity(member),
             package=as_str(self.graph.nodes[node_id].get("package"), ""),
             pixel_hash=stored.pixel_hash,
+            black=stored.black_activity is not None,
         )
         described = stored.described
         screen = _ScreenDescription(described.page_description, described.state, described.elements)
@@ -1845,7 +1960,7 @@ class GraphManager:
         return as_str(record.get("activity"), "")
 
     def _node_from_stored(self, node_id: str, members: Sequence[str]) -> str:
-        """Add a node for ``members`` of ``node_id`` from the stored describe output of the
+        """Add a node for ``members`` of ``node_id`` from the stored description of the
         earliest of them, its representative: its description and its elements."""
         earliest = min(members, key=_step_order)
         described = self._stored_screens[earliest].described
@@ -2541,10 +2656,11 @@ class GraphManager:
         each node, member or edge that lacks one: a node must list its member
         observations with its representative among them, the representative must have
         an image in the step log, every member of an in-app node must have a record
-        there with its pixel hash and describe output, and every edge must hold one
-        entry per action in each per-action list. With embedding settings, so does a
-        damaged text-vector file, one from another model, and one, missing or not,
-        without the vector of a member of an in-app node.
+        there with its pixel hash and, unless it is of a black screenshot, its describe
+        output, and every edge must hold one entry per action in each per-action list.
+        With embedding settings, so does a damaged text-vector file, one from another
+        model, and one, missing or not, without the vector of a member of an in-app
+        node whose record holds a describe output.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2566,7 +2682,11 @@ class GraphManager:
                 text_embeddings_path(path),
                 model=self.embedding.model,
                 kind="text",
-                required=stored_screens.keys(),
+                required=[
+                    member
+                    for member, stored in stored_screens.items()
+                    if stored.black_activity is None
+                ],
             )
             if self.embedding is not None
             else {}
@@ -2765,7 +2885,9 @@ class GraphManager:
         be compared.
 
         An ``ext_`` node stands for every screen of another app or the web, so its
-        members are no screens of the app to compare with.
+        members are no screens of the app to compare with. Two nodes whose members are
+        all black, of different activities, would show the verifier two identical black
+        images, so they stay apart as screen matching keeps them.
         """
         if node_a not in self.graph or node_b not in self.graph:
             return "node missing"
@@ -2777,7 +2899,21 @@ class GraphManager:
         pair = (node_a, node_b)
         if not all(self.graph.nodes[n].get("representative_observation") for n in pair):
             return "missing screenshot"
+        black_a, black_b = self._black_activities(node_a), self._black_activities(node_b)
+        if black_a and black_b and black_a.isdisjoint(black_b):
+            return "black screens of different activities"
         return None
+
+    def _black_activities(self, node_id: str) -> set[str] | None:
+        """Return the activities of ``node_id``'s members when every one is black, or
+        ``None`` when one is not or the node has none."""
+        activities: set[str] = set()
+        for member in _member_observations(self.graph.nodes[node_id]):
+            stored = self._stored_screens.get(member)
+            if stored is None or stored.black_activity is None:
+                return None
+            activities.add(stored.black_activity)
+        return activities or None
 
     @staticmethod
     def _node_numeric_order(node_id: str) -> tuple[int, str]:

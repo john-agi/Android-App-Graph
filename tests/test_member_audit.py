@@ -273,6 +273,35 @@ def test_the_coverage_checkpoint_verifies_the_model_s_pairs_on_closest_members_a
     assert result["merged_count"] == 0
 
 
+SET_PATTERN = "com.demo.password.ChooseLockPattern"
+SET_PIN = "com.demo.password.ChooseLockPassword"
+
+
+def test_two_black_nodes_of_different_activities_are_kept_apart_unverified_whoever_proposes_them(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Every black capture looks the same, so the images propose the pair, and the
+    verifier would compare two identical black images and call them one screen."""
+    write_member_graph(
+        graph_path,
+        {"s0_pattern": [("000001", X)], "s1_pin": [("000002", X)]},
+        black={"000001": SET_PATTERN, "000002": SET_PIN},
+    )
+    graph = _load(graph_path)
+    models.confirm("000001", "000002")
+    issue = {"type": "merge_nodes", "node_a": "s0_pattern", "node_b": "s1_pin"}
+
+    (result,) = graph.verify_merge_proposals(graph.merge_proposals([issue]), {})
+
+    assert result["sources"] == ["text_audit", "image"]
+    assert (result["status"], result["reason"]) == (
+        "skipped",
+        "black screens of different activities",
+    )
+    assert models.shown == []
+    assert list(graph.graph) == ["s0_pattern", "s1_pin"]
+
+
 # Home is the first two members; the last two look alike, and nothing like home.
 SPLIT = {
     "s0_home": [
@@ -530,6 +559,46 @@ def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
     templates = _templates_around_member_checks(graph, graph_path, models)
 
     assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
+
+
+# Home's last member is a black screen of the PIN activity, and Pattern's member a black
+# screen of another; every black member looks the same.
+BLACK_MOVE = {
+    "s0_home": [("000001", X), ("000002", _toward(X, Y, LINKED)), ("000003", Z)],
+    "s1_pattern": [("000004", Z)],
+}
+BLACK_MEMBERS = {"000003": SET_PIN, "000004": SET_PATTERN, "000005": SET_PIN}
+
+
+@pytest.mark.parametrize("pin_node", [True, False], ids=["joins-the-pin-node", "starts-a-node"])
+def test_a_black_member_moves_by_its_activity_not_by_the_verifier(
+    pin_node: bool, graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """The short list would rank every black node first, and the verifier would call two
+    identical black images one screen."""
+    nodes = {**BLACK_MOVE, "s2_pin": [("000005", Z)]} if pin_node else BLACK_MOVE
+    write_member_graph(graph_path, nodes, black=BLACK_MEMBERS)
+    graph = _load(graph_path)
+    models.confirm("000004", "000003")
+
+    (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    destination = "s2_pin" if pin_node else "s2_secure_screen:_chooselockpassword"
+    assert models.shown == [("000001", "000003")]
+    assert models.embedded == []
+    change = check["change"]
+    assert (change["to"], change["new_node"], change["black_activity"]) == (
+        destination,
+        not pin_node,
+        SET_PIN,
+    )
+    assert "000003" in graph.graph.nodes[destination]["observations"]
+    assert graph.graph.nodes["s1_pattern"]["observations"] == ["000004"]
+    assert graph.text_vector("000003") is None
+    if not pin_node:
+        assert graph.graph.nodes[destination]["page_description"] == (
+            "secure screen: ChooseLockPassword"
+        )
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
