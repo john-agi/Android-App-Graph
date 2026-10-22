@@ -158,6 +158,8 @@ class EdgeDetails:
         setup: The device actions sent on the source node before the action since
             the traversal last arrived there from elsewhere, as ``SetupTrail`` reads
             them; None when they are unknown.
+        setup_anchors: The anchor of each action of ``setup``, as ``anchors`` stores a
+            sub-action's, ``None`` for one without. If None, none of them has one.
     """
 
     instruction: str | None = None
@@ -166,6 +168,7 @@ class EdgeDetails:
     num_steps: int | None = None
     effect: ActionEffect | None = None
     setup: Sequence[dict[str, Any]] | None = None
+    setup_anchors: Sequence[dict[str, object] | None] | None = None
 
 
 class SetupTrail:
@@ -183,6 +186,7 @@ class SetupTrail:
     def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
         self._resolve_node_id = resolve_node_id
         self._actions: list[dict[str, Any]] = []
+        self._anchors: list[dict[str, object] | None] = []
         # Each node with the index into _actions where its setup starts, or None when
         # the trail began on it without knowing how the device came to be there.
         self._arrivals: list[tuple[str, int | None]] = []
@@ -196,25 +200,40 @@ class SetupTrail:
         there from elsewhere again.
         """
         self._actions = []
+        self._anchors = []
         self._arrivals = [(node, 0 if arrived else None)]
 
     def setup(self, node: str) -> list[dict[str, Any]] | None:
         """Return the setup of an action sent on ``node`` now, or None when it is unknown."""
-        position = self._position(node)
-        if position is None:
-            return None
-        start = self._arrivals[position][1]
+        start = self._setup_start(node)
         return None if start is None else self._actions[start:]
 
-    def step(self, actions: Sequence[dict[str, Any]], reached: str) -> None:
-        """Add ``actions``, sent on the node the trail is on, and ``reached``, the node
-        they led to."""
+    def setup_anchors(self, node: str) -> list[dict[str, object] | None] | None:
+        """Return the anchor of each action of ``setup(node)``, ``None`` for one without,
+        or None when the setup is unknown."""
+        start = self._setup_start(node)
+        return None if start is None else self._anchors[start:]
+
+    def step(
+        self,
+        actions: Sequence[dict[str, Any]],
+        reached: str,
+        anchors: Sequence[dict[str, object] | None] | None = None,
+    ) -> None:
+        """Add ``actions``, sent on the node the trail is on, with ``anchors``, the anchor
+        each acted on as ``ActionEffect.anchor_records`` gives them (none when None), and
+        ``reached``, the node they led to."""
         self._actions.extend(actions)
+        self._anchors.extend([None] * len(actions) if anchors is None else anchors)
         position = self._position(reached)
         if position is None:
             self._arrivals.append((reached, len(self._actions)))
         else:
             del self._arrivals[position + 1 :]
+
+    def _setup_start(self, node: str) -> int | None:
+        position = self._position(node)
+        return None if position is None else self._arrivals[position][1]
 
     def _position(self, node: str) -> int | None:
         resolved = self._resolve_node_id(node)
@@ -668,6 +687,7 @@ def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
         ("target_observations", ""),
         ("schema_deltas", None),
         ("setups", None),
+        ("setup_anchors", None),
     ):
         values = list(edge_data.get(key, []))
         values.extend([placeholder] * (len(actions) - len(values)))
@@ -721,18 +741,21 @@ def _count_repeat(
     edge_data: dict[str, Any],
     action: dict[str, Any] | list[dict[str, Any]],
     setup: list[dict[str, Any]] | None,
+    setup_anchors: list[dict[str, object] | None] | None,
 ) -> bool:
     """Count one more visit when the edge already holds ``action``, and return whether it
-    does. A known ``setup`` replaces the action's recorded one when that is unknown or
-    longer."""
+    does. A known ``setup`` replaces the action's recorded one, with its
+    ``setup_anchors``, when that is unknown or longer."""
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-            setups = _aligned_lists(edge_data)["setups"]
-            recorded = setups[index]
+            aligned = _aligned_lists(edge_data)
+            recorded = aligned["setups"][index]
             if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
-                setups[index] = setup
-                edge_data["setups"] = setups
+                aligned["setups"][index] = setup
+                aligned["setup_anchors"][index] = setup_anchors
+                edge_data["setups"] = aligned["setups"]
+                edge_data["setup_anchors"] = aligned["setup_anchors"]
             return True
     return False
 
@@ -1736,10 +1759,13 @@ class GraphManager:
         if num_steps is None:
             num_steps = _default_num_steps(action)
         setup = _recorded_setup(details.setup, source, target)
+        setup_anchors = (
+            None if setup is None else list(details.setup_anchors or [None] * len(setup))
+        )
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            if _count_repeat(edge_data, action, setup):
+            if _count_repeat(edge_data, action, setup, setup_anchors):
                 return
         else:
             self.graph.add_edge(source, target, visit_count=1)
@@ -1761,6 +1787,7 @@ class GraphManager:
                 _sub_action_placeholders(action) if effect is None else effect.flag_records(),
             ),
             ("setups", setup),
+            ("setup_anchors", setup_anchors),
         ):
             edge_data[key].append(value)
 
@@ -2673,7 +2700,7 @@ class GraphManager:
                 "action_flags": attrs.get("action_flags", []),
                 "visit_count": attrs.get("visit_count", 0),
             }
-            for key in ("schema_deltas", "setups"):
+            for key in ("schema_deltas", "setups", "setup_anchors"):
                 if attrs.get(key):
                     edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
@@ -2780,7 +2807,7 @@ class GraphManager:
                 "action_flags": edge_data.get("action_flags", []),
                 "visit_count": edge_data.get("visit_count", 0),
             }
-            for key in ("schema_deltas", "setups"):
+            for key in ("schema_deltas", "setups", "setup_anchors"):
                 if edge_data.get(key):
                     edge_attrs[key] = edge_data[key]
             self.graph.add_edge(

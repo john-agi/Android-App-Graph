@@ -1708,7 +1708,7 @@ def test_get_all_edges_from_node_is_empty_for_a_missing_node() -> None:
 
 _ROW = Locator("", "android.widget.LinearLayout", "Network & internet", ("android:id/content",))
 _OTHER_ROW = dataclasses.replace(_ROW, label="Apps")
-_ROW_ANCHOR = {"locator": _ROW.as_record(), "bounds": [0, 699, 1344, 917]}
+_ROW_ANCHOR: dict[str, object] = {"locator": _ROW.as_record(), "bounds": [0, 699, 1344, 917]}
 
 
 def tap_effect(*, mis_tap: bool = False, unchanged: bool = False) -> ActionEffect:
@@ -2036,6 +2036,61 @@ def test_a_repeated_action_keeps_its_shorter_known_setup(
     assert (data["actions"], data["setups"], data["visit_count"]) == ([_TAP], [kept], 2)
 
 
+@pytest.mark.parametrize(
+    ("first", "again", "kept"),
+    [
+        pytest.param(([_SCROLL, _TAP], [None, _ROW_ANCHOR]), ([_TAP], [None]), ([_TAP], [None])),
+        pytest.param(([_TAP], [_ROW_ANCHOR]), ([_SCROLL, _TAP], [None, None]), None),
+        pytest.param(([_TAP], [_ROW_ANCHOR]), (None, None), None),
+    ],
+    ids=["shorter replaces longer", "longer keeps shorter", "unknown keeps known"],
+)
+def test_a_setup_keeps_the_anchor_of_each_of_its_actions(
+    first: tuple[list[dict[str, Any]], list[dict[str, object] | None]],
+    again: tuple[list[dict[str, Any]] | None, list[dict[str, object] | None] | None],
+    kept: tuple[list[dict[str, Any]], list[dict[str, object] | None]] | None,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    setup, setup_anchors = first
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        _TAP,
+        details=EdgeDetails(setup=setup, setup_anchors=setup_anchors),
+    )
+    setup, setup_anchors = again
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        _TAP,
+        details=EdgeDetails(setup=setup, setup_anchors=setup_anchors),
+    )
+
+    data = gm.graph["s0_home"]["s1_settings"]
+    assert list(zip(data["setups"], data["setup_anchors"], strict=True)) == [kept or first]
+
+
+def test_a_dropped_setup_keeps_no_anchors_and_a_setup_given_none_has_none_of_them() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        _TAP,
+        details=EdgeDetails(
+            setup=[_TAP] * (MAX_SETUP_ACTIONS + 1),
+            setup_anchors=[_ROW_ANCHOR] * (MAX_SETUP_ACTIONS + 1),
+        ),
+    )
+    gm.add_edge("s0_home", "s1_settings", {"action": "row"}, details=EdgeDetails(setup=[_SCROLL]))
+    gm.add_edge("s0_home", "s1_settings", {"action": "far row"})
+
+    assert gm.graph["s0_home"]["s1_settings"]["setup_anchors"] == [None, [None], None]
+
+
 def _identity(node: str) -> str:
     return node
 
@@ -2068,6 +2123,22 @@ def test_a_round_trip_joins_the_setup_of_the_node_it_returns_to() -> None:
 
     trail.step([home], "s0_home")
     assert trail.setup("s0_home") == [_TAP, open_menu, choose, open_menu, home]
+
+
+def test_a_setup_trail_keeps_the_anchor_of_each_action_of_a_setup() -> None:
+    open_menu, choose = {"action": "tap", "x": 1}, {"action": "tap", "x": 2}
+    trail = SetupTrail(_identity)
+    trail.begin("s0_home", arrived=False)
+    assert trail.setup_anchors("s0_home") is None
+
+    trail.step([_TAP], "s1_form", [_ROW_ANCHOR])
+    trail.step([_SCROLL], "s1_form")
+    trail.step([open_menu], "s2_menu", [_ROW_ANCHOR])
+    trail.step([choose], "s1_form", [None])
+
+    assert trail.setup("s1_form") == [_SCROLL, open_menu, choose]
+    assert trail.setup_anchors("s1_form") == [None, _ROW_ANCHOR, None]
+    assert trail.setup_anchors("s2_menu") is None
 
 
 def test_a_setup_trail_begun_without_an_arrival_knows_no_setup_until_it_arrives_elsewhere() -> None:
@@ -4813,7 +4884,7 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
 
 
 DESCRIBING_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
-PER_ACTION_LISTS = (*DESCRIBING_LISTS, "anchors", "action_flags")
+PER_ACTION_LISTS = (*DESCRIBING_LISTS, "anchors", "action_flags", "setup_anchors")
 
 edge_and_merge_operations = st.lists(
     st.tuples(

@@ -500,6 +500,35 @@ def test_a_re_exploration_step_records_the_element_its_tap_hit_and_no_mis_tap(
 
 
 @pytest.mark.usefixtures("_fake_device")
+def test_a_re_exploration_step_records_the_anchor_of_each_action_of_its_setup(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph, graph_path = _two_node_graph(tmp_path)
+    reached = iter(["s1_detail", "s1_detail", "s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
+    open_network, open_apps = (
+        {"action": "tap", "x": 400, "y": 780},
+        {"action": "tap", "x": 400, "y": 1300},
+    )
+    sent = iter([open_network, open_apps])
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
+
+    _re_explore(
+        graph,
+        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        _SettingsHome("com.demo"),
+        client,
+        graph_path.parent,
+        steps_per_issue=2,
+    )
+
+    [[network]] = graph.graph["s1_detail"]["s1_detail"]["anchors"]
+    assert network["locator"]["label"] == "Network & internet"
+    edge = graph.graph["s1_detail"]["s0_home"]
+    assert (edge["setups"], edge["setup_anchors"]) == ([[open_network]], [[network]])
+
+
+@pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_skips_unreachable_nodes(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

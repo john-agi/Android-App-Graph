@@ -736,9 +736,9 @@ checkpoint ranks and shows nodes by the same unexplored elements.
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations`, `schema_deltas`, `setups`, `anchors` and
-`action_flags` lists hold one entry per action, in the same order, so entry *i* of
-each describes `actions[i]`. An action that recorded no instruction or observation
+`instructions`, `target_observations`, `schema_deltas`, `setups`, `setup_anchors`,
+`anchors` and `action_flags` lists hold one entry per action, in the same order, so
+entry *i* of each describes `actions[i]`. An action that recorded no instruction or observation
 has `""` in that list, and an action that recorded no state change has `null` in
 `schema_deltas`; only self-loop actions record one. An entry of `anchors` and of
 `action_flags` is itself a list with one item per sub-action of its action, `null`
@@ -762,8 +762,11 @@ when the setup is unknown or too long:
   another one.
 - A setup of more than 8 actions is dropped, and the log says so.
 
-An action recorded again keeps the shorter of its known setups. A graph file
-without `setups` loads unchanged, and its actions replay without a setup.
+An action's entry in `setup_anchors` holds the [anchor](#what-an-action-acted-on)
+of each action of its setup, in the same order, `null` for one without, and is `null`
+when the setup is. An action recorded again keeps the shorter of its known setups,
+with its anchors. A graph file without `setups` loads unchanged, and its actions
+replay without a setup.
 
 #### What an action acted on
 

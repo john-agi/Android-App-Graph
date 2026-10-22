@@ -712,7 +712,12 @@ class Kobe:
             move.source,
             target,
             action=move.action_sequence,
-            details=replace(details, effect=effect, setup=self._setup_trail.setup(move.source)),
+            details=replace(
+                details,
+                effect=effect,
+                setup=self._setup_trail.setup(move.source),
+                setup_anchors=self._setup_trail.setup_anchors(move.source),
+            ),
         )
         self.controller.record_transition(
             Transition(
@@ -810,7 +815,7 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
-        self._setup_trail.step(move.action_sequence, new_node)
+        self._setup_trail.step(move.action_sequence, new_node, effect.anchor_records())
         self.graph.mark_element_explored(move.source, self._acted_on(move, effect))
         self.graph.maybe_normalize_node_edges(move.source)
         self.graph.total_steps_completed += 1

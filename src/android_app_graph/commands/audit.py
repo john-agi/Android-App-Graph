@@ -56,6 +56,7 @@ from android_app_graph.member_groups import (
     MemberCheck,
 )
 from android_app_graph.step_log import (
+    ActionEffect,
     Observation,
     StepRecorder,
     Transition,
@@ -288,7 +289,8 @@ class _Step:
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
     wrote, which differs when an ``end`` is recorded as a back press. ``setup`` is what
-    ``SetupTrail.setup`` read for the action, ``None`` when unknown.
+    ``SetupTrail.setup`` read for the action, ``None`` when unknown, and
+    ``setup_anchors`` what ``SetupTrail.setup_anchors`` read.
     """
 
     before: Observation
@@ -297,6 +299,7 @@ class _Step:
     element: int | None
     action: dict[str, Any]
     setup: list[dict[str, Any]] | None = None
+    setup_anchors: list[dict[str, object] | None] | None = None
 
 
 def _identify(
@@ -432,9 +435,10 @@ def _record_step(
     step: _Step,
     device_state: dict[str, Any],
     step_number: int,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], ActionEffect]:
     """Record the edge *step* took from *source* to the screen *device_state* shows and
-    save the graph. Returns the node the next step starts from, with the step's result.
+    save the graph. Returns the node the next step starts from, with the step's result
+    and what its action did.
     """
     instruction, action = step.instruction, step.action
     after = Observation.from_state(device_state)
@@ -455,6 +459,7 @@ def _record_step(
             num_steps=1,
             effect=effect,
             setup=step.setup,
+            setup_anchors=step.setup_anchors,
         ),
     )
     run.recorder.record_transition(
@@ -491,8 +496,8 @@ def _record_step(
     run.graph.save_graph(run.target.graph_path)
     if new_node == EXTERNAL_WEB_NODE:
         logger.warning("Opened an external web page during re-explore, pressing back")
-        return _leave_external_web(run, source), step_result
-    return new_node, step_result
+        return _leave_external_web(run, source), step_result, effect
+    return new_node, step_result, effect
 
 
 def _explore_steps(
@@ -532,13 +537,19 @@ def _explore_steps(
             trail.begin(current_node, arrived=False)
             continue
 
-        step = replace(step, setup=trail.setup(current_node))
-        current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
+        step = replace(
+            step,
+            setup=trail.setup(current_node),
+            setup_anchors=trail.setup_anchors(current_node),
+        )
+        current_node, step_result, effect = _record_step(
+            run, current_node, step, device_state, step_i + 1
+        )
         step_results.append(step_result)
         if step_result["to"] == EXTERNAL_WEB_NODE:
             trail.begin(current_node, arrived=False)
         else:
-            trail.step([step.action], current_node)
+            trail.step([step.action], current_node, effect.anchor_records())
 
     return step_results
 

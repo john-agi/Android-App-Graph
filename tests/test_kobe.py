@@ -578,6 +578,36 @@ def test_exploration_records_each_action_s_setup_unknown_on_the_screen_it_began_
     }
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_exploration_records_the_anchor_of_each_action_of_a_setup(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup's tap keeps the element it hit, as its own edge does, so that a replay
+    can find that element again."""
+    open_network, back, open_apps = (
+        {"action": "tap", "x": 400, "y": 800},
+        {"action": "back"},
+        {"action": "tap", "x": 400, "y": 1300},
+    )
+    explorer = _explorer(
+        _ReplayDevice(_fixture_screen(_PLAIN_LIST), device_log), tmp_path, router_client
+    )
+    _list_reached_from_home(explorer, "s2_network", "s3_apps")
+    _identifying(explorer, monkeypatch, "s0_home", "s1_list", "s2_network", "s1_list", "s3_apps")
+
+    _explore_sending(explorer, monkeypatch, open_network, open_network, back, open_apps)
+
+    edges = explorer.graph.graph.edges
+    [[network]] = edges["s1_list", "s2_network"]["anchors"]
+    assert network["bounds"] == _NETWORK_ROW_BOUNDS
+    assert edges["s1_list", "s3_apps"]["setups"] == [[open_network, back]]
+    assert edges["s1_list", "s3_apps"]["setup_anchors"] == [[network, None]]
+    assert edges["s0_home", "s1_list"]["setup_anchors"] == [None]
+
+
 @pytest.mark.parametrize("web_page", [False, True], ids=["another app", "outside web page"])
 @pytest.mark.usefixtures("no_sleep")
 def test_after_a_step_that_leaves_the_app_the_setup_of_the_next_action_is_unknown(
