@@ -46,16 +46,19 @@ from typing import Any, Literal, NamedTuple
 import networkx as nx
 from openrouter import OpenRouter
 
-from android_app_graph.android_packages import saved_node_package
 from android_app_graph.graph_files import (
+    PER_ACTION_LISTS,
+    edge_problems,
     graph_steps_dir,
     load_embeddings,
+    nodes_without_members,
     observation_image_b64,
     observation_image_path,
     observation_tree_path,
     require_known_edge_endpoints,
     save_embeddings,
     text_embeddings_path,
+    unloadable_graph,
     write_json_atomically,
 )
 from android_app_graph.member_groups import (
@@ -160,9 +163,10 @@ class EdgeDetails:
             Format: {"key": {"before": old_val, "after": new_val}, ...}
         num_steps: Number of action steps the edge takes to traverse.
             If None, defaults to len(action) for lists or 1 for single actions.
-        setup: The device actions sent on the source node before the action since
-            the traversal last arrived there from elsewhere, as ``SetupTrail`` reads
-            them; None when they are unknown.
+        setup: The device actions sent on the source node before the action, since
+            the traversal last arrived there from elsewhere, whose effect on the node's
+            state is in force when the action is sent, as ``SetupTrail`` reads them;
+            None when they are unknown.
     """
 
     instruction: str | None = None
@@ -172,58 +176,119 @@ class EdgeDetails:
     setup: Sequence[dict[str, Any]] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _NodeState:
+    """A state the trail found a node in, and the index into the trail's actions where
+    the actions sent in that state start."""
+
+    start: int
+    state: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _Arrival:
+    """A node the trail arrived at and the states it found the node in since, in order;
+    ``None`` when the trail began on the node without knowing how the device came there."""
+
+    node: str
+    states: list[_NodeState] | None
+
+
+def _same_state(first: Mapping[str, object], second: Mapping[str, object]) -> bool:
+    """Return whether two states of a node agree on every key; a key one of them lacks
+    counts as null, as in a self-loop's schema delta."""
+    return all(first.get(key) == second.get(key) for key in first.keys() | second.keys())
+
+
+def _spans_in_force(states: Sequence[_NodeState]) -> list[tuple[int, int]]:
+    """Return the spans ``(start, end)`` of the trail's actions that took a node from the
+    first of ``states`` to the last, leaving out what was undone: the actions from a state
+    to a later return to the same state."""
+    spans: list[tuple[int, int]] = []
+    path = [states[0].state]
+    for before, after in itertools.pairwise(states):
+        repeated = next(
+            (index for index, state in enumerate(path) if _same_state(state, after.state)), None
+        )
+        if repeated is None:
+            spans.append((before.start, after.start))
+            path.append(after.state)
+        else:
+            del spans[repeated:]
+            del path[repeated + 1 :]
+    return spans
+
+
 class SetupTrail:
-    """The device actions an exploration sent since it began on a screen, from which it
-    reads each action's setup: the actions sent on the action's source node since the
-    trail last arrived there from elsewhere.
+    """The device actions an exploration sent since it began on a screen, and the states
+    they left each node in, from which it reads each action's setup: the actions sent on
+    the action's source node, since the trail last arrived there from elsewhere, whose
+    effect on the node's state is in force when the action is sent.
 
     The trail keeps the nodes it arrived at in order. Arriving at one of them again, such
-    as a list after one of its rows, ends a round trip: the nodes after it are left
-    behind, and the round trip's actions join its setup, as a self-loop's do. Arriving at
-    any other node starts its setup empty. Node IDs are compared through
-    ``resolve_node_id``, so a node renamed or merged while the trail holds it still matches.
+    as a form after a dialog that set one of its fields, ends a round trip: the nodes
+    after it are left behind, and the round trip's actions join its setup, as a
+    self-loop's do. Arriving at any other node starts its setup empty.
+
+    A setup leaves out what was undone: when the node comes back to a state it was in
+    since the trail arrived there, the actions in between are left out, such as a row of
+    a list opened and left by Back, a menu opened and closed again, or a field typed and
+    cleared. States compare key by key, as a self-loop's schema delta does. Node IDs are
+    compared through ``resolve_node_id``, so a node renamed or merged while the trail
+    holds it still matches.
     """
 
     def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
         self._resolve_node_id = resolve_node_id
         self._actions: list[dict[str, Any]] = []
-        # Each node with the index into _actions where its setup starts, or None when
-        # the trail began on it without knowing how the device came to be there.
-        self._arrivals: list[tuple[str, int | None]] = []
+        self._arrivals: list[_Arrival] = []
 
-    def begin(self, node: str, *, arrived: bool) -> None:
+    def begin(self, node: str, arrival_state: Mapping[str, object] | None) -> None:
         """Begin the trail again on ``node``, forgetting every action before.
 
-        ``arrived`` says the device has just arrived at ``node`` from elsewhere, as when a
-        replay reaches the node it replays to, so the setup on it starts empty. Otherwise
-        the setup of every action sent on ``node`` is unknown until the trail arrives
-        there from elsewhere again.
+        ``arrival_state`` is the node's state when the device has just arrived there from
+        elsewhere, as when a replay reaches the node it replays to; the setup on it starts
+        empty. ``None`` says how the device came to be on ``node`` is unknown: the setup of
+        every action sent on it is unknown until the trail arrives there from elsewhere
+        again.
         """
         self._actions = []
-        self._arrivals = [(node, 0 if arrived else None)]
+        states = None if arrival_state is None else [_NodeState(0, dict(arrival_state))]
+        self._arrivals = [_Arrival(node, states)]
 
     def setup(self, node: str) -> list[dict[str, Any]] | None:
-        """Return the setup of an action sent on ``node`` now, or None when it is unknown."""
+        """Return the setup of an action sent on ``node``, the node the trail is on, or
+        None when it is unknown."""
         position = self._position(node)
         if position is None:
             return None
-        start = self._arrivals[position][1]
-        return None if start is None else self._actions[start:]
+        states = self._arrivals[position].states
+        if states is None:
+            return None
+        return [
+            action for start, end in _spans_in_force(states) for action in self._actions[start:end]
+        ]
 
-    def step(self, actions: Sequence[dict[str, Any]], reached: str) -> None:
+    def step(
+        self, actions: Sequence[dict[str, Any]], reached: str, state: Mapping[str, object]
+    ) -> None:
         """Add ``actions``, sent on the node the trail is on, and ``reached``, the node
-        they led to."""
+        they led to, in ``state``."""
         self._actions.extend(actions)
+        reached_state = _NodeState(len(self._actions), dict(state))
         position = self._position(reached)
         if position is None:
-            self._arrivals.append((reached, len(self._actions)))
-        else:
-            del self._arrivals[position + 1 :]
+            self._arrivals.append(_Arrival(reached, [reached_state]))
+            return
+        del self._arrivals[position + 1 :]
+        states = self._arrivals[position].states
+        if states is not None:
+            states.append(reached_state)
 
     def _position(self, node: str) -> int | None:
         resolved = self._resolve_node_id(node)
         for position in reversed(range(len(self._arrivals))):
-            if self._resolve_node_id(self._arrivals[position][0]) == resolved:
+            if self._resolve_node_id(self._arrivals[position].node) == resolved:
                 return position
         return None
 
@@ -618,20 +683,7 @@ def _default_num_steps(action: object) -> int:
 
 def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
     """Readers pair entry i of every per-action list with actions[i] and skip placeholders."""
-    actions = list(edge_data.get("actions", []))
-    num_steps = list(edge_data.get("num_steps", []))
-    num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
-    aligned: dict[str, list[Any]] = {"actions": actions, "num_steps": num_steps}
-    for key, placeholder in (
-        ("instructions", ""),
-        ("target_observations", ""),
-        ("schema_deltas", None),
-        ("setups", None),
-    ):
-        values = list(edge_data.get(key, []))
-        values.extend([placeholder] * (len(actions) - len(values)))
-        aligned[key] = values
-    return aligned
+    return {key: list(edge_data.get(key, [])) for key in ("actions", *PER_ACTION_LISTS)}
 
 
 def _same_action(entry: object, action: object) -> bool:
@@ -651,7 +703,7 @@ def _without_entries(
 
 def _setup_actions(entry: object) -> tuple[dict[str, Any], ...]:
     """Return an action's entry of ``setups`` as its device actions; an entry that is not
-    a list of actions, such as the placeholder of a setup not recorded, gives none."""
+    a list of actions, such as the ``None`` of an unknown setup, gives none."""
     if not isinstance(entry, list) or not all(isinstance(action, dict) for action in entry):
         return ()
     return tuple(as_str_dict(action) for action in entry)
@@ -687,11 +739,10 @@ def _count_repeat(
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-            setups = _aligned_lists(edge_data)["setups"]
+            setups = edge_data["setups"]
             recorded = setups[index]
             if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
                 setups[index] = setup
-                edge_data["setups"] = setups
             return True
     return False
 
@@ -740,57 +791,73 @@ def _has_tree_or_reason(steps_dir: Path, observation_id: str) -> bool:
     return record is not None and bool(as_str(record.get("ui_tree_error"), ""))
 
 
-def _require_node_members(nodes: list[dict[str, Any]], path: Path, steps_dir: Path) -> None:
-    """Raise ``ValueError`` naming every saved node without member observations, or
-    whose representative is not one of them, has no image in ``steps_dir``, or has
-    neither a tree there nor a record that says why it has none.
+def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
+    """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
+    member observations with its representative among them, or whose representative has
+    no image in ``steps_dir`` or neither a tree there nor a record that says why it has
+    none, and every edge without actions or whose per-action lists do not hold one entry
+    per action.
     """
-    without_members: list[str] = []
-    without_image: list[str] = []
-    without_tree: list[str] = []
-    for node in nodes:
-        representative = node.get("representative_observation")
-        if not isinstance(representative, str) or representative not in _member_observations(node):
-            without_members.append(node["id"])
-        elif not observation_image_path(steps_dir, representative).is_file():
-            without_image.append(node["id"])
-        elif not _has_tree_or_reason(steps_dir, representative):
-            without_tree.append(node["id"])
+    without_members = nodes_without_members(graph["nodes"])
+    without_image = [
+        node["id"]
+        for node in graph["nodes"]
+        if node["id"] not in without_members
+        and not observation_image_path(steps_dir, node["representative_observation"]).is_file()
+    ]
+    without_tree = [
+        node["id"]
+        for node in graph["nodes"]
+        if node["id"] not in without_members
+        and not _has_tree_or_reason(steps_dir, node["representative_observation"])
+    ]
     problems = []
     if without_members:
-        problems.append(f"no member observations with a representative: {without_members}")
+        problems.append(
+            f"node(s) with no member observations with a representative: {without_members}"
+        )
     if without_image:
-        problems.append(f"a representative without an image in {steps_dir}: {without_image}")
+        problems.append(
+            f"node(s) with a representative without an image in {steps_dir}: {without_image}"
+        )
     if without_tree:
         problems.append(
-            f"a representative with neither a tree nor a recorded reason in {steps_dir}: "
-            f"{without_tree}"
+            f"node(s) with a representative with neither a tree nor a recorded reason in "
+            f"{steps_dir}: {without_tree}"
         )
+    problems.extend(edge_problems(graph["edges"]))
     if problems:
-        msg = (
-            f"{path}: node(s) with {'; '.join(problems)}. A graph whose nodes do not list "
-            "their member observations, or whose representatives have no tree and no "
-            "recorded reason, cannot be loaded: explore the app again into a new graph "
-            "directory."
-        )
-        raise ValueError(msg)
+        raise unloadable_graph(path, problems)
 
 
-def _stored_screens(nodes: list[dict[str, Any]], steps_dir: Path) -> dict[str, _StoredScreen]:
+def _stored_screens(
+    nodes: list[dict[str, Any]], path: Path, steps_dir: Path
+) -> dict[str, _StoredScreen]:
     """Read the pixel hash and describe output of every member of the saved in-app
-    ``nodes`` whose record in ``steps_dir`` holds both."""
+    ``nodes`` from its record in ``steps_dir``.
+
+    A member whose record holds no pixel hash or no describe output raises
+    ``ValueError`` naming ``path`` and every such member.
+    """
     stored: dict[str, _StoredScreen] = {}
+    undescribed: list[str] = []
     for node in nodes:
         if node["id"].startswith("ext_") or node.get("is_external"):
             continue
         for member in _member_observations(node):
-            record = read_observation_record(steps_dir, member)
-            if record is None:
-                continue
+            record = read_observation_record(steps_dir, member) or {}
             described = _Described.from_record(record)
             pixel_hash = as_str(record.get("pixel_hash"), "")
-            if described is not None and pixel_hash:
+            if described is None or not pixel_hash:
+                undescribed.append(member)
+            else:
                 stored[member] = _StoredScreen(pixel_hash, described)
+    if undescribed:
+        problem = (
+            f"member(s) whose record in {steps_dir} holds no pixel hash or no describe "
+            f"output: {undescribed}"
+        )
+        raise unloadable_graph(path, [problem])
     return stored
 
 
@@ -806,7 +873,6 @@ class GraphManager:
         audit_timeout: float = DEFAULT_AUDIT_TIMEOUT,
     ) -> None:
         self.graph = nx.DiGraph()
-        self.package_name = ""
         self.client = client
         self.page_detail = page_detail
         self.embedding = embedding
@@ -1747,11 +1813,7 @@ class GraphManager:
         if not instruction or not self.graph.has_edge(source, target):
             return None
         edge_data = self.graph[source][target]
-        # A graph loaded from JSON can hold more actions than instructions; an action
-        # without an instruction matches nothing, so a shorter list is not an error.
-        recorded = zip(
-            edge_data.get("actions", []), edge_data.get("instructions", []), strict=False
-        )
+        recorded = zip(edge_data["actions"], edge_data["instructions"], strict=True)
         for index, (action, recorded_instruction) in enumerate(recorded):
             if recorded_instruction == instruction:
                 return index, action
@@ -1759,9 +1821,8 @@ class GraphManager:
 
     def action_setup(self, source: str, target: str, index: int) -> tuple[dict[str, Any], ...]:
         """Return the setup of action *index* of source→target, the device actions a replay
-        sends on *source* before it; an action recorded without a setup has none."""
-        setups = self.graph[source][target].get("setups", [])
-        return _setup_actions(setups[index]) if index < len(setups) else ()
+        sends on *source* before it; an action whose setup is unknown has none."""
+        return _setup_actions(self.graph[source][target]["setups"][index])
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
         """Move action *index* of source→target, with its entry in every per-action list, to
@@ -1803,7 +1864,6 @@ class GraphManager:
         this replaces, and the next normalization rebuilds them.
         """
         edge_data = self.graph[source][target]
-        edge_data.update(_aligned_lists(edge_data))
         edge_data["instructions"][index] = instruction
         _drop_templates(edge_data)
 
@@ -1811,9 +1871,8 @@ class GraphManager:
         """Return, in node order, the groups of the members of every in-app node at the
         cosine ``floor`` and the checks to make on them.
 
-        Only members with an image vector and a stored describe output are grouped,
-        since a member can leave its node only with both; a node whose representative
-        lacks either has no plan.
+        Only members with an image vector are grouped; a node whose representative has
+        none has no plan.
         """
         plans: list[tuple[str, MemberPlan]] = []
         for raw_id, data in sorted(
@@ -1823,7 +1882,7 @@ class GraphManager:
             node_id = _node_id(raw_id)
             if self._is_external(node_id):
                 continue
-            members = [m for m in _member_observations(data) if m in self._stored_screens]
+            members = _member_observations(data)
             plan = plan_member_checks(
                 members,
                 as_str(data.get("representative_observation"), ""),
@@ -2239,8 +2298,7 @@ class GraphManager:
     def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
         """Return the fewest device actions a replay of one of the edge's actions sends,
         its setup's included (used as path weight)."""
-        costs = _action_costs(edge_data)
-        return min(costs) if costs else 1
+        return min(_action_costs(edge_data))
 
     def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
@@ -2251,7 +2309,7 @@ class GraphManager:
         Returns:
             The path's steps, the first being the source itself. A step's action is the
             edge's cheapest action, a single dict or a list of dicts (compound action),
-            with its setup; an edge without actions gives ``{}``.
+            with its setup.
             Returns None if no path exists.
         """
         if source == target:
@@ -2275,16 +2333,14 @@ class GraphManager:
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
             costs = _action_costs(edge_data)
-            if costs:
-                best_idx = costs.index(min(costs))
-                step = PathStep(
+            best_idx = costs.index(min(costs))
+            result.append(
+                PathStep(
                     _node_id(t),
                     edge_data["actions"][best_idx],
                     self.action_setup(_node_id(s), _node_id(t), best_idx),
                 )
-            else:
-                step = PathStep(_node_id(t), {}, ())
-            result.append(step)
+            )
 
         return result
 
@@ -2334,14 +2390,6 @@ class GraphManager:
                     node_id, action, setup = nav_path[i]
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
-                    instruction = ""
-                    instructions = edge_data.get("instructions", [])
-                    if instructions:
-                        instruction = instructions[0]
-                    target_obs = ""
-                    target_observations = edge_data.get("target_observations", [])
-                    if target_observations:
-                        target_obs = target_observations[0]
                     path_steps.append(
                         {
                             "type": "navigate",
@@ -2349,8 +2397,8 @@ class GraphManager:
                             "to": node_id,
                             "setup": list(setup),
                             "action": action,
-                            "instruction": instruction,
-                            "target_observation": target_obs,
+                            "instruction": edge_data["instructions"][0],
+                            "target_observation": edge_data["target_observations"][0],
                         }
                     )
 
@@ -2391,9 +2439,6 @@ class GraphManager:
         target_observations = edge_data.get("target_observations", [])
         actions = edge_data.get("actions", [])
 
-        if not deltas:
-            return None
-
         best_idx = -1
         best_score = 0
 
@@ -2411,11 +2456,9 @@ class GraphManager:
         return {
             "type": "self_loop",
             "node": node_id,
-            "instruction": instructions[best_idx] if best_idx < len(instructions) else "",
-            "target_observation": target_observations[best_idx]
-            if best_idx < len(target_observations)
-            else "",
-            "action": actions[best_idx] if best_idx < len(actions) else [],
+            "instruction": instructions[best_idx],
+            "target_observation": target_observations[best_idx],
+            "action": actions[best_idx],
             "schema_delta": deltas[best_idx],
             "required_schema": required_schema,
         }
@@ -2551,7 +2594,6 @@ class GraphManager:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
-            "package_name": self.package_name,
             "next_id": self._next_id,
             "total_steps_completed": self.total_steps_completed,
             "node_aliases": dict(self._node_aliases),
@@ -2587,10 +2629,11 @@ class GraphManager:
                 "target_observations": attrs.get("target_observations", []),
                 "num_steps": attrs.get("num_steps", []),
                 "visit_count": attrs.get("visit_count", 0),
+                "schema_deltas": attrs.get("schema_deltas", []),
+                "setups": attrs.get("setups", []),
             }
-            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
-                if attrs.get(key):
-                    edge_data[key] = attrs[key]
+            if attrs.get("normalized_instructions_hash"):
+                edge_data["normalized_instructions_hash"] = attrs["normalized_instructions_hash"]
             data["edges"].append(edge_data)
 
         # Before the graph: loading requires a text vector for every described member,
@@ -2610,17 +2653,21 @@ class GraphManager:
             "Graph saved to %s (%d nodes, %d edges)", path, len(data["nodes"]), len(data["edges"])
         )
 
-    def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
+    def load_graph(self, path: str | Path) -> None:
         """Load graph from a JSON file, with its members' text vectors when the manager
         has embedding settings, the step log beside it as the manager's ``steps_dir``,
         its image vectors when the manager has image-embedding settings, and its
         members' stored screens.
 
-        ``default_package_name`` stands in for the ``package_name`` of a file that has
-        none. A node without member observations, or whose representative has no image
-        in the step log, or neither a tree there nor a recorded reason it has none,
-        raises ``ValueError`` naming it, and so does a text-vector file without the
-        vector of every member with a stored screen.
+        A file that lacks a field the graph needs raises ``ValueError`` naming it and
+        each node, member or edge that lacks one: a node must list its member
+        observations with its representative among them, the representative must have
+        an image in the step log and a tree there or a record that says why it has
+        none, every member of an in-app node must have a record there with its pixel
+        hash and describe output, and every edge must hold one entry per action in each
+        per-action list. With embedding settings, so does a damaged text-vector file, one
+        from another model, and one, missing or not, without the vector of a member of an
+        in-app node.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2630,8 +2677,8 @@ class GraphManager:
         # untouched, not wipe them partway through the node loop.
         data = require_known_edge_endpoints(raw, path)
         steps_dir = graph_steps_dir(path)
-        _require_node_members(data["nodes"], path, steps_dir)
-        stored_screens = _stored_screens(data["nodes"], steps_dir)
+        _require_saved_fields(data, path, steps_dir)
+        stored_screens = _stored_screens(data["nodes"], path, steps_dir)
         image_vectors = (
             load_image_embeddings(steps_dir, model=self.image_embedding.model)
             if self.image_embedding is not None
@@ -2648,7 +2695,6 @@ class GraphManager:
             else {}
         )
 
-        self.package_name = as_str(data.get("package_name"), "") or default_package_name
         self._next_id = data.get("next_id", 0)
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.steps_dir = steps_dir
@@ -2665,12 +2711,12 @@ class GraphManager:
         }
         self.graph.clear()
 
-        for node_data in data.get("nodes", []):
+        for node_data in data["nodes"]:
             node_id = node_data["id"]
-            activities = node_data.get("activities", [node_data.get("activity", "")])
+            activities = node_data.get("activities", [])
             self.graph.add_node(
                 node_id,
-                package=saved_node_package(node_data, self.package_name),
+                package=as_str(node_data.get("package"), ""),
                 activity=activities[0] if activities else "",
                 activities=activities,
                 page_description=node_data.get("page_description", ""),
@@ -2679,26 +2725,23 @@ class GraphManager:
                 interactable_elements=node_data.get("interactable_elements", []),
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
-                observations=_member_observations(node_data),
+                observations=node_data["observations"],
                 representative_observation=node_data["representative_observation"],
             )
 
-        for edge_data in data.get("edges", []):
-            edge_attrs = {
-                "actions": edge_data.get("actions", []),
-                "instructions": edge_data.get("instructions", []),
-                "instruction_templates": edge_data.get("instruction_templates", []),
-                "target_observations": edge_data.get("target_observations", []),
-                "num_steps": edge_data.get("num_steps", []),
-                "visit_count": edge_data.get("visit_count", 0),
-            }
-            for key in ("schema_deltas", "setups", "normalized_instructions_hash"):
-                if edge_data.get(key):
-                    edge_attrs[key] = edge_data[key]
+        for edge_data in data["edges"]:
+            hashed = (
+                {"normalized_instructions_hash": edge_data["normalized_instructions_hash"]}
+                if edge_data.get("normalized_instructions_hash")
+                else {}
+            )
             self.graph.add_edge(
                 edge_data["source"],
                 edge_data["target"],
-                **edge_attrs,
+                **{key: edge_data[key] for key in ("actions", *PER_ACTION_LISTS)},
+                instruction_templates=edge_data.get("instruction_templates", []),
+                visit_count=edge_data.get("visit_count", 0),
+                **hashed,
             )
 
         logger.info(
@@ -2726,10 +2769,7 @@ class GraphManager:
         actions = []
         for i in range(len(path) - 1):
             source, target = path[i], path[i + 1]
-            edge_data = self.graph[source][target]
-            edge_actions = edge_data.get("actions", [])
-            if edge_actions:
-                actions.append(edge_actions[0])
+            actions.append(self.graph[source][target]["actions"][0])
         return actions
 
     def summary(self) -> dict[str, Any]:
@@ -2780,10 +2820,9 @@ class GraphManager:
             target_desc = self.graph.nodes[target].get("page_description", "")
 
             lines.append(f'  {source} ("{source_desc}") → {target} ("{target_desc}"){is_self}:')
-            for i, instr in enumerate(instructions):
+            for instr, obs in zip(instructions, observations, strict=True):
                 if not instr:
                     continue
-                obs = observations[i] if i < len(observations) else ""
                 obs_str = f" → {obs}" if obs else ""
                 lines.append(f'    - "{instr}"{obs_str}')
 

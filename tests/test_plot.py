@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -191,7 +192,22 @@ def test_as_digraph_rejects_other_types() -> None:
         plot.as_digraph(object())
 
 
+def _saved(edge: dict[str, Any]) -> dict[str, Any]:
+    """Return ``edge`` with the per-action lists ``add_edge`` records for its actions, for
+    each list it does not hold."""
+    count = len(edge["actions"])
+    recorded = {
+        "num_steps": [1] * count,
+        "instructions": [""] * count,
+        "target_observations": [""] * count,
+        "schema_deltas": [None] * count,
+        "setups": [None] * count,
+    }
+    return {**recorded, **edge}
+
+
 def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
+    """Write a two-node graph, with its members' images in the step log beside it."""
     graph_path = tmp_path / f"{stem}.json"
     graph_path.write_text(
         json.dumps(
@@ -216,25 +232,30 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
                     },
                 ],
                 "edges": [
-                    {
-                        "source": "s0_home",
-                        "target": "s1_search",
-                        "actions": [{"action": "tap", "x": 5, "y": 6}],
-                        "instructions": ["open search"],
-                        "num_steps": [1],
-                        "visit_count": 2,
-                    },
-                    {
-                        "source": "s1_search",
-                        "target": "s1_search",
-                        "actions": [{"action": "type", "text": "cafe"}],
-                        "schema_deltas": [{"query": {"before": None, "after": "cafe"}}],
-                    },
+                    _saved(
+                        {
+                            "source": "s0_home",
+                            "target": "s1_search",
+                            "actions": [{"action": "tap", "x": 5, "y": 6}],
+                            "instructions": ["open search"],
+                            "visit_count": 2,
+                        }
+                    ),
+                    _saved(
+                        {
+                            "source": "s1_search",
+                            "target": "s1_search",
+                            "actions": [{"action": "type", "text": "cafe"}],
+                            "schema_deltas": [{"query": {"before": None, "after": "cafe"}}],
+                        }
+                    ),
                 ],
             }
         ),
         encoding="utf-8",
     )
+    for observation_id in ("000000", "000001", "000002"):
+        _write_step_image(tmp_path, observation_id, f"member {observation_id}".encode())
     return graph_path
 
 
@@ -247,11 +268,10 @@ def _write_step_image(tmp_path: Path, observation_id: str, image: bytes) -> str:
 
 
 def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
-    """A node's thumbnail is its representative's WebP image from the step log; a node
-    whose representative has no image there gets none."""
+    """A node's thumbnail is its representative's WebP image from the step log."""
     graph_path = _write_graph(tmp_path)
     home_uri = _write_step_image(tmp_path, "000000", b"representative")
-    _write_step_image(tmp_path, "000002", b"another member")
+    search_uri = _write_step_image(tmp_path, "000001", b"search")
 
     data, graph = load_result = plot.load_graph(str(graph_path))
     assert len(load_result) == 2
@@ -260,12 +280,15 @@ def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
     assert graph.nodes["s0_home"]["elements_explored"] == 1
     assert graph.nodes["s0_home"]["elements_total"] == 2
     assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
-    assert graph.nodes["s1_search"]["screenshot_uri"] is None
+    assert graph.nodes["s1_search"]["screenshot_uri"] == search_uri
     assert graph.edges["s0_home", "s1_search"]["label"].startswith("open search")
     # The self-loop edge falls back to an action summary plus its schema delta.
     self_loop_label = graph.edges["s1_search", "s1_search"]["label"]
     assert self_loop_label.startswith("type 'cafe'")
     assert "query" in self_loop_label
+
+
+_MEMBER = {"observations": ["000000"], "representative_observation": "000000"}
 
 
 def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: Path) -> None:
@@ -274,39 +297,40 @@ def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: 
         json.dumps(
             {
                 "nodes": [
-                    {"id": "s0_list", "page_description": "Shopping list"},
-                    {"id": "s1_info", "page_description": "Item info"},
+                    {"id": "s0_list", "page_description": "Shopping list", **_MEMBER},
+                    {"id": "s1_info", "page_description": "Item info", **_MEMBER},
                 ],
                 "edges": [
-                    {
-                        "source": "s0_list",
-                        "target": "s0_list",
-                        "actions": [
-                            {"action": "swipe"},
-                            {"action": "back"},
-                            {"action": "type", "text": "milk"},
-                        ],
-                        "instructions": ["Scroll down the list", "", "Type 'milk'"],
-                        "schema_deltas": [
-                            {"first_visible_item": {"before": "A", "after": "K"}},
-                            None,
-                            {"search_query": {"before": None, "after": "milk"}},
-                        ],
-                        "num_steps": [1, 1, 1],
-                    },
-                    {
-                        "source": "s0_list",
-                        "target": "s1_info",
-                        "actions": [{"action": "tap", "x": 9, "y": 40}],
-                        "instructions": [""],
-                        "schema_deltas": [None],
-                        "num_steps": [1],
-                    },
+                    _saved(
+                        {
+                            "source": "s0_list",
+                            "target": "s0_list",
+                            "actions": [
+                                {"action": "swipe"},
+                                {"action": "back"},
+                                {"action": "type", "text": "milk"},
+                            ],
+                            "instructions": ["Scroll down the list", "", "Type 'milk'"],
+                            "schema_deltas": [
+                                {"first_visible_item": {"before": "A", "after": "K"}},
+                                None,
+                                {"search_query": {"before": None, "after": "milk"}},
+                            ],
+                        }
+                    ),
+                    _saved(
+                        {
+                            "source": "s0_list",
+                            "target": "s1_info",
+                            "actions": [{"action": "tap", "x": 9, "y": 40}],
+                        }
+                    ),
                 ],
             }
         ),
         encoding="utf-8",
     )
+    _write_step_image(tmp_path, "000000", b"image")
 
     _data, graph = plot.load_graph(str(graph_path))
 
@@ -331,9 +355,10 @@ def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: 
         (
             {
                 "target": "s0_search",
-                "instructions": ["Go back"],
+                "actions": [{"action": "back"}, {"action": "back"}],
+                "instructions": ["Go back", ""],
                 "schema_deltas": [None, {}],
-                "num_steps": [2],
+                "num_steps": [2, 3],
             },
             "Go back\n[2 steps]",
         ),
@@ -347,16 +372,23 @@ def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
         json.dumps(
             {
                 "nodes": [
-                    {"id": "s0_search", "page_description": "Search"},
-                    {"id": "s1_results", "page_description": "Results"},
+                    {"id": "s0_search", "page_description": "Search", **_MEMBER},
+                    {"id": "s1_results", "page_description": "Results", **_MEMBER},
                 ],
                 "edges": [
-                    {"source": "s0_search", "actions": [{"action": "tap", "x": 1, "y": 2}], **edge}
+                    _saved(
+                        {
+                            "source": "s0_search",
+                            "actions": [{"action": "tap", "x": 1, "y": 2}],
+                            **edge,
+                        }
+                    )
                 ],
             }
         ),
         encoding="utf-8",
     )
+    _write_step_image(tmp_path, "000000", b"image")
 
     _data, graph = plot.load_graph(str(graph_path))
 
@@ -369,21 +401,6 @@ def test_load_graph_reads_an_audited_graph_from_the_shared_step_log(tmp_path: Pa
 
     _data, graph = plot.load_graph(str(graph_path))
     assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
-
-
-@pytest.mark.parametrize("representative", [None, 7], ids=["absent", "not-a-string"])
-def test_load_graph_shows_no_thumbnail_without_a_representative(
-    tmp_path: Path, representative: object
-) -> None:
-    node: dict[str, object] = {"id": "s0_home", "page_description": "Home"}
-    if representative is not None:
-        node["representative_observation"] = representative
-    graph_path = tmp_path / "demo.json"
-    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
-    _write_step_image(tmp_path, "000007", b"image")
-
-    _data, graph = plot.load_graph(str(graph_path))
-    assert graph.nodes["s0_home"]["screenshot_uri"] is None
 
 
 def _write_member_graph(tmp_path: Path, observations: list[str], representative: str) -> Path:
@@ -416,41 +433,102 @@ def test_load_graph_loads_the_ten_oldest_member_images_and_counts_every_member(
     assert graph.nodes["s0_home"]["member_total"] == 12
 
 
-def test_load_graph_skips_a_member_without_an_image(tmp_path: Path) -> None:
-    """The next member with an image takes its place among the ten, and it still counts."""
+def test_load_graph_rejects_a_member_without_an_image(tmp_path: Path) -> None:
+    """Any member counts, not only the ten the panel shows."""
     observations = _steps(12)
     graph_path = _write_member_graph(tmp_path, observations, observations[0])
-    uris = [
-        _write_step_image(tmp_path, step, f"member {step}".encode())
-        for step in observations
-        if step != "000003"
-    ]
+    for step in observations:
+        if step not in {"000003", "000011"}:
+            _write_step_image(tmp_path, step, f"member {step}".encode())
 
-    _data, graph = plot.load_graph(str(graph_path))
+    with pytest.raises(ValueError, match="without an image") as excinfo:
+        plot.load_graph(str(graph_path))
 
-    assert graph.nodes["s0_home"]["member_image_uris"] == uris[:10]
-    assert graph.nodes["s0_home"]["member_total"] == 12
+    message = str(excinfo.value)
+    assert "['000003', '000011']" in message
+    assert str(graph_path) in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 @pytest.mark.parametrize(
-    ("observations", "total"),
-    [(None, 0), ("000000", 0), ([7, "000000"], 1)],
-    ids=["absent", "not-a-list", "not-a-string"],
+    ("edge", "problem"),
+    [
+        ({}, "edge(s) without actions"),
+        ({"actions": []}, "edge(s) without actions"),
+        (
+            _saved({"actions": [{"action": "tap"}], "setups": []}),
+            "edge(s) without one entry per action",
+        ),
+    ],
+    ids=["no-actions", "empty-actions", "short-list"],
 )
-def test_load_graph_counts_only_the_observation_ids_a_node_lists(
-    tmp_path: Path, observations: object, total: int
+def test_load_graph_rejects_an_edge_without_actions_or_one_entry_per_action(
+    tmp_path: Path, edge: dict[str, object], problem: str
 ) -> None:
-    node: dict[str, object] = {"id": "s0_home", "page_description": "Home"}
-    if observations is not None:
-        node["observations"] = observations
     graph_path = tmp_path / "demo.json"
-    graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
-    uri = _write_step_image(tmp_path, "000000", b"image")
+    nodes = [{"id": "s0_home", "page_description": "Home", **_MEMBER}]
+    edges = [{"source": "s0_home", "target": "s0_home", **edge}]
+    graph_path.write_text(json.dumps({"nodes": nodes, "edges": edges}), encoding="utf-8")
+    _write_step_image(tmp_path, "000000", b"image")
 
-    _data, graph = plot.load_graph(str(graph_path))
+    with pytest.raises(ValueError, match=re.escape(problem)) as excinfo:
+        plot.load_graph(str(graph_path))
 
-    assert graph.nodes["s0_home"]["member_image_uris"] == [uri] * total
-    assert graph.nodes["s0_home"]["member_total"] == total
+    message = str(excinfo.value)
+    assert "['s0_home -> s0_home']" in message
+    assert str(graph_path) in message
+    assert "Explore the app again into a new graph directory" in message
+
+
+def test_load_graph_rejects_a_file_without_an_edges_list(tmp_path: Path) -> None:
+    graph_path = tmp_path / "demo.json"
+    nodes = [{"id": "s0_home", "page_description": "Home", **_MEMBER}]
+    graph_path.write_text(json.dumps({"nodes": nodes}), encoding="utf-8")
+    _write_step_image(tmp_path, "000000", b"image")
+
+    with pytest.raises(ValueError, match="list fields 'nodes' and 'edges'") as excinfo:
+        plot.load_graph(str(graph_path))
+
+    assert str(graph_path) in str(excinfo.value)
+    assert "Explore the app again into a new graph directory" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "membership",
+    [
+        {},
+        {"observations": "000000", "representative_observation": "000000"},
+        {"observations": [7, "000000"], "representative_observation": "000000"},
+        {"observations": ["000000"]},
+        {"observations": ["000000"], "representative_observation": 7},
+        {"observations": ["000000"], "representative_observation": "000001"},
+    ],
+    ids=[
+        "no-members",
+        "members-not-a-list",
+        "a-member-not-a-string",
+        "no-representative",
+        "representative-not-a-string",
+        "representative-not-a-member",
+    ],
+)
+def test_load_graph_rejects_a_node_that_does_not_list_its_members(
+    tmp_path: Path, membership: dict[str, object]
+) -> None:
+    graph_path = tmp_path / "demo.json"
+    nodes = [
+        {"id": "s0_home", "page_description": "Home", **_MEMBER},
+        {"id": "s1_search", "page_description": "Search", **membership},
+    ]
+    graph_path.write_text(json.dumps({"nodes": nodes, "edges": []}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no member observations") as excinfo:
+        plot.load_graph(str(graph_path))
+
+    message = str(excinfo.value)
+    assert "['s1_search']" in message
+    assert str(graph_path) in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 def _vis_nodes(html: str) -> dict[str, dict[str, Any]]:
@@ -532,7 +610,7 @@ def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) 
         ["State keys", "none"],
         ["Elements", "0/0 explored"],
     ]
-    assert nodes["s1_search"]["representativeMember"] is None
+    assert nodes["s1_search"]["representativeMember"] == 0
     assert nodes["s1_search"]["representativeImage"] is None
 
 

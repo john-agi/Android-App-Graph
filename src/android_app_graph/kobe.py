@@ -185,12 +185,11 @@ class Kobe:
         self.graph.steps_dir = steps_dir
 
         if self.graph_path.exists():
-            self.graph.load_graph(self.graph_path, default_package_name=self.package_name)
+            self.graph.load_graph(self.graph_path)
             self.logger.info("Graph loaded from %s", self.graph_path)
             self.graph.embed_missing_members()
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
-        self.graph.package_name = self.package_name
         self.controller = StepRecorder(
             controller, steps_dir, run_kind="explore", source="main_loop"
         )
@@ -315,7 +314,7 @@ class Kobe:
         node, _ = self._identify(self.controller.get_state())
         if node == EXTERNAL_WEB_NODE:
             node, _ = self._leave_external_web(expected_node=None)
-        self._setup_trail.begin(node, arrived=False)
+        self._setup_trail.begin(node, None)
         return node
 
     def _require_node(self, node_id: str) -> dict[str, Any]:
@@ -365,7 +364,10 @@ class Kobe:
         """
         with self.controller.source("navigation_replay"):
             reached = self._replay_to(target_node)
-        self._setup_trail.begin(reached, arrived=reached == self.graph.resolve_node_id(target_node))
+        arrival_state = None
+        if reached == self.graph.resolve_node_id(target_node):
+            arrival_state = self._require_node(reached).get("last_detail_snapshot", {})
+        self._setup_trail.begin(reached, arrival_state)
         return reached
 
     def _replay_to(self, target_node: str) -> str:
@@ -424,9 +426,7 @@ class Kobe:
                     node_id,
                     action.get("action", "?"),
                 )
-                # find_path yields {} for an edge a loaded graph file holds without actions.
-                if action:
-                    self.controller.exe_action(action)
+                self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
         actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
@@ -549,7 +549,7 @@ class Kobe:
                 resume_from,
             )
         node, device_state = self._identify(self.controller.get_state())
-        self._setup_trail.begin(node, arrived=False)
+        self._setup_trail.begin(node, None)
         return _Position(node, device_state)
 
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
@@ -726,7 +726,7 @@ class Kobe:
         self.graph.maybe_normalize_node_edges(move.source)
         self.save_graph()
         node, device_state = self._identify(device_state, expected_node=move.source)
-        self._setup_trail.begin(node, arrived=False)
+        self._setup_trail.begin(node, None)
         return self._continue_after(node, device_state, max_steps)
 
     def _record_external_web_step(
@@ -755,7 +755,7 @@ class Kobe:
         )
         self.save_graph()
         node, device_state = self._leave_external_web(expected_node=move.source)
-        self._setup_trail.begin(node, arrived=False)
+        self._setup_trail.begin(node, None)
         return self._continue_after(node, device_state, max_steps)
 
     def _record_in_app_step(
@@ -782,7 +782,7 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
-        self._setup_trail.step(move.action_sequence, new_node)
+        self._setup_trail.step(move.action_sequence, new_node, detail_after)
         self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.maybe_normalize_node_edges(move.source)
         self._count_step(move.source, move.action_sequence, new_node, move.tokens_before, max_steps)
