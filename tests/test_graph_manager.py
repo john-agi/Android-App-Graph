@@ -4525,6 +4525,30 @@ def test_a_verifier_answer_on_two_members_is_reused_within_a_run(
     assert vlm.kinds() == ["verify"]
 
 
+def test_a_pair_whose_node_an_earlier_merge_removed_is_verified_on_the_node_that_kept_it(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    for number in range(3):
+        add_screen(gm, f"s{number}_home", "Home screen", **members(steps_dir, str(number).encode()))
+    vlm.verdicts.extend(
+        [{"same": True, "reason": "one screen"}, {"same": False, "reason": "another screen"}]
+    )
+    issues = [
+        {"node_a": "s0_home", "node_b": "s1_home"},
+        {"node_a": "s1_home", "node_b": "s2_home"},
+    ]
+
+    first, second = gm.verify_merge_proposals(gm.merge_proposals(issues, sources=()), {})
+
+    assert (first["status"], first["kept"], first["removed"]) == ("merged", "s0_home", "s1_home")
+    assert (second["node_a"], second["node_b"]) == ("s1_home", "s2_home")
+    assert (second["status"], second["reason"]) == ("kept_separate", "another screen")
+    assert second["members"] == {"s0_home": "000000", "s2_home": "000002"}
+    assert vlm.kinds() == ["verify", "verify"]
+
+
 def test_a_merge_check_of_nodes_without_image_vectors_shows_their_representatives(
     tmp_path: Path,
 ) -> None:
