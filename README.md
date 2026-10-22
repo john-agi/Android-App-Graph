@@ -422,7 +422,7 @@ Every step that counts toward `--max-steps` logs a `Step N/M: <from> --[<action>
 line and then the tokens it used. `<to>` is `ext_<package>` for a step into another
 app and `ext_web` for one onto [outside web content](#external-apps-and-web-pages).
 A step that only waits shows `wait` as its action, and a step that plans Back on the
-start screen and [continues from a ranked target](#replaying-to-a-node) instead shows
+start screen and [continues from a ranked target](#replaying-to-a-node) shows
 `continue`, with the node it continues from as `<to>`. A run that continues a graph
 with completed steps first logs the step it resumes from and the target total.
 
