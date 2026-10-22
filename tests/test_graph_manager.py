@@ -4298,7 +4298,7 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, external_side: str
 ) -> None:
     """An ``ext_`` node stands for every screen of another app or the web, so its
-    representative is no screen of the app to compare with."""
+    members are no screens of the app to compare with."""
     pair = {"node_a": "s0_home", "node_b": "s1_home_two", external_side: EXTERNAL_WEB_NODE}
     fake = FakeAudit(result={"issues": [pair]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
