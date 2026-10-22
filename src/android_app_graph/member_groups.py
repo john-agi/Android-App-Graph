@@ -47,9 +47,9 @@ class MemberCheck(NamedTuple):
 class MemberPlan(NamedTuple):
     """The groups of a node's members and the checks the audit makes on them.
 
-    ``groups`` starts with home, the group that holds the representative, and goes
-    on with the others, larger first. ``checks`` are the groups checked against
-    home, ``unchecked`` the groups past the per-node cap; a diffuse node has neither.
+    ``groups`` starts with home, the largest group, and goes on with the others,
+    larger first. ``checks`` are the groups checked against home, ``unchecked`` the
+    groups past the per-node cap; a diffuse node has neither.
     """
 
     groups: list[list[str]]
@@ -58,12 +58,12 @@ class MemberPlan(NamedTuple):
     unchecked: list[list[str]]
 
 
-def unit_vector(vector: Sequence[float]) -> list[float] | None:
-    """Return ``vector`` scaled to length 1, or ``None`` for a zero vector, which has
-    no direction."""
+def unit_vector(vector: Sequence[float]) -> list[float]:
+    """Return ``vector`` scaled to length 1; a zero vector, which has no direction, stays
+    zero, so its cosine with any vector is 0.0."""
     norm = math.hypot(*vector)
     if not norm:
-        return None
+        return list(vector)
     return [value / norm for value in vector]
 
 
@@ -78,12 +78,11 @@ def cosine(first: Sequence[float], second: Sequence[float]) -> float:
 def _pairs(
     first: Iterable[str], second: Iterable[str], units: Mapping[str, Sequence[float]]
 ) -> Iterator[MemberPair]:
-    second_units = [(member, units[member]) for member in second if member in units]
+    second_units = [(member, units[member]) for member in second]
     for member in first:
-        unit = units.get(member)
-        if unit is not None:
-            for other, other_unit in second_units:
-                yield MemberPair(member, other, cosine(unit, other_unit))
+        unit = units[member]
+        for other, other_unit in second_units:
+            yield MemberPair(member, other, cosine(unit, other_unit))
 
 
 def closest_pair(
@@ -91,7 +90,7 @@ def closest_pair(
 ) -> MemberPair | None:
     """Return the member of ``first`` and the member of ``second`` whose unit vectors
     in ``units`` have the highest cosine, the earliest such pair on a tie, or ``None``
-    when either set has no vector."""
+    when either set is empty. Every member has a vector in ``units``."""
     return max(_pairs(first, second, units), key=_score, default=None)
 
 
@@ -131,24 +130,22 @@ def _root(parent: list[int], index: int) -> int:
 
 def plan_member_checks(
     members: Sequence[str],
-    representative: str,
     units: Mapping[str, Sequence[float]],
     *,
     floor: float = GROUPING_FLOOR,
-) -> MemberPlan | None:
-    """Return the groups of the ``members`` of a node that have a vector in ``units``,
-    and the checks to make on them, or ``None`` when ``representative`` has no vector.
+) -> MemberPlan:
+    """Return the groups of the ``members`` of a node, in step order and every one with
+    a vector in ``units``, and the checks to make on them.
 
-    A node is diffuse when home holds fewer than ``HOME_SHARE`` of those members:
-    its images give no reliable signal, so nothing is checked. Otherwise every other
-    group is checked against home, larger groups first, ``CHECKS_PER_NODE`` at most.
-    A group of two or more members is a split check and a lone member a move check;
-    home holding at least half the members means no node of fewer than four is split.
+    Home is the largest group, the one holding the earliest member on a tie. A node is
+    diffuse when home holds fewer than ``HOME_SHARE`` of its members: its images give
+    no reliable signal, so nothing is checked. Otherwise every other group is checked
+    against home, larger groups first, ``CHECKS_PER_NODE`` at most. A group of two or
+    more members is a split check and a lone member a move check; home holding at
+    least half the members means no node of fewer than four is split.
     """
-    if representative not in units:
-        return None
-    grouped = linked_groups([member for member in members if member in units], units, floor)
-    home = next(group for group in grouped if representative in group)
+    grouped = linked_groups(members, units, floor)
+    home = max(grouped, key=len)
     others = sorted((group for group in grouped if group is not home), key=len, reverse=True)
     groups = [home, *others]
     if len(home) < HOME_SHARE * sum(map(len, groups)):

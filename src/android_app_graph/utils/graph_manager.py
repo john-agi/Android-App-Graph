@@ -22,9 +22,9 @@ Every time a node is visited (whether new or existing), the VLM detail JSON is
 used to update the node's state schema — discovering new keys and accumulating
 observed values.
 
-A node holds no image. It lists the step-log observations assigned to it, in
-order, and names one of them its representative: the screen the plot shows, read
-from the step log when it needs it. The audit compares nodes on their members:
+A node holds no image. It lists the step-log observations assigned to it, in step
+order, and each use of a node's image chooses a member by its own rule, reading that
+member's image from the step log. The audit compares nodes on their members:
 merge proposals from the model's text and from close member images, verified in
 rounds on their closest members with every answer that follows from earlier ones
 deduced, and member groups whose closest pair the verifier tells apart, split off or
@@ -51,9 +51,8 @@ from android_app_graph.graph_files import (
     edge_problems,
     graph_steps_dir,
     load_embeddings,
-    nodes_without_members,
+    member_problems,
     observation_image_b64,
-    observation_image_path,
     require_known_edge_endpoints,
     save_embeddings,
     text_embeddings_path,
@@ -479,12 +478,11 @@ class MemberQuestion(NamedTuple):
 
 class ShownMembers(NamedTuple):
     """The member of each node a merge check shows the verifier, and the cosine of
-    their images; ``None`` when a node has no image vector and its representative
-    is shown."""
+    their images."""
 
     existing: str
     new: str
-    score: float | None
+    score: float
 
 
 type MergePairs = Callable[[GraphManager], list[tuple[str, str, dict[str, object]]]]
@@ -563,12 +561,12 @@ class _MergeCheck(NamedTuple):
 
     nodes: NodePair
     question: MemberQuestion
-    score: float | None
+    score: float
     result: dict[str, object]
 
 
-def _most_alike_first(check: _MergeCheck) -> tuple[bool, float]:
-    return check.score is None, -(check.score or 0.0)
+def _most_alike_first(check: _MergeCheck) -> float:
+    return -check.score
 
 
 @dataclass(slots=True)
@@ -696,9 +694,8 @@ def _merge_schema_values(keep_data: dict[str, Any], remove_data: dict[str, Any])
 
 
 def _add_member(node_data: dict[str, Any], observation_id: str) -> None:
-    """Append an observation to a node's members; the first member becomes its representative."""
+    """Append an observation to a node's members."""
     node_data.setdefault("observations", []).append(observation_id)
-    node_data.setdefault("representative_observation", observation_id)
 
 
 def _step_order(step_id: str) -> tuple[int, str]:
@@ -710,7 +707,7 @@ def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any
     """Fold a removed node's visits, members, activities, state schema and elements into
     the kept one.
 
-    The kept node's description and representative stay as they are.
+    The kept node's description stays as it is.
     """
     keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
     members = {*keep_data.get("observations", []), *remove_data.get("observations", [])}
@@ -827,34 +824,29 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
 
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
-    member observations with its representative among them, whose representative has
-    no image in ``steps_dir``, or that has no integer ``replay_misses`` count, and every
-    edge without actions or whose per-action lists do not hold one entry per action.
+    member observations or that has no integer ``replay_misses`` count, every member
+    without an image in ``steps_dir``, and every edge without actions or whose per-action
+    lists do not hold one entry per action.
     """
-    without_members = nodes_without_members(graph["nodes"])
-    without_image = [
-        node["id"]
-        for node in graph["nodes"]
-        if node["id"] not in without_members
-        and not observation_image_path(steps_dir, node["representative_observation"]).is_file()
-    ]
+    problems = member_problems(graph["nodes"], steps_dir)
     without_replay_misses = [
         node["id"] for node in graph["nodes"] if not isinstance(node.get("replay_misses"), int)
     ]
-    problems = []
-    if without_members:
-        problems.append(
-            f"node(s) with no member observations with a representative: {without_members}"
-        )
-    if without_image:
-        problems.append(
-            f"node(s) with a representative without an image in {steps_dir}: {without_image}"
-        )
     if without_replay_misses:
         problems.append(f"node(s) without a replay_misses count: {without_replay_misses}")
     problems.extend(edge_problems(graph["edges"]))
     if problems:
         raise unloadable_graph(path, problems)
+
+
+def _without_image_vectors(without: Mapping[str, Sequence[str]]) -> ValueError:
+    """Return the ``ValueError`` that choosing a node's image raises for the members of
+    each node of ``without`` that have no image vector, naming each node and member."""
+    named = ". ".join(
+        f"Node {node_id!r} has members without an image vector: {', '.join(members)}"
+        for node_id, members in without.items()
+    )
+    return ValueError(named)
 
 
 def _stored_screens(
@@ -1015,28 +1007,41 @@ class GraphManager:
         )
         return ClosestMember(member, score)
 
-    def _member_units(self, members: Iterable[str]) -> dict[str, list[float]]:
-        """Return the image vectors of ``members`` scaled to length 1, leaving out those
-        without a vector or with a zero one; each is scaled once per loaded graph."""
+    def _member_units(self, node_ids: Iterable[str]) -> dict[str, list[float]]:
+        """Return the image vector of every member of ``node_ids`` scaled to length 1,
+        each scaled once per loaded graph.
+
+        A member without an image vector raises ``ValueError`` naming its node and every
+        such member.
+        """
         units: dict[str, list[float]] = {}
-        for member in members:
-            unit = self._unit_vectors.get(member)
-            vector = self._image_vectors.get(member)
-            if unit is None and vector is not None:
-                unit = unit_vector(vector)
-            if unit is not None:
-                units[member] = self._unit_vectors[member] = unit
+        without: dict[str, list[str]] = {}
+        for node_id in node_ids:
+            for member in _member_observations(self.graph.nodes[node_id]):
+                vector = self._image_vectors.get(member)
+                if vector is None:
+                    without.setdefault(node_id, []).append(member)
+                    continue
+                if member not in self._unit_vectors:
+                    self._unit_vectors[member] = unit_vector(vector)
+                units[member] = self._unit_vectors[member]
+        if without:
+            raise _without_image_vectors(without)
         return units
 
     def close_member_pairs(self, floor: float = MERGE_FLOOR) -> list[tuple[str, str, MemberPair]]:
         """Return every pair of in-app nodes of one package whose closest members, by
-        image, reach the cosine ``floor``, with those members, in node order."""
+        image, reach the cosine ``floor``, with those members, in node order.
+
+        A member without an image vector raises ``ValueError`` naming its node and every
+        such member.
+        """
         by_package: dict[str, list[str]] = {}
         for raw_id, data in self.graph.nodes(data=True):
             node_id = _node_id(raw_id)
             if not self._is_external(node_id):
                 by_package.setdefault(as_str(data.get("package"), ""), []).append(node_id)
-        units = self._member_units(self._in_app_members())
+        units = self._member_units(itertools.chain.from_iterable(by_package.values()))
         found: list[tuple[str, str, MemberPair]] = []
         for node_ids in by_package.values():
             ordered = sorted(node_ids, key=self._node_numeric_order)
@@ -1052,19 +1057,19 @@ class GraphManager:
 
     def closest_members(self, existing: str, new: str) -> ShownMembers:
         """Return the member of node ``existing`` and the member of node ``new`` whose
-        images are the most similar, or both representatives when either node has no
-        member with an image vector."""
-        existing_members = _member_observations(self.graph.nodes[existing])
-        new_members = _member_observations(self.graph.nodes[new])
+        images are the most similar, and their cosine.
+
+        A member of either node without an image vector raises ``ValueError`` naming its
+        node and every such member, and so does a node without members.
+        """
         pair = closest_pair(
-            existing_members, new_members, self._member_units([*existing_members, *new_members])
+            _member_observations(self.graph.nodes[existing]),
+            _member_observations(self.graph.nodes[new]),
+            self._member_units([existing, new]),
         )
         if pair is None:
-            return ShownMembers(
-                self.graph.nodes[existing]["representative_observation"],
-                self.graph.nodes[new]["representative_observation"],
-                None,
-            )
+            msg = f"Node {existing!r} or {new!r} has no members to compare"
+            raise ValueError(msg)
         return ShownMembers(pair.first, pair.second, pair.score)
 
     def _in_app_members(self) -> Iterator[str]:
@@ -1209,7 +1214,7 @@ class GraphManager:
             node_id = _node_id(raw_id)
             if data.get("package") != package or self._is_external(node_id):
                 continue
-            if data.get("representative_observation"):
+            if _member_observations(data):
                 node_ids.append(node_id)
             desc = data.get("page_description", "")
             if desc and desc not in descriptions:
@@ -1357,7 +1362,7 @@ class GraphManager:
         if node_id not in self.graph or self._is_external(node_id):
             return None
         data = self.graph.nodes[node_id]
-        if data.get("package") != package or not data.get("representative_observation"):
+        if data.get("package") != package or not _member_observations(data):
             return None
         return node_id
 
@@ -1647,8 +1652,6 @@ class GraphManager:
         node_data["replay_misses"] = 0
         # Structural elements accumulate across visits, so merge rather than replace.
         _merge_elements(node_data, elements)
-        # A confirmed match keeps the node's representative; a new node, including a
-        # verifier-rejected split, takes this observation as its own.
         _add_member(node_data, observation.observation_id)
 
         logger.info(
@@ -1769,7 +1772,7 @@ class GraphManager:
         - Outgoing edges from *remove_id* are rewired from *keep_id*.
         - State schemas are merged (union of keys and values).
         - Visit counts are summed, and member observations are united in step order.
-        - The kept node retains its description and representative.
+        - The kept node retains its description.
         - The removed node is deleted from the graph, and its ID resolves to *keep_id*.
 
         Returns True if the merge was performed, False if either node is missing
@@ -1983,27 +1986,23 @@ class GraphManager:
         """Return, in node order, the groups of the members of every in-app node at the
         cosine ``floor`` and the checks to make on them.
 
-        Only members with an image vector are grouped; a node whose representative has
-        none has no plan.
+        A member without an image vector raises ``ValueError`` naming its node and every
+        such member.
         """
-        plans: list[tuple[str, MemberPlan]] = []
-        for raw_id, data in sorted(
-            self.graph.nodes(data=True),
-            key=lambda item: self._node_numeric_order(_node_id(item[0])),
-        ):
-            node_id = _node_id(raw_id)
-            if self._is_external(node_id):
-                continue
-            members = _member_observations(data)
-            plan = plan_member_checks(
-                members,
-                as_str(data.get("representative_observation"), ""),
-                self._member_units(members),
-                floor=floor,
+        node_ids = sorted(
+            (node_id for node_id in map(_node_id, self.graph) if not self._is_external(node_id)),
+            key=self._node_numeric_order,
+        )
+        units = self._member_units(node_ids)
+        return [
+            (
+                node_id,
+                plan_member_checks(
+                    _member_observations(self.graph.nodes[node_id]), units, floor=floor
+                ),
             )
-            if plan is not None:
-                plans.append((node_id, plan))
-        return plans
+            for node_id in node_ids
+        ]
 
     def split_members(
         self, node_id: str, members: Sequence[str], transitions: Sequence[TransitionRecord]
@@ -2107,17 +2106,15 @@ class GraphManager:
 
     def _node_from_stored(self, node_id: str, members: Sequence[str]) -> str:
         """Add a node for ``members`` of ``node_id`` from the stored description of the
-        earliest of them, its representative: its description and its elements."""
+        earliest of them: its description and its elements."""
         earliest = min(members, key=_step_order)
         described = self._stored_screens[earliest].described
         screen = _ScreenDescription(described.page_description, described.state, described.elements)
-        new_node = self._add_screen_node(
+        return self._add_screen_node(
             screen,
             as_str(self.graph.nodes[node_id].get("package"), ""),
             self._member_activity(earliest),
         )
-        self.graph.nodes[new_node]["representative_observation"] = earliest
-        return new_node
 
     def _relocate(
         self,
@@ -2772,7 +2769,6 @@ class GraphManager:
                 "visit_count": attrs.get("visit_count", 0),
                 "replay_misses": attrs["replay_misses"],
                 "observations": attrs.get("observations", []),
-                "representative_observation": attrs.get("representative_observation"),
             }
             data["nodes"].append(node_data)
 
@@ -2818,14 +2814,13 @@ class GraphManager:
 
         A file that lacks a field the graph needs raises ``ValueError`` naming it and
         each node, member or edge that lacks one: a node must list its member
-        observations with its representative among them and have an integer
-        ``replay_misses`` count, the representative must have an image in the step log,
-        every member of an in-app node must have a record there with its pixel hash
-        and, unless it is of a black screenshot, its describe output, and every edge
-        must hold one entry per action in each per-action list. With embedding
-        settings, so does a damaged text-vector file, one from another model, and one,
-        missing or not, without the vector of a member of an in-app node whose record
-        holds a describe output.
+        observations and have an integer ``replay_misses`` count, every member must have
+        an image in the step log, every member of an in-app node must have a record
+        there with its pixel hash and, unless it is of a black screenshot, its describe
+        output, and every edge must hold one entry per action in each per-action list.
+        With embedding settings, so does a damaged text-vector file, one from another
+        model, and one, missing or not, without the vector of a member of an in-app
+        node whose record holds a describe output.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2887,7 +2882,6 @@ class GraphManager:
                 visit_count=node_data.get("visit_count", 0),
                 replay_misses=node_data["replay_misses"],
                 observations=node_data["observations"],
-                representative_observation=node_data["representative_observation"],
             )
 
         for edge_data in data["edges"]:
@@ -3063,7 +3057,7 @@ class GraphManager:
         if self._is_external(node_a) or self._is_external(node_b):
             return "external node"
         pair = (node_a, node_b)
-        if not all(self.graph.nodes[n].get("representative_observation") for n in pair):
+        if not all(_member_observations(self.graph.nodes[n]) for n in pair):
             return "missing screenshot"
         black_a, black_b = self._black_activities(node_a), self._black_activities(node_b)
         if black_a and black_b and black_a.isdisjoint(black_b):

@@ -616,7 +616,8 @@ description is made from its activity (see [Black screenshots](#screen-matching)
 - `expected_node`, the node the caller expected, or `null`;
 - `exact_match`, the member an exact match copied;
 - `candidates`: each short-list node with the `sources` that proposed it and their
-  scores, its `closest_member` and that member's `image_score`;
+  scores, its `closest_member` and that member's image cosine, `image_score`, always
+  a number;
 - `verifications`: each verifier call's `node`, the `member` it was shown, `same`,
   `answered` (`false` when the verifier gave no answer) and the `reason`;
 - `refinement`: the descriptions the step's first rejection refined, and what the
@@ -658,21 +659,22 @@ such as a data usage warning dialog, is a node of its own, and a menu open over 
 is that node's state.
 
 Each node lists the observations assigned to it in `observations`, in step
-order, and names one of them `representative_observation`:
+order: a screen joins the list of the node it is matched to or starts, a merge unites
+both lists, and the audit's member checks move members from one list to another (see
+[Member checks](#member-checks)). Each use of a node's image chooses a member by its
+own rule:
 
-- a new node's representative is its first observation;
-- a later visit matched to the node joins the list and keeps the representative;
-- a screen the verifier rejects starts a new node with itself as representative;
-- a merge unites both lists in step order and keeps the kept node's representative;
-- a node the audit makes for members it splits off or moves takes the earliest of
-  them as representative, and the node they leave keeps its own (see
-  [Member checks](#member-checks)).
+- screen matching verifies a screen against the node's member closest to it by image,
+  and the audit's merge checks verify a pair of nodes on their two closest members;
+- the audit's member checks take the largest group of alike members as the node's
+  home;
+- `app-graph-plot` shows the earliest member as the node's thumbnail, so a node shows
+  the same image on every render.
 
-Screen matching verifies a screen against a node's member closest to it by image, and
-the audit's merge checks verify a pair of nodes on their two closest members.
-`app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
-`ext_<package>` nodes list the screens that reached them as well; neither screen
-matching nor the audit compares them.
+Where a node's image is chosen by image vector, a member without one stops the command
+with an error naming it and its node (see [Embedding caches](#embedding-caches) for
+when members are embedded). `ext_web` and `ext_<package>` nodes list the screens that
+reached them as well; neither screen matching nor the audit compares them.
 
 #### Screen matching
 
@@ -702,8 +704,8 @@ what each step found.
    order of their best rank in either source, ties broken by image cosine. The verifier
    checks them in that order against each one's closest member by image and stops at
    the first confirmation, after 3 calls at most (4 with an expected node).
-6. **New node.** A screen every check rejects starts a new node with itself as
-   representative. The step's first rejection refines the descriptions of both the
+6. **New node.** A screen every check rejects starts a new node, of which it is the
+   first member. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later
    rejections refine nothing. Refined descriptions, like every description, leave out
    the state listed in [Graph nodes](#graph-nodes), such as an open menu.
@@ -736,15 +738,14 @@ the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
 Loading a graph fails with an error naming the file and what is wrong: the file
-has no `nodes` or `edges` list, a node lists no observations or its representative
-is not one of them, a representative's image is missing from `steps/`, a node has no
-integer `replay_misses` count (see [Replaying to a node](#replaying-to-a-node)), a
-member of an in-app node has no `pixel_hash` in its record in `steps/`, or no
-`describe` there and is not [`black`](#step-log), or an edge has no actions or
-per-action lists (see [Graph edges](#graph-edges)) that do not hold one entry per
-action. `app-graph-plot` fails the same way, except that it reads neither
-`replay_misses` nor any record in `steps/` and needs the image of every member, not
-only of the representative. Explore the app again into a new graph directory.
+has no `nodes` or `edges` list, a node lists no observations, a member of any node
+has no image in `steps/`, a node has no integer `replay_misses` count (see
+[Replaying to a node](#replaying-to-a-node)), a member of an in-app node has no
+`pixel_hash` in its record in `steps/`, or no `describe` there and is not
+[`black`](#step-log), or an edge has no actions or per-action lists (see
+[Graph edges](#graph-edges)) that do not hold one entry per action. `app-graph-plot`
+fails the same way, except that it reads neither `replay_misses` nor any record in
+`steps/`. Explore the app again into a new graph directory.
 
 ### Graph edges
 
@@ -816,15 +817,15 @@ screenshots, oldest first and at most ten, with Previous and Next buttons and th
 position, such as `3 / 10`. Clicking the background or an edge closes the panel.
 
 Hovering a node shows its ID, full page description, activity, visits, state keys,
-explored element count and first ten unexplored elements, then its representative
+explored element count and first ten unexplored elements, then its earliest
 screenshot. Every value from the graph is shown as text, never read as HTML.
 
 The images are embedded in the HTML as data URIs, so the file opens anywhere
 without its step log. Base64 adds a third to each WebP: every member shown adds
 about 100 KB for the Settings screenshots measured in [Step log](#step-log), 235 KB
-at most. The tooltip shows the panel's copy of the representative, so a node embeds
-one more image only when the panel does not show its representative. A Settings
-graph of 82 nodes holding 232 screenshots plots to a 22 MB file.
+at most. The tooltip shows the panel's copy of the earliest screenshot, so the page
+embeds each image once. A Settings graph of 82 nodes holding 232 screenshots plots to
+a 22 MB file.
 
 Run the graph audit utility:
 
@@ -904,8 +905,8 @@ earlier one kept apart.
 After the merges, the members of each in-app node are grouped by their screenshot
 vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
 and the groups are the connected components of those links, single-linkage
-clustering. Only members with a vector are grouped. The group that holds the
-representative is the node's home.
+clustering. The largest group is the node's home; of two groups as large, the one
+holding the earliest member.
 
 - A node whose home holds fewer than half of its members is `diffuse` and is left
   alone, without a verifier call.
@@ -942,12 +943,11 @@ representative is the node's home.
   was verified on, so it reuses that answer and the node stays whole.
 
 A node a split or a move makes takes its description and elements from the stored
-describe output of its earliest member, its representative, or from its activity
-when that member is black, and its state schema from all its members' states.
-Members carry their visits, states, activities and description vectors, so no
-embedding is requested. The node they leave keeps its description, representative,
-state schema and elements. No node ID changes, so no alias is recorded: a node's
-`observations` say where each observation belongs.
+describe output of its earliest member, or from its activity when that member is
+black, and its state schema from all its members' states. Members carry their visits,
+states, activities and description vectors, so no embedding is requested. The node
+they leave keeps its description, state schema and elements. No node ID changes, so
+no alias is recorded: a node's `observations` say where each observation belongs.
 
 Edge actions follow the members. An action on an edge of the node is matched to each
 exploration transition (see [Step log](#step-log)) with the same action whose

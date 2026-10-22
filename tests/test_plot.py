@@ -221,14 +221,12 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
                         "state_schema": {"tab": ["map"]},
                         "interactable_elements": [{"explored": True}, {"explored": False}],
                         "observations": ["000000", "000002"],
-                        "representative_observation": "000000",
                     },
                     {
                         "id": "s1_search",
                         "page_description": "Search results",
                         "activity": "com.demo.Search",
                         "observations": ["000001"],
-                        "representative_observation": "000001",
                     },
                 ],
                 "edges": [
@@ -268,10 +266,11 @@ def _write_step_image(tmp_path: Path, observation_id: str, image: bytes) -> str:
 
 
 def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
-    """A node's thumbnail is its representative's WebP image from the step log."""
+    """A node's member images are its members' WebP images from the step log."""
     graph_path = _write_graph(tmp_path)
-    home_uri = _write_step_image(tmp_path, "000000", b"representative")
+    home_uri = _write_step_image(tmp_path, "000000", b"home")
     search_uri = _write_step_image(tmp_path, "000001", b"search")
+    later_home_uri = _write_step_image(tmp_path, "000002", b"later home")
 
     data, graph = load_result = plot.load_graph(str(graph_path))
     assert len(load_result) == 2
@@ -279,8 +278,8 @@ def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
     assert set(graph) == {"s0_home", "s1_search"}
     assert graph.nodes["s0_home"]["elements_explored"] == 1
     assert graph.nodes["s0_home"]["elements_total"] == 2
-    assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
-    assert graph.nodes["s1_search"]["screenshot_uri"] == search_uri
+    assert graph.nodes["s0_home"]["member_image_uris"] == [home_uri, later_home_uri]
+    assert graph.nodes["s1_search"]["member_image_uris"] == [search_uri]
     assert graph.edges["s0_home", "s1_search"]["label"].startswith("open search")
     # The self-loop edge falls back to an action summary plus its schema delta.
     self_loop_label = graph.edges["s1_search", "s1_search"]["label"]
@@ -288,7 +287,7 @@ def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
     assert "query" in self_loop_label
 
 
-_MEMBER = {"observations": ["000000"], "representative_observation": "000000"}
+_MEMBER = {"observations": ["000000"]}
 
 
 def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: Path) -> None:
@@ -397,21 +396,16 @@ def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
 
 def test_load_graph_reads_an_audited_graph_from_the_shared_step_log(tmp_path: Path) -> None:
     graph_path = _write_graph(tmp_path, stem="demo_audited")
-    home_uri = _write_step_image(tmp_path, "000000", b"representative")
+    home_uri = _write_step_image(tmp_path, "000000", b"home")
 
     _data, graph = plot.load_graph(str(graph_path))
-    assert graph.nodes["s0_home"]["screenshot_uri"] == home_uri
+    assert graph.nodes["s0_home"]["member_image_uris"][0] == home_uri
 
 
-def _write_member_graph(tmp_path: Path, observations: list[str], representative: str) -> Path:
-    """Write a one-node graph whose node lists ``observations`` and names ``representative``."""
+def _write_member_graph(tmp_path: Path, observations: list[str]) -> Path:
+    """Write a one-node graph whose node lists ``observations``."""
     graph_path = tmp_path / "demo.json"
-    node = {
-        "id": "s0_home",
-        "page_description": "Home",
-        "observations": observations,
-        "representative_observation": representative,
-    }
+    node = {"id": "s0_home", "page_description": "Home", "observations": observations}
     graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
     return graph_path
 
@@ -424,7 +418,7 @@ def test_load_graph_loads_the_ten_oldest_member_images_and_counts_every_member(
     tmp_path: Path,
 ) -> None:
     observations = _steps(12)
-    graph_path = _write_member_graph(tmp_path, observations, observations[0])
+    graph_path = _write_member_graph(tmp_path, observations)
     uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
 
     _data, graph = plot.load_graph(str(graph_path))
@@ -436,7 +430,7 @@ def test_load_graph_loads_the_ten_oldest_member_images_and_counts_every_member(
 def test_load_graph_rejects_a_member_without_an_image(tmp_path: Path) -> None:
     """Any member counts, not only the ten the panel shows."""
     observations = _steps(12)
-    graph_path = _write_member_graph(tmp_path, observations, observations[0])
+    graph_path = _write_member_graph(tmp_path, observations)
     for step in observations:
         if step not in {"000003", "000011"}:
             _write_step_image(tmp_path, step, f"member {step}".encode())
@@ -495,22 +489,8 @@ def test_load_graph_rejects_a_file_without_an_edges_list(tmp_path: Path) -> None
 
 @pytest.mark.parametrize(
     "membership",
-    [
-        {},
-        {"observations": "000000", "representative_observation": "000000"},
-        {"observations": [7, "000000"], "representative_observation": "000000"},
-        {"observations": ["000000"]},
-        {"observations": ["000000"], "representative_observation": 7},
-        {"observations": ["000000"], "representative_observation": "000001"},
-    ],
-    ids=[
-        "no-members",
-        "members-not-a-list",
-        "a-member-not-a-string",
-        "no-representative",
-        "representative-not-a-string",
-        "representative-not-a-member",
-    ],
+    [{}, {"observations": []}, {"observations": "000000"}, {"observations": [7, "000000"]}],
+    ids=["no-members", "empty-members", "members-not-a-list", "a-member-not-a-string"],
 )
 def test_load_graph_rejects_a_node_that_does_not_list_its_members(
     tmp_path: Path, membership: dict[str, object]
@@ -538,9 +518,9 @@ def _vis_nodes(html: str) -> dict[str, dict[str, Any]]:
     return {item["id"]: item for item in items}
 
 
-def _plot_member_graph(tmp_path: Path, observations: list[str], representative: str) -> str:
+def _plot_member_graph(tmp_path: Path, observations: list[str]) -> str:
     """Plot the graph ``_write_member_graph`` writes; return the view's HTML."""
-    graph_path = _write_member_graph(tmp_path, observations, representative)
+    graph_path = _write_member_graph(tmp_path, observations)
     _data, graph = plot.load_graph(str(graph_path))
     output = tmp_path / "graph.html"
     plot.plot_pyvis(graph, str(output))
@@ -553,7 +533,7 @@ def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
     observations = _steps(12)
     uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
 
-    html = _plot_member_graph(tmp_path, observations, observations[0])
+    html = _plot_member_graph(tmp_path, observations)
 
     node = _vis_nodes(html)["s0_home"]
     assert node["memberImages"] == uris[:10]
@@ -562,30 +542,24 @@ def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
     assert [html.count(uri) for uri in uris] == [1] * 10 + [0, 0]
 
 
-@pytest.mark.parametrize(
-    ("representative", "member"),
-    [(0, 0), (4, 4), (10, None)],
-    ids=["oldest-member", "later-member", "beyond-the-ten"],
-)
-def test_plot_pyvis_tooltip_shows_the_representative_from_one_copy_of_its_image(
-    tmp_path: Path, representative: int, member: int | None
+def test_plot_pyvis_tooltip_shows_the_earliest_member_from_the_panel_s_copy_of_its_image(
+    tmp_path: Path,
 ) -> None:
-    """The tooltip points at the representative among the panel's images, and carries the
-    image itself only when the panel does not show it."""
-    observations = _steps(12)
+    """The thumbnail is the earliest member on every render, the first of the panel's
+    images, so the page embeds it once."""
+    observations = ["000003", "000005", "000008"]
     uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
 
-    html = _plot_member_graph(tmp_path, observations, observations[representative])
+    html = _plot_member_graph(tmp_path, observations)
 
     node = _vis_nodes(html)["s0_home"]
     assert "title" not in node
-    assert node["representativeMember"] == member
-    if member is None:
-        assert node["representativeImage"] == uris[representative]
-    else:
-        assert node["memberImages"][member] == uris[representative]
-        assert node["representativeImage"] is None
-    assert all(html.count(uri) == 1 for uri in [*uris[:10], uris[representative]])
+    assert node["memberImages"] == uris
+    tooltip = html.index("function tooltipOf(node)")
+    assert (
+        "image.src = node.memberImages[0];" in html[tooltip : html.index("nodes.update(", tooltip)]
+    )
+    assert [html.count(uri) for uri in uris] == [1, 1, 1]
 
 
 def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) -> None:
@@ -610,8 +584,6 @@ def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) 
         ["State keys", "none"],
         ["Elements", "0/0 explored"],
     ]
-    assert nodes["s1_search"]["representativeMember"] == 0
-    assert nodes["s1_search"]["representativeImage"] is None
 
 
 def test_plot_pyvis_passes_markup_in_a_description_to_the_page_only_as_data(

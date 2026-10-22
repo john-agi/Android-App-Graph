@@ -1737,14 +1737,17 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
+    embedding_body: dict[str, object],
 ) -> None:
     """A checkpoint that does not navigate hands back the ID its merge audit kept, not the
     one it removed, so the next step acts from a node still in the graph."""
     graph = replaying_kobe.graph
     for node_id in ("s0_list", "s1_list_dup"):
         graph.graph.add_node(node_id, page_description="Item list", replay_misses=0)
-        add_representative(graph, node_id)
+        add_member(graph, node_id)
+        router_responses.append(httpx.Response(200, json=embedding_body))
+    graph.embed_missing_members()
     graph.graph.add_node("s2_detail", page_description="Item detail", replay_misses=0)
     screens = iter(["s1_list_dup", "s1_list_dup", "s2_detail"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(screens))
@@ -1777,13 +1780,16 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
+    embedding_body: dict[str, object],
 ) -> None:
     """The checkpoint leaves the node the device is on out of its candidates, so it never
     replays the device to the screen it is already on."""
     for node_id in ("s1_list", "s2_list_dup"):
         kobe.graph.graph.add_node(node_id, page_description="Item list", replay_misses=0)
-        add_representative(kobe.graph, node_id)
+        add_member(kobe.graph, node_id)
+        router_responses.append(httpx.Response(200, json=embedding_body))
+    kobe.graph.embed_missing_members()
     kobe.graph.graph.add_node("s0_home", replay_misses=0)
     kobe.graph.graph.add_edge("s0_home", "s1_list")
     duplicate = {"type": "merge_nodes", "node_a": "s1_list", "node_b": "s2_list_dup"}
