@@ -14,6 +14,7 @@ import io
 import itertools
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -3637,6 +3638,52 @@ def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
         "graph_text_emb.json",
         "steps",
     ]
+
+
+@pytest.mark.parametrize(
+    ("failing_file", "copy_vector"),
+    [
+        pytest.param("graph.json", EMBEDDINGS["Home screen"], id="graph file"),
+        pytest.param("graph_text_emb.json", None, id="text vectors"),
+    ],
+)
+def test_a_save_that_stops_at_either_file_leaves_a_graph_that_loads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    vlm: FakeVlm,
+    screen: Screens,
+    failing_file: str,
+    copy_vector: list[float] | None,
+) -> None:
+    """The text vectors are written before the graph, so a save that stops at the graph
+    file leaves the new member's vector beside the previous graph, and one that stops at
+    the vectors leaves both files as they were: the graph on disk never lists a member
+    without a vector."""
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    member = screen(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(member)
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    copy = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(copy)
+    original_replace = os.replace
+
+    def _replace_unless_failing(src: Path, dst: Path) -> None:
+        if dst.name == failing_file:
+            msg = "No space left on device"
+            raise OSError(msg)
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _replace_unless_failing)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    assert loaded.graph.nodes[node_id]["observations"] == [member.observation_id]
+    assert loaded.text_vector(copy.observation_id) == copy_vector
 
 
 def test_load_graph_defaults_the_activities_and_the_step_count(tmp_path: Path) -> None:
