@@ -351,11 +351,11 @@ class Kobe:
             return checkpoint_node, self.controller.get_state()
 
     def navigate_to_node(self, target_node: str) -> str:
-        """Navigate to a target node by replaying saved edges from the start node.
+        """Navigate to a target node by restarting the app and replaying saved edges.
 
-        This executes the shortest path of already-known actions from the
-        app's entry point to the target node — no VLM calls needed. Each action's
-        setup is sent before it.
+        This executes the shortest path of already-known actions to the target node
+        from the node of the screen the app opens on, when one leads from it, and
+        otherwise from the start node. Each action's setup is sent before it.
 
         Args:
             target_node: The node ID to navigate to.
@@ -365,7 +365,7 @@ class Kobe:
         """
         with self.controller.source("navigation_replay"):
             reached = self._replay_to(target_node)
-        self._setup_trail.begin(reached, arrived=reached == target_node)
+        self._setup_trail.begin(reached, arrived=reached == self.graph.resolve_node_id(target_node))
         return reached
 
     def _replay_to(self, target_node: str) -> str:
@@ -380,11 +380,17 @@ class Kobe:
             raise NoPathError(msg)
 
         restart_app(self.controller, self.app_launch, self.logger)
+        opened_on, _ = self._identify(self.controller.get_state(), expected_node=start_node)
+        start_node = self.graph.resolve_node_id(start_node)
+        target_node = self.graph.resolve_node_id(target_node)
+        if opened_on != start_node:
+            self.logger.info(
+                "%s opened on %s, not on the start node %s.", self.app_name, opened_on, start_node
+            )
+            path = self.graph.find_path(opened_on, target_node) or path
 
         if len(path) <= 1:
-            self.logger.info("Already at target node %s", target_node)
-            node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
-            return node
+            return self._report_arrival(opened_on, target_node)
 
         self.logger.info(
             "Replaying %d actions to reach node %s ...",
@@ -394,7 +400,7 @@ class Kobe:
 
         for i, (node_id, action, setup) in enumerate(path):
             if i == 0:
-                continue  # the first entry is the start node and carries no action
+                continue  # the first entry is the node the replay starts on and carries no action
 
             self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
             if isinstance(action, list):
@@ -424,6 +430,11 @@ class Kobe:
             time.sleep(1)  # brief pause for the UI to settle
 
         actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
+        return self._report_arrival(actual_node, target_node)
+
+    def _report_arrival(self, actual_node: str, target_node: str) -> str:
+        """Log whether a replay to ``target_node`` reached it, and return ``actual_node``,
+        where exploration continues either way."""
         if actual_node != target_node:
             self.logger.warning(
                 "Expected to reach %s but arrived at %s. Continuing from %s.",
@@ -519,6 +530,12 @@ class Kobe:
     def _starting_position(
         self, resume_from: str | None, start_step: int, max_steps: int
     ) -> _Position:
+        if start_step > 0:
+            self.logger.info(
+                "Resuming exploration from step %d (target: %d steps total)",
+                start_step,
+                max_steps,
+            )
         if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
             if resume_from == "auto":
                 resume_from = self.graph.get_resume_target(package_name=self.package_name)
@@ -531,12 +548,6 @@ class Kobe:
                 "Node %s not found in graph. Starting from current screen.",
                 resume_from,
             )
-        elif start_step > 0:
-            self.logger.info(
-                "Resuming exploration from step %d (target: %d steps total)",
-                start_step,
-                max_steps,
-            )
         node, device_state = self._identify(self.controller.get_state())
         self._setup_trail.begin(node, arrived=False)
         return _Position(node, device_state)
@@ -548,12 +559,14 @@ class Kobe:
         if move is None:
             time.sleep(1)
             device_state = self.controller.get_state()
-            self.graph.total_steps_completed += 1
+            self._count_step(
+                position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
+            )
             self.save_graph()
             return _Position(position.node, device_state)
 
         if move.action.get("action") == "back" and self._back_leaves_app(position.node):
-            continued = self._continue_from_ranked_target(position, max_steps)
+            continued = self._continue_from_ranked_target(position, tokens_before, max_steps)
             if continued is not None:
                 return continued
         self.controller.exe_action(move.action)
@@ -572,22 +585,32 @@ class Kobe:
 
     def _back_leaves_app(self, node: str) -> bool:
         """Return whether Back on ``node`` is taken to leave the app, so that a step that
-        plans it there continues from a ranked target instead.
+        plans it there continues from a ranked target instead: on the start node, and on
+        a node from which Back has been recorded leaving the app, an edge by Back to an
+        ``ext_`` node.
 
         The start node is the screen the app is launched on, the root activity of its
         task, and Back there returns to the home screen
         (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
+        An app can also open on another screen, such as the tab used last, where Back
+        then leaves the app too.
         """
-        return node == self.graph.get_start_node()
+        return node == self.graph.get_start_node() or any(
+            target.startswith("ext_") and [{"action": "back"}] in data.get("actions", [])
+            for _, target, data in self.graph.graph.out_edges(node, data=True)
+        )
 
-    def _continue_from_ranked_target(self, position: _Position, max_steps: int) -> _Position | None:
+    def _continue_from_ranked_target(
+        self, position: _Position, tokens_before: dict[str, int], max_steps: int
+    ) -> _Position | None:
         """Take the step that planned Back on ``position`` by continuing from a ranked
         target, chosen and reached as at a coverage checkpoint but without its merge audit,
         and return where the next step starts; ``None``, having done nothing, when no other
         node is ranked, so that the caller presses Back.
 
-        A navigation that fails before the app restart leaves the device on ``position``,
-        where the next step starts.
+        Its ``Step N/M`` line shows ``continue`` as the action and the node the next step
+        starts from as the target. A navigation that fails before the app restart leaves
+        the device on ``position``, where the next step starts.
         """
         with self.controller.source("coverage_checkpoint"):
             target = self._choose_continuation_target(position.node)
@@ -598,18 +621,19 @@ class Kobe:
                 )
                 return None
             self.logger.info(
-                "Step %d/%d: Back on %s leaves the app; continuing from ranked target %s instead.",
-                self.graph.total_steps_completed + 1,
-                max_steps,
+                "  Back on %s leaves the app; continuing from ranked target %s instead.",
                 position.node,
                 target,
             )
             reached = self._navigate_to_continuation(target, position.node)
+            next_position = position
             if reached is not None:
-                position = _Position(reached, self.controller.get_state())
-        self.graph.total_steps_completed += 1
+                next_position = _Position(reached, self.controller.get_state())
+        self._count_step(
+            position.node, [{"action": "continue"}], next_position.node, tokens_before, max_steps
+        )
         self.save_graph()
-        return self._continue_after(position.node, position.device_state, max_steps)
+        return self._continue_after(next_position.node, next_position.device_state, max_steps)
 
     def _plan_move(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
         """Plan an action from ``position`` for the caller to execute; ``None`` when the action
@@ -697,8 +721,8 @@ class Kobe:
     def _record_external_app_step(
         self, move: _Move, device_state: dict[str, Any], max_steps: int
     ) -> _Position:
-        device_state = self._handle_external_app(move, device_state)
-        self.graph.total_steps_completed += 1
+        ext_node, device_state = self._handle_external_app(move, device_state)
+        self._count_step(move.source, move.action_sequence, ext_node, move.tokens_before, max_steps)
         self.graph.maybe_normalize_node_edges(move.source)
         self.save_graph()
         node, device_state = self._identify(device_state, expected_node=move.source)
@@ -726,7 +750,9 @@ class Kobe:
             ),
         )
         self.graph.mark_element_explored(move.source, move.planned_element)
-        self.graph.total_steps_completed += 1
+        self._count_step(
+            move.source, move.action_sequence, EXTERNAL_WEB_NODE, move.tokens_before, max_steps
+        )
         self.save_graph()
         node, device_state = self._leave_external_web(expected_node=move.source)
         self._setup_trail.begin(node, arrived=False)
@@ -759,20 +785,33 @@ class Kobe:
         self._setup_trail.step(move.action_sequence, new_node)
         self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.maybe_normalize_node_edges(move.source)
-        self.graph.total_steps_completed += 1
-        self._log_step(move, new_node, max_steps)
+        self._count_step(move.source, move.action_sequence, new_node, move.tokens_before, max_steps)
         self.save_graph()
         return self._continue_after(new_node, device_state, max_steps)
 
-    def _log_step(self, move: _Move, new_node: str, max_steps: int) -> None:
+    def _count_step(
+        self,
+        source: str,
+        actions: list[dict[str, Any]],
+        target: str,
+        tokens_before: dict[str, int],
+        max_steps: int,
+    ) -> None:
+        """Count a step toward ``max_steps``, log it as ``Step N/M``, and log the tokens it
+        used since ``tokens_before``.
+
+        Exploration counts every step here and nowhere else, so a run's log has one
+        ``Step N/M`` line for each step it took.
+        """
+        self.graph.total_steps_completed += 1
         tokens_after = token_tracker.snapshot_by_type()
         step_tokens = {
-            a: tokens_after.get(a, 0) - move.tokens_before.get(a, 0) for a in _STEP_AGENT_NAMES
+            a: tokens_after.get(a, 0) - tokens_before.get(a, 0) for a in _STEP_AGENT_NAMES
         }
         token_parts = " | ".join(
             f"{a}={step_tokens[a]}" for a in _STEP_AGENT_NAMES if step_tokens[a] > 0
         )
-        action_summary = "+".join(a.get("action", "?") for a in move.action_sequence)
+        action_summary = "+".join(a.get("action", "?") for a in actions)
         total_actions = sum(
             len(self.graph.graph[s][t].get("actions", [])) for s, t in self.graph.graph.edges()
         )
@@ -780,9 +819,9 @@ class Kobe:
             "Step %d/%d: %s --[%s]--> %s | graph: %d nodes, %d edges, %d total actions",
             self.graph.total_steps_completed,
             max_steps,
-            move.source,
+            source,
             action_summary,
-            new_node,
+            target,
             self.graph.graph.number_of_nodes(),
             self.graph.graph.number_of_edges(),
             total_actions,
@@ -857,14 +896,17 @@ class Kobe:
             self.controller.get_state(), expected_node=self.graph.get_start_node()
         )
 
-    def _handle_external_app(self, move: _Move, device_state: dict[str, Any]) -> dict[str, Any]:
+    def _handle_external_app(
+        self, move: _Move, device_state: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
         """Handle navigation to an external app.
 
         Records the screen in the external app's node (no VLM calls) and the edge, marks
         the planned element explored, and returns to the app with ``return_to_app``.
 
         Returns:
-            The state of the app's screen that ``return_to_app`` returned to.
+            The external app's node, and the state of the app's screen that
+            ``return_to_app`` returned to.
         """
         observation = Observation.from_state(device_state)
         external_package = observation.package.strip()
@@ -885,14 +927,8 @@ class Kobe:
             ),
         )
         self.graph.mark_element_explored(move.source, move.planned_element)
-        self.logger.info(
-            "Step: %s --[%s]--> %s (external)",
-            move.source,
-            move.action.get("action", "?"),
-            ext_node_id,
-        )
         with self.controller.source("external_app_recovery"):
-            return return_to_app(self.controller, self.app_launch, self.logger)
+            return ext_node_id, return_to_app(self.controller, self.app_launch, self.logger)
 
     def save_graph(self) -> None:
         """Persist the graph to disk."""
