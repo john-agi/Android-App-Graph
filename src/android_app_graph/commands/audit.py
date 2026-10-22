@@ -221,7 +221,8 @@ def _check_member_group(
 ) -> dict[str, object]:
     """Verify ``check``'s group against its node's home on the closest pair across
     them, and split the group off or move its member when the verifier tells them
-    apart."""
+    apart. Without an answer the node stays whole and ``same`` is ``None``: a change
+    rests on an answer, and node verification has already asked twice."""
     kind = "split" if len(check.group) > 1 else "move"
     home_member, member = check.pair.first, check.pair.second
     verdict = graph.verify_members(
@@ -230,6 +231,10 @@ def _check_member_group(
         description=graph.graph.nodes[node_id].get("page_description", ""),
         verdicts=verdicts,
     )
+    if not verdict.answered:
+        outcome = "no answer, so the node stays whole"
+    else:
+        outcome = "same" if verdict.same else "different"
     logger.info(
         "%s check of %s on members %s and %s (%.3f): %s",
         kind.capitalize(),
@@ -237,7 +242,7 @@ def _check_member_group(
         home_member,
         member,
         check.pair.score,
-        "same" if verdict.same else "different",
+        outcome,
     )
     result: dict[str, object] = {
         "kind": kind,
@@ -245,11 +250,11 @@ def _check_member_group(
         "group": check.group,
         "members": [home_member, member],
         "image_score": check.pair.score,
-        "same": verdict.same,
+        "same": verdict.same if verdict.answered else None,
         "reason": verdict.reason,
         "reused": verdict.reused,
     }
-    if verdict.same:
+    if verdict.same or not verdict.answered:
         return result
     if kind == "split":
         change = graph.split_members(node_id, check.group, transitions)

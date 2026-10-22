@@ -272,12 +272,13 @@ embedding still raises. A reply stopped by the provider's content filter
 handled like any other empty or partial reply.
 
 Node verification also reports no answer for a reply it cannot parse, and logs
-each one as `node_verify: no answer` with its cause. Merge checks, the audit's and
-the coverage checkpoint's, and the audit's member checks count no answer as
-"different" (see [Merge proposals](#merge-proposals) and
-[Member checks](#member-checks)); screen matching counts it as a rejection unless
-the screen's screenshot and description are near-identical to those of the member the
-verifier was shown (see [Screen matching](#screen-matching)).
+each one as `node_verify: no answer` with its cause. No answer changes nothing in
+the audit: a merge check, the audit's or the coverage checkpoint's, keeps the two
+nodes apart, and a split or move check leaves the node whole (see
+[Merge proposals](#merge-proposals) and [Member checks](#member-checks)). Screen
+matching counts it as a rejection unless the screen's screenshot and description are
+near-identical to those of the member the verifier was shown (see
+[Screen matching](#screen-matching)).
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),
@@ -835,14 +836,17 @@ the node's home.
 - Every other group is checked against home on the closest pair across them, the
   strongest evidence that the two are one screen:
   - a group of two or more members is a split check. When the verifier tells the
-    pair apart, or gives no answer, the group becomes a new node.
+    pair apart, the group becomes a new node.
   - a lone member is a move check. When the verifier tells it apart from its closest
-    home member, or gives no answer, the member goes through the short list of
+    home member, the member goes through the short list of
     [screen matching](#screen-matching) again, without the node it leaves, with its
     stored describe output in place of the describe call and its description vector
     in place of the description's embedding, with no description refined, and with a
     call without an answer counted as a rejection even on a near-identical node. It
     moves to the first node the verifier confirms, or to a new node.
+  - a split or move check the verifier gives no answer on (see
+    [Requests and recovery](#requests-and-recovery)) leaves the node whole: every
+    change rests on a verifier answer.
 - A node gets three checks at most, larger groups first; the rest are `unchecked`.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
@@ -878,10 +882,11 @@ an action drops its instruction templates, which the final normalization rebuild
 
 - `checks`: each check's `kind` (`split` or `move`), its `node` and `group`, the
   `members` compared (a home member, then one of the group) and their `image_score`,
-  the verifier's `same` and `reason`, and `reused`. A check the verifier answered
-  "different" adds the `change`: `from`, `to`, `new_node`, the `members` moved, the
-  `edge_actions` moved, each with its `edge`, `action` and the edges it is on `now`,
-  and, for a move, the `short_list`'s `candidates` and `verifications`;
+  the verifier's `same` (`null` when it gave no answer) and `reason`, and `reused`.
+  A check the verifier answered "different" adds the `change`: `from`, `to`,
+  `new_node`, the `members` moved, the `edge_actions` moved, each with its `edge`,
+  `action` and the edges it is on `now`, and, for a move, the `short_list`'s
+  `candidates` and `verifications`;
 - `diffuse`: each diffuse node with its groups;
 - `unchecked`: each node with the groups past its three checks.
 
