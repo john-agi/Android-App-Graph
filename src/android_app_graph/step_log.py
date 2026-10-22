@@ -517,7 +517,8 @@ class StepRecorder:
         """Record ``action`` with the latest observation of this run, then send it.
 
         The latest observation is the screen the action was taken from, except in a
-        replay, which acts without looking; ``source`` says which.
+        replay, which looks only before a tap or long press it re-finds the element
+        of; ``source`` says which.
         """
         last = self._last_observation
         self._write_record(

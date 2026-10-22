@@ -55,6 +55,7 @@ from android_app_graph.member_groups import (
     HOME_SHARE,
     MemberCheck,
 )
+from android_app_graph.replay import replay_action
 from android_app_graph.step_log import (
     ActionEffect,
     Observation,
@@ -79,6 +80,7 @@ from android_app_graph.utils.graph_manager import (
     GraphManager,
     MemberVerdicts,
     MergeProposal,
+    Setup,
     SetupTrail,
 )
 from android_app_graph.utils.logging import setup_logging
@@ -316,14 +318,14 @@ def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
     return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
-def _execute(controller: DeviceController, action: dict[str, Any] | list[dict[str, Any]]) -> None:
-    if isinstance(action, list):
-        for sub_action in action:
-            controller.exe_action(sub_action)
-            time.sleep(0.5)
-    elif action:
-        controller.exe_action(action)
-    time.sleep(1)
+def _replay_setup(recorder: StepRecorder, setup: Setup, screen: Observation | None) -> None:
+    """Send ``setup``, the first action on ``screen`` when the caller has just read it."""
+    for number, (action, anchor) in enumerate(
+        zip(setup.actions, setup.anchors, strict=True), start=1
+    ):
+        replay_action(
+            recorder, action, (anchor,), logger=logger, screen=screen if number == 1 else None
+        )
 
 
 def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
@@ -336,7 +338,8 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         logger.warning("No path from %s to %s", start, target_node)
         return None
 
-    opened_on = _identify(run, run.recorder.get_state(), expected_node=start)
+    opened = run.recorder.get_state()
+    opened_on = _identify(run, opened, expected_node=start)
     start, target_node = run.graph.resolve_node_id(start), run.graph.resolve_node_id(target_node)
     if opened_on != start:
         logger.info(
@@ -346,10 +349,14 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
 
     actual = opened_on
     if len(path) > 1:
+        # The first action starts on the screen just identified, so it is not read again.
+        screen: Observation | None = Observation.from_state(opened)
         for step in path[1:]:
-            for setup_action in step.setup:
-                _execute(run.recorder, setup_action)
-            _execute(run.recorder, step.action)
+            _replay_setup(run.recorder, step.setup, screen)
+            if step.setup.actions:
+                screen = None
+            replay_action(run.recorder, step.action, step.anchors, logger=logger, screen=screen)
+            screen = None
         actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
     if actual != target_node:
         logger.warning(
@@ -574,19 +581,22 @@ def _replay_to(run: _ReExploreRun, node: str) -> str | None:
 def _correct_flagged_edge(
     run: _ReExploreRun, source: str, target: str, instruction: str
 ) -> dict[str, Any]:
-    """Execute the flagged action once from *source*, after its setup, and correct its
-    edge by where it leads. Returns the outcome fields of the issue's result.
+    """Execute the flagged action once from *source*, after its setup, each tap on the
+    element it recorded as ``replay_action`` finds it, and correct its edge by where it
+    leads. Returns the outcome fields of the issue's result.
     """
     found = run.graph.find_edge_action(source, target, instruction)
     if found is None:
         logger.warning("Instruction '%s' is not on %s → %s", instruction, source, target)
         return {"status": "instruction_not_found"}
-    index, action = found
+    index, recorded, anchors = found
 
-    for setup_action in run.graph.action_setup(source, target, index):
-        _execute(run.recorder, setup_action)
+    _replay_setup(run.recorder, run.graph.action_setup(source, target, index), None)
     before = run.recorder.get_state()
-    _execute(run.recorder, action)
+    before_observation = Observation.from_state(before)
+    action = replay_action(
+        run.recorder, recorded, anchors, logger=logger, screen=before_observation
+    )
     after = run.recorder.get_state()
     reached = (
         f"ext_{after['package'].strip()}"
@@ -594,10 +604,7 @@ def _correct_flagged_edge(
         else _identify(run, after, expected_node=target)
     )
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
-    before_observation, after_observation = (
-        Observation.from_state(before),
-        Observation.from_state(after),
-    )
+    after_observation = Observation.from_state(after)
     run.recorder.record_transition(
         Transition(
             before=before_observation,
@@ -609,7 +616,7 @@ def _correct_flagged_edge(
             effect=action_effect(
                 before_observation,
                 after_observation,
-                action if isinstance(action, list) else [action],
+                action,
                 planned=None,
                 self_loop=reached == source,
             ),

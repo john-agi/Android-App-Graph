@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import io
+import itertools
 import json
 import logging
 from collections.abc import Callable, Iterator
@@ -24,7 +25,8 @@ from android_app_graph.graph_files import (
     observation_tree_path,
 )
 from android_app_graph.screen_image import encode_screenshot
-from android_app_graph.step_log import Observation, StepRecorder
+from android_app_graph.step_log import ActionEffect, ActionHit, Observation, StepRecorder
+from android_app_graph.ui_tree import Anchor, Bounds, actionable_elements, parse_tree
 from android_app_graph.utils import ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
 
@@ -1051,6 +1053,144 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
     assert call["settings"] == ModelSettings("instruction-model")
 
 
+def _network_row_tapped_higher_up() -> tuple[dict[str, Any], EdgeDetails]:
+    """A tap on Settings' Network & internet row, recorded while the row sat higher up
+    the list than Settings' home fixture shows it, and the effect that anchors it."""
+    tree = parse_tree(
+        (Path(__file__).parent / "data" / "uiautomator_windows_plain_list.txt").read_text("utf-8")
+    )
+    (row,) = [
+        element
+        for element in actionable_elements(tree, "com.demo", Bounds(0, 0, 1344, 2992))
+        if element.label == "Network & internet"
+    ]
+    anchor = Anchor(row.locator, Bounds(0, 415, 1344, 633))
+    effect = ActionEffect((ActionHit("element", anchor),), None, no_visible_effect=False)
+    return {"action": "tap", "x": 672, "y": 524}, EdgeDetails(instruction=_FLAGGED, effect=effect)
+
+
+# The centre of the Network & internet row on Settings' home fixture.
+_NETWORK_ROW_TAP = {"action": "tap", "x": 672, "y": 808}
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_the_flagged_action_taps_its_element_where_the_screen_before_it_shows_it(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The screen read before the flagged action is the one its anchor is found in, and
+    the transition and the relabelling take the tap as it was sent."""
+    graph = _graph_with_nodes(
+        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
+    )
+    recorded, details = _network_row_tapped_higher_up()
+    graph.add_edge("s0_home", "s1_detail", [recorded], details=details)
+    reached = iter(["s0_home", "s1_detail", "s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
+    described: list[dict[str, object]] = []
+
+    def describe(**kwargs: object) -> str:
+        described.append(kwargs)
+        return "Tap Network & internet"
+
+    monkeypatch.setattr(audit, "describe_executed_action", describe)
+    controller = _SettingsHome("com.demo")
+
+    _re_explore(graph, [_retry()], controller, client, tmp_path)
+
+    assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP]
+    assert described[0]["action"] == [_NETWORK_ROW_TAP]
+    records = step_records(tmp_path / "steps")
+    assert [(record["kind"], record["source"]) for record in records[1:5]] == [
+        ("observation", "edge_retry"),
+        ("action", "edge_retry"),
+        ("observation", "edge_retry"),
+        ("transition", "edge_retry"),
+    ]
+    before, tap, _after, transition = records[1:5]
+    assert tap["observation"] == before["id"]
+    assert transition["action"] == [_NETWORK_ROW_TAP]
+    assert transition["anchors"][0]["bounds"] == [0, 699, 1344, 917]
+
+
+@pytest.mark.parametrize("hops", [1, 2], ids=["one tap", "two taps"])
+@pytest.mark.usefixtures("_fake_device")
+def test_the_audit_s_replay_taps_each_element_where_the_screen_shows_it_now(
+    hops: int,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The replay's first tap is aimed by the capture that identified the screen the app
+    opened on, so the screen is captured once before it, not twice; a later tap is aimed
+    by a capture taken just before it."""
+    nodes = ["s0_home", "s1_detail", "s2_more"][: hops + 1]
+    graph = _graph_with_nodes(*((node, {"page_description": node}) for node in nodes))
+    recorded, details = _network_row_tapped_higher_up()
+    for source, target in itertools.pairwise(nodes):
+        graph.add_edge(source, target, [recorded], details=details)
+    reached = iter(["s0_home"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached, nodes[-1]))
+    controller = _SettingsHome("com.demo")
+
+    (result,) = _re_explore(
+        graph,
+        [{"type": "explore_node", "node": nodes[-1], "expected_pages": []}],
+        controller,
+        client,
+        tmp_path,
+    )
+
+    assert result["navigated_to"] == nodes[-1]
+    assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP] * hops
+    replay = [
+        record
+        for record in step_records(tmp_path / "steps")
+        if record["source"] == "navigation_replay"
+    ]
+    assert [record["kind"] for record in replay] == [
+        *(["observation", "action"] * hops),
+        "observation",
+    ]
+    assert [replay[i + 1]["observation"] for i in range(0, 2 * hops, 2)] == [
+        replay[i]["id"] for i in range(0, 2 * hops, 2)
+    ]
+
+
+def _setup_tapping_the_network_row() -> EdgeDetails:
+    """The flagged instruction, after a setup that tapped Settings' Network & internet
+    row while it sat higher up the list than Settings' home fixture shows it."""
+    recorded, details = _network_row_tapped_higher_up()
+    assert details.effect is not None
+    return EdgeDetails(
+        instruction=_FLAGGED, setup=[recorded], setup_anchors=details.effect.anchor_records()
+    )
+
+
+@pytest.mark.parametrize("issue", [_retry(), {"type": "explore_node", "node": "s1_detail"}])
+@pytest.mark.usefixtures("_fake_device")
+def test_the_audit_taps_each_setup_element_where_the_screen_shows_it_now(
+    issue: dict[str, Any], client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its replay sends a path action's setup, and its retry of a flagged action sends
+    that action's setup, each tap on the element it recorded."""
+    graph = _graph_with_nodes(
+        ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
+    )
+    graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=_setup_tapping_the_network_row())
+    reached = iter(["s0_home", "s1_detail"])
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached, "s0_home"))
+    monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Open the detail")
+    controller = _SettingsHome("com.demo")
+
+    _re_explore(graph, [{"expected_pages": [], **issue}], controller, client, tmp_path)
+
+    assert [action for action, _ in controller.actions] == [_NETWORK_ROW_TAP, _DETAIL_TAP]
+
+
 @pytest.mark.parametrize("arrives_at", [None, "s2_settings"])
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_leaves_the_graph_unchanged_when_the_replay_misses_the_source(
@@ -1309,7 +1449,12 @@ def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_re
             "nodes": [{"id": node} for node in ("s0_splash", "s1_home", "s2_detail")],
             "edges": [
                 {"source": "s0_splash", "target": "s1_home", "actions": []},
-                {"source": "s1_home", "target": "s2_detail", "actions": [[_DETAIL_TAP]]},
+                {
+                    "source": "s1_home",
+                    "target": "s2_detail",
+                    "actions": [[_DETAIL_TAP]],
+                    "anchors": [[None]],
+                },
             ],
         },
     )
@@ -1437,6 +1582,7 @@ def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup
 ) -> None:
     graph = _flagged_graph()
     graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
+    graph.graph["s0_home"]["s1_detail"]["setup_anchors"] = [[None]]
     _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home")
 
     (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)

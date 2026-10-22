@@ -55,6 +55,7 @@ from android_app_graph.utils.graph_manager import (
     PathStep,
     PathToStart,
     ScreenQuery,
+    Setup,
     SetupTrail,
     _merge_elements,
     _merge_into_schema,
@@ -2258,6 +2259,7 @@ def test_a_graph_file_without_setups_loads_replays_without_them_and_saves_none(
                     "target": "s1_settings",
                     "actions": [[_TAP]],
                     "num_steps": [1],
+                    "anchors": [[None]],
                 }
             ],
         },
@@ -2266,8 +2268,8 @@ def test_a_graph_file_without_setups_loads_replays_without_them_and_saves_none(
     gm.load_graph(path)
 
     assert gm.find_path("s0_home", "s1_settings") == [
-        PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", [_TAP], ()),
+        PathStep("s0_home", {}),
+        PathStep("s1_settings", [_TAP], (None,)),
     ]
     again = tmp_path / "saved" / "explored.json"
     gm.save_graph(again)
@@ -2694,8 +2696,43 @@ def test_find_edge_action_matches_nothing_for_an_action_without_an_instruction()
     )
     gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
 
-    assert gm.find_edge_action("s0_home", "s1_settings", "open settings") == (0, {"action": "tap"})
+    found = gm.find_edge_action("s0_home", "s1_settings", "open settings")
+    assert found == (0, {"action": "tap"}, (None,))
     assert gm.find_edge_action("s0_home", "s1_settings", "open search") is None
+
+
+_NETWORK_ANCHOR = Anchor(_ROW, Bounds(0, 699, 1344, 917))
+_APPS_ANCHOR = Anchor(_OTHER_ROW, Bounds(0, 1189, 1344, 1407))
+
+
+def _tap_on(anchor: Anchor) -> dict[str, Any]:
+    bounds = anchor.bounds
+    return {"action": "tap", "x": (bounds.left + bounds.right) // 2, "y": bounds.top + 10}
+
+
+def _anchored(*anchors: Anchor | None) -> ActionEffect:
+    """What an action whose sub-actions acted on ``anchors`` did."""
+    hits = tuple(ActionHit(None if anchor is None else "element", anchor) for anchor in anchors)
+    return ActionEffect(hits, None, no_visible_effect=False)
+
+
+def test_find_edge_action_returns_the_anchors_of_the_action_it_finds() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    for anchor, instruction in ((_NETWORK_ANCHOR, "open network"), (_APPS_ANCHOR, "open apps")):
+        gm.add_edge(
+            "s0_home",
+            "s1_settings",
+            [_tap_on(anchor)],
+            details=EdgeDetails(instruction=instruction, effect=_anchored(anchor)),
+        )
+
+    assert gm.find_edge_action("s0_home", "s1_settings", "open apps") == (
+        1,
+        [_tap_on(_APPS_ANCHOR)],
+        (_APPS_ANCHOR,),
+    )
 
 
 @dataclass
@@ -3281,8 +3318,8 @@ def test_find_path_prefers_the_fewest_total_steps() -> None:
 
     assert path == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {"action": "a"}, ()),
-        PathStep("s3_results", {"action": "b"}, ()),
+        PathStep("s1_settings", {"action": "a"}, (None,)),
+        PathStep("s3_results", {"action": "b"}, (None,)),
     ]
 
 
@@ -3295,7 +3332,45 @@ def test_find_path_picks_the_action_with_the_fewest_steps() -> None:
 
     path = gm.find_path("s0_home", "s1_settings")
 
-    assert path == [PathStep("s0_home", {}, ()), PathStep("s1_settings", {"action": "short"}, ())]
+    assert path == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {"action": "short"}, (None,)),
+    ]
+
+
+def test_find_path_returns_the_anchors_of_the_action_it_picks() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    swipe = {"action": "swipe", "x1": 500, "y1": 1500, "x2": 500, "y2": 500}
+    compound = [swipe, _tap_on(_APPS_ANCHOR)]
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        compound,
+        details=EdgeDetails(num_steps=2, effect=_anchored(None, _APPS_ANCHOR)),
+    )
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        [_tap_on(_NETWORK_ANCHOR)],
+        details=EdgeDetails(num_steps=1, effect=_anchored(_NETWORK_ANCHOR)),
+    )
+    gm.add_edge(
+        "s1_settings",
+        "s0_home",
+        compound,
+        details=EdgeDetails(num_steps=2, effect=_anchored(None, _APPS_ANCHOR)),
+    )
+
+    assert gm.find_path("s0_home", "s1_settings") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", [_tap_on(_NETWORK_ANCHOR)], (_NETWORK_ANCHOR,)),
+    ]
+    assert gm.find_path("s1_settings", "s0_home") == [
+        PathStep("s1_settings", {}, ()),
+        PathStep("s0_home", compound, (None, _APPS_ANCHOR)),
+    ]
 
 
 def test_find_path_uses_an_empty_action_for_an_edge_without_actions() -> None:
@@ -3318,8 +3393,26 @@ def test_find_path_returns_the_setup_of_the_action_it_takes() -> None:
 
     assert gm.find_path("s0_home", "s1_settings") == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {"action": "row"}, (_SCROLL,)),
+        PathStep("s1_settings", {"action": "row"}, (None,), Setup((_SCROLL,), (None,))),
     ]
+
+
+def test_find_path_and_action_setup_give_each_setup_action_its_anchor() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        {"action": "row"},
+        details=EdgeDetails(setup=[_SCROLL, _TAP], setup_anchors=[None, _ROW_ANCHOR]),
+    )
+    setup = Setup((_SCROLL, _TAP), (None, Anchor(_ROW, Bounds(0, 699, 1344, 917))))
+
+    assert gm.action_setup("s0_home", "s1_settings", 0) == setup
+    path = gm.find_path("s0_home", "s1_settings")
+    assert path is not None
+    assert path[1].setup == setup
 
 
 @pytest.mark.parametrize("setups", [[None], [{"action": "swipe"}], [[_SCROLL, "swipe"]]])
@@ -3329,12 +3422,14 @@ def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "row"}], setups=setups)
+    gm.graph.add_edge(
+        "s0_home", "s1_settings", actions=[{"action": "row"}], anchors=[[None]], setups=setups
+    )
 
     path = gm.find_path("s0_home", "s1_settings")
 
     assert path is not None
-    assert path[1] == PathStep("s1_settings", {"action": "row"}, ())
+    assert path[1] == PathStep("s1_settings", {"action": "row"}, (None,))
 
 
 def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
@@ -3356,8 +3451,8 @@ def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
 
     assert path == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {"action": "a"}, ()),
-        PathStep("s3_results", {"action": "b"}, ()),
+        PathStep("s1_settings", {"action": "a"}, (None,)),
+        PathStep("s3_results", {"action": "b"}, (None,)),
     ]
 
 
@@ -3377,6 +3472,7 @@ def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:
     gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
     gm.graph["s0_home"]["s1_settings"]["target_observations"] = ["the settings page"]
     gm.graph["s1_settings"]["s3_results"]["setups"] = [[_SCROLL]]
+    gm.graph["s1_settings"]["s3_results"]["setup_anchors"] = [[None]]
 
     steps = gm.find_guided_path(
         "s0_home", [{"node_id": "s3_results", "required_schema": {"sort": "price"}}]
@@ -3428,7 +3524,9 @@ def test_find_guided_path_navigates_an_edge_from_a_file_without_text_lists() -> 
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "tap"}], num_steps=[1])
+    gm.graph.add_edge(
+        "s0_home", "s1_settings", actions=[{"action": "tap"}], num_steps=[1], anchors=[[None]]
+    )
 
     steps = gm.find_guided_path("s0_home", [{"node_id": "s1_settings"}])
 

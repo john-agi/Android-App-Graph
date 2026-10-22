@@ -83,7 +83,7 @@ from android_app_graph.step_log import (
     screen_size_of,
     tree_elements,
 )
-from android_app_graph.ui_tree import Locator, TreeElement
+from android_app_graph.ui_tree import Anchor, Locator, TreeElement
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     DescribeRequest,
@@ -132,15 +132,25 @@ class PathToStart(NamedTuple):
     external: list[str]
 
 
+class Setup(NamedTuple):
+    """An action's setup as a replay sends it: the device actions sent before it on the
+    node it leaves, and the anchor of each, ``None`` for one without."""
+
+    actions: tuple[dict[str, Any], ...]
+    anchors: tuple[Anchor | None, ...]
+
+
 class PathStep(NamedTuple):
     """One step of a path ``find_path`` returns: the node it reaches, the recorded action
-    that reaches it, and that action's setup, the device actions sent before it on the
-    node the step leaves. The first step is the path's start, with the action ``{}`` and
-    no setup."""
+    that reaches it with its anchors, one per sub-action, ``None`` for one without, and
+    that action's setup, the device actions sent before it on the node the step leaves,
+    with theirs. The first step is the path's start, with the action ``{}``, no anchors
+    and no setup."""
 
     node: str
     action: dict[str, Any] | list[dict[str, Any]]
-    setup: tuple[dict[str, Any], ...]
+    anchors: tuple[Anchor | None, ...] = ()
+    setup: Setup = Setup((), ())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -673,6 +683,11 @@ def _default_num_steps(action: object) -> int:
 
 def _sub_action_placeholders(action: object) -> list[None]:
     return [None] * _default_num_steps(action)
+
+
+def _action_anchors(edge_data: Mapping[str, Any], index: int) -> tuple[Anchor | None, ...]:
+    """Return the anchors of action ``index`` of an edge, one per sub-action."""
+    return tuple(Anchor.from_record(record) for record in edge_data["anchors"][index])
 
 
 def _had_no_visible_effect(flags: object) -> bool:
@@ -1813,10 +1828,10 @@ class GraphManager:
 
     def find_edge_action(
         self, source: str, target: str, instruction: str
-    ) -> tuple[int, dict[str, Any] | list[dict[str, Any]]] | None:
-        """Return the index and action of the first action on the edge recorded with exactly
-        *instruction*, or None. An empty *instruction* matches nothing, not the placeholder of
-        an action recorded without one.
+    ) -> tuple[int, dict[str, Any] | list[dict[str, Any]], tuple[Anchor | None, ...]] | None:
+        """Return the index, action and anchors of the first action on the edge recorded
+        with exactly *instruction*, or None. An empty *instruction* matches nothing, not the
+        placeholder of an action recorded without one.
         """
         if not instruction or not self.graph.has_edge(source, target):
             return None
@@ -1828,14 +1843,19 @@ class GraphManager:
         )
         for index, (action, recorded_instruction) in enumerate(recorded):
             if recorded_instruction == instruction:
-                return index, action
+                return index, action, _action_anchors(edge_data, index)
         return None
 
-    def action_setup(self, source: str, target: str, index: int) -> tuple[dict[str, Any], ...]:
+    def action_setup(self, source: str, target: str, index: int) -> Setup:
         """Return the setup of action *index* of source→target, the device actions a replay
-        sends on *source* before it; an action recorded without a setup has none."""
-        setups = self.graph[source][target].get("setups", [])
-        return _setup_actions(setups[index]) if index < len(setups) else ()
+        sends on *source* before it, with their anchors; an action recorded without a setup
+        has none."""
+        aligned = _aligned_lists(self.graph[source][target])
+        actions = _setup_actions(aligned["setups"][index])
+        if not actions:
+            return Setup((), ())
+        anchors = aligned["setup_anchors"][index]
+        return Setup(actions, tuple(Anchor.from_record(record) for record in anchors))
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
         """Move action *index* of source→target, with its entry in every per-action list, to
@@ -2341,11 +2361,11 @@ class GraphManager:
         Returns:
             The path's steps, the first being the source itself. A step's action is the
             edge's cheapest action, a single dict or a list of dicts (compound action),
-            with its setup; an edge without actions gives ``{}``.
+            with its anchors and its setup; an edge without actions gives ``{}``.
             Returns None if no path exists.
         """
         if source == target:
-            return [PathStep(source, {}, ())]
+            return [PathStep(source, {})]
 
         if source not in self.graph or target not in self.graph:
             return None
@@ -2360,7 +2380,7 @@ class GraphManager:
         except nx.NetworkXNoPath:
             return None
 
-        result = [PathStep(_node_id(node_path[0]), {}, ())]
+        result = [PathStep(_node_id(node_path[0]), {})]
         for i in range(len(node_path) - 1):
             s, t = node_path[i], node_path[i + 1]
             edge_data = self.graph[s][t]
@@ -2370,10 +2390,11 @@ class GraphManager:
                 step = PathStep(
                     _node_id(t),
                     edge_data["actions"][best_idx],
+                    _action_anchors(edge_data, best_idx),
                     self.action_setup(_node_id(s), _node_id(t), best_idx),
                 )
             else:
-                step = PathStep(_node_id(t), {}, ())
+                step = PathStep(_node_id(t), {})
             result.append(step)
 
         return result
@@ -2421,7 +2442,7 @@ class GraphManager:
                     return None
 
                 for i in range(1, len(nav_path)):
-                    node_id, action, setup = nav_path[i]
+                    node_id, action, _anchors, setup = nav_path[i]
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
                     instruction = ""
@@ -2437,7 +2458,7 @@ class GraphManager:
                             "type": "navigate",
                             "from": prev_node,
                             "to": node_id,
-                            "setup": list(setup),
+                            "setup": list(setup.actions),
                             "action": action,
                             "instruction": instruction,
                             "target_observation": target_obs,
