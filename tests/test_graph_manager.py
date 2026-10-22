@@ -11,13 +11,16 @@ import base64
 import dataclasses
 import hashlib
 import io
+import itertools
 import json
 import logging
 import socket
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any, TypedDict, cast
+from typing import IO, Any, TypedDict, cast, override
 
 import httpx
 import networkx as nx
@@ -25,6 +28,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from openrouter import OpenRouter
+from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
 from android_app_graph.step_log import (
@@ -51,7 +55,7 @@ from android_app_graph.utils.graph_manager import (
     _merge_into_schema,
     element_locator,
 )
-from android_app_graph.utils.vlm_utils import DescribeRequest
+from android_app_graph.utils.vlm_utils import MAX_REQUESTS_IN_FLIGHT, DescribeRequest, TokenTracker
 
 PACKAGE = "com.example.app"
 HOME = "com.example.app.HomeActivity"
@@ -2717,6 +2721,183 @@ def test_maybe_normalize_node_edges_below_the_milestone_returns_false(
 
 def test_maybe_normalize_node_edges_for_a_missing_node_returns_false() -> None:
     assert make_manager().maybe_normalize_node_edges("s9_missing") is False
+
+
+# How long a call waits for the other calls of its batch before it fails the test instead
+# of hanging.
+MEET_TIMEOUT = 10.0
+
+
+def _edges_needing_a_call(gm: GraphManager, count: int) -> list[str]:
+    """Give s0_home *count* outgoing edges, each with one instruction that names a value, so
+    every edge needs a normalize_edge call. Return the instructions in edge order."""
+    add_screen(gm, "s0_home", "Home screen")
+    instructions = []
+    for index in range(1, count + 1):
+        instruction = f'open item "{index}"'
+        add_screen(gm, f"s{index}_item", f"Item {index}")
+        gm.add_edge(
+            "s0_home",
+            f"s{index}_item",
+            {"index": index},
+            details=EdgeDetails(instruction=instruction),
+        )
+        instructions.append(instruction)
+    return instructions
+
+
+def _template_of(instructions: list[str]) -> dict[str, Any]:
+    return {**TEMPLATE_RESULT, "instruction_template": f"template of {instructions[0]}"}
+
+
+def _home_templates(gm: GraphManager) -> list[str]:
+    """Each s0_home edge's template in edge order, "" for an edge without one."""
+    return [
+        (data.get("instruction_templates") or [{"template": ""}])[0]["template"]
+        for _, _, data in gm.graph.out_edges("s0_home", data=True)
+    ]
+
+
+@dataclass
+class InFlight:
+    """Counts the calls inside it, and the most there were at once."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    current: int = 0
+    peak: int = 0
+
+    def __enter__(self) -> None:
+        with self.lock:
+            self.current += 1
+            self.peak = max(self.peak, self.current)
+
+    def __exit__(self, *_exc_info: object) -> None:
+        with self.lock:
+            self.current -= 1
+
+
+def test_normalize_all_edges_keeps_the_maximum_number_of_calls_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gm = make_manager()
+    instructions = _edges_needing_a_call(gm, 2 * MAX_REQUESTS_IN_FLIGHT)
+    batch = threading.Barrier(MAX_REQUESTS_IN_FLIGHT, timeout=MEET_TIMEOUT)
+    in_flight = InFlight()
+
+    def normalize(
+        _client: OpenRouter, edge_instructions: list[str], **_kwargs: object
+    ) -> dict[str, Any]:
+        with in_flight:
+            batch.wait()
+        return _template_of(edge_instructions)
+
+    monkeypatch.setattr(gm_module, "normalize_edge", normalize)
+
+    gm.normalize_all_edges()
+
+    assert in_flight.peak == MAX_REQUESTS_IN_FLIGHT
+    assert _home_templates(gm) == [f"template of {i}" for i in instructions]
+
+
+def test_normalize_all_edges_applies_and_logs_the_results_in_edge_order(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The last edge's call returns first, and every other one only after the next edge's."""
+    gm = make_manager()
+    instructions = _edges_needing_a_call(gm, MAX_REQUESTS_IN_FLIGHT)
+    returned = {instruction: threading.Event() for instruction in instructions}
+    next_edge = dict(itertools.pairwise(instructions))
+
+    def normalize(
+        _client: OpenRouter, edge_instructions: list[str], **_kwargs: object
+    ) -> dict[str, Any]:
+        (instruction,) = edge_instructions
+        if instruction in next_edge:
+            assert returned[next_edge[instruction]].wait(MEET_TIMEOUT)
+        returned[instruction].set()
+        return _template_of(edge_instructions)
+
+    monkeypatch.setattr(gm_module, "normalize_edge", normalize)
+
+    with caplog.at_level(logging.INFO, logger=gm_module.__name__):
+        gm.normalize_all_edges()
+
+    assert _home_templates(gm) == [f"template of {i}" for i in instructions]
+    assert [r.getMessage() for r in caplog.records if "Edge " in r.getMessage()] == [
+        f"  Edge s0_home→s{index}_item: 'template of {instruction}' (2 examples)"
+        for index, instruction in enumerate(instructions, start=1)
+    ]
+
+
+class YieldingUsage(ChatUsage):
+    """Usage whose every field read lets other threads run, so totals that several threads
+    update without a lock lose some of the updates."""
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if not name.startswith("_"):
+            time.sleep(0.0001)
+        return super().__getattribute__(name)
+
+
+def test_normalize_all_edges_counts_the_usage_of_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = YieldingUsage.model_validate(
+        {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10, "cost": 0.25}
+    )
+    concurrent, expected = TokenTracker(), TokenTracker()
+    gm = make_manager()
+    instructions = _edges_needing_a_call(gm, 2 * MAX_REQUESTS_IN_FLIGHT)
+    batch = threading.Barrier(MAX_REQUESTS_IN_FLIGHT, timeout=MEET_TIMEOUT)
+
+    def normalize(
+        _client: OpenRouter, edge_instructions: list[str], **_kwargs: object
+    ) -> dict[str, Any]:
+        batch.wait()
+        concurrent.record("normalize_edge", PAGE_DETAIL.model, usage)
+        return _template_of(edge_instructions)
+
+    monkeypatch.setattr(gm_module, "normalize_edge", normalize)
+
+    gm.normalize_all_edges()
+    for _ in instructions:
+        expected.record("normalize_edge", PAGE_DETAIL.model, usage)
+
+    assert concurrent.summary() == expected.summary()
+
+
+class CreditsExhaustedError(RuntimeError):
+    """Stands in for a request the provider refuses, such as one past the account's credit."""
+
+
+def test_normalize_all_edges_applies_the_returned_templates_and_then_raises_a_failed_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gm = make_manager()
+    instructions = _edges_needing_a_call(gm, MAX_REQUESTS_IN_FLIGHT)
+    failing = instructions[1]
+    others_returned = threading.Semaphore(0)
+
+    def normalize(
+        _client: OpenRouter, edge_instructions: list[str], **_kwargs: object
+    ) -> dict[str, Any]:
+        if edge_instructions == [failing]:
+            for _ in instructions[1:]:
+                assert others_returned.acquire(timeout=MEET_TIMEOUT)
+            raise CreditsExhaustedError
+        others_returned.release()
+        return _template_of(edge_instructions)
+
+    monkeypatch.setattr(gm_module, "normalize_edge", normalize)
+
+    with pytest.raises(CreditsExhaustedError):
+        gm.normalize_all_edges()
+
+    assert _home_templates(gm) == [
+        "" if instruction == failing else f"template of {instruction}"
+        for instruction in instructions
+    ]
 
 
 def _line_graph(gm: GraphManager) -> None:
