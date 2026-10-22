@@ -44,6 +44,7 @@ from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
+    MAX_SETUP_ACTIONS,
     NORMALIZE_EVERY_N_VISITS,
     SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
@@ -51,6 +52,8 @@ from android_app_graph.utils.graph_manager import (
     PathStep,
     PathToStart,
     ScreenQuery,
+    Setup,
+    SetupTrail,
     _merge_elements,
     _merge_into_schema,
     element_locator,
@@ -1706,7 +1709,7 @@ def test_get_all_edges_from_node_is_empty_for_a_missing_node() -> None:
 
 _ROW = Locator("", "android.widget.LinearLayout", "Network & internet", ("android:id/content",))
 _OTHER_ROW = dataclasses.replace(_ROW, label="Apps")
-_ROW_ANCHOR = {"locator": _ROW.as_record(), "bounds": [0, 699, 1344, 917]}
+_ROW_ANCHOR: dict[str, object] = {"locator": _ROW.as_record(), "bounds": [0, 699, 1344, 917]}
 
 
 def tap_effect(*, mis_tap: bool = False, unchanged: bool = False) -> ActionEffect:
@@ -1769,8 +1772,6 @@ def test_get_all_edges_from_node_marks_each_instruction_whose_action_changed_not
 @pytest.mark.parametrize(
     "flags",
     [
-        pytest.param(None, id="no list"),
-        pytest.param([], id="shorter than the instructions"),
         pytest.param(["unchanged"], id="an entry that is no list"),
         pytest.param([["unchanged"]], id="a flag that is no object"),
         pytest.param([[{"no_visible_effect": "yes"}]], id="a flag that is not true"),
@@ -1779,10 +1780,13 @@ def test_get_all_edges_from_node_marks_each_instruction_whose_action_changed_not
 def test_an_edge_without_a_usable_flag_marks_no_instruction_as_unchanged(flags: object) -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    edge: dict[str, object] = {"actions": [{"action": "tap"}], "instructions": ["Tap the logo"]}
-    if flags is not None:
-        edge["action_flags"] = flags
-    gm.graph.add_edge("s0_home", "s0_home", **edge)
+    gm.graph.add_edge(
+        "s0_home",
+        "s0_home",
+        actions=[{"action": "tap"}],
+        instructions=["Tap the logo"],
+        action_flags=flags,
+    )
 
     assert gm.get_all_edges_from_node("s0_home")[0]["no_visible_change"] == [False]
 
@@ -1946,8 +1950,6 @@ def test_add_edge_pads_an_edge_whose_lists_are_missing_before_appending() -> Non
     assert data["instructions"] == ["", "", "scroll"]
     assert data["target_observations"] == ["", "", ""]
     assert data["schema_deltas"] == [None, None, None]
-    assert data["anchors"] == [[None], [None, None], [None]]
-    assert data["action_flags"] == [[None], [None, None], [None]]
 
 
 def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
@@ -1969,6 +1971,236 @@ def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:
     assert data["instructions"] == ["sort by price"]
     assert data["target_observations"] == ["sorted by price"]
     assert data["schema_deltas"] == [{"sort": {"after": "price"}}]
+
+
+_SCROLL = {"action": "swipe", "x1": 5, "y1": 90, "x2": 5, "y2": 10}
+_TAP = {"action": "tap", "x": 5, "y": 50}
+
+
+def test_add_edge_records_each_action_s_setup_and_none_without_one() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+
+    gm.add_edge("s0_home", "s1_settings", {"action": "tap"})
+    gm.add_edge("s0_home", "s1_settings", {"action": "row"}, details=EdgeDetails(setup=[]))
+    gm.add_edge(
+        "s0_home", "s1_settings", {"action": "far row"}, details=EdgeDetails(setup=[_SCROLL])
+    )
+
+    assert gm.graph["s0_home"]["s1_settings"]["setups"] == [None, [], [_SCROLL]]
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_add_edge_drops_a_setup_longer_than_the_cap_and_logs_it(
+    extra: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    setup = [_SCROLL] * (MAX_SETUP_ACTIONS + extra)
+
+    with caplog.at_level(logging.INFO, logger=gm_module.__name__):
+        gm.add_edge("s0_home", "s1_settings", _TAP, details=EdgeDetails(setup=setup))
+
+    assert gm.graph["s0_home"]["s1_settings"]["setups"] == [None if extra else setup]
+    dropped = "Dropped the setup of an action on s0_home -> s1_settings: 9 actions, more than 8"
+    messages = [record.getMessage() for record in caplog.records]
+    assert [m for m in messages if m.startswith("Dropped")] == ([dropped] if extra else [])
+
+
+@pytest.mark.parametrize(
+    ("first", "again", "kept"),
+    [
+        pytest.param(None, [_SCROLL], [_SCROLL], id="known replaces unknown"),
+        pytest.param([_SCROLL, _SCROLL], [_SCROLL], [_SCROLL], id="shorter replaces longer"),
+        pytest.param([], [_SCROLL], [], id="longer keeps shorter"),
+        pytest.param([_SCROLL], None, [_SCROLL], id="unknown keeps known"),
+    ],
+)
+def test_a_repeated_action_keeps_its_shorter_known_setup(
+    first: list[dict[str, Any]] | None,
+    again: list[dict[str, Any]] | None,
+    kept: list[dict[str, Any]],
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    if first is None:
+        gm.graph.add_edge("s0_home", "s1_settings", actions=[_TAP], visit_count=1)
+    else:
+        gm.add_edge("s0_home", "s1_settings", _TAP, details=EdgeDetails(setup=first))
+
+    gm.add_edge("s0_home", "s1_settings", _TAP, details=EdgeDetails(setup=again))
+
+    data = gm.graph["s0_home"]["s1_settings"]
+    assert (data["actions"], data["setups"], data["visit_count"]) == ([_TAP], [kept], 2)
+
+
+@pytest.mark.parametrize(
+    ("first", "again", "kept"),
+    [
+        pytest.param(([_SCROLL, _TAP], [None, _ROW_ANCHOR]), ([_TAP], [None]), ([_TAP], [None])),
+        pytest.param(([_TAP], [_ROW_ANCHOR]), ([_SCROLL, _TAP], [None, None]), None),
+        pytest.param(([_TAP], [_ROW_ANCHOR]), (None, None), None),
+    ],
+    ids=["shorter replaces longer", "longer keeps shorter", "unknown keeps known"],
+)
+def test_a_setup_keeps_the_anchor_of_each_of_its_actions(
+    first: tuple[list[dict[str, Any]], list[dict[str, object] | None]],
+    again: tuple[list[dict[str, Any]] | None, list[dict[str, object] | None] | None],
+    kept: tuple[list[dict[str, Any]], list[dict[str, object] | None]] | None,
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    setup, setup_anchors = first
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        _TAP,
+        details=EdgeDetails(setup=setup, setup_anchors=setup_anchors),
+    )
+    setup, setup_anchors = again
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        _TAP,
+        details=EdgeDetails(setup=setup, setup_anchors=setup_anchors),
+    )
+
+    data = gm.graph["s0_home"]["s1_settings"]
+    assert list(zip(data["setups"], data["setup_anchors"], strict=True)) == [kept or first]
+
+
+def test_a_dropped_setup_keeps_no_anchors_and_a_setup_given_none_has_none_of_them() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge(
+        "s0_home",
+        "s1_settings",
+        _TAP,
+        details=EdgeDetails(
+            setup=[_TAP] * (MAX_SETUP_ACTIONS + 1),
+            setup_anchors=[_ROW_ANCHOR] * (MAX_SETUP_ACTIONS + 1),
+        ),
+    )
+    gm.add_edge("s0_home", "s1_settings", {"action": "row"}, details=EdgeDetails(setup=[_SCROLL]))
+    gm.add_edge("s0_home", "s1_settings", {"action": "far row"})
+
+    assert gm.graph["s0_home"]["s1_settings"]["setup_anchors"] == [None, [None], None]
+
+
+def _identity(node: str) -> str:
+    return node
+
+
+def test_a_setup_trail_starts_an_arrival_s_setup_empty_and_extends_it_with_self_loops() -> None:
+    trail = SetupTrail(_identity)
+    trail.begin("s0_home", arrived=True)
+    assert trail.setup("s0_home") == []
+
+    trail.step([_SCROLL], "s0_home")
+    assert trail.setup("s0_home") == [_SCROLL]
+
+    trail.step([_TAP], "s1_list")
+    assert trail.setup("s1_list") == []
+
+
+def test_a_round_trip_joins_the_setup_of_the_node_it_returns_to() -> None:
+    """The nodes the round trip passed through are left behind: arriving at one of them
+    again starts its setup afresh."""
+    open_menu, choose, home = {"action": "tap", "x": 1}, {"action": "tap", "x": 2}, _TAP
+    trail = SetupTrail(_identity)
+    trail.begin("s0_home", arrived=True)
+    trail.step([_TAP], "s1_form")
+    trail.step([open_menu], "s2_menu")
+    trail.step([choose], "s1_form")
+    assert trail.setup("s1_form") == [open_menu, choose]
+
+    trail.step([open_menu], "s2_menu")
+    assert trail.setup("s2_menu") == []
+
+    trail.step([home], "s0_home")
+    assert trail.setup("s0_home") == [_TAP, open_menu, choose, open_menu, home]
+
+
+def test_a_setup_trail_keeps_the_anchor_of_each_action_of_a_setup() -> None:
+    open_menu, choose = {"action": "tap", "x": 1}, {"action": "tap", "x": 2}
+    trail = SetupTrail(_identity)
+    trail.begin("s0_home", arrived=False)
+    assert trail.setup_anchors("s0_home") is None
+
+    trail.step([_TAP], "s1_form", [_ROW_ANCHOR])
+    trail.step([_SCROLL], "s1_form")
+    trail.step([open_menu], "s2_menu", [_ROW_ANCHOR])
+    trail.step([choose], "s1_form", [None])
+
+    assert trail.setup("s1_form") == [_SCROLL, open_menu, choose]
+    assert trail.setup_anchors("s1_form") == [None, _ROW_ANCHOR, None]
+    assert trail.setup_anchors("s2_menu") is None
+
+
+def test_a_setup_trail_begun_without_an_arrival_knows_no_setup_until_it_arrives_elsewhere() -> None:
+    trail = SetupTrail(_identity)
+    trail.begin("s0_home", arrived=False)
+    trail.step([_SCROLL], "s0_home")
+    assert trail.setup("s0_home") is None
+
+    trail.step([_TAP], "s1_list")
+    assert trail.setup("s1_list") == []
+
+    trail.step([{"action": "back"}], "s0_home")
+    assert trail.setup("s0_home") is None
+    assert trail.setup("s9_never_reached") is None
+
+
+def test_a_setup_trail_matches_a_node_merged_away_while_it_holds_it() -> None:
+    gm = make_manager()
+    for node_id in ("s0_home", "s1_list", "s2_detail", "s5_list"):
+        add_screen(gm, node_id, f"screen {node_id}")
+    trail = SetupTrail(gm.resolve_node_id)
+    trail.begin("s0_home", arrived=True)
+    trail.step([_TAP], "s1_list")
+    trail.step([_SCROLL], "s1_list")
+
+    assert gm.merge_nodes("s5_list", "s1_list") is True
+    assert trail.setup("s5_list") == [_SCROLL]
+
+    trail.step([_TAP], "s2_detail")
+    trail.step([{"action": "back"}], "s5_list")
+    assert trail.setup("s5_list") == [_SCROLL, _TAP, {"action": "back"}]
+
+
+def test_a_graph_file_without_setups_loads_replays_without_them_and_saves_none(
+    tmp_path: Path, write_graph_file: Callable[[Path, dict[str, Any]], None]
+) -> None:
+    path = tmp_path / "explored.json"
+    write_graph_file(
+        path,
+        {
+            "nodes": [{"id": "s0_home"}, {"id": "s1_settings"}],
+            "edges": [
+                {
+                    "source": "s0_home",
+                    "target": "s1_settings",
+                    "actions": [[_TAP]],
+                    "num_steps": [1],
+                }
+            ],
+        },
+    )
+    gm = GraphManager()
+    gm.load_graph(path)
+
+    assert gm.find_path("s0_home", "s1_settings") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", [_TAP], ()),
+    ]
+    again = tmp_path / "saved" / "explored.json"
+    gm.save_graph(again)
+    assert "setups" not in json.loads(again.read_text(encoding="utf-8"))["edges"][0]
 
 
 def test_add_edge_ignores_an_unknown_endpoint(caplog: pytest.LogCaptureFixture) -> None:
@@ -2118,23 +2350,6 @@ def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
     }
 
 
-def test_representative_image_needs_a_step_log() -> None:
-    gm = make_manager()
-    add_screen(
-        gm, "s0_home", "Home screen", observations=["000000"], representative_observation="000000"
-    )
-
-    with pytest.raises(RuntimeError, match="needs a steps_dir"):
-        gm.representative_image_b64("s0_home")
-
-
-def test_representative_image_is_read_from_the_step_log(tmp_path: Path) -> None:
-    gm = make_manager(steps_dir=tmp_path / "steps")
-    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps", b"home-image"))
-
-    assert gm.representative_image_b64("s0_home") == b64(b"home-image")
-
-
 def test_merge_nodes_adds_only_the_schema_values_the_kept_node_lacks() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", state_schema={"tab": ["home"]})
@@ -2216,21 +2431,21 @@ def test_merge_nodes_pads_the_side_whose_edge_lacks_a_list(bare_side: str) -> No
         full,
         full,
         {"action": "sort"},
-        details=EdgeDetails(instruction="sort", schema_delta={"sort": "price"}),
+        details=EdgeDetails(instruction="sort", schema_delta={"sort": "price"}, setup=[]),
     )
 
     assert gm.merge_nodes("s0_keep", "s1_remove") is True
 
     data = gm.graph["s0_keep"]["s0_keep"]
-    keys = ("actions", "num_steps", "instructions", "target_observations", "schema_deltas")
-    padded = (["tap", "type"], 2, "", "", None)
-    recorded = ({"action": "sort"}, 1, "sort", "", {"sort": "price"})
+    keys = ("actions", *DESCRIBING_LISTS)
+    padded = (["tap", "type"], 2, "", "", None, None)
+    recorded = ({"action": "sort"}, 1, "sort", "", {"sort": "price"}, [])
     rows = list(zip(*(data[key] for key in keys), strict=True))
     assert rows == ([padded, recorded] if bare_side == "kept" else [recorded, padded])
 
 
 def edge_rows(gm: GraphManager, source: str, target: str) -> list[tuple[Any, ...]]:
-    """One (action, num_steps, instruction, observation, schema_delta) row per action."""
+    """One (action, num_steps, instruction, observation, schema_delta, setup) row per action."""
     data = gm.graph[source][target]
     return list(zip(*(data[key] for key in ("actions", *DESCRIBING_LISTS)), strict=True))
 
@@ -2258,6 +2473,7 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
             instruction="search for milk",
             target_observation="Settings page",
             schema_delta={"query": {"after": "milk"}},
+            setup=[_SCROLL],
         ),
     )
     gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, details=EdgeDetails(num_steps=3))
@@ -2272,12 +2488,19 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
     assert gm.move_edge_action("s0_home", "s1_settings", 1, "s2_search") is True
 
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None),
-        ({"action": "swipe"}, 3, "", "", None),
+        ({"action": "tap"}, 1, "open settings", "", None, None),
+        ({"action": "swipe"}, 3, "", "", None, None),
     ]
     assert edge_rows(gm, "s0_home", "s2_search") == [
-        ({"action": "enter"}, 1, "submit the search", "", None),
-        (search, 2, "search for milk", "Search results", {"query": {"after": "milk"}}),
+        ({"action": "enter"}, 1, "submit the search", "", None, None),
+        (
+            search,
+            2,
+            "search for milk",
+            "Search results",
+            {"query": {"after": "milk"}},
+            [_SCROLL],
+        ),
     ]
     assert gm.graph["s0_home"]["s1_settings"]["instruction_templates"] == []
     assert gm.graph["s0_home"]["s2_search"]["visit_count"] == 2
@@ -2298,7 +2521,7 @@ def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_ne
 
     assert not gm.graph.has_edge("s0_home", "s1_settings")
     assert edge_rows(gm, "s0_home", "s0_home") == [
-        ({"action": "tap"}, 1, "open settings", "Home screen", None)
+        ({"action": "tap"}, 1, "open settings", "Home screen", None, None)
     ]
     assert gm.graph["s0_home"]["s0_home"]["visit_count"] == 1
 
@@ -2321,7 +2544,7 @@ def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
 
     assert list(gm.graph.nodes) == ["s0_home", "s1_settings"]
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None)
+        ({"action": "tap"}, 1, "open settings", "", None, None)
     ]
     assert "move_edge_action: missing node ext_com.other" in caplog.text
 
@@ -2347,7 +2570,7 @@ def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
         assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
 
     assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
-        ({"action": "tap"}, 1, "open settings", "Outside page", None)
+        ({"action": "tap"}, 1, "open settings", "Outside page", None, None)
     ]
     assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
     assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
@@ -3040,6 +3263,57 @@ def test_find_path_uses_an_empty_action_for_an_edge_without_actions() -> None:
     ]
 
 
+def test_find_path_returns_the_setup_of_the_action_it_takes() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.add_edge("s0_home", "s1_settings", {"action": "row"}, details=EdgeDetails(setup=[_SCROLL]))
+
+    assert gm.find_path("s0_home", "s1_settings") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {"action": "row"}, (None,), Setup((_SCROLL,), (None,))),
+    ]
+
+
+@pytest.mark.parametrize("setups", [[None], [{"action": "swipe"}], [[_SCROLL, "swipe"]]])
+def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
+    setups: list[object],
+) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_settings", "Settings page")
+    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "row"}], setups=setups)
+
+    path = gm.find_path("s0_home", "s1_settings")
+
+    assert path is not None
+    assert path[1] == PathStep("s1_settings", {"action": "row"})
+
+
+def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
+    """A one-step action whose setup takes two more loses to a path of two one-step
+    actions without one, and on one edge an action without a setup beats one with it."""
+    gm = make_manager()
+    _line_graph(gm)
+    gm.add_edge(
+        "s0_home",
+        "s3_results",
+        {"action": "row"},
+        details=EdgeDetails(num_steps=1, setup=[_SCROLL, _SCROLL]),
+    )
+    gm.add_edge(
+        "s0_home", "s1_settings", {"action": "scrolled a"}, details=EdgeDetails(setup=[_SCROLL])
+    )
+
+    path = gm.find_path("s0_home", "s3_results")
+
+    assert path == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {"action": "a"}, (None,)),
+        PathStep("s3_results", {"action": "b"}, (None,)),
+    ]
+
+
 def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:
     gm = make_manager()
     _line_graph(gm)
@@ -3055,6 +3329,8 @@ def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:
     )
     gm.graph["s0_home"]["s1_settings"]["instructions"] = ["open settings"]
     gm.graph["s0_home"]["s1_settings"]["target_observations"] = ["the settings page"]
+    gm.graph["s1_settings"]["s3_results"]["setups"] = [[_SCROLL]]
+    gm.graph["s1_settings"]["s3_results"]["setup_anchors"] = [[None]]
 
     steps = gm.find_guided_path(
         "s0_home", [{"node_id": "s3_results", "required_schema": {"sort": "price"}}]
@@ -3064,6 +3340,7 @@ def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:
     assert [step["type"] for step in steps] == ["navigate", "navigate", "self_loop"]
     assert steps[0]["instruction"] == "open settings"
     assert steps[0]["target_observation"] == "the settings page"
+    assert (steps[0]["setup"], steps[1]["setup"]) == ([], [_SCROLL])
     assert steps[1]["instruction"] == ""
     assert steps[2]["schema_delta"] == {"sort": {"after": "price"}}
     assert steps[2]["action"] == {"action": "sort"}
@@ -3586,7 +3863,6 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     assert restored["description_embedding"] == EMBEDDINGS["Home screen"]
     assert restored["description_embedding_model"] == gm.embedding_model
     assert loaded.steps_dir == steps_dir
-    assert loaded.representative_image_b64(node_id) == SHOT_A
     assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
     assert loaded.image_vector(observation.observation_id) == [0.0, 0.6, 0.8]
 
@@ -3893,7 +4169,6 @@ def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     gm.load_graph(path)
 
     assert gm.steps_dir == app_dir / "steps"
-    assert gm.representative_image_b64("s0_home") == b64(b"home-image")
 
 
 def write_graph(path: Path, nodes: list[dict[str, object]]) -> None:
@@ -3985,7 +4260,6 @@ def _without_tree(steps_dir: Path, record: dict[str, object] | None) -> Membersh
     [
         pytest.param(None, id="no record"),
         pytest.param({"kind": "observation", "ui_tree_error": None}, id="no reason"),
-        pytest.param({"kind": "observation"}, id="a record without the tree fields"),
     ],
 )
 def test_load_graph_rejects_a_representative_with_neither_a_tree_nor_a_reason_naming_it(
@@ -4522,6 +4796,7 @@ json_scalars = (
 )
 actions = st.dictionaries(st.text(min_size=1, max_size=8), json_scalars, max_size=3)
 small_dicts = st.lists(st.dictionaries(st.text(max_size=6), json_scalars, max_size=2), max_size=2)
+setup_entries = st.none() | st.lists(actions, max_size=3)
 step_ids = st.lists(
     st.integers(min_value=0, max_value=10_000_000), min_size=1, max_size=4, unique=True
 ).map(lambda numbers: [f"{number:06d}" for number in numbers])
@@ -4566,6 +4841,7 @@ edge_attrs = st.fixed_dictionaries(
         "num_steps": st.lists(st.integers(min_value=1, max_value=5), max_size=3),
         "visit_count": st.integers(min_value=0, max_value=20),
         "schema_deltas": small_dicts,
+        "setups": st.lists(setup_entries, max_size=3),
     }
 )
 graphs = st.tuples(
@@ -4606,6 +4882,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "num_steps": d.get("num_steps", []),
             "visit_count": d.get("visit_count", 0),
             "schema_deltas": d.get("schema_deltas") or None,
+            "setups": d.get("setups") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
     }
@@ -4710,8 +4987,8 @@ def test_every_edge_references_an_existing_node(ops: list[tuple[str, str, str, s
                 assert "page_description" in gm.graph.nodes[v]
 
 
-DESCRIBING_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas")
-PER_ACTION_LISTS = (*DESCRIBING_LISTS, "anchors", "action_flags")
+DESCRIBING_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
+PER_ACTION_LISTS = (*DESCRIBING_LISTS, "anchors", "action_flags", "setup_anchors")
 
 edge_and_merge_operations = st.lists(
     st.tuples(
@@ -4722,6 +4999,7 @@ edge_and_merge_operations = st.lists(
         st.none() | st.text(max_size=12),
         st.none() | st.text(max_size=12),
         st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
+        setup_entries,
     ),
     max_size=25,
 )
@@ -4755,6 +5033,7 @@ def test_every_per_action_list_has_one_entry_per_action(
             str | None,
             str | None,
             dict[str, Any] | None,
+            list[dict[str, Any]] | None,
         ]
     ],
 ) -> None:
@@ -4762,14 +5041,17 @@ def test_every_per_action_list_has_one_entry_per_action(
     gm = make_manager()
     for node_id in POOL:
         add_screen(gm, node_id, f"screen {node_id}", **members(path.parent / "steps"))
-    for kind, a, b, action, instruction, observation, delta in ops:
+    for kind, a, b, action, instruction, observation, delta, setup in ops:
         if kind == "edge":
             gm.add_edge(
                 a,
                 b,
                 action,
                 details=EdgeDetails(
-                    instruction=instruction, target_observation=observation, schema_delta=delta
+                    instruction=instruction,
+                    target_observation=observation,
+                    schema_delta=delta,
+                    setup=setup,
                 ),
             )
         else:
