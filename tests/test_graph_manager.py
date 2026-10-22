@@ -1299,6 +1299,26 @@ def test_a_node_s_stable_layout_follows_a_visit(vlm: FakeVlm, screen: Screens) -
     assert gm.node_layout("s0_page") == dict.fromkeys(page, pytest.approx(0.8))
 
 
+@pytest.mark.usefixtures("vlm")
+def test_a_node_s_stable_layout_follows_a_split(
+    tmp_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    """Half of the node's members show the page and half the dialog, so no entry is on
+    enough of them until the dialog's members leave."""
+    path = tmp_path / "demo.json"
+    trees = {"000001": PAGE_TREE, "000002": PAGE_TREE, "000003": DIALOG_TREE, "000004": DIALOG_TREE}
+    write_member_graph(path, {"s0_page": [(member, ANY_IMAGE) for member in trees]})
+    for member, tree in trees.items():
+        (tmp_path / "steps" / f"{member}.xml").write_text(tree, encoding="utf-8")
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, embedding=EMBEDDING)
+    gm.load_graph(path)
+    assert gm.node_layout("s0_page") == {}
+
+    gm.split_members("s0_page", ["000003", "000004"], [])
+
+    assert gm.node_layout("s0_page") == dict.fromkeys(layout_signature(parse_tree(PAGE_TREE)), 1.0)
+
+
 def _png(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
