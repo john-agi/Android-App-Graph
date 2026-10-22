@@ -13,6 +13,9 @@ open, so a round never asks a pair whose answer could contradict the answers bef
 it. The "same" answers join the nodes into clusters, and no "different" answer ever
 falls inside one.
 
+A pair the verifier gives no answer on is neither "same" nor "different": it decides
+no other pair, and it is neither asked again nor deduced.
+
 [1] Wang, Li, Kraska, Franklin, Feng, "Leveraging Transitive Relations for Crowdsourced
     Joins", SIGMOD 2013, https://arxiv.org/abs/1408.6916.
 """
@@ -67,10 +70,12 @@ class PairRounds:
 
     Call ``next_round`` for the indices of the pairs to ask, ``record`` each answer, and
     repeat until ``next_round`` returns none: every pair is then asked or deduced.
+    ``asked`` holds the answers, and ``unanswered`` the pairs asked without one.
     """
 
     pairs: Sequence[NodePair]
     asked: dict[int, bool] = field(default_factory=dict)
+    unanswered: set[int] = field(default_factory=set)
     deduced: dict[int, Deduction] = field(default_factory=dict)
     rounds: int = 0
 
@@ -83,6 +88,8 @@ class PairRounds:
         apart: list[NodePair] = []
         questions: list[int] = []
         for index, (first, second) in enumerate(self.pairs):
+            if index in self.unanswered:
+                continue
             same = self._answer(index)
             if same is None and not _decided(assumed, apart, first, second):
                 questions.append(index)
@@ -94,9 +101,12 @@ class PairRounds:
             self.rounds += 1
         return questions
 
-    def record(self, index: int, *, same: bool) -> None:
-        """Record the verifier's answer on pair ``index``."""
-        self.asked[index] = same
+    def record(self, index: int, *, same: bool | None) -> None:
+        """Record the verifier's answer on pair ``index``, ``None`` when it gave none."""
+        if same is None:
+            self.unanswered.add(index)
+        else:
+            self.asked[index] = same
 
     def clusters(self, order: NodeOrder) -> list[list[str]]:
         """Return the clusters the "same" answers join the nodes of the asked pairs
@@ -105,7 +115,9 @@ class PairRounds:
         for index, same in self.asked.items():
             if same:
                 components.join(*self.pairs[index])
-        asked_nodes = {node for index in self.asked for node in self.pairs[index]}
+        asked_nodes = {
+            node for index in [*self.asked, *self.unanswered] for node in self.pairs[index]
+        }
         by_root: dict[str, list[str]] = {}
         for node in sorted(asked_nodes, key=order):
             by_root.setdefault(components.root(node), []).append(node)
@@ -133,7 +145,7 @@ class PairRounds:
                 ends = frozenset((components.root(first), components.root(second)))
                 apart.setdefault(ends, index)
         for index, (first, second) in enumerate(self.pairs):
-            if self._answer(index) is not None:
+            if index in self.unanswered or self._answer(index) is not None:
                 continue
             if components.root(first) == components.root(second):
                 basis = _path(links, first, second)

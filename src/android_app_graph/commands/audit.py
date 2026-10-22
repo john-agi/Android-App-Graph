@@ -221,7 +221,9 @@ def _check_member_groups(
     transitions: Sequence[TransitionRecord],
 ) -> list[dict[str, object]]:
     """Ask the verifier about every check's closest pair at once, then, in order, split
-    off or move each group it tells apart from its node's home."""
+    off or move each group it tells apart from its node's home. Without an answer the
+    node stays whole: a change rests on an answer, and node verification has already
+    asked twice."""
     questions = [
         MemberQuestion(
             check.pair.first,
@@ -234,7 +236,7 @@ def _check_member_groups(
     answers = graph.verify_member_pairs(questions, verdicts)
     for (node_id, check), verdict in zip(checks, answers, strict=True):
         result = _member_check_record(node_id, check, verdict)
-        if not verdict.same:
+        if verdict.answered and not verdict.same:
             result["change"] = _separate_group(graph, node_id, check, verdicts, transitions)
         results.append(result)
     return results
@@ -245,6 +247,10 @@ def _member_check_record(
 ) -> dict[str, object]:
     kind = "split" if len(check.group) > 1 else "move"
     home_member, member = check.pair.first, check.pair.second
+    if not verdict.answered:
+        outcome = "no answer, so the node stays whole"
+    else:
+        outcome = "same" if verdict.same else "different"
     logger.info(
         "%s check of %s on members %s and %s (%.3f): %s",
         kind.capitalize(),
@@ -252,7 +258,7 @@ def _member_check_record(
         home_member,
         member,
         check.pair.score,
-        "same" if verdict.same else "different",
+        outcome,
     )
     return {
         "kind": kind,
@@ -260,7 +266,7 @@ def _member_check_record(
         "group": check.group,
         "members": [home_member, member],
         "image_score": check.pair.score,
-        "same": verdict.same,
+        "same": verdict.same if verdict.answered else None,
         "reason": verdict.reason,
         "reused": verdict.reused,
     }

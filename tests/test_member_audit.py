@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import logging
 import math
 import threading
 from collections.abc import Callable
@@ -77,9 +78,10 @@ MEET_TIMEOUT = 10.0
 
 @dataclass
 class FakeModels:
-    """A verifier that confirms the member pairs in ``same`` and records each pair it
-    is shown as ``(existing, new)``, a text embedding that records each text, and an
-    edge normalizer whose every template is ``template``.
+    """A verifier that confirms the member pairs in ``same``, gives no answer once for
+    each entry of ``unanswered``, and records each pair it is shown as
+    ``(existing, new)``, a text embedding that records each text, and an edge normalizer
+    whose every template is ``template``.
 
     A pair in ``meetings`` is answered only once every question its barrier counts has
     been asked, so a round asked one question at a time breaks the barrier. A pair in
@@ -87,6 +89,7 @@ class FakeModels:
     """
 
     same: set[frozenset[str]] = field(default_factory=set)
+    unanswered: list[frozenset[str]] = field(default_factory=list)
     shown: list[tuple[str, str]] = field(default_factory=list)
     descriptions: list[str] = field(default_factory=list)
     embedded: list[str] = field(default_factory=list)
@@ -96,6 +99,9 @@ class FakeModels:
 
     def confirm(self, first: str, second: str) -> None:
         self.same.add(frozenset((first, second)))
+
+    def give_no_answer(self, first: str, second: str) -> None:
+        self.unanswered.append(frozenset((first, second)))
 
     def meet(self, *pairs: tuple[str, str]) -> None:
         meeting = threading.Barrier(len(pairs), timeout=MEET_TIMEOUT)
@@ -119,6 +125,9 @@ class FakeModels:
             meeting.wait()
         self.shown.append(pair)
         self.descriptions.append(existing_description)
+        if frozenset(pair) in self.unanswered:
+            self.unanswered.remove(frozenset(pair))
+            return {"same": False, "answered": False, "reason": "timed out"}
         return {"same": frozenset(pair) in self.same, "reason": "scripted"}
 
     def get_embedding(
@@ -319,7 +328,7 @@ def test_two_black_nodes_of_different_activities_are_kept_apart_unverified_whoev
     models.confirm("000001", "000002")
     issue = {"type": "merge_nodes", "node_a": "s0_pattern", "node_b": "s1_pin"}
 
-    (result,) = graph.verify_merge_proposals(graph.merge_proposals([issue]), {})
+    (result,) = graph.verify_merge_proposals(graph.merge_proposals([issue]), {}).pairs
 
     assert result["sources"] == ["text_audit", "image"]
     assert (result["status"], result["reason"]) == (
@@ -589,6 +598,83 @@ def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
     assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
 
 
+def test_a_moving_member_without_an_answer_on_a_candidate_goes_on_to_the_next(
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """List's member has the moving member's image vector and description vector, so
+    List is the first candidate; the check on it gets no answer, counts as a rejection
+    and is recorded as no answer."""
+    write_member_graph(
+        graph_path,
+        {**MOVE, "s1_list": [("000004", Y)]},
+        edges=MOVE_EDGES,
+        transitions=MOVE_TRANSITIONS,
+    )
+    graph = _load(graph_path)
+    models.give_no_answer("000004", "000003")
+
+    with caplog.at_level(logging.INFO):
+        (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    short_list = check["change"]["short_list"]
+    assert short_list["candidates"][0] == {
+        "node": "s1_list",
+        "sources": {"image": pytest.approx(1.0), "text": pytest.approx(1.0)},
+        "closest_member": "000004",
+        "image_score": pytest.approx(1.0),
+    }
+    assert short_list["verifications"][0] == {
+        "node": "s1_list",
+        "member": "000004",
+        "same": False,
+        "answered": False,
+        "reason": "timed out",
+    }
+    assert "Verifier gave no answer on node s1_list against member 000004 (timed out); " in (
+        caplog.text
+    )
+    assert check["change"]["to"] == "s3_screen_000003"
+    assert models.shown == [("000002", "000003"), ("000004", "000003"), ("000005", "000003")]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "edges", "transitions", "kind"),
+    [
+        (SPLIT, SPLIT_EDGES, SPLIT_TRANSITIONS, "split"),
+        (MOVE, MOVE_EDGES, MOVE_TRANSITIONS, "move"),
+    ],
+    ids=["split", "move"],
+)
+def test_a_split_or_move_check_without_an_answer_leaves_the_node_whole(
+    nodes: dict[str, list[tuple[str, list[float]]]],
+    edges: tuple[dict[str, object], ...],
+    transitions: tuple[tuple[str, str, object, str, str], ...],
+    kind: str,
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """A change rests on a verifier answer, and the verifier was already asked twice, so
+    the check is reported as unanswered, neither "same" nor "different"."""
+    write_member_graph(graph_path, nodes, edges=edges, transitions=transitions)
+    graph = _load(graph_path)
+    members = {node: graph.graph.nodes[node]["observations"] for node in graph.graph}
+    before = _edges(graph)
+    models.give_no_answer("000002", "000003")
+
+    (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    assert (check["kind"], check["members"]) == (kind, ["000002", "000003"])
+    assert (check["same"], check["reason"]) == (None, "timed out")
+    assert "change" not in check
+    assert {node: graph.graph.nodes[node]["observations"] for node in graph.graph} == members
+    assert _edges(graph) == before
+    assert models.shown == [("000002", "000003")]
+
+
 # Home's last member is a black screen of the PIN activity, and Pattern's member a black
 # screen of another; every black member looks the same.
 BLACK_MOVE = {
@@ -777,6 +863,49 @@ def test_a_merge_below_the_grouping_floor_is_not_split_again(
     assert list(graph.graph) == ["s0_home"]
 
 
+def test_a_member_pair_the_verifier_gave_no_answer_on_is_asked_about_again_later_in_the_run(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Settings' far member 000004 looks like Home's only member. The merge check on the
+    two gets no answer, so the nodes stay apart and the run keeps no answer for the pair.
+    The member's move check then shows the verifier the same pair, which it confirms."""
+    write_member_graph(
+        graph_path,
+        {
+            "s0_home": [("000001", X)],
+            "s1_settings": [
+                ("000002", Y),
+                ("000003", _toward(Y, Z, LINKED)),
+                ("000004", _toward(X, Y, PROPOSED)),
+            ],
+        },
+    )
+    graph = _load(graph_path)
+    models.give_no_answer("000001", "000004")
+    models.confirm("000001", "000004")
+    verdicts: MemberVerdicts = {}
+
+    (merge,) = graph.verify_merge_proposals(graph.merge_proposals([]), verdicts).pairs
+
+    assert (merge["status"], merge["reason"]) == ("kept_separate", "timed out")
+    assert verdicts == {}
+
+    (check,) = _checks(_check_members(graph, graph_path, verdicts))
+
+    assert (check["kind"], check["members"], check["same"]) == ("move", ["000002", "000004"], False)
+    assert check["change"]["to"] == "s0_home"
+    assert check["change"]["short_list"]["verifications"] == [
+        {
+            "node": "s0_home",
+            "member": "000001",
+            "same": True,
+            "answered": True,
+            "reason": "scripted",
+        }
+    ]
+    assert models.shown == [("000004", "000001"), ("000002", "000004"), ("000001", "000004")]
+
+
 @pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     tmp_path: Path,
@@ -864,6 +993,47 @@ def test_two_confirmed_pairs_decide_the_third_and_all_three_nodes_merge(
     ] * 3
     assert list(graph.graph) == ["s0_screen"]
     assert graph.graph.nodes["s0_screen"]["observations"] == ["000001", "000002", "000003"]
+
+
+def test_a_merge_check_without_an_answer_decides_no_other_pair(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """No answer on s0 + s1 is neither "same" nor "different", so with s1 = s2 it says
+    nothing about s0 + s2: the next round asks it."""
+    write_member_graph(graph_path, _one_member_nodes(0.0, 0.5, 1.0))
+    graph = _load(graph_path)
+    models.give_no_answer("000001", "000002")
+    models.confirm("000002", "000003")
+    issues = [
+        _merge_issue("s0_screen", "s2_screen"),
+        _merge_issue("s0_screen", "s1_screen"),
+        _merge_issue("s1_screen", "s2_screen"),
+    ]
+
+    report = graph.verify_merge_proposals(graph.merge_proposals(issues, sources=()), {})
+
+    assert sorted(models.shown) == [
+        ("000001", "000002"),
+        ("000001", "000003"),
+        ("000002", "000003"),
+    ]
+    assert (report.rounds, report.asked, report.deduced) == (2, 3, 0)
+    far, unanswered, _ = report.pairs
+    assert {key: unanswered[key] for key in ("asked", "round", "same", "reason", "status")} == {
+        "asked": True,
+        "round": 1,
+        "same": None,
+        "reason": "timed out",
+        "status": "kept_separate",
+    }
+    assert {key: far[key] for key in ("asked", "round", "same", "status")} == {
+        "asked": True,
+        "round": 2,
+        "same": False,
+        "status": "kept_separate",
+    }
+    assert report.merges == [Merge("s1_screen", ["s2_screen"])]
+    assert list(graph.graph) == ["s0_screen", "s1_screen"]
 
 
 def test_a_round_s_questions_are_in_flight_together(

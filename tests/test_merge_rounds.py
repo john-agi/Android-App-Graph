@@ -18,8 +18,9 @@ def _order(node: str) -> tuple[int, str]:
     return int(node.split("_", 1)[0][1:]), node
 
 
-def _run(rounds: PairRounds, answer: Callable[[NodePair], bool]) -> list[list[int]]:
-    """Ask every round of ``rounds`` with ``answer`` and return each round's questions."""
+def _run(rounds: PairRounds, answer: Callable[[NodePair], bool | None]) -> list[list[int]]:
+    """Ask every round of ``rounds`` with ``answer``, ``None`` for no answer, and return
+    each round's questions."""
     asked: list[list[int]] = []
     while questions := rounds.next_round():
         asked.append(questions)
@@ -68,6 +69,26 @@ def test_a_path_with_two_different_answers_decides_nothing() -> None:
     assert rounds.deduced == {}
 
 
+def test_a_pair_without_an_answer_decides_no_other_pair_and_is_not_asked_again() -> None:
+    """No answer on A + B is neither "same" nor "different", so with B = C it says
+    nothing about A + C, which the next round asks."""
+    rounds = PairRounds([(A, B), (B, C), (A, C)])
+
+    asked = _run(rounds, {(A, B): None, (B, C): True, (A, C): False}.__getitem__)
+
+    assert asked == [[0, 1], [2]]
+    assert (rounds.asked, rounds.unanswered, rounds.deduced) == ({1: True, 2: False}, {0}, {})
+    assert rounds.clusters(_order) == [[A], [B, C]]
+
+
+def test_the_nodes_of_a_pair_without_an_answer_are_clusters_of_their_own() -> None:
+    rounds = PairRounds([(A, B)])
+
+    _run(rounds, lambda _pair: None)
+
+    assert rounds.clusters(_order) == [[A], [B]]
+
+
 def test_the_same_answers_join_the_nodes_into_clusters_in_node_order() -> None:
     rounds = PairRounds([(C, D), (B, D), (A, B), (A, C)])
 
@@ -111,13 +132,17 @@ def _follows(answers: Mapping[NodePair, bool], first: str, second: str) -> bool 
 
 
 def _asked_one_at_a_time(
-    pairs: Sequence[NodePair], answer: Callable[[NodePair], bool]
+    pairs: Sequence[NodePair], answer: Callable[[NodePair], bool | None]
 ) -> list[NodePair]:
-    asked: dict[NodePair, bool] = {}
+    asked: list[NodePair] = []
+    answered: dict[NodePair, bool] = {}
     for pair in pairs:
-        if _follows(asked, *pair) is None:
-            asked[pair] = answer(pair)
-    return list(asked)
+        if _follows(answered, *pair) is None:
+            asked.append(pair)
+            same = answer(pair)
+            if same is not None:
+                answered[pair] = same
+    return asked
 
 
 @given(pairs=ordered_pairs(), data=st.data())
@@ -134,6 +159,24 @@ def test_rounds_ask_the_pairs_that_asking_one_at_a_time_asks(
         pairs, answers.__getitem__
     )
     assert sorted([*rounds.asked, *rounds.deduced]) == list(range(len(pairs)))
+
+
+@given(pairs=ordered_pairs(), data=st.data())
+def test_pairs_without_an_answer_are_asked_once_and_deduce_nothing(
+    pairs: list[NodePair], data: st.DataObject
+) -> None:
+    """A pair without an answer is asked as asking one pair at a time asks it, and no
+    deduction rests on it."""
+    answers = {pair: data.draw(st.sampled_from([True, False, None])) for pair in pairs}
+    rounds = PairRounds(pairs)
+
+    _run(rounds, answers.__getitem__)
+
+    asked = sorted([*rounds.asked, *rounds.unanswered])
+    assert [pairs[index] for index in asked] == _asked_one_at_a_time(pairs, answers.__getitem__)
+    assert sorted([*asked, *rounds.deduced]) == list(range(len(pairs)))
+    for deduction in rounds.deduced.values():
+        assert rounds.unanswered.isdisjoint(deduction.basis)
 
 
 @given(pairs=ordered_pairs(), data=st.data())

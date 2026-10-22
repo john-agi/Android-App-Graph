@@ -1023,6 +1023,11 @@ def describe_page_and_state(
     return page_description, state, elements, is_external_web
 
 
+def _no_verifier_answer(reason: str) -> dict[str, Any]:
+    logger.warning("node_verify: no answer (%s)", reason)
+    return {"same": False, "answered": False, "reason": reason}
+
+
 def verify_same_node(
     client: OpenRouter,
     screenshot_new_b64: str,
@@ -1038,15 +1043,21 @@ def verify_same_node(
     "location search page" get refined to "start location search page" and
     "end location search page".
 
+    A request that still times out at its deadline is asked once more, with a
+    deadline of its own for the SDK's retries and for sending again after HTTP 429.
+
     Returns a dict with keys:
         - "same": bool
         - "reason": str
         - "existing_description": str (only when same=False) — refined name for existing node
         - "new_description": str (only when same=False) — refined name for new screen
+        - "answered": False (only when the verifier gave no answer: the request timed out
+          twice, the reply was truncated or it could not be parsed) — "same" is then False
     """
     prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
-    try:
-        resp = send_chat(
+
+    def ask() -> ChatResult:
+        return send_chat(
             client,
             call_type="node_verify",
             settings=settings,
@@ -1064,14 +1075,23 @@ def verify_same_node(
             ],
             response_format=_structured_output("node_verification", _NODE_VERIFICATION_SCHEMA),
         )
-    except TruncatedReplyError, httpx.TimeoutException:
-        return {"same": False, "reason": "reply truncated"}
+
+    try:
+        try:
+            resp = ask()
+        except httpx.TimeoutException:
+            logger.warning("node_verify: asking once more")
+            resp = ask()
+    except httpx.TimeoutException:
+        return _no_verifier_answer("timed out")
+    except TruncatedReplyError:
+        return _no_verifier_answer("reply truncated")
     raw = strip_json_fences(message_text(resp))
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Failed to parse verify JSON. Raw:\n%s", raw)
-        return {"same": False, "reason": "parse error"}
+        return _no_verifier_answer("parse error")
 
     logger.debug("Node verify: %s", result)
     return result

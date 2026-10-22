@@ -454,11 +454,13 @@ def _short_list_order(candidate: Candidate) -> tuple[int, float]:
 
 class MemberVerdict(NamedTuple):
     """The verifier's answer on whether two member observations show one screen;
-    ``reused`` when an earlier check of the same pair in the run gave it."""
+    ``reused`` when an earlier check of the same pair in the run gave it, and not
+    ``answered``, with ``same`` false, when the verifier gave no answer."""
 
     same: bool
     reason: str
     reused: bool = False
+    answered: bool = True
 
 
 type MemberVerdicts = dict[frozenset[str], MemberVerdict]
@@ -1112,8 +1114,9 @@ class GraphManager:
         4. The short list's candidates are verified in order against their closest
            members, up to ``SHORT_LIST_VERIFICATIONS``.
 
-        The first confirmation decides. A screen every check rejects starts a new node,
-        and the step's first rejection refines the two descriptions.
+        The first confirmation decides, and a check the verifier gives no answer on
+        counts as a rejection. A screen every check rejects starts a new node, and the
+        step's first rejection refines the two descriptions.
 
         A ``black`` screen, all a secure window captures, is matched by its activity
         instead of steps 1 to 4: it joins the node with a black member of its activity,
@@ -1414,13 +1417,21 @@ class GraphManager:
 
     def _verify(self, identification: _Identification, node_id: str, member: str) -> str | None:
         """Ask the verifier whether the identified screen is ``node_id``'s ``member``, and
-        return ``node_id`` when it says so; the first rejection refines both descriptions."""
+        return ``node_id`` when it says so; no answer counts as a rejection, and the first
+        rejection refines both descriptions."""
         description = self.graph.nodes[node_id].get("page_description", "")
         verdict = self._verifier_reply(identification, member, description)
         same = verdict.get("same") is True
+        answered = verdict.get("answered") is not False
         reason = as_str(verdict.get("reason"), "")
         identification.decision.verifications.append(
-            {"node": node_id, "member": member, "same": same, "reason": reason}
+            {
+                "node": node_id,
+                "member": member,
+                "same": same,
+                "answered": answered,
+                "reason": reason,
+            }
         )
         if same:
             logger.info(
@@ -1431,9 +1442,18 @@ class GraphManager:
                 reason,
             )
             return node_id
-        logger.info(
-            "Verifier rejected node %s against member %s: reason: %s", node_id, member, reason
-        )
+        if answered:
+            logger.info(
+                "Verifier rejected node %s against member %s: reason: %s", node_id, member, reason
+            )
+        else:
+            logger.warning(
+                "Verifier gave no answer on node %s against member %s (%s); it counts as a "
+                "rejection",
+                node_id,
+                member,
+                reason,
+            )
         if identification.verdicts is None and not identification.rejected:
             identification.rejected = True
             self._refine(identification, node_id, verdict)
@@ -1450,7 +1470,7 @@ class GraphManager:
                 description=description,
                 verdicts=verdicts,
             )
-            return {"same": known.same, "reason": known.reason}
+            return {"same": known.same, "answered": known.answered, "reason": known.reason}
         client, page_detail = self._require_page_detail()
         return verify_same_node(
             client,
@@ -1478,33 +1498,43 @@ class GraphManager:
         time, keep each answer in ``verdicts``, and return the answers in order.
 
         A pair ``verdicts`` already holds, or an earlier question names too, is answered
-        from there and marked ``reused``. When a call raises, the answers already
-        returned are kept in ``verdicts`` before the error is raised.
+        from there and marked ``reused``. No answer is not kept: it says nothing about the
+        two screens, and a later call asks the pair again. When a call raises, the answers
+        already returned are kept in ``verdicts`` before the error is raised.
         """
         first_asked: dict[frozenset[str], int] = {}
         for index, question in enumerate(questions):
             pair = frozenset((question.existing, question.new))
             if pair not in verdicts:
                 first_asked.setdefault(pair, index)
+        replies: dict[frozenset[str], MemberVerdict] = {}
         if first_asked:
-            self._ask_verifier([questions[index] for index in first_asked.values()], verdicts)
+            replies = self._ask_verifier(
+                [questions[index] for index in first_asked.values()], verdicts
+            )
         answers: list[MemberVerdict] = []
         for index, question in enumerate(questions):
             pair = frozenset((question.existing, question.new))
             if first_asked.get(pair) == index:
-                answers.append(verdicts[pair])
+                answers.append(replies[pair])
                 continue
             logger.info(
                 "Reusing the verifier's answer on members %s and %s",
                 question.existing,
                 question.new,
             )
-            answers.append(verdicts[pair]._replace(reused=True))
+            known = replies[pair] if pair in replies else verdicts[pair]
+            answers.append(known._replace(reused=True))
         return answers
 
-    def _ask_verifier(self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts) -> None:
+    def _ask_verifier(
+        self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts
+    ) -> dict[frozenset[str], MemberVerdict]:
+        """Ask ``questions`` concurrently and return the verdict on each pair, keeping
+        each answered one in ``verdicts``."""
         client, page_detail = self._require_page_detail()
         steps_dir = self._require_steps_dir()
+        replies: dict[frozenset[str], MemberVerdict] = {}
 
         def ask(question: MemberQuestion) -> MemberVerdict:
             reply = verify_same_node(
@@ -1514,12 +1544,20 @@ class GraphManager:
                 existing_description=question.description,
                 settings=page_detail,
             )
-            return MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
+            return MemberVerdict(
+                reply.get("same") is True,
+                as_str(reply.get("reason"), ""),
+                answered=reply.get("answered") is not False,
+            )
 
         def keep(question: MemberQuestion, verdict: MemberVerdict) -> None:
-            verdicts[frozenset((question.existing, question.new))] = verdict
+            pair = frozenset((question.existing, question.new))
+            replies[pair] = verdict
+            if verdict.answered:
+                verdicts[pair] = verdict
 
         call_concurrently("node_verify", ask, questions, keep)
+        return replies
 
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
@@ -3076,7 +3114,7 @@ class GraphManager:
         return MergeReport(
             pairs=results,
             rounds=rounds.rounds,
-            asked=len(rounds.asked),
+            asked=len(rounds.asked) + len(rounds.unanswered),
             deduced=len(rounds.deduced),
             merges=merges,
         )
@@ -3117,12 +3155,14 @@ class GraphManager:
             )
             answers = self.verify_member_pairs([checks[i].question for i in questions], verdicts)
             for index, answer in zip(questions, answers, strict=True):
-                rounds.record(index, same=answer.same)
+                same = answer.same if answer.answered else None
+                outcome = "no answer" if same is None else ("same" if same else "different")
+                rounds.record(index, same=same)
                 check = checks[index]
                 check.result.update(
                     asked=True,
                     round=rounds.rounds,
-                    same=answer.same,
+                    same=same,
                     reason=answer.reason,
                     reused=answer.reused,
                 )
@@ -3131,7 +3171,7 @@ class GraphManager:
                     *check.nodes,
                     check.question.existing,
                     check.question.new,
-                    "same" if answer.same else "different",
+                    outcome,
                     answer.reason,
                 )
         for index, deduction in rounds.deduced.items():

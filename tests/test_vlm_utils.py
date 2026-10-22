@@ -15,7 +15,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, override
 
@@ -1428,7 +1428,7 @@ def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Resp
 @pytest.mark.parametrize(
     ("operation", "fallback"),
     [
-        ("verify", {"same": False, "reason": "reply truncated"}),
+        ("verify", {"same": False, "answered": False, "reason": "reply truncated"}),
         ("normalize", {"instruction_template": "search milk", "is_template": False}),
         ("merge_audit", {"issues": [], "summary": "reply truncated"}),
         ("audit", {"issues": [], "summary": "reply truncated"}),
@@ -1507,35 +1507,9 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
     assert len(router_requests) == 1
 
 
-@pytest.fixture
-def timing_out_client(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
-) -> Iterator[OpenRouter]:
-    """A client whose every attempt times out, a second past the default 60 s timeout.
-
-    Time passes only on the clock the SDK's retry loop reads, so it gives up after
-    two attempts instead of retrying without end on a real clock.
-    """
-    del no_sleep  # requested for its side effect on time.sleep
-    attempts: list[httpx.Request] = []
-
-    def time_out(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        msg = "no complete response within 60 s"
-        raise httpx.ReadTimeout(msg, request=request)
-
-    monkeypatch.setattr(time, "time", lambda: 61.0 * len(attempts))
-    with (
-        httpx.Client(transport=httpx.MockTransport(time_out)) as http_client,
-        open_client("test-key", http_client=http_client) as client,
-    ):
-        yield client
-
-
 @pytest.mark.parametrize(
     ("operation", "call_type", "fallback"),
     [
-        ("verify", "node_verify", {"same": False, "reason": "reply truncated"}),
         (
             "normalize",
             "normalize_edge",
@@ -1553,6 +1527,7 @@ def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
     call_type: str,
     fallback: object,
     timing_out_client: OpenRouter,
+    timed_out_requests: list[httpx.Request],
     png_screenshot: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1560,6 +1535,113 @@ def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
         result = _final_fallback(operation, timing_out_client, png_screenshot)
     assert result == fallback
     assert f"{call_type}: timed out after retries" in caplog.text
+    assert len(timed_out_requests) == 2
+
+
+def test_node_verification_that_times_out_is_asked_once_more_then_has_no_answer(
+    timing_out_client: OpenRouter,
+    timed_out_requests: list[httpx.Request],
+    png_screenshot: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        verdict = vlm.verify_same_node(
+            timing_out_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": False, "answered": False, "reason": "timed out"}
+    assert caplog.text.count("node_verify: timed out after retries") == 2
+    assert "node_verify: asking once more" in caplog.text
+    assert "node_verify: no answer (timed out)" in caplog.text
+    assert len(timed_out_requests) == 4
+    assert timed_out_requests[2].content == timed_out_requests[0].content
+
+
+def test_node_verification_takes_the_answer_to_its_second_ask(
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: list[float],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """The first ask times out on both of the SDK's attempts; the second ask answers."""
+    del no_sleep  # requested for its side effect on time.sleep
+    attempts: list[httpx.Request] = []
+
+    def answer_late(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) <= 2:
+            msg = "no complete response within 60 s"
+            raise httpx.ReadTimeout(msg, request=request)
+        return chat_response(content='{"same":true,"reason":"same list"}')
+
+    monkeypatch.setattr(time, "time", lambda: 61.0 * len(attempts))
+    with (
+        httpx.Client(transport=httpx.MockTransport(answer_late)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        verdict = vlm.verify_same_node(
+            client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": True, "reason": "same list"}
+    assert len(attempts) == 3
+
+
+def test_each_node_verification_ask_sends_a_429_again_within_a_deadline_of_its_own(
+    monkeypatch: pytest.MonkeyPatch, png_screenshot: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each ask is answered 429 with a ``Retry-After`` that ends at its 120 s deadline, and
+    the request sent again then times out at 60 s, so no answer comes after 360 s."""
+    elapsed: list[float] = [0.0]
+    attempts: list[httpx.Request] = []
+
+    def rate_limit_then_time_out(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) % 2:
+            return httpx.Response(
+                429,
+                json={"error": {"code": 429, "message": "rate limited"}},
+                headers={"retry-after": "120"},
+            )
+        elapsed[0] += 60
+        msg = "no complete response within 60 s"
+        raise httpx.ReadTimeout(msg, request=request)
+
+    def sleep(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(time, "time", lambda: elapsed[0])
+    monkeypatch.setattr(time, "sleep", sleep)
+    with (
+        caplog.at_level("WARNING"),
+        httpx.Client(transport=httpx.MockTransport(rate_limit_then_time_out)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        verdict = vlm.verify_same_node(
+            client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": False, "answered": False, "reason": "timed out"}
+    assert len(attempts) == 4
+    assert caplog.text.count("node_verify: rate limited (HTTP 429); sending again in 120.0 s") == 2
+    assert "node_verify: asking once more" in caplog.text
+    assert elapsed[0] == 6 * PAGE_DETAIL.request_timeout
+
+
+def test_node_verification_with_an_unparseable_reply_has_no_answer(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router_responses.append(chat_response(content="The screens look the same."))
+    with caplog.at_level("WARNING"):
+        verdict = vlm.verify_same_node(
+            router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
+        )
+    assert verdict == {"same": False, "answered": False, "reason": "parse error"}
+    assert "node_verify: no answer (parse error)" in caplog.text
+    assert len(router_requests) == 1
 
 
 def test_a_page_description_that_still_times_out_raises(

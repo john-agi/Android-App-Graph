@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw
 
 from android_app_graph.graph_files import PER_ACTION_LISTS, save_embeddings, text_embeddings_path
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
-from android_app_graph.utils import ModelSettings
+from android_app_graph.utils import ModelSettings, vlm_utils
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
@@ -106,10 +106,11 @@ SHOT_A = b64(b"screenshot-a")
 SHOT_B = b64(b"screenshot-b")
 
 
-def make_manager(steps_dir: Path | None = None) -> GraphManager:
-    """A manager whose client is a sentinel; every caller of it is patched."""
+def make_manager(steps_dir: Path | None = None, client: OpenRouter = FAKE_CLIENT) -> GraphManager:
+    """A manager whose client is a sentinel unless given; every caller of the sentinel is
+    patched."""
     gm = GraphManager(
-        client=FAKE_CLIENT,
+        client=client,
         page_detail=PAGE_DETAIL,
         embedding=EMBEDDING,
         image_embedding=IMAGE_EMBEDDING,
@@ -664,7 +665,13 @@ def test_identify_state_verified_match_merges_into_existing_node(
         }
     ]
     assert identify["verifications"] == [
-        {"node": first, "member": home.observation_id, "same": True, "reason": "identical layout"}
+        {
+            "node": first,
+            "member": home.observation_id,
+            "same": True,
+            "answered": True,
+            "reason": "identical layout",
+        }
     ]
     assert identify["node"] == first
 
@@ -1075,6 +1082,48 @@ def test_an_expected_node_is_followed_through_its_renames(vlm: FakeVlm, screen: 
     assert gm.identify_state(observation, expected_node="s0_home") == renamed
 
     assert screen.record(observation)["identify"]["stage"] == "expected"
+
+
+def test_a_verifier_that_never_answers_is_asked_twice_and_the_screen_starts_a_new_node(
+    vlm: FakeVlm,
+    screen: Screens,
+    timing_out_client: OpenRouter,
+    timed_out_requests: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verifier times out, is asked once more and times out again on a node whose
+    member looks and is described exactly like the screen; the check counts as a
+    rejection, recorded as no answer."""
+    monkeypatch.setattr(gm_module, "verify_same_node", vlm_utils.verify_same_node)
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen", {}, [])])
+    gm = make_manager(screen.steps_dir, client=timing_out_client)
+    home = screen(HOME, SHOT_A, PACKAGE)
+    first = gm.identify_state(home)
+    again = screen(HOME, SHOT_B, PACKAGE)
+
+    with caplog.at_level(logging.INFO):
+        node_id = gm.identify_state(again)
+
+    assert node_id == "s1_home_screen"
+    assert sorted(gm.graph) == [first, node_id]
+    assert caplog.text.count("node_verify: timed out after retries") == 2
+    assert len(timed_out_requests) == 4
+    assert (
+        f"Verifier gave no answer on node {first} against member {home.observation_id} "
+        "(timed out); it counts as a rejection"
+    ) in caplog.text
+    identify = screen.record(again)["identify"]
+    assert identify["stage"] == "new"
+    assert identify["verifications"] == [
+        {
+            "node": first,
+            "member": home.observation_id,
+            "same": False,
+            "answered": False,
+            "reason": "timed out",
+        }
+    ]
 
 
 def _png(image: Image.Image) -> str:

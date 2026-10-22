@@ -231,12 +231,13 @@ so a timed-out attempt gets exactly one more, and 5XX and 429 responses are
 retried for up to two minutes at the default timeout and ten minutes for the
 audits, after which the last one fails. Other 4xx responses, including 402 (no
 credit left), fail at once, as does a server that closes the connection without
-sending a response. The application never retries what the SDK has given up on:
-a call that still times out takes the fallback listed below for a truncated
-reply, and a call without one raises. OpenRouter bills a non-streaming request
-in full even after the client disconnects, so an attempt cut off at its deadline
-is still billed, and a timeout shorter than the model needs pays for the same
-request twice.
+sending a response. The application retries what the SDK has given up on only
+for node verification: a verifier request that still times out is sent once more,
+with a deadline of its own for the retries above. Any other call that still times
+out takes the fallback listed below for a truncated reply, and a call without one
+raises. OpenRouter bills a non-streaming request in full even after the client
+disconnects, so an attempt cut off at its deadline is still billed, and a timeout
+shorter than the model needs pays for the same request twice.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
@@ -262,7 +263,7 @@ No request sets `max_tokens`, so a reply stops only at the model's own output
 limit. A reply cut off there (`finish_reason: "length"`) is never asked again,
 since the same request would be cut off again. The log names the call and any
 reasoning tokens, and the caller applies its final fallback at once: an action
-waits, node verification treats the screens as different, edge normalization
+waits, node verification reports no answer, edge normalization
 and relabelling a flagged edge keep the instruction, the audits report no
 issues, the coverage checkpoint uses its top candidate, and a page description
 or an exploration plan raises. A call that still times out after the SDK's
@@ -271,6 +272,13 @@ fallback, so an action waits too; a page description, an exploration plan or an
 embedding still raises. A reply stopped by the provider's content filter
 (`finish_reason: "content_filter"`) is logged with the call's name and otherwise
 handled like any other empty or partial reply.
+
+Node verification also reports no answer for a reply it cannot parse, and logs
+each one as `node_verify: no answer` with its cause. No answer changes nothing in
+the audit: a merge check, the audit's or the coverage checkpoint's, keeps the two
+nodes apart and decides no other pair, and a split or move check leaves the node
+whole (see [Merge proposals](#merge-proposals) and [Member checks](#member-checks)).
+Screen matching counts it as a rejection (see [Screen matching](#screen-matching)).
 
 The page-detail calls that return JSON (screen descriptions, node verification,
 edge normalization, both audits and the coverage checkpoint's target choice),
@@ -600,8 +608,8 @@ description is made from its activity (see [Black screenshots](#screen-matching)
 - `exact_match`, the member an exact match copied;
 - `candidates`: each short-list node with the `sources` that proposed it and their
   scores, its `closest_member` and that member's `image_score`;
-- `verifications`: each verifier call's `node`, the `member` it was shown, `same` and
-  the `reason`;
+- `verifications`: each verifier call's `node`, the `member` it was shown, `same`,
+  `answered` (`false` when the verifier gave no answer) and the `reason`;
 - `refinement`: the descriptions the step's first rejection refined, and what the
   rejected node was renamed to, or `null`;
 - `node`, the node the screen joined, under its ID at that moment.
@@ -690,6 +698,10 @@ what each step found.
    screen and the rejected node, which is renamed after its new description; later
    rejections refine nothing. Refined descriptions, like every description, leave out
    the state listed in [Graph nodes](#graph-nodes), such as an open menu.
+
+A verifier call that gives no answer (see
+[Requests and recovery](#requests-and-recovery)) is logged as such and counts as a
+rejection, and matching goes on.
 
 **Black screenshots.** A [`black`](#step-log) screenshot shows nothing to describe or
 compare, and every black capture has the same `pixel_hash`, so after its image
@@ -852,6 +864,11 @@ Asked in that order, a pair is asked exactly when the answers on the pairs befor
 leave it open, so a round never asks a pair whose answer could contradict the answers
 before it.
 
+A pair the verifier gives no answer on (see
+[Requests and recovery](#requests-and-recovery)) is neither "same" nor "different":
+it decides no other pair, and it is neither asked again nor deduced. Its two nodes
+stay apart unless "same" answers on other pairs join them.
+
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage
 checkpoint's merge audit verifies the model's pairs the same way and proposes none
@@ -865,10 +882,11 @@ earlier one kept apart.
 - `pairs`: every pair with `node_a` and `node_b`, the `sources` and what each found in
   `findings` (the model's `issue`, or the image `members` and their `score`), the
   closest `members` by node and their `image_score`, whether it was `asked`, the
-  `round` that asked it or after which it was deduced, the answer `same`, the
-  verifier's `reason` and `reused` for an asked pair or the asked pairs it is
-  `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
-  `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
+  `round` that asked it or after which it was deduced, the answer `same` (`null`
+  when the verifier gave no answer), the verifier's `reason` and `reused` for an
+  asked pair or the asked pairs it is `deduced_from`, and the `status`: `merged`,
+  with the node both are `kept` in, `kept_separate`, or `skipped` with the `reason`
+  the pair cannot be verified.
 
 #### Member checks
 
@@ -895,6 +913,9 @@ representative is the node's home.
     black member of its activity, or to a new node described from its activity. The
     short list would rank every black node first by image, and the verifier would see
     two identical black images.
+  - a split or move check the verifier gives no answer on (see
+    [Requests and recovery](#requests-and-recovery)) leaves the node whole: every
+    change rests on a verifier answer.
 - A node gets three checks at most, larger groups first; the rest are `unchecked`.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
@@ -902,7 +923,8 @@ representative is the node's home.
   are made in node order; then every move check is asked at once and the moves are
   made in node order, so a member can move to a node a split made. A rejected
   member's short list asks its verifier calls one at a time. A verifier answer on a
-  pair of members is reused within the run.
+  pair of members is reused within the run; a check without an answer is not, so a
+  later check of the pair asks again.
   Two merged nodes whose closest members fall below the grouping floor, a pair from
   `text_audit` or one the images propose between the merge floor and the grouping
   floor, are two groups of the merged node: their split check is the pair the merge
@@ -933,11 +955,11 @@ an action drops its instruction templates, which the final normalization rebuild
 
 - `checks`: each check's `kind` (`split` or `move`), its `node` and `group`, the
   `members` compared (a home member, then one of the group) and their `image_score`,
-  the verifier's `same` and `reason`, and `reused`. A check the verifier answered
-  "different" adds the `change`: `from`, `to`, `new_node`, the `members` moved, the
-  `edge_actions` moved, each with its `edge`, `action` and the edges it is on `now`,
-  and, for a move, the `short_list`'s `candidates` and `verifications`, or, for a
-  black member, its `black_activity`;
+  the verifier's `same` (`null` when it gave no answer) and `reason`, and `reused`.
+  A check the verifier answered "different" adds the `change`: `from`, `to`,
+  `new_node`, the `members` moved, the `edge_actions` moved, each with its `edge`,
+  `action` and the edges it is on `now`, and, for a move, the `short_list`'s
+  `candidates` and `verifications`, or, for a black member, its `black_activity`;
 - `diffuse`: each diffuse node with its groups;
 - `unchecked`: each node with the groups past its three checks.
 
