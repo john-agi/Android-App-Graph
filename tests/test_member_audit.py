@@ -419,20 +419,6 @@ def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
     assert _edges(graph) == before
 
 
-def test_a_split_check_the_verifier_gives_no_answer_on_splits_the_group_off(
-    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
-) -> None:
-    write_member_graph(graph_path, SPLIT)
-    graph = _load(graph_path)
-    models.give_no_answer("000002", "000003")
-
-    (check,) = _checks(_check_members(graph, graph_path, {}))
-
-    assert (check["same"], check["reason"]) == (False, "timed out")
-    assert check["change"]["to"] == "s2_screen_000003"
-    assert graph.graph.nodes["s2_screen_000003"]["observations"] == ["000003", "000004"]
-
-
 # The third member of Home looks like List's member, and nothing like Menu's.
 MOVE = {
     "s0_home": [("000001", X), ("000002", _toward(X, Y, LINKED)), ("000003", Y)],
@@ -594,6 +580,41 @@ def test_a_moving_member_without_an_answer_on_a_near_identical_node_does_not_joi
     assert "unverified" not in caplog.text
     assert check["change"]["to"] == "s3_screen_000003"
     assert models.shown == [("000002", "000003"), ("000004", "000003"), ("000005", "000003")]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "edges", "transitions", "kind"),
+    [
+        (SPLIT, SPLIT_EDGES, SPLIT_TRANSITIONS, "split"),
+        (MOVE, MOVE_EDGES, MOVE_TRANSITIONS, "move"),
+    ],
+    ids=["split", "move"],
+)
+def test_a_split_or_move_check_without_an_answer_leaves_the_node_whole(
+    nodes: dict[str, list[tuple[str, list[float]]]],
+    edges: tuple[dict[str, object], ...],
+    transitions: tuple[tuple[str, str, object, str, str], ...],
+    kind: str,
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """A change rests on a verifier answer, and the verifier was already asked twice, so
+    the check is reported as unanswered, neither "same" nor "different"."""
+    write_member_graph(graph_path, nodes, edges=edges, transitions=transitions)
+    graph = _load(graph_path)
+    members = {node: graph.graph.nodes[node]["observations"] for node in graph.graph}
+    before = _edges(graph)
+    models.give_no_answer("000002", "000003")
+
+    (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    assert (check["kind"], check["members"]) == (kind, ["000002", "000003"])
+    assert (check["same"], check["reason"]) == (None, "timed out")
+    assert "change" not in check
+    assert {node: graph.graph.nodes[node]["observations"] for node in graph.graph} == members
+    assert _edges(graph) == before
+    assert models.shown == [("000002", "000003")]
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
