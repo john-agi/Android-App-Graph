@@ -22,7 +22,7 @@ from android_app_graph.device import DeviceController, StillOutsideAppError
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
-from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE
+from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 from android_app_graph.utils.vlm_utils import PlanRequest
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
@@ -455,9 +455,7 @@ def test_navigation_sends_nothing_for_an_edge_without_actions_and_replays_the_re
         },
     )
     replaying_kobe.graph.load_graph(graph_file)
-    monkeypatch.setattr(
-        replaying_kobe.graph, "identify_state", lambda *_args, **_kwargs: "s2_detail"
-    )
+    _identifying(replaying_kobe, monkeypatch, "s0_splash", "s2_detail")
 
     assert replaying_kobe.navigate_to_node("s2_detail") == "s2_detail"
     assert device_log == [*_FIRST_RESTART, open_detail]
@@ -471,9 +469,7 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     open_detail = {"action": "tap", "coordinate": [30, 40]}
     replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
     replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=open_detail)
-    monkeypatch.setattr(
-        replaying_kobe.graph, "identify_state", lambda *_args, **_kwargs: "s1_detail"
-    )
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s1_detail")
 
     assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
     assert device_log == [*_FIRST_RESTART, open_detail]
@@ -503,7 +499,9 @@ def test_a_replay_scrolls_a_list_as_exploration_did_before_tapping_a_row_on_it(
     open_row = {"action": "tap", "x": 50, "y": 190}
     _list_reached_from_home(replaying_kobe, "s2_detail")
     _identifying(
-        replaying_kobe, monkeypatch, "s0_home", "s1_list", "s1_list", "s2_detail", "s2_detail"
+        replaying_kobe,
+        monkeypatch,
+        *("s0_home", "s1_list", "s1_list", "s2_detail", "s0_home", "s2_detail"),
     )
     _explore_sending(replaying_kobe, monkeypatch, open_list, scroll_down, open_row)
     device_log.clear()
@@ -528,7 +526,7 @@ def test_a_replay_fills_a_form_through_its_dropdown_before_tapping_the_field_it_
     _identifying(
         replaying_kobe,
         monkeypatch,
-        *("s0_home", form, security, form, certificates, certificates),
+        *("s0_home", form, security, form, certificates, "s0_home", certificates),
     )
     _explore_sending(
         replaying_kobe,
@@ -621,15 +619,28 @@ def test_after_a_step_that_leaves_the_app_the_setup_of_the_next_action_is_unknow
     }
 
 
-@pytest.mark.parametrize(("reached", "setup"), [("s1_list", []), ("s0_home", None)])
+@pytest.mark.parametrize(
+    ("after_restart", "reached", "setup"),
+    [
+        pytest.param(["s0_home", "s1_list"], "s1_list", [], id="replay reached"),
+        pytest.param(["s0_home", "s0_home"], "s0_home", None, id="replay missed"),
+        pytest.param(["s1_list"], "s1_list", [], id="app opened on the node"),
+    ],
+)
 @pytest.mark.usefixtures("no_sleep", "device_log")
 def test_a_resumed_exploration_knows_the_setup_only_on_the_node_its_replay_reached(
-    reached: str, setup: list[object] | None, replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+    after_restart: list[str],
+    reached: str,
+    setup: list[object] | None,
+    replaying_kobe: Kobe,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The launch arrives at the screen the app opens on, so a replay that sends nothing
+    because the app opened on its node has reached it as one that sends its path has."""
     scroll = {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40}
     _list_reached_from_home(replaying_kobe)
     replaying_kobe.graph.add_edge("s0_home", "s1_list", action=[{"action": "tap", "x": 1, "y": 2}])
-    _identifying(replaying_kobe, monkeypatch, reached, reached)
+    _identifying(replaying_kobe, monkeypatch, *after_restart, reached)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Scroll", []))
     monkeypatch.setattr("android_app_graph.kobe.predict_next_action", lambda **_kw: (scroll, ""))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
@@ -637,6 +648,89 @@ def test_a_resumed_exploration_knows_the_setup_only_on_the_node_its_replay_reach
     replaying_kobe.explore(max_steps=1, resume_from="s1_list")
 
     assert _setups(replaying_kobe)[(reached, reached)] == [setup]
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_a_replay_to_the_start_node_renamed_on_the_screen_the_app_opened_on_reaches_it(
+    replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Expecting the start node on the screen the app opened on, identification can reject
+    and rename it. A replay that then reaches it under its new ID has reached its node, so
+    the setup of the next action there is known."""
+    scroll = {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40}
+    graph = replaying_kobe.graph
+    _list_reached_from_home(replaying_kobe)
+    graph.add_edge("s0_home", "s1_list", action=[{"action": "tap", "x": 1, "y": 2}])
+    graph.add_edge("s1_list", "s0_home", action=[{"action": "back"}])
+    monkeypatch.setattr(
+        "android_app_graph.utils.graph_manager.get_embedding", lambda *_args, **_kw: [1.0]
+    )
+    answers = iter(["s1_list", "s0_home_feed", "s0_home_feed"])
+
+    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
+        if expected_node == "s0_home":
+            graph.rename_node("s0_home", "Home feed")
+        return next(answers)
+
+    monkeypatch.setattr(graph, "identify_state", identify)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Scroll", []))
+    monkeypatch.setattr("android_app_graph.kobe.predict_next_action", lambda **_kw: (scroll, ""))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+
+    replaying_kobe.explore(max_steps=1, resume_from="s0_home")
+
+    assert _setups(replaying_kobe)[("s0_home_feed", "s0_home_feed")] == [[]]
+
+
+_SCROLL_CLOCKS = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 60}
+_OPEN_ALARMS = {"action": "tap", "coordinate": [10, 190]}
+_SCROLL_ALARMS = {"action": "swipe", "x1": 50, "y1": 170, "x2": 50, "y2": 30}
+_OPEN_ALARM = {"action": "tap", "coordinate": [50, 40]}
+
+
+@pytest.mark.parametrize(
+    ("opened_on", "replayed"),
+    [
+        pytest.param("s0_alarms", [_SCROLL_ALARMS, _OPEN_ALARM], id="start node"),
+        pytest.param(
+            "s1_clock",
+            [_SCROLL_CLOCKS, _OPEN_ALARMS, _SCROLL_ALARMS, _OPEN_ALARM],
+            id="node with a path",
+        ),
+        pytest.param("s3_whats_new", [_SCROLL_ALARMS, _OPEN_ALARM], id="node without a path"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_starts_from_the_node_the_app_opened_on(
+    opened_on: str,
+    replayed: list[object],
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An app can reopen on the screen used last instead of its start screen. The replay
+    identifies the screen the restart shows, expecting the start node, and replays from
+    that node when a recorded path leads from it, from the start node otherwise, each
+    action after its setup."""
+    graph = replaying_kobe.graph
+    graph.graph.add_nodes_from(["s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new"])
+    graph.add_edge(
+        "s1_clock", "s0_alarms", action=[_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
+    )
+    graph.add_edge(
+        "s0_alarms", "s2_alarm", action=[_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
+    )
+    expected = _identifying(replaying_kobe, monkeypatch, opened_on, "s2_alarm")
+    caplog.set_level(logging.INFO, logger="test")
+
+    reached = replaying_kobe.navigate_to_node("s2_alarm")
+
+    assert device_log == [*_FIRST_RESTART, *replayed]
+    assert expected == ["s0_alarms", "s2_alarm"]
+    assert reached == "s2_alarm"
+    opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms."
+    assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
 
 
 @pytest.mark.parametrize("malformed", [False, True])
@@ -897,7 +991,7 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     assert [action["action"] for action in device.actions] == [executed, "back"]
 
 
-_BACK = {"action": "back"}
+_BACK: dict[str, object] = {"action": "back"}
 
 
 @pytest.mark.parametrize(
@@ -1538,9 +1632,7 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
-    monkeypatch.setattr(
-        replaying_kobe.graph, "identify_state", lambda *_args, **_kwargs: "s1_settings"
-    )
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s1_settings")
     assert (
         replaying_kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
         == "s1_settings"
@@ -1693,9 +1785,10 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
     home, settings = _in_app("Home", "white"), _in_app("Settings", "gray")
     item_list, sort_menu = _in_app("List", "blue"), _in_app("Sort", "green")
-    # The checkpoint reads the list screen once to identify it and once for the next step.
+    # The app restarts onto home. The checkpoint reads the list screen once to identify it
+    # and once for the next step.
     device = _ReplayScript(
-        device_log, home, settings, item_list, item_list, sort_menu, broken=open_item
+        device_log, home, settings, home, item_list, item_list, sort_menu, broken=open_item
     )
     explorer = _explorer(device, tmp_path, router_client)
     explorer.coverage_checkpoint_steps = 1
@@ -1736,6 +1829,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
         *step,
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "coverage_checkpoint"),
@@ -1796,7 +1890,9 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
     open_list = {"action": "tap", "coordinate": [10, 20]}
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
     web_page, item_list = _in_app("Article", "orange"), _in_app("List", "blue")
-    device = _ReplayScript(device_log, web_page, item_list, broken=open_item)
+    device = _ReplayScript(
+        device_log, _in_app("Home", "white"), web_page, item_list, broken=open_item
+    )
     explorer = _explorer(device, tmp_path, router_client)
     explorer.graph.graph.add_nodes_from(["s0_home", "s1_list", "s2_detail"])
     explorer.graph.add_edge("s0_home", "s1_list", action=[open_list])
@@ -1807,7 +1903,11 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
             chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
         ]
     )
-    nodes = {"com.demo.Article": EXTERNAL_WEB_NODE, "com.demo.List": "s1_list"}
+    nodes = {
+        "com.demo.Home": "s0_home",
+        "com.demo.Article": EXTERNAL_WEB_NODE,
+        "com.demo.List": "s1_list",
+    }
     monkeypatch.setattr(
         explorer.graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
     )
@@ -2167,11 +2267,11 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
     explorer = _explorer(device, tmp_path, router_client)
     explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
     explorer.graph.add_edge("s0_home", "s1_detail", action=[open_detail])
-    expected = _identifying(explorer, monkeypatch, "s0_home")
+    expected = _identifying(explorer, monkeypatch, "s0_home", "s0_home")
 
     assert explorer.navigate_to_node("s1_detail") == "s0_home"
     assert device_log == [*_FIRST_RESTART, open_detail, *_RESTART]
-    assert expected == ["s0_home"]
+    assert expected == ["s0_home", "s0_home"]
 
 
 def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *nodes: str) -> list[object]:
@@ -2295,12 +2395,12 @@ def test_a_replay_expects_the_node_it_replays_to(
 ) -> None:
     _list_reached_from_home(replaying_kobe)
     replaying_kobe.graph.add_edge("s0_home", "s1_list", action=[{"action": "tap", "x": 1, "y": 2}])
-    identified = _identifying(replaying_kobe, monkeypatch, "s1_list", "s0_home")
+    identified = _identifying(replaying_kobe, monkeypatch, "s0_home", "s1_list", "s0_home")
 
     replaying_kobe.navigate_to_node("s1_list")
     replaying_kobe.navigate_to_node("s0_home")
 
-    assert identified == ["s1_list", "s0_home"]
+    assert identified == ["s0_home", "s1_list", "s0_home"]
 
 
 _BACK_REPLY = '{"action":"system_button","button":"Back"}'
@@ -2350,7 +2450,7 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
-    expected = _identifying(explorer, monkeypatch, "s0_home", "s1_list")
+    expected = _identifying(explorer, monkeypatch, "s0_home", "s0_home", "s1_list")
     planned_from = _planning_back(monkeypatch)
     router_responses.extend(
         [
@@ -2364,7 +2464,7 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     explorer.explore(max_steps=2)
 
     assert device_log == [*_FIRST_RESTART, _OPEN_LIST]
-    assert expected == [None, "s1_list"]
+    assert expected == [None, "s0_home", "s1_list"]
     assert planned_from == ["s0_home", "s1_list"]
     assert _requested_models(router_requests) == [
         "provider/action",
@@ -2385,6 +2485,7 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     ]
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("observation", "coverage_checkpoint"),
@@ -2461,6 +2562,104 @@ def test_back_on_the_start_screen_whose_replay_cannot_restart_the_app_stays_ther
         "Step 1/2: s0_home --[continue]--> s0_home",
         "Step 2/2: s0_home --[wait]--> s0_home",
     ]
+
+
+_LAUNCHER = "ext_com.android.launcher3"
+_OPEN_DETAIL = {"action": "tap", "coordinate": [30, 40]}
+
+
+def _edge_to_the_launcher(explorer: Kobe, source: str, action: dict[str, object]) -> None:
+    """Give the graph the start screen, a list and a detail screen, each reached from the
+    start screen, and an edge by ``action`` from ``source`` to the launcher's node."""
+    _list_reached_from_home(explorer, "s2_detail")
+    explorer.graph.graph.add_node(_LAUNCHER, is_external=True)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    explorer.graph.add_edge("s0_home", "s2_detail", action=[_OPEN_DETAIL])
+    explorer.graph.add_edge(source, _LAUNCHER, action=[action])
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_back_where_a_recorded_back_has_left_the_app_continues_from_a_ranked_target_instead(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An app that reopens on the tab used last makes that tab's Back leave the app as
+    the start screen's does. Once a Back from the list has been recorded leaving the app,
+    a Back planned there is not sent: exploration continues from a ranked target."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _edge_to_the_launcher(explorer, "s1_list", _BACK)
+    expected = _identifying(explorer, monkeypatch, "s1_list", "s0_home", "s2_detail")
+    planned_from = _planning_back(monkeypatch)
+    router_responses.extend(
+        [
+            chat_response(content=_BACK_REPLY),
+            chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=2)
+
+    assert device_log == [*_FIRST_RESTART, _OPEN_DETAIL]
+    assert expected == [None, "s0_home", "s2_detail"]
+    assert planned_from == ["s1_list", "s2_detail"]
+    assert _requested_models(router_requests) == [
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+    ]
+    assert list(explorer.graph.graph.edges(data="visit_count")) == [
+        ("s0_home", "s1_list", 1),
+        ("s0_home", "s2_detail", 1),
+        ("s1_list", _LAUNCHER, 1),
+    ]
+    assert (
+        "Step 1/2: Back on s1_list leaves the app; continuing from ranked target s2_detail "
+        "instead." in caplog.text
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "action"),
+    [
+        pytest.param("s1_list", _OPEN_LIST, id="a tap on the list left the app"),
+        pytest.param("s2_detail", _BACK, id="Back on another screen left the app"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_back_is_pressed_where_no_recorded_back_has_left_the_app(
+    source: str,
+    action: dict[str, object],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an edge by Back from the list to an ``ext_`` node shows that Back leaves the
+    app there, so without one the list's Back is pressed and recorded."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _edge_to_the_launcher(explorer, source, action)
+    _identifying(explorer, monkeypatch, "s1_list", "s0_home")
+    _planning_back(monkeypatch)
+    router_responses.append(chat_response(content=_BACK_REPLY))
+
+    explorer.explore(max_steps=1)
+
+    assert device_log == [_BACK]
+    assert _requested_models(router_requests) == ["provider/action"]
+    assert explorer.graph.graph.edges["s1_list", "s0_home"]["actions"] == [[_BACK]]
 
 
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(

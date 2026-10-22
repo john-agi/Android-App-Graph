@@ -412,7 +412,7 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
     """The replay to the node is recorded as a navigation replay; the step from it is an
     audit transition from the screen it planned on to the screen it reached."""
     graph, graph_path = _two_node_graph(tmp_path)
-    reached = iter(["s1_detail", "s0_home"])
+    reached = iter(["s0_home", "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
@@ -429,6 +429,7 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
 
     records = step_records(graph_path.parent / "steps")
     assert [(record["kind"], record["source"]) for record in records] == [
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("observation", "re_explore"),
@@ -437,10 +438,10 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         ("transition", "re_explore"),
     ]
     assert {record["run_kind"] for record in records} == {"audit"}
-    assert records[0]["observation"] is None
-    assert {key: records[5][key] for key in _STEP_FIELDS} == {
-        "before": "000002",
-        "after": "000004",
+    assert records[1]["observation"] == records[0]["id"]
+    assert {key: records[6][key] for key in _STEP_FIELDS} == {
+        "before": "000003",
+        "after": "000005",
         "instruction": "tap the first button",
         "element": None,
         "action": tap,
@@ -489,7 +490,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
     graph, graph_path = _two_node_graph(tmp_path)
     # identify_state is faked below, so add the node it would create.
     graph.graph.add_node(EXTERNAL_WEB_NODE)
-    identified = iter(["s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
+    identified = iter(["s0_home", "s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(identified))
     monkeypatch.setattr(
         audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
@@ -546,7 +547,9 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     # identify_state is faked below, so add the node it would create.
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
     on_the_page = [EXTERNAL_WEB_NODE] * (1 + back_presses_on_the_page)
-    expected = _identifying(graph, monkeypatch, "s1_detail", *on_the_page, "s1_detail", "s0_home")
+    expected = _identifying(
+        graph, monkeypatch, "s0_home", "s1_detail", *on_the_page, "s1_detail", "s0_home"
+    )
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -573,10 +576,12 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     assert graph.graph.out_degree(EXTERNAL_WEB_NODE) == 0
     replay = {"action": "tap", "coordinate": [10, 20]}
     assert device_log == [*_FIRST_RESTART, replay, tap, *leaving, tap]
-    # The replay expects its target, each back press the page's opener, a restart home.
+    # The replay expects the start node and then its target, each back press the page's
+    # opener, a restart home.
     restarted = back_presses_on_the_page == 3
     back = ["s1_detail"] * (back_presses_on_the_page + (0 if restarted else 1))
-    assert expected == ["s1_detail", None, *back, *(["s0_home"] if restarted else []), None]
+    restart = ["s0_home"] if restarted else []
+    assert expected == ["s0_home", "s1_detail", None, *back, *restart, None]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -697,7 +702,8 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
     """Each replay starts from a restarted app, not the screen the previous issue ended on,
     and the run asks the device for the launcher activity once."""
     graph, _graph_path = _two_node_graph(tmp_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    # Each issue replays from home to the detail page, where its one step stays.
+    _identifying(graph, monkeypatch, *("s0_home", "s1_detail", "s1_detail") * 2)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
 
     results = audit.re_explore_issues(
@@ -736,7 +742,7 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
     graph.graph.add_node("s2_camera_permission", page_description="Camera permission dialog")
-    reached = iter(["s1_detail", "s2_camera_permission"])
+    reached = iter(["s0_home", "s1_detail", "s2_camera_permission"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
@@ -1180,7 +1186,7 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     graph.graph.add_node("s4_detail_copy", page_description="Detail")
     graph.merge_nodes("s0_home", "s3_home_copy")
     graph.merge_nodes("s1_detail", "s4_detail_copy")
-    reached = iter(["s0_start", "s1_detail", "s0_start", "s2_app_settings"])
+    reached = iter(["s0_start", "s1_detail", "s0_start", "s0_start", "s2_app_settings"])
 
     def identify(*_args: object, **_kwargs: object) -> str:
         if "s0_home" in graph.graph:
@@ -1230,7 +1236,7 @@ def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_re
     )
     graph = GraphManager()
     graph.load_graph(graph_path)
-    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s2_detail")
+    _identifying(graph, monkeypatch, "s0_splash", "s2_detail")
 
     (result,) = _re_explore(
         graph,
@@ -1244,6 +1250,65 @@ def test_re_explore_sends_nothing_for_an_edge_without_actions_and_replays_the_re
     assert device_log == [*_FIRST_RESTART, _DETAIL_TAP]
 
 
+_SCROLL_CLOCKS = {"action": "swipe", "x1": 540, "y1": 1200, "x2": 540, "y2": 600}
+_OPEN_ALARMS = {"action": "tap", "x": 100, "y": 1800}
+_SCROLL_ALARMS = {"action": "swipe", "x1": 540, "y1": 1500, "x2": 540, "y2": 300}
+_OPEN_ALARM = {"action": "tap", "x": 540, "y": 400}
+
+
+@pytest.mark.parametrize(
+    ("opened_on", "replayed"),
+    [
+        pytest.param("s0_alarms", [_SCROLL_ALARMS, _OPEN_ALARM], id="start node"),
+        pytest.param(
+            "s1_clock",
+            [_SCROLL_CLOCKS, _OPEN_ALARMS, _SCROLL_ALARMS, _OPEN_ALARM],
+            id="node with a path",
+        ),
+        pytest.param("s3_whats_new", [_SCROLL_ALARMS, _OPEN_ALARM], id="node without a path"),
+    ],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_replays_from_the_node_the_app_opened_on(
+    opened_on: str,
+    replayed: list[object],
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An app can reopen on the screen used last instead of its start screen. The replay
+    identifies the screen the restart shows, expecting the start node, and replays from
+    that node when a recorded path leads from it, from the start node otherwise, each
+    action after its setup."""
+    graph = _graph_with_nodes(
+        *((node, {}) for node in ("s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new"))
+    )
+    graph.add_edge(
+        "s1_clock", "s0_alarms", [_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
+    )
+    graph.add_edge(
+        "s0_alarms", "s2_alarm", [_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
+    )
+    expected = _identifying(graph, monkeypatch, opened_on, "s2_alarm")
+    caplog.set_level(logging.INFO, logger=audit.logger.name)
+
+    (result,) = _re_explore(
+        graph,
+        [{"type": "explore_node", "node": "s2_alarm", "expected_pages": []}],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+    )
+
+    assert device_log == [*_FIRST_RESTART, *replayed]
+    assert expected == ["s0_alarms", "s2_alarm"]
+    assert result["navigated_to"] == "s2_alarm"
+    opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms"
+    assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
+
+
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
@@ -1252,7 +1317,7 @@ def test_re_explore_replays_an_edge_without_actions_by_executing_nothing_for_it(
         ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
     )
     graph.graph.add_edge("s0_home", "s1_detail")
-    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
     issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
 
     (result,) = _re_explore(
@@ -1276,7 +1341,7 @@ def test_re_explore_replays_each_action_after_its_setup(
         ("s0_home", {"page_description": "Home"}), ("s1_detail", {"page_description": "Detail"})
     )
     graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=EdgeDetails(setup=[_SWIPE]))
-    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s1_detail")
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
     issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
 
     (result,) = _re_explore(
@@ -1303,12 +1368,17 @@ def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup
 
 
 @pytest.mark.parametrize(
-    ("reached", "scroll_setup", "row_setup"),
-    [("s1_detail", [], [_SWIPE]), ("s0_home", None, None)],
-    ids=["replay reached", "replay missed"],
+    ("after_restart", "reached", "scroll_setup", "row_setup"),
+    [
+        (["s0_home", "s1_detail"], "s1_detail", [], [_SWIPE]),
+        (["s0_home", "s0_home"], "s0_home", None, None),
+        (["s1_detail"], "s1_detail", [], [_SWIPE]),
+    ],
+    ids=["replay reached", "replay missed", "app opened on the node"],
 )
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_reached(
+    after_restart: list[str],
     reached: str,
     scroll_setup: list[object] | None,
     row_setup: list[object] | None,
@@ -1317,9 +1387,11 @@ def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
 ) -> None:
+    """The launch arrives at the screen the app opens on, so a replay that sends nothing
+    because the app opened on its node has reached it as one that sends its path has."""
     row_tap = {"action": "tap", "x": 540, "y": 1700}
     graph = _flagged_graph()
-    _identifying(graph, monkeypatch, reached, reached, "s2_settings")
+    _identifying(graph, monkeypatch, *after_restart, reached, "s2_settings")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     sent = iter([_SWIPE, row_tap])
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
@@ -1340,6 +1412,42 @@ def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_
         [row_tap],
         row_setup,
     )
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_to_the_start_node_renamed_on_the_screen_the_app_opened_on_reaches_it(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    """Expecting the start node on the screen the app opened on, identification can reject
+    and rename it. A replay that then reaches it under its new ID has reached the issue's
+    node, so the setup of the next step there is known."""
+    graph = _flagged_graph()
+    graph.add_edge("s1_detail", "s0_home", [{"action": "back"}])
+    graph.client, graph.embedding = client, ModelSettings("provider/embedding")
+    monkeypatch.setattr(graph_manager, "get_embedding", lambda *_args, **_kwargs: [1.0])
+    answers = iter(["s1_detail", "s0_start", "s0_start"])
+
+    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
+        if expected_node == "s0_home":
+            graph.rename_node("s0_home", "Start")
+        return next(answers)
+
+    monkeypatch.setattr(graph, "identify_state", identify)
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (_SWIPE, ""))
+    issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
+
+    (result,) = _re_explore(
+        graph,
+        [issue],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=1,
+    )
+
+    assert result["navigated_to"] == "s0_start"
+    assert graph.graph["s0_start"]["s0_start"]["setups"] == [[]]
 
 
 @pytest.mark.usefixtures("_fake_device")
