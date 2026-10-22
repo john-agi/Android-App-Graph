@@ -289,6 +289,8 @@ def _edge(source: str, target: str, *actions: dict[str, Any], **extra: object) -
         "instructions": [f"do {index}" for index in range(len(actions))],
         "target_observations": [f"{target} after {index}" for index in range(len(actions))],
         "num_steps": [1] * len(actions),
+        "anchors": [[None] for _ in actions],
+        "action_flags": [[None] for _ in actions],
         "visit_count": len(actions),
         **extra,
     }

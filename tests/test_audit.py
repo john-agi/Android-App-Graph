@@ -249,6 +249,8 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "actions": [{"action": "tap", "coordinate": [10, 20]}],
                         "instructions": ["open the detail page"],
                         "num_steps": [1],
+                        "anchors": [[None]],
+                        "action_flags": [[None]],
                     }
                 ],
             }

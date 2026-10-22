@@ -1771,8 +1771,6 @@ def test_get_all_edges_from_node_marks_each_instruction_whose_action_changed_not
 @pytest.mark.parametrize(
     "flags",
     [
-        pytest.param(None, id="no list"),
-        pytest.param([], id="shorter than the instructions"),
         pytest.param(["unchanged"], id="an entry that is no list"),
         pytest.param([["unchanged"]], id="a flag that is no object"),
         pytest.param([[{"no_visible_effect": "yes"}]], id="a flag that is not true"),
@@ -1781,10 +1779,13 @@ def test_get_all_edges_from_node_marks_each_instruction_whose_action_changed_not
 def test_an_edge_without_a_usable_flag_marks_no_instruction_as_unchanged(flags: object) -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
-    edge: dict[str, object] = {"actions": [{"action": "tap"}], "instructions": ["Tap the logo"]}
-    if flags is not None:
-        edge["action_flags"] = flags
-    gm.graph.add_edge("s0_home", "s0_home", **edge)
+    gm.graph.add_edge(
+        "s0_home",
+        "s0_home",
+        actions=[{"action": "tap"}],
+        instructions=["Tap the logo"],
+        action_flags=flags,
+    )
 
     assert gm.get_all_edges_from_node("s0_home")[0]["no_visible_change"] == [False]
 
@@ -1948,8 +1949,6 @@ def test_add_edge_pads_an_edge_whose_lists_are_missing_before_appending() -> Non
     assert data["instructions"] == ["", "", "scroll"]
     assert data["target_observations"] == ["", "", ""]
     assert data["schema_deltas"] == [None, None, None]
-    assert data["anchors"] == [[None], [None, None], [None]]
-    assert data["action_flags"] == [[None], [None, None], [None]]
 
 
 def test_add_edge_records_a_self_loop_with_a_schema_delta() -> None:

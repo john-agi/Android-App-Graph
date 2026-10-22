@@ -651,16 +651,18 @@ def _aligned_lists(edge_data: dict[str, Any]) -> dict[str, list[Any]]:
     """Readers pair entry i of every per-action list with actions[i] and skip placeholders.
 
     An entry of ``anchors`` and ``action_flags`` is itself a list, with one entry per
-    sub-action of its action.
+    sub-action of its action. ``add_edge`` records both with every action, so neither
+    list is padded.
     """
     actions = list(edge_data.get("actions", []))
     num_steps = list(edge_data.get("num_steps", []))
     num_steps.extend(_default_num_steps(action) for action in actions[len(num_steps) :])
-    aligned: dict[str, list[Any]] = {"actions": actions, "num_steps": num_steps}
-    for key in ("anchors", "action_flags"):
-        values = list(edge_data.get(key, []))
-        values.extend(_sub_action_placeholders(action) for action in actions[len(values) :])
-        aligned[key] = values
+    aligned: dict[str, list[Any]] = {
+        "actions": actions,
+        "num_steps": num_steps,
+        "anchors": list(edge_data.get("anchors", [])),
+        "action_flags": list(edge_data.get("action_flags", [])),
+    }
     for key, placeholder in (
         ("instructions", ""),
         ("target_observations", ""),
@@ -2274,10 +2276,11 @@ class GraphManager:
         """
         edges = []
         for _, target, data in self.graph.out_edges(node_id, data=True):
-            flags = data.get("action_flags", [])
             recorded = [
-                (instruction, index < len(flags) and _had_no_visible_effect(flags[index]))
-                for index, instruction in enumerate(data.get("instructions", []))
+                (instruction, _had_no_visible_effect(flags))
+                for instruction, flags in zip(
+                    data.get("instructions", []), data.get("action_flags", []), strict=True
+                )
                 if instruction
             ]
             edge_info = {
