@@ -10,16 +10,30 @@ window is read once.
 
 Window IDs change from one dump to the next, and ``layer`` is only the windows'
 order, so two dumps are compared by window type, layer and bounds.
+
+A screen's layout signature is the part of its tree that names its structure rather
+than its content; a node's stable layout is the part of its members' signatures that
+most of them share. Layout is evidence for screen matching, never a decision.
 """
 
 from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections import Counter
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from typing import Literal, NamedTuple
 
 IDLE_FAILURE = "ERROR: could not get idle state."
 SYSTEM_WINDOW = "TYPE_SYSTEM"
+APPLICATION_WINDOW = "TYPE_APPLICATION"
+# Android's accessibility title for every PopupWindow: menus, dropdowns and tooltips.
+POPUP_TITLE = "Popup Window"
+STABLE_LAYOUT_SHARE = 0.8
+# A layout of fewer entries says too little to compare: one or two controls match
+# every screen that has them.
+MIN_LAYOUT_ENTRIES = 3
 
 _TRAILER = "UI hierchary dumped to:"
 _BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
@@ -186,6 +200,123 @@ def _screen_key(tree: UiTree) -> list[_WindowKey]:
         ]
         keys.append(((window.window_type, window.layer, window.bounds), node_keys))
     return keys
+
+
+type WindowRole = Literal["base", "dialog", "popup"]
+
+
+class LayoutEntry(NamedTuple):
+    """One entry of a layout signature, of one of three kinds:
+
+    - ``title``: an app window's role and its title;
+    - ``action``: the window role, resource ID and class of a visible actionable node;
+    - ``text``: the resource ID, class and label of a visible static text outside
+      scrolling containers.
+
+    The fields a kind does not use are empty.
+    """
+
+    kind: Literal["title", "action", "text"]
+    window_role: str
+    resource_id: str
+    class_name: str
+    label: str
+
+
+def window_roles(tree: UiTree) -> dict[int, WindowRole]:
+    """Return the role of each app window of ``tree``, by its index in ``tree.windows``.
+
+    A ``TYPE_APPLICATION`` window titled ``POPUP_TITLE`` is a ``popup``; one that spans
+    the width of the widest window and starts at the top of the highest one is the
+    ``base`` screen; any other is a ``dialog``. Every other window type, the keyboard
+    and the system bars among them, has no role.
+    """
+    if not tree.windows:
+        return {}
+    left = min(window.bounds.left for window in tree.windows)
+    right = max(window.bounds.right for window in tree.windows)
+    top = min(window.bounds.top for window in tree.windows)
+    roles: dict[int, WindowRole] = {}
+    for index, window in enumerate(tree.windows):
+        if window.window_type != APPLICATION_WINDOW:
+            continue
+        bounds = window.bounds
+        if window.title == POPUP_TITLE:
+            roles[index] = "popup"
+        elif bounds.left <= left and bounds.right >= right and bounds.top <= top:
+            roles[index] = "base"
+        else:
+            roles[index] = "dialog"
+    return roles
+
+
+def layout_signature(tree: UiTree) -> frozenset[LayoutEntry]:
+    """Return the layout signature of the screen ``tree`` shows: the entries of its app
+    windows that ``LayoutEntry`` describes.
+
+    A node is visible when its bounds have an area, actionable when it is clickable,
+    long-clickable, checkable or scrollable, and static text when it is neither and has
+    a text or, without one, a content description, its label. A scrolling container is
+    a scrollable ancestor: what scrolls is content, not structure.
+    """
+    roles = window_roles(tree)
+    entries = {
+        LayoutEntry("title", role, "", "", tree.windows[index].title)
+        for index, role in roles.items()
+        if tree.windows[index].title
+    }
+    for index, node in enumerate(tree.nodes):
+        role = roles.get(node.window)
+        if role is None or not _visible(node.bounds):
+            continue
+        if node.clickable or node.long_clickable or node.checkable or node.scrollable:
+            entries.add(LayoutEntry("action", role, node.resource_id, node.class_name, ""))
+            continue
+        label = node.text or node.content_description
+        if label and not _in_scrolling_container(tree, index):
+            entries.add(LayoutEntry("text", "", node.resource_id, node.class_name, label))
+    return frozenset(entries)
+
+
+def stable_layout(
+    signatures: Collection[frozenset[LayoutEntry]], *, share: float = STABLE_LAYOUT_SHARE
+) -> dict[LayoutEntry, float]:
+    """Return the entries on at least ``share`` of ``signatures``, each weighted by the
+    share it is on; empty for no signature."""
+    if not signatures:
+        return {}
+    counts = Counter(entry for signature in signatures for entry in signature)
+    shares = {entry: count / len(signatures) for entry, count in counts.items()}
+    return {entry: weight for entry, weight in shares.items() if weight >= share}
+
+
+def layout_similarity(
+    first: Mapping[LayoutEntry, float], second: Mapping[LayoutEntry, float]
+) -> float | None:
+    """Return the weighted Jaccard similarity of two weighted layouts: a screen's
+    signature weighs each of its entries 1, a node's stable layout each by its share.
+
+    ``None`` when either has fewer than ``MIN_LAYOUT_ENTRIES`` entries.
+    """
+    if len(first) < MIN_LAYOUT_ENTRIES or len(second) < MIN_LAYOUT_ENTRIES:
+        return None
+    entries = first.keys() | second.keys()
+    shared = sum(min(first.get(entry, 0.0), second.get(entry, 0.0)) for entry in entries)
+    either = sum(max(first.get(entry, 0.0), second.get(entry, 0.0)) for entry in entries)
+    return shared / either
+
+
+def _visible(bounds: Bounds) -> bool:
+    return bounds.right > bounds.left and bounds.bottom > bounds.top
+
+
+def _in_scrolling_container(tree: UiTree, index: int) -> bool:
+    parent = tree.nodes[index].parent
+    while parent is not None:
+        if tree.nodes[parent].scrollable:
+            return True
+        parent = tree.nodes[parent].parent
+    return False
 
 
 def _window(element: ET.Element, display_id: int) -> UiWindow:

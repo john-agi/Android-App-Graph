@@ -1,5 +1,6 @@
-"""Tests for android_app_graph.ui_tree: parsing ``uiautomator dump --windows`` output
-and deciding whether two trees show the same screen."""
+"""Tests for android_app_graph.ui_tree: parsing ``uiautomator dump --windows`` output,
+deciding whether two trees show the same screen, and the layout signature, stable
+layout and layout similarity."""
 
 from __future__ import annotations
 
@@ -10,20 +11,28 @@ import pytest
 
 from android_app_graph.ui_tree import (
     IDLE_FAILURE,
+    MIN_LAYOUT_ENTRIES,
     Bounds,
+    LayoutEntry,
     UiNode,
     UiTree,
     UiWindow,
     UnusableDumpError,
+    layout_signature,
+    layout_similarity,
     parse_tree,
     same_screen,
+    stable_layout,
+    window_roles,
     xml_document,
 )
 
 # Trimmed from `adb exec-out uiautomator dump [--windows] /dev/stdout` on a Pixel 8 Pro
 # emulator (API 37, 1344x2992): every window is kept, and in each hierarchy only a few
 # labelled nodes and their ancestors. Each file is the command's stdout, trailing line
-# included; never_idle is a running stopwatch's.
+# included; never_idle is a running stopwatch's. The settings_* files are trimmed the
+# same way from trees a Settings exploration kept in its step log on a Pixel 8a
+# emulator (API 37, 1080x2400): a page, a dialog, and that dialog with the keyboard.
 _DATA = Path(__file__).parent / "data"
 _TRAILER = "UI hierchary dumped to: /dev/stdout"
 
@@ -374,3 +383,188 @@ def test_a_change_in_the_window_list_shows_another_screen(name: str, value: str)
     window = re.sub(rf'(?<![\w-]){name}="[^"]*"', f'{name}="{value}"', dump[start:end], count=1)
 
     assert not same_screen(parse_tree(dump), parse_tree(dump[:start] + window + dump[end:]))
+
+
+def _signature(name: str) -> frozenset[LayoutEntry]:
+    return layout_signature(parse_tree(_dump(name)))
+
+
+def _action(role: str, resource_id: str, class_name: str) -> LayoutEntry:
+    return LayoutEntry("action", role, resource_id, class_name, "")
+
+
+def _window_with(nodes: str, *, title: str = "Page", bounds: str = "[0,0][100,200]") -> str:
+    """A dump with the status bar and one application window holding ``nodes``."""
+    return (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><displays><display id=\"0\">"
+        '<window index="0" title="" bounds="[0,0][100,10]" active="false" focused="false" '
+        'accessibility-focused="false" id="1" layer="1" type="TYPE_SYSTEM"><hierarchy '
+        'rotation="0"><node text="1:33" bounds="[0,0][10,10]" drawing-order="0" />'
+        f'</hierarchy></window><window index="1" title="{title}" bounds="{bounds}" '
+        'active="true" focused="true" accessibility-focused="false" id="2" layer="0" '
+        f'type="TYPE_APPLICATION"><hierarchy rotation="0">{nodes}</hierarchy></window>'
+        f"</display></displays>{_TRAILER}"
+    )
+
+
+def _node(attributes: str, children: str = "") -> str:
+    return f'<node drawing-order="0" bounds="[0,20][100,40]" {attributes}>{children}</node>'
+
+
+def test_a_page_s_signature_is_its_title_and_its_controls() -> None:
+    """Settings draws the page's title and its rows inside the scrolling container, so
+    the window's title is the page's only text entry."""
+    tree = parse_tree(_dump("windows_settings_page"))
+
+    assert layout_signature(tree) == {
+        LayoutEntry("title", "base", "", "", "Data warning & limit"),
+        _action("base", "", "android.widget.ImageButton"),
+        _action("base", "", "android.widget.LinearLayout"),
+        _action("base", "com.android.settings:id/content_parent", "android.widget.ScrollView"),
+        _action("base", "com.android.settings:id/switchWidget", "android.widget.Switch"),
+    }
+    texts = {node.text or node.content_description for node in tree.nodes if node.window == 1}
+    assert {"Data warning & limit", "Set data warning", "2.00 GB"} <= texts
+
+
+def test_a_dialog_s_entries_name_the_dialog_role() -> None:
+    assert _signature("windows_settings_dialog") == {
+        LayoutEntry("title", "dialog", "", "", "Set data usage warning"),
+        _action("dialog", "android:id/button1", "android.widget.Button"),
+        _action("dialog", "com.android.settings:id/bytes", "android.widget.EditText"),
+        _action("dialog", "com.android.settings:id/size_spinner", "android.widget.Spinner"),
+        LayoutEntry(
+            "text",
+            "",
+            "com.android.settings:id/alertTitle",
+            "android.widget.TextView",
+            "Set data usage warning",
+        ),
+    }
+
+
+def test_the_keyboard_and_the_status_bar_are_left_out() -> None:
+    """The keyboard moved the dialog up; neither window takes part in the signature."""
+    tree = parse_tree(_dump("windows_settings_dialog_keyboard"))
+
+    assert [window.window_type for window in tree.windows] == [
+        "TYPE_SYSTEM",
+        "TYPE_INPUT_METHOD",
+        "TYPE_APPLICATION",
+    ]
+    assert layout_signature(tree) == _signature("windows_settings_dialog")
+
+
+@pytest.mark.parametrize(
+    ("name", "roles"),
+    [
+        pytest.param("windows_plain_list", {1: "base"}, id="a page"),
+        pytest.param("windows_keyboard", {2: "base"}, id="a page under the keyboard"),
+        pytest.param("windows_settings_dialog", {1: "dialog"}, id="a dialog with margins"),
+        pytest.param("windows_dialog_compose", {1: "dialog"}, id="a dialog the screen's width"),
+        pytest.param("windows_child_popup_window", {1: "popup", 2: "base"}, id="a popup"),
+    ],
+)
+def test_each_app_window_has_a_role_and_no_other_window_does(
+    name: str, roles: dict[int, str]
+) -> None:
+    assert window_roles(parse_tree(_dump(name))) == roles
+
+
+def test_a_tree_without_windows_has_no_role_and_no_signature() -> None:
+    tree = parse_tree("<displays />")
+
+    assert (window_roles(tree), layout_signature(tree)) == ({}, frozenset())
+
+
+def test_a_window_narrower_than_the_screen_or_below_its_top_is_a_dialog() -> None:
+    narrower = parse_tree(_window_with("", bounds="[5,0][95,200]"))
+    lower = parse_tree(_window_with("", bounds="[0,50][100,200]"))
+
+    assert window_roles(narrower) == window_roles(lower) == {1: "dialog"}
+
+
+def test_each_action_flag_makes_a_node_actionable() -> None:
+    flags = ("clickable", "long-clickable", "checkable", "scrollable")
+    nodes = "".join(
+        _node(f'resource-id="id/{flag}" class="View" {flag}="true"')
+        for flag in (*flags, "focusable")
+    )
+
+    assert layout_signature(parse_tree(_window_with(nodes, title=""))) == {
+        _action("base", f"id/{flag}", "View") for flag in flags
+    }
+
+
+def test_static_text_inside_a_scrolling_container_is_left_out() -> None:
+    nodes = _node('text="Header" class="TextView"') + _node(
+        'class="RecyclerView" scrollable="true"',
+        _node('class="LinearLayout"', _node('text="Row" class="TextView"')),
+    )
+
+    assert layout_signature(parse_tree(_window_with(nodes, title=""))) == {
+        LayoutEntry("text", "", "", "TextView", "Header"),
+        _action("base", "", "RecyclerView"),
+    }
+
+
+def test_a_static_text_without_text_is_labelled_by_its_content_description() -> None:
+    nodes = _node('text="Wi-Fi" content-desc="Wireless" class="TextView"') + _node(
+        'content-desc="Signal full" class="ImageView"'
+    )
+
+    assert layout_signature(parse_tree(_window_with(nodes, title=""))) == {
+        LayoutEntry("text", "", "", "TextView", "Wi-Fi"),
+        LayoutEntry("text", "", "", "ImageView", "Signal full"),
+    }
+
+
+def test_an_invisible_or_unlabelled_node_is_left_out() -> None:
+    nodes = (
+        '<node drawing-order="0" bounds="[0,20][0,40]" clickable="true" class="Button" />'
+        '<node drawing-order="0" bounds="[0,20][100,20]" text="Hidden" class="TextView" />'
+        + _node('class="FrameLayout"')
+    )
+
+    assert layout_signature(parse_tree(_window_with(nodes))) == {
+        LayoutEntry("title", "base", "", "", "Page")
+    }
+
+
+_A, _B, _C, _D, _E = (_action("base", f"id/{name}", "Button") for name in "abcde")
+
+
+def test_a_stable_layout_keeps_the_entries_on_most_signatures_with_their_share() -> None:
+    signatures = [
+        frozenset({_A, _B, _C}),
+        frozenset({_A, _B, _C}),
+        frozenset({_A, _B, _C}),
+        frozenset({_A, _B, _D}),
+        frozenset({_A, _D, _E}),
+    ]
+
+    assert stable_layout(signatures) == {_A: 1.0, _B: 0.8}
+    assert stable_layout(signatures, share=0.6) == {_A: 1.0, _B: 0.8, _C: 0.6}
+
+
+def test_a_stable_layout_of_no_signature_is_empty() -> None:
+    assert stable_layout([]) == {}
+
+
+def test_layout_similarity_is_the_weighted_jaccard_of_two_layouts() -> None:
+    screen = dict.fromkeys((_A, _B, _C, _D), 1.0)
+    node = {_A: 1.0, _B: 0.8, _E: 0.9}
+
+    assert layout_similarity(screen, node) == pytest.approx((1.0 + 0.8) / (1 + 1 + 1 + 1 + 0.9))
+    assert layout_similarity(screen, screen) == 1.0
+    assert layout_similarity(screen, dict.fromkeys((_E, _B, _C), 1.0)) == pytest.approx(2 / 5)
+
+
+def test_a_layout_with_too_few_entries_scores_nothing() -> None:
+    small = dict.fromkeys((_A, _B), 1.0)
+    large = dict.fromkeys((_A, _B, _C), 1.0)
+
+    assert len(large) == MIN_LAYOUT_ENTRIES
+    assert layout_similarity(small, large) is None
+    assert layout_similarity(large, small) is None
+    assert layout_similarity(large, large) == 1.0

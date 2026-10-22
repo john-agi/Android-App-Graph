@@ -14,6 +14,7 @@ import io
 import itertools
 import json
 import logging
+import math
 import os
 import socket
 import threading
@@ -33,12 +34,16 @@ from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
 from android_app_graph.graph_files import PER_ACTION_LISTS, save_embeddings, text_embeddings_path
+from android_app_graph.member_groups import MERGE_FLOOR
+from android_app_graph.payloads import as_object_dict
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
-from android_app_graph.ui_tree import parse_tree
+from android_app_graph.ui_tree import layout_signature, parse_tree, xml_document
 from android_app_graph.utils import ModelSettings
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
+    LAYOUT_MERGE_FLOOR,
+    LAYOUT_SHORT_LIST_FLOOR,
     MAX_SETUP_ACTIONS,
     NORMALIZE_EVERY_N_VISITS,
     SHORT_LIST_SOURCES,
@@ -121,15 +126,43 @@ def make_manager(steps_dir: Path | None = None) -> GraphManager:
 
 # The smallest document the tree parser accepts: a dump that found no window.
 EMPTY_TREE = "<displays />"
+_DATA = Path(__file__).parent / "data"
+# Trees a Settings exploration kept, trimmed: a page, a dialog, and the same dialog with
+# the keyboard up. The two dialogs have one layout signature, unlike the page's.
+PAGE_TREE, DIALOG_TREE, DIALOG_KEYBOARD_TREE = (
+    xml_document((_DATA / f"uiautomator_windows_settings_{name}.txt").read_text("utf-8"))
+    for name in ("page", "dialog", "dialog_keyboard")
+)
+NO_TREE = "the device state has no tree"
 
 
-def write_observation_image(steps_dir: Path, image: bytes) -> str:
-    """Write an observation image and its tree into ``steps_dir`` under the next free
-    step ID, as a StepRecorder would, and return the ID."""
+def with_menu_open(tree: str) -> str:
+    """``tree`` with a menu of two options open over its screen in a popup window."""
+    options = "".join(
+        f'<node text="{label}" resource-id="android:id/title" class="android.widget.TextView" '
+        f'clickable="true" bounds="[540,{top}][1060,{top + 120}]" drawing-order="0" />'
+        for label, top in (("Help", 300), ("Reset", 420))
+    )
+    menu = (
+        '<window index="2" title="Popup Window" bounds="[540,300][1060,540]" active="false" '
+        'focused="false" accessibility-focused="false" id="560" layer="2" '
+        f'type="TYPE_APPLICATION"><hierarchy rotation="0">{options}</hierarchy></window>'
+    )
+    return tree.replace("</display>", f"{menu}</display>")
+
+
+def write_observation_image(steps_dir: Path, image: bytes, tree: str | None = EMPTY_TREE) -> str:
+    """Write an observation image and its ``tree`` into ``steps_dir`` under the next free
+    step ID, as a StepRecorder would, and return the ID; ``None`` writes no tree, and a
+    record that says why."""
     steps_dir.mkdir(parents=True, exist_ok=True)
     observation_id = f"{len(list(steps_dir.glob('*.webp'))):06d}"
     (steps_dir / f"{observation_id}.webp").write_bytes(image)
-    (steps_dir / f"{observation_id}.xml").write_text(EMPTY_TREE, encoding="utf-8")
+    if tree is None:
+        record = {"id": observation_id, "kind": "observation", "ui_tree_error": NO_TREE}
+        (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+    else:
+        (steps_dir / f"{observation_id}.xml").write_text(tree, encoding="utf-8")
     return observation_id
 
 
@@ -139,24 +172,29 @@ class Membership(TypedDict):
 
 
 def write_member_record(steps_dir: Path, observation_id: str) -> None:
-    """Write the record exploration leaves for a member observation in ``steps_dir``: its
-    pixel hash and describe output."""
+    """Add to the record of an observation in ``steps_dir`` what exploration leaves for a
+    member: its pixel hash and describe output."""
     steps_dir.mkdir(parents=True, exist_ok=True)
-    record = {
-        "id": observation_id,
-        "kind": "observation",
-        "pixel_hash": f"member-{observation_id}",
-        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
+    path = steps_dir / f"{observation_id}.json"
+    record: dict[str, object] = {"id": observation_id, "kind": "observation"}
+    if path.exists():
+        record = as_object_dict(json.loads(path.read_text("utf-8")))
+    record["pixel_hash"] = f"member-{observation_id}"
+    record["describe"] = {
+        "page_description": "",
+        "state": {},
+        "elements": [],
+        "is_external_web": False,
     }
-    (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+    path.write_text(json.dumps(record), "utf-8")
 
 
-def members(steps_dir: Path, *images: bytes) -> Membership:
+def members(steps_dir: Path, *images: bytes, tree: str | None = EMPTY_TREE) -> Membership:
     """The membership fields of a node whose observations, ``b"screenshot-a"`` unless
-    given, are members in ``steps_dir``; the first is the representative."""
+    given, are members in ``steps_dir`` with ``tree``; the first is the representative."""
     observation_ids = []
     for image in images or (b"screenshot-a",):
-        observation_id = write_observation_image(steps_dir, image)
+        observation_id = write_observation_image(steps_dir, image, tree)
         write_member_record(steps_dir, observation_id)
         observation_ids.append(observation_id)
     return {"observations": observation_ids, "representative_observation": observation_ids[0]}
@@ -175,9 +213,13 @@ class Screens:
     steps_dir: Path
 
     def __call__(
-        self, activity: str = HOME, screenshot: str = SHOT_A, package: str = PACKAGE
+        self,
+        activity: str = HOME,
+        screenshot: str = SHOT_A,
+        package: str = PACKAGE,
+        tree: str | None = EMPTY_TREE,
     ) -> Observation:
-        observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot))
+        observation_id = write_observation_image(self.steps_dir, base64.b64decode(screenshot), tree)
         pixel_hash = fake_pixel_hash(screenshot)
         record = {
             "id": observation_id,
@@ -185,6 +227,8 @@ class Screens:
             "package": package,
             "pixel_hash": pixel_hash,
         }
+        if tree is None:
+            record["ui_tree_error"] = NO_TREE
         (self.steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
         return Observation(
             observation_id,
@@ -192,8 +236,8 @@ class Screens:
             activity,
             package,
             pixel_hash,
-            parse_tree(EMPTY_TREE),
-            None,
+            None if tree is None else parse_tree(tree),
+            NO_TREE if tree is None else None,
         )
 
     def record(self, observation: Observation) -> dict[str, Any]:
@@ -1089,6 +1133,212 @@ def test_an_expected_node_is_followed_through_its_renames(vlm: FakeVlm, screen: 
     assert gm.identify_state(observation, expected_node="s0_home") == renamed
 
     assert screen.record(observation)["identify"]["stage"] == "expected"
+
+
+def _a_node_only_its_layout_matches(vlm: FakeVlm, steps_dir: Path) -> GraphManager:
+    """The nodes of ``_three_image_matches_and_a_text_match``, then s4: a dialog that
+    looks unlike the screen and is described otherwise, but whose member's tree has the
+    screen's layout."""
+    gm = make_manager(steps_dir)
+    for number, image in enumerate((b"a", b"b", b"c")):
+        add_screen(gm, f"s{number}_lookalike", "Settings page", **members(steps_dir, image))
+        vlm.images[b64(image)] = NEAR
+    add_screen(gm, "s3_results", "Search results", **members(steps_dir, b"d"))
+    add_screen(gm, "s4_dialog", "Promo overlay", **members(steps_dir, b"e", tree=DIALOG_TREE))
+    vlm.images.update({b64(b"d"): FAR, b64(b"e"): FAR, SHOT_A: NEAR})
+    gm.embed_missing_members()
+    vlm.calls.clear()
+    vlm.descriptions.append(("Search results", {}, []))
+    return with_text_vectors(gm, steps_dir)
+
+
+def test_a_node_only_its_layout_puts_on_the_short_list_is_verified_and_takes_the_screen(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """The order of model calls: image embedding, describe, text embedding, then the
+    short list, where the layout source's candidate is the third verifier call, within
+    the cap. The keyboard over the screen's dialog leaves its layout as it is."""
+    gm = _a_node_only_its_layout_matches(vlm, screen.steps_dir)
+    vlm.verdicts.extend(
+        [
+            {"same": False, "reason": "not s0"},
+            {"same": False, "reason": "not s3"},
+            {"same": True, "reason": "the dialog"},
+        ]
+    )
+    observation = screen(HOME, SHOT_A, PACKAGE, tree=DIALOG_KEYBOARD_TREE)
+
+    assert gm.identify_state(observation) == "s4_dialog"
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify", "verify", "verify"]
+    assert verified(vlm) == [b64(b"a"), b64(b"d"), b64(b"e")]
+    candidates = screen.record(observation)["identify"]["candidates"]
+    assert [(c["node"], sorted(c["sources"])) for c in candidates] == [
+        ("s0_lookalike", ["image", "text"]),
+        ("s3_results", ["text"]),
+        ("s4_dialog", ["layout"]),
+        ("s1_lookalike", ["image"]),
+        ("s2_lookalike", ["image"]),
+    ]
+    assert candidates[2]["sources"] == {"layout": pytest.approx(1.0)}
+    assert gm.graph.nodes["s4_dialog"]["observations"][-1] == observation.observation_id
+
+
+def test_a_layout_match_the_verifier_rejects_starts_a_node_of_its_own(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = make_manager(screen.steps_dir)
+    add_screen(gm, "s0_dialog", "Promo overlay", **members(screen.steps_dir, tree=DIALOG_TREE))
+    gm.embed_missing_members()
+    vlm.descriptions.append(("Search results", {}, []))
+    vlm.verdicts.append({"same": False, "reason": "another dialog"})
+    observation = screen(HOME, SHOT_A, PACKAGE, tree=DIALOG_TREE)
+
+    node_id = gm.identify_state(observation)
+
+    assert node_id == "s0_search_results"
+    assert sorted(gm.graph) == ["s0_dialog", "s0_search_results"]
+    (candidate,) = screen.record(observation)["identify"]["candidates"]
+    assert candidate["sources"]["layout"] == pytest.approx(1.0)
+    assert gm.graph.nodes["s0_dialog"]["observations"] == ["000000"]
+
+
+@pytest.mark.parametrize(
+    "tree",
+    [
+        pytest.param(None, id="no tree"),
+        pytest.param(EMPTY_TREE, id="a tree too small to compare"),
+    ],
+)
+def test_a_screen_without_a_layout_builds_the_short_list_from_image_and_text(
+    tree: str | None, vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = _a_node_only_its_layout_matches(vlm, screen.steps_dir)
+    vlm.verdicts.extend({"same": False, "reason": "another page"} for _ in range(3))
+    observation = screen(HOME, SHOT_A, PACKAGE, tree=tree)
+
+    gm.identify_state(observation)
+
+    candidates = screen.record(observation)["identify"]["candidates"]
+    assert [(c["node"], sorted(c["sources"])) for c in candidates] == [
+        ("s0_lookalike", ["image", "text"]),
+        ("s3_results", ["text"]),
+        ("s1_lookalike", ["image"]),
+        ("s2_lookalike", ["image"]),
+    ]
+
+
+@pytest.mark.usefixtures("vlm")
+@pytest.mark.parametrize("floor", [LAYOUT_SHORT_LIST_FLOOR, 1.0])
+def test_a_node_whose_layout_reaches_the_floor_is_a_layout_candidate_and_one_below_is_not(
+    floor: float, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gm_module, "LAYOUT_SHORT_LIST_FLOOR", floor)
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(gm, "s0_dialog", "Promo overlay", **members(steps_dir, tree=DIALOG_TREE))
+    add_screen(gm, "s1_page", "Settings page", **members(steps_dir, tree=PAGE_TREE))
+    gm.embed_missing_members()
+    screen_layout = dict.fromkeys(layout_signature(parse_tree(PAGE_TREE)), 1.0)
+
+    ranked = gm.short_list(ScreenQuery(NEAR, [], screen_layout), ["s0_dialog", "s1_page"])
+
+    assert gm.layout_score("s0_dialog", screen_layout) == pytest.approx(0.0)
+    assert [(c.node_id, c.sources["layout"]) for c in ranked if "layout" in c.sources] == [
+        ("s1_page", 1.0)
+    ]
+
+
+def test_a_node_s_stable_layout_keeps_what_most_of_its_members_trees_share(
+    tmp_path: Path,
+) -> None:
+    """Four of five members show the page; the fifth, the dialog, adds nothing."""
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    page = members(steps_dir, b"1", b"2", b"3", b"4", tree=PAGE_TREE)
+    dialog = members(steps_dir, b"5", tree=DIALOG_TREE)
+    add_screen(
+        gm,
+        "s0_page",
+        "Settings page",
+        observations=[*page["observations"], *dialog["observations"]],
+        representative_observation=page["representative_observation"],
+    )
+
+    assert gm.node_layout("s0_page") == dict.fromkeys(
+        layout_signature(parse_tree(PAGE_TREE)), pytest.approx(0.8)
+    )
+
+
+@pytest.mark.parametrize(
+    "tree",
+    [pytest.param(None, id="no tree, with the reason"), pytest.param(EMPTY_TREE, id="no window")],
+)
+def test_a_node_whose_members_have_no_layout_is_no_layout_candidate(
+    tree: str | None, tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir, b"1", b"2", tree=tree))
+
+    assert gm.node_layout("s0_home") == {}
+    assert (
+        gm.layout_score("s0_home", dict.fromkeys(layout_signature(parse_tree(PAGE_TREE)), 1.0))
+        is None
+    )
+
+
+def test_a_node_s_stable_layout_follows_a_merge(tmp_path: Path) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(
+        gm, "s0_page", "Settings page", **members(steps_dir, b"1", b"2", b"3", b"4", tree=PAGE_TREE)
+    )
+    add_screen(gm, "s1_dialog", "Promo overlay", **members(steps_dir, b"5", tree=DIALOG_TREE))
+    page = layout_signature(parse_tree(PAGE_TREE))
+    assert gm.node_layout("s0_page") == dict.fromkeys(page, 1.0)
+
+    gm.merge_nodes("s0_page", "s1_dialog")
+
+    assert gm.node_layout("s0_page") == dict.fromkeys(page, pytest.approx(0.8))
+
+
+def test_a_node_s_stable_layout_follows_a_visit(vlm: FakeVlm, screen: Screens) -> None:
+    """The page's only member has its menu open; once the page is visited with the menu
+    closed, the menu is on half the members, too few for the stable layout."""
+    gm = make_manager(screen.steps_dir)
+    menu_open = with_menu_open(PAGE_TREE)
+    add_screen(gm, "s0_page", "Settings page", **members(screen.steps_dir, tree=menu_open))
+    gm.embed_missing_members()
+    page = layout_signature(parse_tree(PAGE_TREE))
+    assert gm.node_layout("s0_page") == dict.fromkeys(layout_signature(parse_tree(menu_open)), 1.0)
+    assert len(gm.node_layout("s0_page")) > len(page)
+    vlm.descriptions.append(("Settings page", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "the page with its menu closed"})
+
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE, tree=PAGE_TREE)) == "s0_page"
+
+    assert gm.node_layout("s0_page") == dict.fromkeys(page, 1.0)
+
+
+@pytest.mark.usefixtures("vlm")
+def test_a_node_s_stable_layout_follows_a_split(
+    tmp_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    """Half of the node's members show the page and half the dialog, so no entry is on
+    enough of them until the dialog's members leave."""
+    path = tmp_path / "demo.json"
+    trees = {"000001": PAGE_TREE, "000002": PAGE_TREE, "000003": DIALOG_TREE, "000004": DIALOG_TREE}
+    write_member_graph(path, {"s0_page": [(member, ANY_IMAGE) for member in trees]})
+    for member, tree in trees.items():
+        (tmp_path / "steps" / f"{member}.xml").write_text(tree, encoding="utf-8")
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, embedding=EMBEDDING)
+    gm.load_graph(path)
+    assert gm.node_layout("s0_page") == {}
+
+    gm.split_members("s0_page", ["000003", "000004"], [])
+
+    assert gm.node_layout("s0_page") == dict.fromkeys(layout_signature(parse_tree(PAGE_TREE)), 1.0)
 
 
 def _png(image: Image.Image) -> str:
@@ -4362,7 +4612,7 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, external_side: str
 ) -> None:
     """An ``ext_`` node stands for every screen of another app or the web, so its
-    representative is no screen of the app to compare with."""
+    members are no screens of the app to compare with."""
     pair = {"node_a": "s0_home", "node_b": "s1_home_two", external_side: EXTERNAL_WEB_NODE}
     fake = FakeAudit(result={"issues": [pair]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
@@ -4445,6 +4695,139 @@ def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     assert result["results"][0]["status"] == "kept_separate"
     assert result["results"][0]["reason"] == "different banner"
     assert gm.graph.number_of_nodes() == 2
+
+
+# The cosine of s0's and s1's second members in ``_two_dialogs_with_one_layout``: too low
+# for the images to propose the pair, so only the layouts do.
+DIALOGS_IMAGE_SCORE = MERGE_FLOOR / 2
+
+
+def _two_dialogs_with_one_layout(gm: GraphManager, vlm: FakeVlm, steps_dir: Path) -> None:
+    """s0 and s1: one dialog's layout, described apart; their representatives look unlike
+    each other, their second members alike, and s0's third less so. s2: a page that looks
+    like neither."""
+    add_screen(
+        gm,
+        "s0_dialog",
+        "Promo overlay",
+        **members(steps_dir, b"0a", b"0b", b"0c", tree=DIALOG_TREE),
+    )
+    add_screen(
+        gm,
+        "s1_dialog",
+        "Settings page",
+        visit_count=3,
+        **members(steps_dir, b"1a", b"1b", tree=DIALOG_KEYBOARD_TREE),
+    )
+    add_screen(gm, "s2_page", "Search results", **members(steps_dir, b"2a", tree=PAGE_TREE))
+    vlm.images.update(
+        {
+            b64(b"0a"): ANY_IMAGE,
+            b64(b"0b"): NEAR,
+            b64(b"0c"): [0.8, 0.6, 0.0],
+            b64(b"1a"): FAR,
+            b64(b"1b"): [0.0, DIALOGS_IMAGE_SCORE, math.sqrt(1 - DIALOGS_IMAGE_SCORE**2)],
+            b64(b"2a"): [-1.0, 0.0, 0.0],
+        }
+    )
+    gm.embed_missing_members()
+    vlm.calls.clear()
+
+
+@pytest.mark.parametrize("same", [True, False])
+def test_a_pair_whose_layouts_match_is_merged_only_when_the_verifier_confirms_it(
+    same: bool, vlm: FakeVlm, tmp_path: Path
+) -> None:
+    """The verifier is shown the two nodes' closest members by image, the more-visited
+    node's as the existing screen with its description; the lower-numbered node is
+    kept."""
+    gm = make_manager(tmp_path / "steps")
+    _two_dialogs_with_one_layout(gm, vlm, tmp_path / "steps")
+    vlm.verdicts.append({"same": same, "reason": "scripted"})
+
+    (proposal,) = gm.merge_proposals([])
+    (result,) = gm.verify_merge_proposals([proposal], {})
+
+    assert (proposal.node_a, proposal.node_b, proposal.sources) == (
+        "s0_dialog",
+        "s1_dialog",
+        ["layout"],
+    )
+    assert proposal.findings == [{"source": "layout", "score": pytest.approx(1.0)}]
+    ((_, call),) = vlm.calls
+    assert (call["existing"], call["new"]) == (b64(b"1b"), b64(b"0b"))
+    assert call["existing_description"] == "Settings page"
+    assert result["members"] == {"s1_dialog": "000004", "s0_dialog": "000001"}
+    assert result["image_score"] == pytest.approx(DIALOGS_IMAGE_SCORE)
+    if same:
+        assert (result["status"], result["kept"], result["removed"]) == (
+            "merged",
+            "s0_dialog",
+            "s1_dialog",
+        )
+        assert sorted(gm.graph) == ["s0_dialog", "s2_page"]
+    else:
+        assert result["status"] == "kept_separate"
+        assert sorted(gm.graph) == ["s0_dialog", "s1_dialog", "s2_page"]
+
+
+def test_a_pair_the_model_and_the_layouts_propose_is_verified_once_naming_both_sources(
+    vlm: FakeVlm, tmp_path: Path
+) -> None:
+    gm = make_manager(tmp_path / "steps")
+    _two_dialogs_with_one_layout(gm, vlm, tmp_path / "steps")
+    vlm.verdicts.append({"same": False, "reason": "two dialogs"})
+    issue = {"type": "merge_nodes", "node_a": "s1_dialog", "node_b": "s0_dialog"}
+
+    proposals = gm.merge_proposals([issue])
+    (result,) = gm.verify_merge_proposals(proposals, {})
+
+    assert result["sources"] == ["text_audit", "layout"]
+    assert proposals[0].findings == [
+        {"source": "text_audit", "issue": issue},
+        {"source": "layout", "score": pytest.approx(1.0)},
+    ]
+    assert vlm.kinds() == ["verify"]
+
+
+def test_layouts_propose_no_pair_below_the_floor_or_across_packages_or_apps(
+    vlm: FakeVlm, tmp_path: Path, screen: Screens
+) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    add_screen(gm, "s0_dialog", "Promo overlay", **members(steps_dir, tree=DIALOG_TREE))
+    add_screen(gm, "s1_page", "Settings page", **members(steps_dir, tree=PAGE_TREE))
+    add_screen(
+        gm,
+        "s2_dialog",
+        "Promo overlay",
+        package=OTHER_PACKAGE,
+        **members(steps_dir, tree=DIALOG_TREE),
+    )
+    gm.record_external_app_visit(screen(OTHER_APP, SHOT_B, OTHER_PACKAGE, tree=DIALOG_TREE))
+
+    assert LAYOUT_MERGE_FLOOR > 0.0
+    assert gm.merge_proposals([]) == []
+    assert gm.close_layouts(floor=0.0) == [("s0_dialog", "s1_page", pytest.approx(0.0))]
+    assert vlm.kinds() == []
+
+
+def test_the_coverage_checkpoint_verifies_the_model_s_pairs_and_no_layout_pair(
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
+) -> None:
+    """Each checkpoint would otherwise propose again every pair an earlier one kept
+    apart."""
+    gm = make_manager(tmp_path / "steps")
+    _two_dialogs_with_one_layout(gm, vlm, tmp_path / "steps")
+    issue = {"node_a": "s1_dialog", "node_b": "s2_page"}
+    monkeypatch.setattr(gm_module, "audit_merge_nodes", FakeAudit(result={"issues": [issue]}))
+    vlm.verdicts.append({"same": False, "reason": "a dialog and a page"})
+
+    result = gm.run_node_merge_audit()
+
+    ((pair, sources),) = [((r["node_a"], r["node_b"]), r["sources"]) for r in result["results"]]
+    assert (pair, sources) == (("s1_dialog", "s2_page"), ["text_audit"])
+    assert vlm.kinds() == ["verify"]
 
 
 POOL = [f"s{i}_screen" for i in range(5)]

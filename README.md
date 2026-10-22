@@ -25,7 +25,7 @@ Android-App-Graph/
 │       ├── kobe.py                    # Core app explorer
 │       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
 │       ├── step_log.py                # Records every screenshot and action in steps/
-│       ├── ui_tree.py                 # The accessibility tree of a screen, parsed and compared
+│       ├── ui_tree.py                 # A screen's accessibility tree: parsed, compared, its layout
 │       └── utils/                     # Graph, VLM, and logging helpers
 ├── scripts/                           # Operator scripts, not packaged
 │   └── run_explore.sh                 # Auto-resume wrapper around app-graph
@@ -74,6 +74,7 @@ graph TD;
     gm --> gf;
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
+    gm --> tree;
     gm --> vlm;
     gf --> pay;
     steps --> gf;
@@ -611,8 +612,9 @@ node:
 - `stage`: `exact`, `expected`, `short_list`, `new` or `external_web`;
 - `expected_node`, the node the caller expected, or `null`;
 - `exact_match`, the member an exact match copied;
-- `candidates`: each short-list node with the `sources` that proposed it and their
-  scores, its `closest_member` and that member's `image_score`;
+- `candidates`: each short-list node with the `sources` that proposed it (`image`,
+  `text`, `layout`) and their scores, its `closest_member` and that member's
+  `image_score`;
 - `verifications`: each verifier call's `node`, the `member` it was shown, `same` and
   the `reason`;
 - `refinement`: the descriptions the step's first rejection refined, and what the
@@ -671,8 +673,9 @@ order, and names one of them `representative_observation`:
 
 Screen matching verifies a screen against a node's member closest to it by image, and
 the audit's merge checks verify a pair of nodes on their two closest members.
-`app-graph-plot` shows the representative as the node's thumbnail. `ext_web` and
-`ext_<package>` nodes list the screens that reached them as well; neither screen
+`app-graph-plot` shows the representative as the node's thumbnail. A node's
+[stable layout](#layout-similarity) is computed from its members' trees. `ext_web`
+and `ext_<package>` nodes list the screens that reached them as well; neither screen
 matching nor the audit compares them.
 
 #### Screen matching
@@ -696,12 +699,16 @@ what each step found.
    to, the screen a step left when Back closes an outside web page or another app, the
    start node after a restart, and the target of the audit's retried edge. A
    confirmation decides; a rejection leaves the node off the short list.
-5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
-   each node's closest member, proposes 3, and `text`, by the highest description
-   cosine among each node's members, proposes 2. The nodes are taken once each, in the
-   order of their best rank in either source, ties broken by image cosine. The verifier
-   checks them in that order against each one's closest member by image and stops at
-   the first confirmation, after 3 calls at most (4 with an expected node).
+5. **Short list.** Three sources rank the other nodes: `image`, by the image cosine
+   of each node's closest member, proposes 3; `text`, by the highest description
+   cosine among each node's members, proposes 2; and `layout`, by
+   [layout similarity](#layout-similarity), proposes the 2 best that reach 0.55, and
+   none for a screenshot without a usable tree. The nodes are taken once each, in the
+   order of their best rank in any source, ties broken by image cosine, so each
+   source's best node is among the first three. No score matches a node on its own:
+   the verifier checks them in that order against each one's closest member by image
+   and stops at the first confirmation, after 3 calls at most (4 with an expected
+   node).
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later
@@ -725,6 +732,37 @@ its record in `steps/`, or an edge has no actions or per-action lists (see
 fails the same way, except that it reads no record or tree in `steps/` and needs
 the image of every member, not only of the representative. Explore the app again
 into a new graph directory.
+
+#### Layout similarity
+
+A screenshot's layout signature is read from its tree in `steps/`: the set of
+
+- each app window's role and title;
+- the role, resource ID and class of each visible node an app window lets the user
+  act on: clickable, long-clickable, checkable or scrollable;
+- the resource ID, class and label (its text, or else its content description) of
+  each other visible node with a label outside scrolling containers, such as a
+  dialog's title.
+
+An app window (`TYPE_APPLICATION`) titled `Popup Window`, Android's title for menus,
+dropdowns and tooltips, is a popup; one that spans the width of the screen from its
+top is the base screen; any other is a dialog. A dialog over a page therefore differs
+from the page. The keyboard and the system bars are left out, so the keyboard
+appearing over a dialog leaves the dialog's signature as it was.
+
+A node's stable layout holds the entries on at least 80% of its members' signatures,
+each weighted by the share of members it is on, so a menu open on fewer of a page's
+visits stays out of the page's stable layout. It is computed from the members'
+trees when first needed and again once a visit, a merge, a split or a move has
+changed the members; the graph file stores none. The layout similarity of a
+screenshot and a node is the weighted Jaccard of the screenshot's signature, each
+entry weighing 1, and the node's stable layout; two nodes compare their stable
+layouts the same way. A signature or a stable layout of fewer than 3 entries scores
+nothing, as for a screenshot without a tree or a node whose members have none.
+
+Layout proposes short-list candidates and [merge pairs](#merge-proposals) and decides
+nothing: different screens can share a layout, such as one dropdown opened over two
+pages.
 
 ### Graph edges
 
@@ -834,6 +872,8 @@ verified once whatever proposed it. Each pair names its sources:
   [Embedding caches](#embedding-caches)). The merge floor and the grouping floor of
   [member checks](#member-checks) are set separately: a lower merge floor proposes
   more pairs, and a higher grouping floor separates more members.
+- `layout`: two in-app nodes of one package whose stable layouts reach a
+  [layout similarity](#layout-similarity) of 0.80.
 
 A near-identical image proves nothing on its own: a start search and a destination
 search look alike and are different screens. Each pair is verified on its two
@@ -841,14 +881,15 @@ closest members: the verifier sees the member of the more-visited node, with tha
 node's description, beside the member of the other. A confirmed pair is merged into
 its lower-numbered node; a pair whose node an earlier merge removed is verified on
 the node that kept it. The coverage checkpoint's merge audit verifies the model's
-pairs the same way and proposes none from images, since every checkpoint would
-otherwise propose again each pair an earlier one kept apart.
+pairs the same way and proposes none from images or layouts, since every checkpoint
+would otherwise propose again each pair an earlier one kept apart.
 
 `<app_name>_merge.json` lists every pair: `node_a` and `node_b`, the `sources` and
-what each found in `findings` (the model's `issue`, or the image `members` and their
-`score`), the `members` the verifier was shown by node and their `image_score`, the
-`status` (`merged`, `kept_separate`, or `skipped` with the `reason` the pair cannot be
-verified), `kept` and `removed` after a merge, the verifier's `reason`, and `reused`.
+what each found in `findings` (the model's `issue`, the image `members` and their
+`score`, or the layout `score`), the `members` the verifier was shown by node and
+their `image_score`, the `status` (`merged`, `kept_separate`, or `skipped` with the
+`reason` the pair cannot be verified), `kept` and `removed` after a merge, the
+verifier's `reason`, and `reused`.
 
 #### Member checks
 

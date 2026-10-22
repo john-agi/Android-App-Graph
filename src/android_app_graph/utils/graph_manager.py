@@ -12,8 +12,8 @@ An edge represents a device action that transitions between states.
 State matching compares a new screenshot with the members of the nodes of its app
 package, cheapest evidence first: an exact pixel match outside the status bar, then
 the node the caller expects, then a short list of nodes ranked by the image and the
-description similarity of their members, each checked by the verifier against its
-member closest to the screen.
+description similarity of their members and by their layout similarity, each checked
+by the verifier against its member closest to the screen.
 Different Android activities that display the same screen are merged into a single
 node; the node stores all observed activities.
 
@@ -21,12 +21,14 @@ Every time a node is visited (whether new or existing), the VLM detail JSON is
 used to update the node's state schema — discovering new keys and accumulating
 observed values.
 
-A node holds no image. It lists the step-log observations assigned to it, in
-order, and names one of them its representative: the screen the plot shows, read
-from the step log when it needs it. The audit compares nodes on their members:
-merge proposals from the model's text and from close member images, each verified
-once on its closest members, and member groups whose closest pair the verifier
-tells apart, split off or moved to the node screen matching confirms.
+A node holds no image and no tree. It lists the step-log observations assigned to
+it, in order, and names one of them its representative: the screen the plot shows,
+read from the step log when it needs it. Its stable layout is computed from its
+members' trees when first needed. The audit compares nodes on their members: merge
+proposals from the model's text, from close member images and from close stable
+layouts, each verified once on its closest members, and member groups whose closest
+pair the verifier tells apart, split off or moved to the node screen matching
+confirms.
 """
 
 from __future__ import annotations
@@ -83,6 +85,12 @@ from android_app_graph.step_log import (
     read_observation_tree,
     save_image_embeddings,
 )
+from android_app_graph.ui_tree import (
+    LayoutEntry,
+    layout_signature,
+    layout_similarity,
+    stable_layout,
+)
 from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
@@ -103,6 +111,8 @@ logger = logging.getLogger(__name__)
 NORMALIZE_EVERY_N_VISITS = 10
 # The verifier calls the short list may make for one screen; a checked expected node adds one.
 SHORT_LIST_VERIFICATIONS = 3
+LAYOUT_SHORT_LIST_FLOOR = 0.55
+LAYOUT_MERGE_FLOOR = 0.80
 _FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
@@ -361,10 +371,12 @@ class ClosestMember(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class ScreenQuery:
-    """A screen as the short list's sources rank nodes for it."""
+    """A screen as the short list's sources rank nodes for it; ``layout`` is its layout
+    signature, each entry weighing 1, or ``None`` when it has no tree."""
 
     image_vector: list[float]
     description_embedding: list[float]
+    layout: Mapping[LayoutEntry, float] | None = None
 
 
 type SourceScores = Callable[[GraphManager, ScreenQuery, Sequence[str]], list[tuple[str, float]]]
@@ -427,9 +439,23 @@ def _text_scores(
     return list(best.items())
 
 
+def _layout_scores(
+    graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
+) -> list[tuple[str, float]]:
+    if query.layout is None:
+        return []
+    scored = [(node_id, graph.layout_score(node_id, query.layout)) for node_id in node_ids]
+    return [
+        (node_id, score)
+        for node_id, score in scored
+        if score is not None and score >= LAYOUT_SHORT_LIST_FLOOR
+    ]
+
+
 SHORT_LIST_SOURCES = (
     ShortListSource("image", 3, _image_scores),
     ShortListSource("text", 2, _text_scores),
+    ShortListSource("layout", 2, _layout_scores),
 )
 
 
@@ -478,7 +504,14 @@ def _close_member_images(graph: GraphManager) -> list[tuple[str, str, dict[str, 
     ]
 
 
-MERGE_SOURCES = (MergeSource("image", _close_member_images),)
+def _close_layouts(graph: GraphManager) -> list[tuple[str, str, dict[str, object]]]:
+    return [(node_a, node_b, {"score": score}) for node_a, node_b, score in graph.close_layouts()]
+
+
+MERGE_SOURCES = (
+    MergeSource("image", _close_member_images),
+    MergeSource("layout", _close_layouts),
+)
 
 
 @dataclass(slots=True)
@@ -857,6 +890,8 @@ class GraphManager:
         # refined it to.
         self._text_vectors: dict[str, list[float]] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
+        self._layout_signatures: dict[str, frozenset[LayoutEntry] | None] = {}
+        self._stable_layouts: dict[str, tuple[tuple[str, ...], dict[LayoutEntry, float]]] = {}
         self.total_steps_completed = 0
 
     def _page_detail(self) -> tuple[OpenRouter, ModelSettings] | None:
@@ -963,23 +998,16 @@ class GraphManager:
     def close_member_pairs(self, floor: float = MERGE_FLOOR) -> list[tuple[str, str, MemberPair]]:
         """Return every pair of in-app nodes of one package whose closest members, by
         image, reach the cosine ``floor``, with those members, in node order."""
-        by_package: dict[str, list[str]] = {}
-        for raw_id, data in self.graph.nodes(data=True):
-            node_id = _node_id(raw_id)
-            if not self._is_external(node_id):
-                by_package.setdefault(as_str(data.get("package"), ""), []).append(node_id)
         units = self._member_units(self._in_app_members())
         found: list[tuple[str, str, MemberPair]] = []
-        for node_ids in by_package.values():
-            ordered = sorted(node_ids, key=self._node_numeric_order)
-            for node_a, node_b in itertools.combinations(ordered, 2):
-                pair = closest_pair(
-                    _member_observations(self.graph.nodes[node_a]),
-                    _member_observations(self.graph.nodes[node_b]),
-                    units,
-                )
-                if pair is not None and pair.score >= floor:
-                    found.append((node_a, node_b, pair))
+        for node_a, node_b in self._same_package_pairs():
+            pair = closest_pair(
+                _member_observations(self.graph.nodes[node_a]),
+                _member_observations(self.graph.nodes[node_b]),
+                units,
+            )
+            if pair is not None and pair.score >= floor:
+                found.append((node_a, node_b, pair))
         return found
 
     def closest_members(self, existing: str, new: str) -> ShownMembers:
@@ -998,6 +1026,65 @@ class GraphManager:
                 None,
             )
         return ShownMembers(pair.first, pair.second, pair.score)
+
+    def _layout_signature(self, observation_id: str) -> frozenset[LayoutEntry] | None:
+        """Return the layout signature of an observation, read from its tree in the step
+        log once, or ``None`` when it has no tree."""
+        if observation_id not in self._layout_signatures:
+            tree, _reason = read_observation_tree(self._require_steps_dir(), observation_id)
+            self._layout_signatures[observation_id] = (
+                layout_signature(tree) if tree is not None else None
+            )
+        return self._layout_signatures[observation_id]
+
+    def node_layout(self, node_id: str) -> dict[LayoutEntry, float]:
+        """Return the stable layout of ``node_id`` from the trees of its members, empty
+        when none has a tree.
+
+        It is computed when first needed, and again once the node's members have
+        changed since, by a visit, a merge, a split or a move.
+        """
+        members = tuple(_member_observations(self.graph.nodes[node_id]))
+        cached = self._stable_layouts.get(node_id)
+        if cached is not None and cached[0] == members:
+            return cached[1]
+        signatures = [
+            signature
+            for member in members
+            if (signature := self._layout_signature(member)) is not None
+        ]
+        layout = stable_layout(signatures)
+        self._stable_layouts[node_id] = (members, layout)
+        return layout
+
+    def layout_score(self, node_id: str, screen: Mapping[LayoutEntry, float]) -> float | None:
+        """Return the layout similarity of a screen's signature ``screen`` and the stable
+        layout of ``node_id``, or ``None`` when either is too small to compare."""
+        return layout_similarity(screen, self.node_layout(node_id))
+
+    def _screen_layout(self, observation_id: str) -> dict[LayoutEntry, float] | None:
+        signature = self._layout_signature(observation_id)
+        return None if signature is None else dict.fromkeys(signature, 1.0)
+
+    def _same_package_pairs(self) -> Iterator[tuple[str, str]]:
+        """Yield every pair of in-app nodes of one package, each in node order."""
+        by_package: dict[str, list[str]] = {}
+        for raw_id, data in self.graph.nodes(data=True):
+            node_id = _node_id(raw_id)
+            if not self._is_external(node_id):
+                by_package.setdefault(as_str(data.get("package"), ""), []).append(node_id)
+        for node_ids in by_package.values():
+            yield from itertools.combinations(sorted(node_ids, key=self._node_numeric_order), 2)
+
+    def close_layouts(self, floor: float = LAYOUT_MERGE_FLOOR) -> list[tuple[str, str, float]]:
+        """Return every pair of in-app nodes of one package whose stable layouts reach the
+        similarity ``floor``, with that similarity, in node order."""
+        found: list[tuple[str, str, float]] = []
+        for node_a, node_b in self._same_package_pairs():
+            score = layout_similarity(self.node_layout(node_a), self.node_layout(node_b))
+            if score is not None and score >= floor:
+                found.append((node_a, node_b, score))
+        return found
 
     def _in_app_members(self) -> Iterator[str]:
         for node_id, data in self.graph.nodes(data=True):
@@ -1050,11 +1137,13 @@ class GraphManager:
            goes to ``EXTERNAL_WEB_NODE``.
         3. ``expected_node``, the node the caller expects the screen to be, is verified
            against its member closest to the screen.
-        4. The short list's candidates are verified in order against their closest
-           members, up to ``SHORT_LIST_VERIFICATIONS``.
+        4. The short list's candidates, from image, text and layout similarity, are
+           verified in order against their closest members, up to
+           ``SHORT_LIST_VERIFICATIONS``.
 
-        The first confirmation decides. A screen every check rejects starts a new node,
-        and the step's first rejection refines the two descriptions.
+        The first confirmation decides: no similarity matches a screen on its own. A
+        screen every check rejects starts a new node, and the step's first rejection
+        refines the two descriptions.
         """
         client, page_detail = self._require_page_detail()
         self._require_embedding()
@@ -1062,6 +1151,9 @@ class GraphManager:
         same_package = self._same_package_nodes(observation.package)
         image_vector = self._embed_image(observation.screenshot_b64)
         self._image_vectors[observation.observation_id] = image_vector
+        self._layout_signatures[observation.observation_id] = (
+            None if observation.ui_tree is None else layout_signature(observation.ui_tree)
+        )
         exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
         if exact is not None:
             return self._record_exact_match(observation, *exact, expected_node=expected_node)
@@ -1252,7 +1344,11 @@ class GraphManager:
             for node_id in self._same_package_nodes(identification.observation.package).node_ids
             if node_id not in excluded
         ]
-        query = ScreenQuery(identification.image_vector, identification.text_vector)
+        query = ScreenQuery(
+            identification.image_vector,
+            identification.text_vector,
+            self._screen_layout(identification.observation.observation_id),
+        )
         candidates = self.short_list(query, node_ids)
         identification.decision.candidates = [candidate.as_record() for candidate in candidates]
         logger.info(
@@ -2606,6 +2702,8 @@ class GraphManager:
         self._unit_vectors = {}
         self._text_vectors = text_vectors
         self._stored_screens = stored_screens
+        self._layout_signatures = {}
+        self._stable_layouts = {}
         self._node_aliases = {
             old: new
             for old, new in as_str_dict(data.get("node_aliases")).items()
@@ -2906,8 +3004,8 @@ class GraphManager:
     def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
         """Run a lightweight node-merge audit and merge verified duplicates.
 
-        Only the model's pairs are verified: image proposals would bring back at every
-        checkpoint each pair an earlier one kept apart.
+        Only the model's pairs are verified: image and layout proposals would bring back
+        at every checkpoint each pair an earlier one kept apart.
         """
         page_detail = self._page_detail()
         if page_detail is None:

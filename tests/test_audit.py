@@ -27,9 +27,11 @@ from android_app_graph.graph_files import (
 )
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
+from android_app_graph.ui_tree import xml_document
 from android_app_graph.utils import ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
 
+_DATA = Path(__file__).parent / "data"
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _RESOLVE_LAUNCHER = [
     *("adb", "-s", "test-device", "shell", "pm", "resolve-activity", "--brief"),
@@ -1817,6 +1819,52 @@ def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
         }
     ]
     assert (app_dir / "demo_audited.json").exists() == same
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_verifies_a_pair_whose_layouts_match_when_the_model_proposes_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    add_representative: Callable[..., None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """Both screens are one dialog of Settings, the second with the keyboard up."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    app_dir = tmp_path / "graphs" / "demo"
+    _save_with_representatives(
+        _graph_with_nodes(("s0_home", {}), ("s1_home", {})),
+        app_dir / "demo.json",
+        add_representative,
+        write_image_vectors,
+    )
+    for node_id, name in (("s0_home", "dialog"), ("s1_home", "dialog_keyboard")):
+        dump = (_DATA / f"uiautomator_windows_settings_{name}.txt").read_text(encoding="utf-8")
+        observation_tree_path(app_dir / "steps", f"{node_id}-observation").write_text(
+            xml_document(dump), encoding="utf-8"
+        )
+    config = _write_config(tmp_path, str(tmp_path / "graphs"))
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+    verified: list[dict[str, object]] = []
+
+    def verify(*_args: object, **kwargs: object) -> dict[str, object]:
+        verified.append(kwargs)
+        return {"same": False, "reason": "two dialogs"}
+
+    monkeypatch.setattr(graph_manager, "verify_same_node", verify)
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+
+    assert audit.main(["-c", str(config)]) == 0
+
+    (result,) = json.loads((app_dir / "demo_merge.json").read_text(encoding="utf-8"))
+    assert (result["node_a"], result["node_b"], result["sources"]) == (
+        "s0_home",
+        "s1_home",
+        ["layout"],
+    )
+    assert result["findings"] == [{"source": "layout", "score": 1.0}]
+    assert (result["status"], result["reason"]) == ("kept_separate", "two dialogs")
+    assert len(verified) == 1
+    assert not (app_dir / "demo_audited.json").exists()
 
 
 _BROWSER = "ext_com.android.chrome"
