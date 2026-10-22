@@ -744,6 +744,49 @@ def test_a_merge_below_the_grouping_floor_is_not_split_again(
     assert list(graph.graph) == ["s0_home"]
 
 
+def test_a_member_pair_the_verifier_gave_no_answer_on_is_asked_about_again_later_in_the_run(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Settings' far member 000004 looks like Home's only member. The merge check on the
+    two gets no answer, so the nodes stay apart and the run keeps no answer for the pair.
+    The member's move check then shows the verifier the same pair, which it confirms."""
+    write_member_graph(
+        graph_path,
+        {
+            "s0_home": [("000001", X)],
+            "s1_settings": [
+                ("000002", Y),
+                ("000003", _toward(Y, Z, LINKED)),
+                ("000004", _toward(X, Y, PROPOSED)),
+            ],
+        },
+    )
+    graph = _load(graph_path)
+    models.give_no_answer("000001", "000004")
+    models.confirm("000001", "000004")
+    verdicts: MemberVerdicts = {}
+
+    (merge,) = graph.verify_merge_proposals(graph.merge_proposals([]), verdicts)
+
+    assert (merge["status"], merge["reason"]) == ("kept_separate", "timed out")
+    assert verdicts == {}
+
+    (check,) = _checks(_check_members(graph, graph_path, verdicts))
+
+    assert (check["kind"], check["members"], check["same"]) == ("move", ["000002", "000004"], False)
+    assert check["change"]["to"] == "s0_home"
+    assert check["change"]["short_list"]["verifications"] == [
+        {
+            "node": "s0_home",
+            "member": "000001",
+            "same": True,
+            "answered": True,
+            "reason": "scripted",
+        }
+    ]
+    assert models.shown == [("000004", "000001"), ("000002", "000004"), ("000001", "000004")]
+
+
 @pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     tmp_path: Path,

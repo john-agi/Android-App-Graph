@@ -847,7 +847,8 @@ the node's home.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
 - Every split check runs before any move check, so a member can move to a node a
-  split made. A verifier answer on a pair of members is reused within the run.
+  split made. A verifier answer on a pair of members is reused within the run; a
+  check without an answer is not, so a later check of the pair asks again.
   Two merged nodes whose closest members fall below the grouping floor, a pair from
   `text_audit` or one the images propose between the merge floor and the grouping
   floor, are two groups of the merged node: their split check is the pair the merge

@@ -1284,7 +1284,10 @@ class GraphManager:
     ) -> MemberVerdict:
         """Ask the verifier whether member observations ``existing``, of the node
         ``description`` describes, and ``new`` show one screen, and keep the answer in
-        ``verdicts``; a pair ``verdicts`` already holds is answered from there."""
+        ``verdicts``; a pair ``verdicts`` already holds is answered from there.
+
+        No answer is not kept: it says nothing about the two screens, and a later check
+        of the pair may get an answer."""
         pair = frozenset((existing, new))
         known = verdicts.get(pair)
         if known is not None:
@@ -1304,7 +1307,8 @@ class GraphManager:
             as_str(reply.get("reason"), ""),
             answered=reply.get("answered") is not False,
         )
-        verdicts[pair] = verdict
+        if verdict.answered:
+            verdicts[pair] = verdict
         return verdict
 
     def _joins_without_answer(
