@@ -13,7 +13,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import logging
 import secrets
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
@@ -25,12 +24,14 @@ from PIL import Image
 
 from android_app_graph.graph_files import (
     image_embeddings_path,
+    load_embeddings,
     observation_image_path,
+    save_embeddings,
     step_record_path,
     write_bytes_atomically,
     write_json_atomically,
 )
-from android_app_graph.payloads import as_float_list, as_int_list, as_object_dict, as_str
+from android_app_graph.payloads import as_int_list, as_object_dict, as_str
 from android_app_graph.screen_image import encode_screenshot, pixel_hash, status_bar_rows
 
 if TYPE_CHECKING:
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
 
     from android_app_graph.device import DeviceController
 
-logger = logging.getLogger(__name__)
 
 _FRAME_COORDINATES = 4
 
@@ -160,59 +160,10 @@ def annotate_observation(steps: Path, observation_id: str, fields: Mapping[str, 
     write_json_atomically(path, {**record, **fields}, ensure_ascii=False)
 
 
-def _damaged_image_embeddings(path: Path, damage: str) -> ValueError:
-    return ValueError(
-        f"Image embedding file {path} {damage}. Delete it to embed every screenshot again."
-    )
-
-
 def load_image_embeddings(steps: Path, *, model: str) -> dict[str, list[float]]:
     """Return the image vectors of the step log ``steps`` by observation ID, when
-    ``model`` computed them.
-
-    The file is tagged with the model that wrote it, since a matching dimension
-    cannot prove two vectors came from one model. A step log without the file has no
-    vectors yet, and a file written by another model is empty after one warning, so
-    every observation is embedded again.
-
-    A damaged file raises ``ValueError`` naming it and the damage, so damage to the
-    step log is reported instead of repaired by paying for every vector again: a file
-    that cannot be read or parsed, is not tagged, has no ``embeddings`` object, or
-    holds a malformed or non-finite vector, which the message names by observation.
-    """
-    path = image_embeddings_path(steps)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as exc:
-        raise _damaged_image_embeddings(path, f"cannot be read or parsed: {exc}") from exc
-    stored = as_object_dict(raw)
-    tag = stored.get("model")
-    if not isinstance(tag, str):
-        raise _damaged_image_embeddings(path, "is not tagged with the model that wrote it")
-    if not isinstance(stored.get("embeddings"), dict):
-        raise _damaged_image_embeddings(path, "has no embeddings object")
-    if tag != model:
-        logger.warning(
-            "Image embedding file %s was written by model %r, not the configured %r; treating "
-            "it as empty, so every observation is embedded again",
-            path,
-            tag,
-            model,
-        )
-        return {}
-    embeddings = {
-        observation_id: as_float_list(vector)
-        for observation_id, vector in as_object_dict(stored.get("embeddings")).items()
-    }
-    malformed = [observation_id for observation_id, numbers in embeddings.items() if not numbers]
-    if malformed:
-        raise _damaged_image_embeddings(
-            path,
-            f"has a malformed or non-finite vector for observation(s) {', '.join(malformed)}",
-        )
-    return embeddings
+    ``model`` computed them, by the rules of ``load_embeddings``."""
+    return load_embeddings(image_embeddings_path(steps), model=model, kind="image")
 
 
 def save_image_embeddings(
@@ -220,9 +171,7 @@ def save_image_embeddings(
 ) -> None:
     """Write ``embeddings``, image vectors by observation ID that ``model`` computed, to
     the step log ``steps``, replacing the file atomically."""
-    write_json_atomically(
-        image_embeddings_path(steps), {"model": model, "embeddings": dict(embeddings)}
-    )
+    save_embeddings(image_embeddings_path(steps), embeddings, model=model)
 
 
 def _status_bar(state: Mapping[str, object]) -> list[int] | None:

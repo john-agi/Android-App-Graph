@@ -73,6 +73,7 @@ graph TD;
     gm --> pay["android_app_graph.payloads"];
     gm --> steps;
     gm --> vlm;
+    gf --> pay;
     steps --> gf;
     steps --> pay;
     steps --> img;
