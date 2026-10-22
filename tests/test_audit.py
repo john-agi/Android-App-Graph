@@ -1602,6 +1602,43 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
     assert expected == ["s0_home", "s0_home", None]
 
 
+@pytest.mark.parametrize(
+    "after_the_tap",
+    [_BROWSER_SCREEN, {**_HOME_SCREEN, "activity": "com.demo.Article", "screenshot": _png(50)}],
+    ids=["another app", "outside web page"],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_the_setup_of_the_step_after_one_that_leaves_the_app_as_unknown(
+    after_the_tap: dict[str, Any],
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    screens_by_log: Callable[..., DeviceController],
+) -> None:
+    """Back may return to the screen the step left or a restart to the start screen, and
+    neither is an action a replay could send."""
+    graph, _graph_path = _two_node_graph(tmp_path)
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    nodes = {
+        "com.demo.Home": "s0_home",
+        "com.demo.Detail": "s1_detail",
+        "com.demo.Article": EXTERNAL_WEB_NODE,
+    }
+    monkeypatch.setattr(
+        graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
+    )
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+    issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
+    controller = screens_by_log(*[_HOME_SCREEN] * 4, after_the_tap, _HOME_SCREEN, _DETAIL_SCREEN)
+
+    _re_explore(graph, [issue], controller, client, tmp_path, steps_per_issue=2)
+
+    edge = graph.graph["s0_home"]["s1_detail"]
+    assert (edge["actions"][-1], edge["setups"][-1]) == ([tap], None)
+
+
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_skips_a_missing_node_and_ignores_an_issue_of_another_type(
     client: OpenRouter, tmp_path: Path, device_log: list[object]

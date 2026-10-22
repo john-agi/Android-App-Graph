@@ -577,8 +577,10 @@ def test_exploration_records_each_action_s_setup_unknown_on_the_screen_it_began_
     }
 
 
+@pytest.mark.parametrize("web_page", [False, True], ids=["another app", "outside web page"])
 @pytest.mark.usefixtures("no_sleep")
 def test_after_a_step_that_leaves_the_app_the_setup_of_the_next_action_is_unknown(
+    web_page: bool,
     tmp_path: Path,
     router_client: OpenRouter,
     screens_by_log: Callable[..., DeviceController],
@@ -592,20 +594,27 @@ def test_after_a_step_that_leaves_the_app_the_setup_of_the_next_action_is_unknow
         {"action": "tap", "x": 50, "y": 60},
         {"action": "tap", "x": 50, "y": 90},
     )
+    opened = _screen("com.demo.ArticleActivity", "blue") if web_page else _SEARCH_SCREEN
+    outside = EXTERNAL_WEB_NODE if web_page else f"ext_{_SEARCH}"
+    on_the_page = [EXTERNAL_WEB_NODE] if web_page else []
     explorer = _explorer(
-        screens_by_log(HOME_SCREEN, HOME_SCREEN, HOME_SCREEN, _SEARCH_SCREEN, HOME_SCREEN),
+        screens_by_log(HOME_SCREEN, HOME_SCREEN, HOME_SCREEN, opened, HOME_SCREEN),
         tmp_path,
         router_client,
     )
-    _list_reached_from_home(explorer, "s2_detail")
-    _identifying(explorer, monkeypatch, "s0_home", "s1_list", "s1_list", "s1_list", "s2_detail")
+    _list_reached_from_home(explorer, "s2_detail", *on_the_page)
+    _identifying(
+        explorer,
+        monkeypatch,
+        *("s0_home", "s1_list", "s1_list", *on_the_page, "s1_list", "s2_detail"),
+    )
 
     _explore_sending(explorer, monkeypatch, open_list, scroll, open_link, open_row)
 
     assert _setups(explorer) == {
         ("s0_home", "s1_list"): [None],
         ("s1_list", "s1_list"): [[]],
-        ("s1_list", f"ext_{_SEARCH}"): [[scroll]],
+        ("s1_list", outside): [[scroll]],
         ("s1_list", "s2_detail"): [None],
     }
 
@@ -1650,8 +1659,9 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     """A replay that fails after the app restart continues from the screen the device is
-    on: the next step plans from that screen's node and screenshot. The step log tells
-    the replay's actions from the checkpoint's own screen reads."""
+    on: the next step plans from that screen's node and screenshot, and its setup is
+    unknown. The step log tells the replay's actions from the checkpoint's own screen
+    reads."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     open_list = {"action": "tap", "coordinate": [10, 20]}
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
@@ -1690,6 +1700,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     explorer.explore(max_steps=2)
 
     assert list(graph.graph.in_edges("s4_sort_menu")) == [("s1_list", "s4_sort_menu")]
+    assert graph.graph["s1_list"]["s4_sort_menu"]["setups"] == [None]
     list_webp = base64.b64encode(encode_screenshot(str(item_list["screenshot"]))).decode("ascii")
     list_image = f"data:image/webp;base64,{list_webp}"
     assert all(list_image in request.content.decode() for request in router_requests[-2:])
