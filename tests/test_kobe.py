@@ -2622,9 +2622,13 @@ def test_back_where_a_recorded_back_has_left_the_app_continues_from_a_ranked_tar
         ("s1_list", _LAUNCHER, 1),
     ]
     assert (
-        "Step 1/2: Back on s1_list leaves the app; continuing from ranked target s2_detail "
-        "instead." in caplog.text
+        "Back on s1_list leaves the app; continuing from ranked target s2_detail instead."
+        in caplog.text
     )
+    assert _numbered_steps(caplog.messages) == [
+        "Step 1/2: s1_list --[continue]--> s2_detail",
+        "Step 2/2: s2_detail --[wait]--> s2_detail",
+    ]
 
 
 @pytest.mark.parametrize(
