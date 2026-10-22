@@ -104,6 +104,7 @@ def b64(data: bytes) -> str:
 
 SHOT_A = b64(b"screenshot-a")
 SHOT_B = b64(b"screenshot-b")
+SHOT_C = b64(b"screenshot-c")
 
 
 def make_manager(steps_dir: Path | None = None, client: OpenRouter = FAKE_CLIENT) -> GraphManager:
@@ -211,6 +212,7 @@ def add_screen(
         "interactable_elements": [],
         "last_normalized_visit_milestone": 0,
         "visit_count": 0,
+        "replay_misses": 0,
     }
     attrs.update(overrides)
     gm.graph.add_node(node_id, **attrs)
@@ -603,6 +605,7 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(
     assert list(gm.graph) == [EXTERNAL_WEB_NODE]
     assert gm.get_node(EXTERNAL_WEB_NODE) == {
         "page_description": "[external web page]",
+        "replay_misses": 0,
         "visit_count": 2,
         "observations": [article.observation_id, sign_in.observation_id],
         "representative_observation": article.observation_id,
@@ -1242,7 +1245,12 @@ def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
         (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}], "edges": []}),
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}],
+                "edges": [],
+            }
+        ),
         "utf-8",
     )
     vectors = {kept: EMBEDDINGS["Home screen"]}
@@ -1337,9 +1345,10 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     write_graph(
         path,
         [
-            {"id": "s0_home", **home},
+            {"id": "s0_home", "replay_misses": 0, **home},
             {
                 "id": EXTERNAL_WEB_NODE,
+                "replay_misses": 0,
                 "observations": [browser],
                 "representative_observation": browser,
             },
@@ -1720,7 +1729,10 @@ def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vect
 ) -> None:
     path = tmp_path / "graph.json"
     member = members(tmp_path / "steps")
-    path.write_text(json.dumps({"nodes": [{"id": "s0_home", **member}], "edges": []}), "utf-8")
+    path.write_text(
+        json.dumps({"nodes": [{"id": "s0_home", "replay_misses": 0, **member}], "edges": []}),
+        "utf-8",
+    )
     write_image_vectors(tmp_path / "steps", member["observations"])
     gm = GraphManager()
 
@@ -1754,7 +1766,12 @@ def test_closest_member_raises_naming_the_node_and_every_member_without_a_usable
     )
     path = tmp_path / "graph.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "package": PACKAGE, **member}], "edges": []}),
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}],
+                "edges": [],
+            }
+        ),
         "utf-8",
     )
     write_text_vectors(path, member)
@@ -2586,6 +2603,7 @@ def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
         "page_description": f"[external app: {OTHER_PACKAGE}]",
         "state_schema": {},
         "visit_count": 2,
+        "replay_misses": 0,
         "is_external": True,
         "observations": [first.observation_id, second.observation_id],
         "representative_observation": first.observation_id,
@@ -3911,6 +3929,99 @@ def test_always_offer_start_offers_nothing_when_top_k_is_zero() -> None:
     assert gm.get_exploration_target_candidates(top_k=0, always_offer_start=True) == []
 
 
+def _candidate_ids(gm: GraphManager) -> list[str]:
+    return [c["node_id"] for c in gm.get_exploration_target_candidates()]
+
+
+def _form_replay_missed(times: int) -> GraphManager:
+    """A start screen and a form that outranks it, which replay has missed ``times``
+    times in a row."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", interactable_elements=_unexplored("Display"))
+    add_screen(gm, "s1_form", "Form", interactable_elements=_unexplored("Name", "Port"))
+    gm.add_edge("s0_home", "s1_form", {"action": "a"})
+    for _ in range(times):
+        gm.record_replay_miss("s1_form")
+    return gm
+
+
+def test_a_node_replay_missed_once_stays_the_top_candidate() -> None:
+    gm = _form_replay_missed(1)
+
+    assert gm.get_resume_target() == "s1_form"
+    assert _candidate_ids(gm) == ["s1_form", "s0_home"]
+
+
+def test_a_node_replay_missed_twice_in_a_row_leaves_the_ranking() -> None:
+    gm = _form_replay_missed(2)
+
+    assert gm.get_resume_target() == "s0_home"
+    assert _candidate_ids(gm) == ["s0_home"]
+
+
+def test_replay_misses_never_take_the_start_node_out_of_the_candidates() -> None:
+    gm = _form_replay_missed(0)
+    for _ in range(2):
+        gm.record_replay_miss("s0_home")
+
+    assert _candidate_ids(gm) == ["s1_form", "s0_home"]
+
+
+@pytest.mark.usefixtures("vlm")
+def test_a_replay_miss_counts_on_the_node_its_target_was_renamed_to() -> None:
+    """Identifying the screen a replay landed on can rename the node it replayed to."""
+    gm = _form_replay_missed(1)
+    renamed = gm.rename_node("s1_form", "Settings page")
+
+    gm.record_replay_miss("s1_form")
+
+    assert renamed != "s1_form"
+    assert _candidate_ids(gm) == ["s0_home"]
+
+
+def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager:
+    """A home screen and a settings page reached from it, each identified from one
+    screenshot, which look unlike each other; replay has missed the settings page twice
+    in a row."""
+    vlm.images.update({SHOT_A: FAR, SHOT_B: NEAR, SHOT_C: NEAR})
+    vlm.descriptions.extend([("Home screen", {}, []), ("Settings page", {}, [])])
+    vlm.verdicts.append({"same": False, "reason": "another page"})
+    gm = make_manager(screen.steps_dir)
+    home = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    settings = gm.identify_state(screen(SETTINGS, SHOT_B, PACKAGE))
+    assert (home, settings) == ("s0_home_screen", "s1_settings_page")
+    gm.add_edge(home, settings, {"action": "open settings"})
+    for _ in range(2):
+        gm.record_replay_miss(settings)
+    return gm
+
+
+@pytest.mark.parametrize(
+    ("screenshot", "expected_node", "stage"),
+    [
+        pytest.param(SHOT_B, None, "exact", id="exact"),
+        pytest.param(SHOT_C, "s1_settings_page", "expected", id="expected"),
+        pytest.param(SHOT_C, None, "short_list", id="short-list"),
+    ],
+)
+def test_a_screen_identified_as_a_node_replay_missed_clears_its_misses(
+    screenshot: str, expected_node: str | None, stage: str, vlm: FakeVlm, screen: Screens
+) -> None:
+    """The node is a candidate again, and one more miss leaves it one."""
+    gm = _settings_replay_missed_twice(vlm, screen)
+    assert "s1_settings_page" not in _candidate_ids(gm)
+    vlm.descriptions.append(("Settings page", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "the settings page"})
+    observation = screen(SETTINGS, screenshot, PACKAGE)
+
+    assert gm.identify_state(observation, expected_node=expected_node) == "s1_settings_page"
+
+    assert screen.record(observation)["identify"]["stage"] == stage
+    assert "s1_settings_page" in _candidate_ids(gm)
+    gm.record_replay_miss("s1_settings_page")
+    assert "s1_settings_page" in _candidate_ids(gm)
+
+
 def _app_with_a_gmail_screen(package: str, activity: str, other_activity: str) -> GraphManager:
     gm = make_manager()
     add_screen(gm, "s0_list", "Home screen", activity=activity, package=package)
@@ -4228,7 +4339,12 @@ def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     membership = members(app_dir / "steps", b"home-image")
     path = app_dir / "demo_audited.json"
     path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "activity": HOME, **membership}], "edges": []}),
+        json.dumps(
+            {
+                "nodes": [{"id": "s0_home", "activity": HOME, "replay_misses": 0, **membership}],
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
     write_text_vectors(path, membership)
@@ -4271,8 +4387,8 @@ def test_load_graph_rejects_a_node_without_members_naming_it(
     write_graph(
         path,
         [
-            {"id": "s0_home", **members(tmp_path / "steps")},
-            {"id": "s1_settings", **membership},
+            {"id": "s0_home", "replay_misses": 0, **members(tmp_path / "steps")},
+            {"id": "s1_settings", "replay_misses": 0, **membership},
         ],
     )
     gm = make_manager()
@@ -4312,13 +4428,41 @@ def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
     assert "no member observations" not in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "count", [{}, {"replay_misses": "0"}], ids=["no-count", "count-not-an-int"]
+)
+def test_load_graph_rejects_a_node_without_a_replay_misses_count_naming_it(
+    tmp_path: Path, count: dict[str, object]
+) -> None:
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", "replay_misses": 0, **members(tmp_path / "steps")},
+            {"id": "s1_settings", **count, **members(tmp_path / "steps")},
+        ],
+    )
+    gm = make_manager()
+    add_screen(gm, "s9_stale", "Stale screen")
+
+    with pytest.raises(ValueError, match="without a replay_misses count") as excinfo:
+        gm.load_graph(path)
+
+    message = str(excinfo.value)
+    assert "['s1_settings']" in message
+    assert "s0_home" not in message
+    assert str(path) in message
+    assert "Explore the app again into a new graph directory." in message
+    assert list(gm.graph.nodes) == ["s9_stale"]
+
+
 def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
     tmp_path: Path,
 ) -> None:
     previous = tmp_path / "previous" / "graph.json"
     previous.parent.mkdir()
     membership = members(previous.parent / "steps")
-    write_graph(previous, [{"id": "s9_stale", **membership}])
+    write_graph(previous, [{"id": "s9_stale", "replay_misses": 0, **membership}])
     write_text_vectors(previous, membership)
     path = tmp_path / "graph.json"
     write_graph(
@@ -4378,7 +4522,13 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
     previous = tmp_path / "previous.json"
     membership = members(tmp_path / "steps")
     previous.write_text(
-        json.dumps({"next_id": 7, "nodes": [{"id": "s9_stale", **membership}], "edges": []}),
+        json.dumps(
+            {
+                "next_id": 7,
+                "nodes": [{"id": "s9_stale", "replay_misses": 0, **membership}],
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
     write_text_vectors(previous, membership)
@@ -4757,6 +4907,7 @@ screen_attrs = st.fixed_dictionaries(
         ),
         "last_normalized_visit_milestone": st.integers(min_value=0, max_value=10),
         "visit_count": st.integers(min_value=0, max_value=100),
+        "replay_misses": st.integers(min_value=0, max_value=10),
     }
 )
 node_attrs = st.tuples(screen_attrs, memberships).map(lambda parts: {**parts[0], **parts[1]})
@@ -4818,6 +4969,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "interactable_elements": d.get("interactable_elements", []),
             "last_normalized_visit_milestone": d.get("last_normalized_visit_milestone", 0),
             "visit_count": d.get("visit_count", 0),
+            "replay_misses": d["replay_misses"],
             "observations": d.get("observations", []),
             "representative_observation": d.get("representative_observation"),
         }

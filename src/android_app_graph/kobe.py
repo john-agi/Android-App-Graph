@@ -433,8 +433,8 @@ class Kobe:
         return self._report_arrival(actual_node, target_node)
 
     def _report_arrival(self, actual_node: str, target_node: str) -> str:
-        """Log whether a replay to ``target_node`` reached it, and return ``actual_node``,
-        where exploration continues either way."""
+        """Log whether a replay to ``target_node`` reached it, count a miss on it when it
+        did not, and return ``actual_node``, where exploration continues either way."""
         if actual_node != target_node:
             self.logger.warning(
                 "Expected to reach %s but arrived at %s. Continuing from %s.",
@@ -442,6 +442,7 @@ class Kobe:
                 actual_node,
                 actual_node,
             )
+            self.graph.record_replay_miss(target_node)
         else:
             self.logger.info("Successfully reached target node %s", target_node)
 

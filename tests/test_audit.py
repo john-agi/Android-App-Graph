@@ -63,10 +63,11 @@ def _write_config(tmp_path: Path, graph_dir: str = "graphs") -> Path:
 
 
 def _graph_with_nodes(*nodes: tuple[str, dict[str, Any]]) -> GraphManager:
-    """Return a GraphManager holding the given nodes and no VLM clients."""
+    """Return a GraphManager holding the given nodes, each with a ``replay_misses`` of 0,
+    and no VLM clients."""
     graph = GraphManager()
     for node_id, attrs in nodes:
-        graph.graph.add_node(node_id, **attrs)
+        graph.graph.add_node(node_id, replay_misses=0, **attrs)
     return graph
 
 
@@ -230,6 +231,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "id": "s0_home",
                         "activity": "com.demo.Home",
                         "page_description": "Home",
+                        "replay_misses": 0,
                         "observations": ["s0_home-observation"],
                         "representative_observation": "s0_home-observation",
                     },
@@ -237,6 +239,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "id": "s1_detail",
                         "activity": "com.demo.Detail",
                         "page_description": "Detail",
+                        "replay_misses": 0,
                         "observations": ["s1_detail-observation"],
                         "representative_observation": "s1_detail-observation",
                     },
@@ -511,7 +514,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
 ) -> None:
     graph, graph_path = _two_node_graph(tmp_path)
     # identify_state is faked below, so add the node it would create.
-    graph.graph.add_node(EXTERNAL_WEB_NODE)
+    graph.graph.add_node(EXTERNAL_WEB_NODE, replay_misses=0)
     identified = iter(["s0_home", "s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(identified))
     monkeypatch.setattr(
@@ -567,7 +570,7 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     from an app screen and records no edge out of the shared ext_web node."""
     graph, graph_path = _two_node_graph(tmp_path)
     # identify_state is faked below, so add the node it would create.
-    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0)
     on_the_page = [EXTERNAL_WEB_NODE] * (1 + back_presses_on_the_page)
     expected = _identifying(
         graph, monkeypatch, "s0_home", "s1_detail", *on_the_page, "s1_detail", "s0_home"
@@ -763,7 +766,9 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     device_log: list[object],
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
-    graph.graph.add_node("s2_camera_permission", page_description="Camera permission dialog")
+    graph.graph.add_node(
+        "s2_camera_permission", page_description="Camera permission dialog", replay_misses=0
+    )
     reached = iter(["s0_home", "s1_detail", "s2_camera_permission"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
@@ -1086,7 +1091,9 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
     device_log: list[object],
 ) -> None:
     graph = _flagged_graph()
-    graph.graph.add_node("ext_com.browser", page_description="[external app: com.browser]")
+    graph.graph.add_node(
+        "ext_com.browser", page_description="[external app: com.browser]", replay_misses=0
+    )
     graph.add_edge(
         "s0_home", "ext_com.browser", [_GEAR_TAP], details=EdgeDetails(instruction="open help")
     )
@@ -1112,7 +1119,9 @@ def test_re_explore_identifies_the_screen_a_flagged_action_reaches_by_the_device
 ) -> None:
     """A system dialog on top of the app is a screen of its own package, not an ext_ node."""
     graph = _flagged_graph()
-    graph.graph.add_node("s3_camera_permission", page_description="Camera permission dialog")
+    graph.graph.add_node(
+        "s3_camera_permission", page_description="Camera permission dialog", replay_misses=0
+    )
     reached = iter(["s0_home", "s3_camera_permission", "s0_home"])
     identified: list[tuple[str, str, str]] = []
 
@@ -1141,7 +1150,7 @@ def test_re_explore_moves_a_flagged_action_that_opens_an_outside_web_page_to_the
     """The restart before the next replay leaves the page, so no back press is needed."""
     graph = _flagged_graph()
     # identify_state is faked below, so add the node it would create.
-    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0)
     reached = iter(["s0_home", EXTERNAL_WEB_NODE, "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
 
@@ -1159,7 +1168,7 @@ def test_re_explore_skips_a_flagged_edge_out_of_an_external_node(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph = _flagged_graph()
-    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0)
     graph.add_edge(
         "s0_home", EXTERNAL_WEB_NODE, [_GEAR_TAP], details=EdgeDetails(instruction="open help")
     )
@@ -1204,8 +1213,8 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
     graph = _flagged_graph()
     graph.client, graph.embedding = client, ModelSettings("provider/embedding")
     monkeypatch.setattr(graph_manager, "get_embedding", lambda *_args, **_kwargs: [1.0])
-    graph.graph.add_node("s3_home_copy", page_description="Home")
-    graph.graph.add_node("s4_detail_copy", page_description="Detail")
+    graph.graph.add_node("s3_home_copy", page_description="Home", replay_misses=0)
+    graph.graph.add_node("s4_detail_copy", page_description="Detail", replay_misses=0)
     graph.merge_nodes("s0_home", "s3_home_copy")
     graph.merge_nodes("s1_detail", "s4_detail_copy")
     reached = iter(["s0_start", "s1_detail", "s0_start", "s0_start", "s2_app_settings"])
@@ -1546,7 +1555,7 @@ def test_re_explore_records_the_setup_of_the_step_after_one_that_leaves_the_app_
     """Back may return to the screen the step left or a restart to the start screen, and
     neither is an action a replay could send."""
     graph, _graph_path = _two_node_graph(tmp_path)
-    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]")
+    graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0)
     nodes = {
         "com.demo.Home": "s0_home",
         "com.demo.Detail": "s1_detail",

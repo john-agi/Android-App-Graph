@@ -427,11 +427,11 @@ def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
 def write_graph_file(png_screenshot: str) -> Callable[..., None]:
     """Write ``document`` as a graph file that ``load_graph`` accepts, with what exploration
     records where ``document`` gives none: every node but an ``ext_`` one gets the package
-    ``com.demo``, every node gets one member observation, its representative, with an
-    image and a record holding a pixel hash and a describe output in the step log beside
-    it, every member of a node but an ``ext_`` one gets a text vector in the file beside
-    the graph, tagged with ``embedding_model``, and every edge gets the per-action lists
-    ``add_edge`` records."""
+    ``com.demo``, every node gets a ``replay_misses`` of 0 and one member observation, its
+    representative, with an image and a record holding a pixel hash and a describe output
+    in the step log beside it, every member of a node but an ``ext_`` one gets a text
+    vector in the file beside the graph, tagged with ``embedding_model``, and every edge
+    gets the per-action lists ``add_edge`` records."""
 
     def write(
         path: Path, document: dict[str, Any], embedding_model: str = "google/gemini-embedding-2"
@@ -451,6 +451,7 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
                 text_vectors[observation_id] = [1.0, 0.0]
             recorded = {
                 "package": "com.demo" if in_app else "",
+                "replay_misses": 0,
                 "observations": [observation_id],
                 "representative_observation": observation_id,
             }
@@ -543,6 +544,7 @@ def write_member_graph() -> Callable[..., None]:
                     "activity": "com.demo.Main",
                     "page_description": f"Node {node_id}",
                     "visit_count": len(members),
+                    "replay_misses": 0,
                     "observations": [observation_id for observation_id, _ in members],
                     "representative_observation": members[0][0],
                 }

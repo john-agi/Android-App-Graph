@@ -205,15 +205,27 @@ class _ReplayedError(Exception):
     """Ends exploration once it has chosen the node to replay to."""
 
 
-def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
+def _replays(explorer: Kobe, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make the explorer's replays end exploration; return the list each replay's target
+    is appended to."""
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> str:
+        replayed.append(node_id)
+        raise _ReplayedError
+
+    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+    return replayed
+
+
+def _write_form_and_dialog_graph(
     tmp_path: Path,
-    router_client: OpenRouter,
-    monkeypatch: pytest.MonkeyPatch,
     write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    """``auto`` resumes at the form with unexplored fields, not at the dialog with no
-    out-edges and nothing left to explore."""
+    """Save the graph of a home screen leading to a form with unexplored fields, which
+    ranks first, and to a dialog with no out-edges and nothing left to explore, which
+    ranks second."""
     fields = [
         {"description": description, "explored": False} for description in ("Name", "APN", "Proxy")
     ]
@@ -237,23 +249,67 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
         [f"{node}-observation" for node in ("s0_home", "s1_form", "s2_dialog")],
         model="provider/embedding",
     )
+
+
+def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    write_graph_file: Callable[..., None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """``auto`` resumes at the form with unexplored fields, not at the dialog with no
+    out-edges and nothing left to explore."""
+    _write_form_and_dialog_graph(tmp_path, write_graph_file, write_image_vectors)
     explorer = _explorer(
         _Device(AssertionError("the replay must start before the device is read")),
         tmp_path,
         router_client,
     )
-    replayed: list[str] = []
-
-    def replay(node_id: str) -> str:
-        replayed.append(node_id)
-        raise _ReplayedError
-
-    monkeypatch.setattr(explorer, "navigate_to_node", replay)
+    replayed = _replays(explorer, monkeypatch)
 
     with pytest.raises(_ReplayedError):
         explorer.explore(max_steps=1, resume_from="auto")
 
     assert replayed == ["s1_form"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_resume_from_auto_passes_over_a_node_two_replays_in_a_row_missed(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    write_graph_file: Callable[..., None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """Both replays to the form land on the home screen. After the second, the checkpoint
+    offers the dialog and the start screen, and a run on the saved graph resumes at the
+    dialog."""
+    _write_form_and_dialog_graph(tmp_path, write_graph_file, write_image_vectors)
+    explorer = _explorer(_ReplayDevice(HOME_SCREEN, device_log), tmp_path, router_client)
+    _identifying(explorer, monkeypatch, "s0_home", "s0_home", "s0_home", "s0_home")
+
+    assert explorer.navigate_to_node("s1_form") == "s0_home"
+    assert explorer.graph.get_resume_target(package_name="com.demo") == "s1_form"
+    assert explorer.navigate_to_node("s1_form") == "s0_home"
+    offered = explorer.graph.get_exploration_target_candidates(
+        package_name="com.demo", always_offer_start=True
+    )
+    assert [candidate["node_id"] for candidate in offered] == ["s2_dialog", "s0_home"]
+    explorer.save_graph()
+
+    resumed = _explorer(
+        _Device(AssertionError("the replay must start before the device is read")),
+        tmp_path,
+        router_client,
+    )
+    replayed = _replays(resumed, monkeypatch)
+
+    with pytest.raises(_ReplayedError):
+        resumed.explore(max_steps=1, resume_from="auto")
+
+    assert replayed == ["s2_dialog"]
 
 
 def test_a_rejected_page_description_leaves_no_node(
@@ -334,7 +390,7 @@ def test_navigation_restarts_the_app_through_its_launch_activity(
 ) -> None:
     device = _ReplayDevice(HOME_SCREEN, device_log)
     explorer = _explorer(device, tmp_path, router_client, launch_activity="com.demo/.Main")
-    explorer.graph.graph.add_node("s0_home")
+    explorer.graph.graph.add_node("s0_home", replay_misses=0)
     monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     assert explorer.navigate_to_node("s0_home") == "s0_home"
     assert device_log == [_FORCE_STOP, _clear_task_start("com.demo/.Main")]
@@ -343,7 +399,7 @@ def test_navigation_restarts_the_app_through_its_launch_activity(
 def test_navigation_without_a_recorded_path_leaves_the_app_running(
     replaying_kobe: Kobe, device_log: list[object]
 ) -> None:
-    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_orphan"])
+    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_orphan"], replay_misses=0)
     with pytest.raises(ValueError, match="No path from s0_home to s1_orphan"):
         replaying_kobe.navigate_to_node("s1_orphan")
     assert device_log == []
@@ -355,7 +411,7 @@ def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
 ) -> None:
     """An edge action stored as one dict, not a list of steps, reaches the device as it is."""
     open_detail = {"action": "tap", "coordinate": [30, 40]}
-    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
+    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
     replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=open_detail)
     _identifying(replaying_kobe, monkeypatch, "s0_home", "s1_detail")
 
@@ -478,7 +534,9 @@ def test_a_replay_opens_a_menu_on_a_form_filled_through_a_dialog_before_choosing
     enterprise = {"security": "WPA/WPA2-Enterprise", "open_menu": None}
     menu_open = {**enterprise, "open_menu": "CA certificate dropdown"}
     for node in ("s0_home", form, dialog, installer):
-        replaying_kobe.graph.graph.add_node(node, page_description=node, package="com.demo")
+        replaying_kobe.graph.graph.add_node(
+            node, page_description=node, package="com.demo", replay_misses=0
+        )
     _identifying(
         replaying_kobe,
         monkeypatch,
@@ -646,6 +704,21 @@ _SCROLL_CLOCKS = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 60}
 _OPEN_ALARMS = {"action": "tap", "coordinate": [10, 190]}
 _SCROLL_ALARMS = {"action": "swipe", "x1": 50, "y1": 170, "x2": 50, "y2": 30}
 _OPEN_ALARM = {"action": "tap", "coordinate": [50, 40]}
+_CLOCK_NODES = ("s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new")
+
+
+def _clock_graph(explorer: Kobe) -> None:
+    """Give the graph Clock's alarms tab, its start node, reached from the clock tab, an
+    alarm reached from the alarms tab, and a What's new screen no path leads from; each
+    action has a setup."""
+    graph = explorer.graph
+    graph.graph.add_nodes_from(_CLOCK_NODES, replay_misses=0)
+    graph.add_edge(
+        "s1_clock", "s0_alarms", action=[_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
+    )
+    graph.add_edge(
+        "s0_alarms", "s2_alarm", action=[_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
+    )
 
 
 @pytest.mark.parametrize(
@@ -673,14 +746,7 @@ def test_a_replay_starts_from_the_node_the_app_opened_on(
     identifies the screen the restart shows, expecting the start node, and replays from
     that node when a recorded path leads from it, from the start node otherwise, each
     action after its setup."""
-    graph = replaying_kobe.graph
-    graph.graph.add_nodes_from(["s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new"])
-    graph.add_edge(
-        "s1_clock", "s0_alarms", action=[_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
-    )
-    graph.add_edge(
-        "s0_alarms", "s2_alarm", action=[_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
-    )
+    _clock_graph(replaying_kobe)
     expected = _identifying(replaying_kobe, monkeypatch, opened_on, "s2_alarm")
     caplog.set_level(logging.INFO, logger="test")
 
@@ -691,6 +757,52 @@ def test_a_replay_starts_from_the_node_the_app_opened_on(
     assert reached == "s2_alarm"
     opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms."
     assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
+
+
+@pytest.mark.parametrize(
+    ("opened_on", "target", "replayed", "misses"),
+    [
+        pytest.param(
+            "s1_clock",
+            "s2_alarm",
+            [_SCROLL_CLOCKS, _OPEN_ALARMS, _SCROLL_ALARMS, _OPEN_ALARM],
+            1,
+            id="from a node with a path",
+        ),
+        pytest.param(
+            "s3_whats_new",
+            "s2_alarm",
+            [_SCROLL_ALARMS, _OPEN_ALARM],
+            1,
+            id="from a node without a path",
+        ),
+        pytest.param("s3_whats_new", "s0_alarms", [], 1, id="to the start node, sending nothing"),
+        pytest.param("s2_alarm", "s2_alarm", [], 0, id="app opened on the target"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_from_the_screen_the_app_opened_on_counts_a_miss_where_it_lands_elsewhere(
+    opened_on: str,
+    target: str,
+    replayed: list[object],
+    misses: int,
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app opens on a node other than the start node, and the replay ends on that
+    node. Unless it is the target, the target counts one miss, whether the replay started
+    from that node, from the start node or sent nothing; no other node's count changes."""
+    _clock_graph(replaying_kobe)
+    _identifying(replaying_kobe, monkeypatch, opened_on, opened_on)
+
+    reached = replaying_kobe.navigate_to_node(target)
+
+    assert reached == opened_on
+    assert device_log == [*_FIRST_RESTART, *replayed]
+    assert dict(replaying_kobe.graph.graph.nodes(data="replay_misses")) == {
+        node: misses if node == target else 0 for node in _CLOCK_NODES
+    }
 
 
 @pytest.mark.parametrize("malformed", [False, True])
@@ -1040,8 +1152,9 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
             {"description": "Turn on dark mode toggle", "position": "top", "explored": False},
             {"description": "Compose FAB", "position": "bottom right", "explored": False},
         ],
+        replay_misses=0,
     )
-    kobe.graph.graph.add_node("s1_compose", page_description="compose")
+    kobe.graph.graph.add_node("s1_compose", page_description="compose", replay_misses=0)
     screens = iter(["s0_home", "s1_compose"])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
@@ -1072,7 +1185,9 @@ def test_a_crash_mid_exploration_is_logged_with_its_traceback(
     def _crash(**_kwargs: object) -> NoReturn:
         raise failure
 
-    kobe.graph.graph.add_node("s0_home", page_description="home", interactable_elements=[])
+    kobe.graph.graph.add_node(
+        "s0_home", page_description="home", interactable_elements=[], replay_misses=0
+    )
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _crash)
@@ -1340,8 +1455,8 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A replay that arrives at another node continues from where it arrived."""
-    kobe.graph.graph.add_node("s0_home", page_description="home")
-    kobe.graph.graph.add_node("s1_settings", page_description="settings")
+    kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
+    kobe.graph.graph.add_node("s1_settings", page_description="settings", replay_misses=0)
     replayed: list[str] = []
 
     def replay(node_id: str) -> str:
@@ -1368,7 +1483,7 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    kobe.graph.graph.add_node("s0_home", page_description="home")
+    kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
     planned_from: list[object] = []
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
@@ -1389,7 +1504,7 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A step that raises is not counted, so a re-run repeats it."""
-    kobe.graph.graph.add_node("s0_home", page_description="home")
+    kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
     kobe.graph.total_steps_completed = 3
 
     def stop_planning(**_kwargs: object) -> tuple[str, int | None]:
@@ -1416,7 +1531,9 @@ def test_a_run_resumed_from_a_node_logs_the_step_it_starts_from_before_the_repla
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    kobe.graph.graph.add_node("s0_home", page_description="home", package="com.demo")
+    kobe.graph.graph.add_node(
+        "s0_home", page_description="home", package="com.demo", replay_misses=0
+    )
     kobe.graph.total_steps_completed = 3
     logged_before_the_replay: list[str] = []
 
@@ -1455,7 +1572,9 @@ def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
     out those with no value."""
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     graph = explorer.graph.graph
-    graph.add_node("s0_home", page_description="home", last_detail_snapshot={"sort": "name"})
+    graph.add_node(
+        "s0_home", page_description="home", last_detail_snapshot={"sort": "name"}, replay_misses=0
+    )
     details = iter([{"sort": "name"}, detail_after])
 
     def identify(*_args: object, **_kwargs: object) -> str:
@@ -1486,7 +1605,7 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     """No step is followed by a merge audit or a choice of where to continue."""
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     explorer.coverage_checkpoint_steps = 0
-    explorer.graph.graph.add_node("s0_home", page_description="home")
+    explorer.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
     monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     for _ in range(2):
@@ -1512,6 +1631,7 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     chat_response: Callable[..., httpx.Response],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    kobe.graph.graph.add_nodes_from(["s0_home", "s1_settings"], replay_misses=0)
     kobe.graph.graph.add_edge("s0_home", "s1_settings")
     router_responses.extend(
         [
@@ -1543,6 +1663,7 @@ def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
             {"description": description, "explored": False}
             for description in ("Display", "Storage")
         ],
+        replay_misses=0,
     )
     for node_id in ("s1_form", "s2_form", "s3_form"):
         graph.add_node(
@@ -1551,6 +1672,7 @@ def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
                 {"description": description, "explored": False}
                 for description in ("Name", "Address", "Port", "Username", "Password")
             ],
+            replay_misses=0,
         )
         graph.add_edge("s0_home", node_id)
     kobe.coverage_checkpoint_top_k = 2
@@ -1583,7 +1705,9 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     """The replay from the start node runs on a restarted app, not whatever screen is showing."""
     open_settings = {"action": "tap", "coordinate": [10, 20]}
     open_detail = {"action": "tap", "coordinate": [30, 40]}
-    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])
+    replaying_kobe.graph.graph.add_nodes_from(
+        ["s0_home", "s1_settings", "s2_detail"], replay_misses=0
+    )
     replaying_kobe.graph.add_edge("s0_home", "s1_settings", action=[open_settings])
     replaying_kobe.graph.add_edge("s1_settings", "s2_detail", action=[open_detail])
     router_responses.extend(
@@ -1619,9 +1743,9 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     one it removed, so the next step acts from a node still in the graph."""
     graph = replaying_kobe.graph
     for node_id in ("s0_list", "s1_list_dup"):
-        graph.graph.add_node(node_id, page_description="Item list")
+        graph.graph.add_node(node_id, page_description="Item list", replay_misses=0)
         add_representative(graph, node_id)
-    graph.graph.add_node("s2_detail", page_description="Item detail")
+    graph.graph.add_node("s2_detail", page_description="Item detail", replay_misses=0)
     screens = iter(["s1_list_dup", "s1_list_dup", "s2_detail"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     replaying_kobe.coverage_checkpoint_steps = 1
@@ -1658,8 +1782,9 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     """The checkpoint leaves the node the device is on out of its candidates, so it never
     replays the device to the screen it is already on."""
     for node_id in ("s1_list", "s2_list_dup"):
-        kobe.graph.graph.add_node(node_id, page_description="Item list")
+        kobe.graph.graph.add_node(node_id, page_description="Item list", replay_misses=0)
         add_representative(kobe.graph, node_id)
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
     kobe.graph.graph.add_edge("s0_home", "s1_list")
     duplicate = {"type": "merge_nodes", "node_a": "s1_list", "node_b": "s2_list_dup"}
     router_responses.extend(
@@ -1759,7 +1884,9 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         "com.demo.Settings": "s3_settings",
         "com.demo.Sort": "s4_sort_menu",
     }
-    graph.graph.add_nodes_from([*nodes.values(), "s2_detail"], page_description="a screen")
+    graph.graph.add_nodes_from(
+        [*nodes.values(), "s2_detail"], page_description="a screen", replay_misses=0
+    )
     graph.add_edge("s0_home", "s1_list", action=[open_list])
     graph.add_edge("s1_list", "s2_detail", action=[open_item])
     monkeypatch.setattr(
@@ -1801,7 +1928,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
 @pytest.mark.usefixtures("no_sleep")
 def _settings_and_detail(explorer: Kobe) -> None:
     """Give ``explorer`` the path home → settings → detail, one tap each."""
-    explorer.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"])
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_settings", "s2_detail"], replay_misses=0)
     explorer.graph.add_edge("s0_home", "s1_settings", action=[{"action": "tap", "x": 1, "y": 2}])
     explorer.graph.add_edge("s1_settings", "s2_detail", action=[{"action": "tap", "x": 3, "y": 4}])
 
@@ -1860,7 +1987,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
         device_log, _in_app("Home", "white"), web_page, item_list, broken=open_item
     )
     explorer = _explorer(device, tmp_path, router_client)
-    explorer.graph.graph.add_nodes_from(["s0_home", "s1_list", "s2_detail"])
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_list", "s2_detail"], replay_misses=0)
     explorer.graph.add_edge("s0_home", "s1_list", action=[open_list])
     explorer.graph.add_edge("s1_list", "s2_detail", action=[open_item])
     router_responses.extend(
@@ -2230,7 +2357,7 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
     after_the_replay = [_SEARCH_SCREEN, _SEARCH_SCREEN, HOME_SCREEN]
     device = screens_by_log(*[HOME_SCREEN] * 4, *after_the_replay)
     explorer = _explorer(device, tmp_path, router_client)
-    explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"])
+    explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
     explorer.graph.add_edge("s0_home", "s1_detail", action=[open_detail])
     expected = _identifying(explorer, monkeypatch, "s0_home", "s0_home")
 
@@ -2264,7 +2391,9 @@ def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visi
 
 def _list_reached_from_home(explorer: Kobe, *extra_nodes: str) -> None:
     for node in ("s0_home", "s1_list", *extra_nodes):
-        explorer.graph.graph.add_node(node, page_description=node, package="com.demo")
+        explorer.graph.graph.add_node(
+            node, page_description=node, package="com.demo", replay_misses=0
+        )
 
 
 @pytest.mark.parametrize(
@@ -2546,7 +2675,7 @@ def _edge_to_the_launcher(explorer: Kobe, source: str, action: dict[str, object]
     """Give the graph the start screen, a list and a detail screen, each reached from the
     start screen, and an edge by ``action`` from ``source`` to the launcher's node."""
     _list_reached_from_home(explorer, "s2_detail")
-    explorer.graph.graph.add_node(_LAUNCHER, is_external=True)
+    explorer.graph.graph.add_node(_LAUNCHER, is_external=True, replay_misses=0)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
     explorer.graph.add_edge("s0_home", "s2_detail", action=[_OPEN_DETAIL])
     explorer.graph.add_edge(source, _LAUNCHER, action=[action])
@@ -2638,6 +2767,52 @@ def test_back_is_pressed_where_no_recorded_back_has_left_the_app(
     assert device_log == [_BACK]
     assert _requested_models(router_requests) == ["provider/action"]
     assert explorer.graph.graph.edges["s1_list", "s0_home"]["actions"] == [[_BACK]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both replays to the list that Back on the start screen continues with land on the
+    start screen, and each counts a miss on the list. With the list out of the ranking,
+    the third Back on the start screen is pressed without a model call to choose a
+    target."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    expected = _identifying(explorer, monkeypatch, *["s0_home"] * 6)
+    planned_from = _planning_back(monkeypatch)
+    choose_list = '{"node_id":"s1_list","reason":"unexplored"}'
+    router_responses.extend(
+        [
+            chat_response(content=_BACK_REPLY),
+            chat_response(content=choose_list),
+            chat_response(content=_BACK_REPLY),
+            chat_response(content=choose_list),
+            chat_response(content=_BACK_REPLY),
+        ]
+    )
+
+    explorer.explore(max_steps=3)
+
+    assert device_log == [*_FIRST_RESTART, _OPEN_LIST, *_RESTART, _OPEN_LIST, _BACK]
+    assert expected == [None, "s0_home", "s1_list", "s0_home", "s1_list", None]
+    assert planned_from == ["s0_home"] * 3
+    assert _requested_models(router_requests) == [
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+    ]
+    assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 2
 
 
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
