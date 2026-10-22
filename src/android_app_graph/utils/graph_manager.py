@@ -1328,9 +1328,8 @@ class GraphManager:
                 reason,
             )
             return False
-        member_vector = self.text_vector(closest.observation_id)
-        text_score = (
-            cosine_similarity(identification.text_vector, member_vector) if member_vector else 0.0
+        text_score = cosine_similarity(
+            identification.text_vector, self._text_vectors[closest.observation_id]
         )
         near_identical = (
             closest.score >= NEAR_IDENTICAL_IMAGE_COSINE
