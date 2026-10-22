@@ -447,6 +447,15 @@ class MemberVerdict(NamedTuple):
 type MemberVerdicts = dict[frozenset[str], MemberVerdict]
 
 
+class MemberQuestion(NamedTuple):
+    """Whether member observation ``existing``, of the node ``description`` describes,
+    and member observation ``new`` show one screen."""
+
+    existing: str
+    new: str
+    description: str
+
+
 class ShownMembers(NamedTuple):
     """The member of each node a merge check shows the verifier, and the cosine of
     their images; ``None`` when a node has no image vector and its representative
@@ -1322,23 +1331,60 @@ class GraphManager:
         """Ask the verifier whether member observations ``existing``, of the node
         ``description`` describes, and ``new`` show one screen, and keep the answer in
         ``verdicts``; a pair ``verdicts`` already holds is answered from there."""
-        pair = frozenset((existing, new))
-        known = verdicts.get(pair)
-        if known is not None:
-            logger.info("Reusing the verifier's answer on members %s and %s", existing, new)
-            return known._replace(reused=True)
+        (verdict,) = self.verify_member_pairs(
+            [MemberQuestion(existing, new, description)], verdicts
+        )
+        return verdict
+
+    def verify_member_pairs(
+        self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts
+    ) -> list[MemberVerdict]:
+        """Ask the verifier ``questions`` at once, up to ``MAX_REQUESTS_IN_FLIGHT`` at a
+        time, keep each answer in ``verdicts``, and return the answers in order.
+
+        A pair ``verdicts`` already holds, or an earlier question names too, is answered
+        from there and marked ``reused``. When a call raises, the answers already
+        returned are kept in ``verdicts`` before the error is raised.
+        """
+        first_asked: dict[frozenset[str], int] = {}
+        for index, question in enumerate(questions):
+            pair = frozenset((question.existing, question.new))
+            if pair not in verdicts:
+                first_asked.setdefault(pair, index)
+        if first_asked:
+            self._ask_verifier([questions[index] for index in first_asked.values()], verdicts)
+        answers: list[MemberVerdict] = []
+        for index, question in enumerate(questions):
+            pair = frozenset((question.existing, question.new))
+            if first_asked.get(pair) == index:
+                answers.append(verdicts[pair])
+                continue
+            logger.info(
+                "Reusing the verifier's answer on members %s and %s",
+                question.existing,
+                question.new,
+            )
+            answers.append(verdicts[pair]._replace(reused=True))
+        return answers
+
+    def _ask_verifier(self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts) -> None:
         client, page_detail = self._require_page_detail()
         steps_dir = self._require_steps_dir()
-        reply = verify_same_node(
-            client,
-            screenshot_new_b64=observation_image_b64(steps_dir, new),
-            screenshot_existing_b64=observation_image_b64(steps_dir, existing),
-            existing_description=description,
-            settings=page_detail,
-        )
-        verdict = MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
-        verdicts[pair] = verdict
-        return verdict
+
+        def ask(question: MemberQuestion) -> MemberVerdict:
+            reply = verify_same_node(
+                client,
+                screenshot_new_b64=observation_image_b64(steps_dir, question.new),
+                screenshot_existing_b64=observation_image_b64(steps_dir, question.existing),
+                existing_description=question.description,
+                settings=page_detail,
+            )
+            return MemberVerdict(reply.get("same") is True, as_str(reply.get("reason"), ""))
+
+        def keep(question: MemberQuestion, verdict: MemberVerdict) -> None:
+            verdicts[frozenset((question.existing, question.new))] = verdict
+
+        call_concurrently("node_verify", ask, questions, keep)
 
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]

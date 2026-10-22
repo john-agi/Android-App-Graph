@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,20 +62,34 @@ def _member(image_b64: str) -> str:
     return base64.b64decode(image_b64).decode("ascii")
 
 
+# How long a question waits for the other questions of its round before it fails the
+# test instead of hanging.
+MEET_TIMEOUT = 10.0
+
+
 @dataclass
 class FakeModels:
     """A verifier that confirms the member pairs in ``same`` and records each pair it
     is shown as ``(existing, new)``, a text embedding that records each text, and an
-    edge normalizer whose every template is ``template``."""
+    edge normalizer whose every template is ``template``.
+
+    A pair in ``meetings`` is answered only once every question its barrier counts has
+    been asked, so a round asked one question at a time breaks the barrier.
+    """
 
     same: set[frozenset[str]] = field(default_factory=set)
     shown: list[tuple[str, str]] = field(default_factory=list)
     descriptions: list[str] = field(default_factory=list)
     embedded: list[str] = field(default_factory=list)
     template: str = "before"
+    meetings: dict[frozenset[str], threading.Barrier] = field(default_factory=dict)
 
     def confirm(self, first: str, second: str) -> None:
         self.same.add(frozenset((first, second)))
+
+    def meet(self, *pairs: tuple[str, str]) -> None:
+        meeting = threading.Barrier(len(pairs), timeout=MEET_TIMEOUT)
+        self.meetings.update((frozenset(pair), meeting) for pair in pairs)
 
     def verify_same_node(
         self,
@@ -86,6 +101,9 @@ class FakeModels:
         **_settings: object,
     ) -> dict[str, Any]:
         pair = (_member(screenshot_existing_b64), _member(screenshot_new_b64))
+        meeting = self.meetings.get(frozenset(pair))
+        if meeting is not None:
+            meeting.wait()
         self.shown.append(pair)
         self.descriptions.append(existing_description)
         return {"same": frozenset(pair) in self.same, "reason": "scripted"}
@@ -718,3 +736,77 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
         encoding="utf-8"
     )
     assert json.loads(audited_vectors) == json.loads(explored_vectors)
+
+
+def _split_node(first: int) -> list[tuple[str, list[float]]]:
+    """Members ``first`` to ``first + 3`` in two groups of two, as in ``SPLIT``."""
+    vectors = (X, _toward(X, Y, LINKED), _toward(Y, X, LINKED), Y)
+    return [(f"{first + offset:06d}", vector) for offset, vector in enumerate(vectors)]
+
+
+def _move_node(first: int) -> list[tuple[str, list[float]]]:
+    """Members ``first`` to ``first + 2``, the last one alone, as in ``MOVE``'s Home."""
+    vectors = (X, _toward(X, Y, LINKED), Y)
+    return [(f"{first + offset:06d}", vector) for offset, vector in enumerate(vectors)]
+
+
+def test_member_checks_ask_every_split_at_once_then_every_move_at_once(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    write_member_graph(
+        graph_path,
+        {
+            "s0_home": _split_node(1),
+            "s1_list": _split_node(5),
+            "s2_menu": _move_node(9),
+            "s3_page": _move_node(12),
+        },
+    )
+    graph = _load(graph_path)
+    splits = (("000002", "000003"), ("000006", "000007"))
+    moves = (("000010", "000011"), ("000013", "000014"))
+    for pair in (*splits, *moves):
+        models.confirm(*pair)
+    models.meet(*splits)
+    models.meet(*moves)
+
+    report = _check_members(graph, graph_path, {})
+
+    assert [(check["kind"], check["node"]) for check in report.checks] == [
+        ("split", "s0_home"),
+        ("split", "s1_list"),
+        ("move", "s2_menu"),
+        ("move", "s3_page"),
+    ]
+    assert (set(models.shown[:2]), set(models.shown[2:])) == (set(splits), set(moves))
+
+
+def test_a_member_moves_to_the_node_a_split_made(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Menu's lone member looks like Home's second group, which a split makes a node of
+    before any member moves."""
+    write_member_graph(
+        graph_path,
+        {
+            "s0_home": _split_node(1),
+            "s1_menu": [
+                ("000020", Z),
+                ("000021", _toward(Z, X, LINKED)),
+                ("000022", _toward(Y, Z, LINKED)),
+            ],
+        },
+    )
+    graph = _load(graph_path)
+    models.confirm("000004", "000022")
+
+    split, move = _checks(_check_members(graph, graph_path, {}))
+
+    new = "s2_screen_000003"
+    assert (split["kind"], split["change"]["to"]) == ("split", new)
+    assert (move["kind"], move["members"], move["change"]["to"]) == (
+        "move",
+        ["000020", "000022"],
+        new,
+    )
+    assert graph.graph.nodes[new]["observations"] == ["000003", "000004", "000022"]
