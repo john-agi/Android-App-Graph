@@ -609,11 +609,12 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the number it gave the element its instruction acts on, and `element_locator`, that element's [locator](#elements) (`null` when the planner named none or the element has none), the executed `action`, [what it acted on](#what-an-action-acted-on) as `anchors`, `hits` and `action_flags`, one entry per sub-action, and `from_node` and `to_node` as they were then |
 
 An action or transition record takes `activity` and `package` from the screenshot
-it was taken from. A [replay](#replaying-to-a-node) reads the screen before each tap
-or long press that has an anchor, and that action names that screenshot; any other
-replayed action is sent without a look and names the last screenshot before it,
-which can predate the app restart. The planner's instruction can differ from the
-edge's: an action-model `end` is recorded on the edge as "Press back".
+it was taken from. A [replay](#replaying-to-a-node) records the screen the app opened
+on first, so its first action names that screenshot. Each later tap or long press
+that has an anchor names the screenshot the replay reads just before it, and any
+other replayed action is sent without a look and names the last screenshot before
+it. The planner's instruction can differ from the edge's: an action-model `end` is
+recorded on the edge as "Press back".
 
 The status bar's clock and icons change on their own, so `pixel_hash` leaves them
 out. It is the SHA-256 of the image's decoded pixels, mode and size below its top
