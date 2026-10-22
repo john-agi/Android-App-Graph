@@ -500,9 +500,10 @@ that centre; a long press keeps its duration.
 Otherwise the action goes to its recorded coordinates. The log says which way each
 tap went: `anchor`, or `recorded coordinates:` and the reason, `no_anchor` (the edge
 recorded none), `no_tree`, `no_match`, `ambiguous` (more than one element) or
-`covered` (a dialog, the keyboard or another element lies over its centre). Typing,
-swipes, Back, Home, Enter and waits replay as recorded, without a look. Each
-anchored tap after the replay's first action makes a replay one capture longer.
+`covered` (a dialog, the keyboard where it draws or another element lies over its
+centre, as the [hit test](#what-an-action-acted-on) decides). Typing, swipes, Back,
+Home, Enter and waits replay as recorded, without a look. Each anchored tap after
+the replay's first action makes a replay one capture longer.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
@@ -844,8 +845,15 @@ the [tree](#step-log) of the screen it was planned from, and store it on the edg
 with the action:
 
 - **Anchor.** A tap or long press is hit-tested at its point. The windows are taken
-  from the top layer down, and the first that holds the point takes the tap: the
-  keyboard's window gives `keyboard`, a window that is not an application's, such
+  from the top layer down, and the first that covers the point takes the tap. A
+  window covers its bounds, except the keyboard's, which covers only the smallest
+  rectangle around what the keyboard draws: the visible nodes of its window that
+  take taps (clickable, long-clickable or focusable) or have a label (text or content
+  description), leaving out containers as large as the window. A docked keyboard's
+  rectangle is the keyboard, the gaps between its keys included. A floating keyboard
+  draws a small toolbar while its window spans the lower screen, so its rectangle is
+  the toolbar and a tap beside it reaches the window below. The keyboard gives
+  `keyboard`, a window that is not an application's, such
   as the status bar, gives `system`. In an application window the tap goes where
   Android dispatches a touch: down through the nodes under the point, the one drawn
   last first, to the deepest one that takes taps (clickable, long-clickable, or a

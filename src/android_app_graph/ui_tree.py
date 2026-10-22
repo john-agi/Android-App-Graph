@@ -242,7 +242,7 @@ class Hit:
     ``kind`` is ``element`` for a node of an application window, ``anchor`` the element
     that node is part of and ``node`` that element's index in the tree;
     ``outside_dialog`` for a point outside a dialog or popup that took focus, where a
-    tap dismisses it; ``keyboard`` for the keyboard's window; ``system`` for any other
+    tap dismisses it; ``keyboard`` for the keyboard where it draws; ``system`` for any other
     window that is not an application's, such as the status bar; and ``nothing`` for a
     point off the screen or under no node.
     """
@@ -400,13 +400,15 @@ def hit_test(tree: UiTree, point: tuple[int, int], screen: Bounds) -> Hit:
     """Return what a tap at ``point``, in the pixels of ``screen``, lands on in ``tree``.
 
     The windows of the active application window's display are walked from the highest
-    layer down, and the first whose bounds hold the point takes the tap. In an
+    layer down, and the first that covers the point takes the tap: a window covers its
+    bounds, and the keyboard's window only the rectangle around what the keyboard
+    draws, so a tap beside a floating keyboard reaches the window below. In an
     application window the tap goes where Android dispatches a touch: down through the
     nodes under the point, the one drawn last first, to the deepest node that takes
     taps (clickable, long-clickable, or a row of a list that takes its rows' taps), or
     the deepest node under the point when none does. The anchor is the element that
     node is part of, as ``actionable_elements`` lists it. A point on the screen that no
-    window holds lies outside the dialog or popup that took focus when an application
+    window covers lies outside the dialog or popup that took focus when an application
     window took focus, since such a window hides the windows below it from the dump.
     """
     x, y = point
@@ -417,7 +419,7 @@ def hit_test(tree: UiTree, point: tuple[int, int], screen: Bounds) -> Hit:
     on_display = [i for i, window in enumerate(tree.windows) if window.display_id == display]
     for index in sorted(on_display, key=lambda i: -tree.windows[i].layer):
         window = tree.windows[index]
-        if not _holds(window.bounds, x, y):
+        if not _covers(tree, index, x, y):
             continue
         if window.window_type == INPUT_METHOD_WINDOW:
             return Hit("keyboard")
@@ -443,7 +445,8 @@ def resolve_anchor(
     layout views around a button take their label from its text and share its locator.
     ``no_match`` is no such node and ``ambiguous`` more than one. ``covered`` is a node
     that a tap at its centre, as ``hit_test`` dispatches it, does not reach, because a
-    higher window, such as a dialog or the keyboard, or another element lies over it.
+    higher window, such as a dialog or the keyboard where it draws, or another element
+    lies over it.
     """
     windows = set(acting_windows(tree, package))
     found = [
@@ -590,6 +593,61 @@ def _holds(bounds: Bounds, x: int, y: int) -> bool:
     return bounds.left <= x < bounds.right and bounds.top <= y < bounds.bottom
 
 
+def _covers(tree: UiTree, window: int, x: int, y: int) -> bool:
+    """Return whether window ``window`` of ``tree`` takes a touch at ``x``, ``y``.
+
+    A window takes the touches inside its bounds, except the keyboard's: those bounds
+    are its frame, and a floating keyboard draws a small toolbar in a frame that spans
+    the lower screen, so a touch beside the toolbar reaches the window below. The
+    keyboard takes the touches inside the smallest rectangle around what it draws,
+    ``_keyboard_drawn``: its toolbar when it floats, and when it is docked its keys
+    with the gaps between them, which it takes too.
+    """
+    bounds = tree.windows[window].bounds
+    if not _holds(bounds, x, y):
+        return False
+    if tree.windows[window].window_type != INPUT_METHOD_WINDOW:
+        return True
+    drawn = _keyboard_drawn(tree, window)
+    return drawn is not None and _holds(drawn, x, y)
+
+
+def _keyboard_drawn(tree: UiTree, window: int) -> Bounds | None:
+    """Return the smallest rectangle around the visible nodes of keyboard window
+    ``window`` that take taps (clickable, long-clickable or focusable) or have a label
+    (text or content description), or ``None`` when it has none.
+
+    A container as large as the window is left out: it spans the frame whatever the
+    keyboard draws.
+    """
+    frame = tree.windows[window].bounds
+    drawn = [
+        node.bounds
+        for node in tree.nodes
+        if node.window == window
+        and _area(node.bounds)
+        and (node.clickable or node.long_clickable or node.focusable or _own_label(node))
+        and not _contains(node.bounds, frame)
+    ]
+    if not drawn:
+        return None
+    return Bounds(
+        min(bounds.left for bounds in drawn),
+        min(bounds.top for bounds in drawn),
+        max(bounds.right for bounds in drawn),
+        max(bounds.bottom for bounds in drawn),
+    )
+
+
+def _contains(outer: Bounds, inner: Bounds) -> bool:
+    return (
+        outer.left <= inner.left
+        and outer.top <= inner.top
+        and outer.right >= inner.right
+        and outer.bottom >= inner.bottom
+    )
+
+
 def _active_application_window(tree: UiTree) -> int | None:
     return next(
         (
@@ -665,7 +723,7 @@ def _label(tree: UiTree, index: int) -> str:
     node = tree.nodes[index]
     if _is_text_field(node):
         return _words(node.hint) or _words(node.content_description)
-    own = _words(node.text) or _words(node.content_description)
+    own = _own_label(node)
     if own or node.scrollable:
         return own
     stack = list(reversed(node.children))
@@ -675,6 +733,10 @@ def _label(tree: UiTree, index: int) -> str:
             return text
         stack.extend(reversed(descendant.children))
     return ""
+
+
+def _own_label(node: UiNode) -> str:
+    return _words(node.text) or _words(node.content_description)
 
 
 def _words(text: str) -> str:
