@@ -1264,7 +1264,7 @@ class GraphManager:
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
     ) -> None:
         """Give the rejected node and the screen the verifier's refined descriptions,
-        re-embedding both; the node is renamed to match its new description."""
+        embedding the screen's; the node is renamed to match its new description."""
         refined_existing = as_str(verdict.get("existing_description"), "")
         refined_new = as_str(verdict.get("new_description"), "")
         renamed = node_id
