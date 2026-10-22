@@ -4,35 +4,73 @@
 utils.vlm_utils' chat completions, page descriptions, text embeddings and
 action responses; this module owns its tests, including which errors are
 re-asked, so the callers cannot drift on it. ``DeadlineTransport`` and
-``capped_retries`` bound how long one request and the SDK's retries of it take.
+``send_within_deadline`` bound how long one request and its retries take, and
+``send_within_deadline`` sends a request answered with HTTP 429 again.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import override
 
 import httpx
 import pytest
-from openrouter.errors import OpenRouterError, ResponseValidationError
+from openrouter.errors import OpenRouterError, ResponseValidationError, TooManyRequestsResponseError
 
 from android_app_graph import retrying
 from android_app_graph.utils import ModelSettings, open_client
-from android_app_graph.utils.vlm_utils import send_chat
+from android_app_graph.utils.vlm_utils import message_text, send_chat
 
 _URL = "https://openrouter.ai/api/v1/chat/completions"
 _WHITESPACE = b"\n         \n"
+_RATE_LIMITED = {"error": {"code": 429, "message": "rate limited"}}
 
 
 class _Clock:
-    """Seconds that pass only when a test moves them on."""
+    """Seconds that pass only when a test moves them on or sleeps."""
 
     def __init__(self) -> None:
         self.now = 0.0
+        self.slept: list[float] = []
 
     def __call__(self) -> float:
         return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """One fake clock for the request's deadline, the SDK's retry time and every sleep."""
+    fake = _Clock()
+    monkeypatch.setattr(time, "monotonic", fake)
+    monkeypatch.setattr(time, "time", fake)
+    monkeypatch.setattr(time, "sleep", fake.sleep)
+    return fake
+
+
+def _rate_limited(headers: dict[str, str] | None = None) -> httpx.Response:
+    return httpx.Response(429, json=_RATE_LIMITED, headers=headers)
+
+
+def _chat(answer: Callable[[httpx.Request], httpx.Response], *, request_timeout: float = 60) -> str:
+    """Send one chat request through ``open_client`` to a provider that answers with ``answer``."""
+    with (
+        httpx.Client(transport=httpx.MockTransport(answer)) as http_client,
+        open_client("test-key", http_client=http_client) as client,
+    ):
+        reply = send_chat(
+            client,
+            call_type="chat",
+            settings=ModelSettings("provider/model", request_timeout=request_timeout),
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    return message_text(reply)
 
 
 class _Trickle(httpx.SyncByteStream):
@@ -252,3 +290,140 @@ def test_call_with_retry_logs_the_traceback_on_a_re_ask(caplog: pytest.LogCaptur
         assert retrying.call_with_retry("action agent", flaky) == "ok"
     assert "action agent returned unusable output; asking again (2/2)" in caplog.text
     assert caplog.records[0].exc_info is not None
+
+
+@pytest.mark.parametrize(
+    "rate_limited",
+    [
+        _rate_limited,
+        lambda: httpx.Response(429, text="Too Many Requests"),
+        lambda: httpx.Response(429, json={"unexpected": "shape"}),
+    ],
+    ids=["json", "text", "unexpected-json"],
+)
+def test_a_429_with_any_body_is_sent_again(
+    rate_limited: Callable[[], httpx.Response], clock: _Clock, chat_body: dict[str, object]
+) -> None:
+    answers = [rate_limited(), httpx.Response(200, json=chat_body)]
+    assert _chat(lambda _request: answers.pop(0)) == "test reply"
+    assert answers == []
+    assert len(clock.slept) == 1
+
+
+@pytest.mark.parametrize(("retry_after", "waited"), [("30", 30), ("120", 120)])
+def test_a_429_waits_as_long_as_its_retry_after_asks_when_that_ends_by_the_deadline(
+    retry_after: str, waited: float, clock: _Clock, chat_body: dict[str, object]
+) -> None:
+    """At a 60 s timeout the deadline is 120 s after the first attempt."""
+    answers = [_rate_limited({"Retry-After": retry_after}), httpx.Response(200, json=chat_body)]
+    assert _chat(lambda _request: answers.pop(0)) == "test reply"
+    assert clock.slept == [waited]
+
+
+@pytest.mark.parametrize(
+    "retry_after", ["121", "0", "-5", "soon", "nan", "Wed, 21 Oct 2026 07:28:00 -0000"]
+)
+def test_a_429_whose_retry_after_ends_past_the_deadline_or_is_no_delay_waits_the_backoff(
+    retry_after: str, clock: _Clock, chat_body: dict[str, object]
+) -> None:
+    """A date in ``-0000``, which names no time zone, is not a delay."""
+    answers = [_rate_limited({"Retry-After": retry_after}), httpx.Response(200, json=chat_body)]
+    assert _chat(lambda _request: answers.pop(0)) == "test reply"
+    assert len(clock.slept) == 1
+    assert 0.5 <= clock.slept[0] <= 1.5
+
+
+def test_a_429_waits_until_the_date_its_retry_after_names(
+    no_sleep: list[float], chat_body: dict[str, object]
+) -> None:
+    sent_at = datetime.now(UTC)
+    retry_at = (sent_at + timedelta(seconds=30)).replace(microsecond=0)
+    header = {"Retry-After": format_datetime(retry_at, usegmt=True)}
+    answers = [_rate_limited(header), httpx.Response(200, json=chat_body)]
+    assert _chat(lambda _request: answers.pop(0)) == "test reply"
+    answered_at = datetime.now(UTC)
+    assert len(no_sleep) == 1
+    assert (retry_at - answered_at).total_seconds() <= no_sleep[0]
+    assert no_sleep[0] <= (retry_at - sent_at).total_seconds()
+
+
+def test_429s_past_the_deadline_raise_and_each_one_sent_again_is_logged(
+    clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each answer takes 50 s: the third ends past the 120 s deadline, so it is the last."""
+    requests: list[httpx.Request] = []
+
+    def slow_rate_limit(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        clock.now += 50
+        return _rate_limited()
+
+    with (
+        caplog.at_level("WARNING", logger=retrying.__name__),
+        pytest.raises(TooManyRequestsResponseError, match="rate limited"),
+    ):
+        _chat(slow_rate_limit)
+    assert len(requests) == 3
+    assert len(clock.slept) == 2
+    assert 0.5 <= clock.slept[0] <= 1.5
+    assert 0.75 <= clock.slept[1] <= 1.75
+    assert [record.getMessage() for record in caplog.records] == [
+        f"chat: rate limited (HTTP 429); sending again in {seconds:.1f} s"
+        for seconds in clock.slept
+    ]
+
+
+def test_a_backoff_that_would_cross_the_deadline_ends_at_it_and_no_attempt_starts_after(
+    clock: _Clock,
+) -> None:
+    """The first 429 arrives 0.25 s before the 120 s deadline, less than any backoff;
+    the 429 that arrives at the deadline leaves no time, so it raises at once."""
+    started_at: list[float] = []
+
+    def rate_limit(_request: httpx.Request) -> httpx.Response:
+        started_at.append(clock.now)
+        clock.now += 119.75 if len(started_at) == 1 else 0
+        return _rate_limited()
+
+    with pytest.raises(TooManyRequestsResponseError):
+        _chat(rate_limit)
+    assert clock.slept == [0.25]
+    assert started_at == [0, 120]
+
+
+def test_the_429_backoff_grows_to_at_most_a_minute_between_tries(clock: _Clock) -> None:
+    with pytest.raises(TooManyRequestsResponseError):
+        _chat(lambda _request: _rate_limited(), request_timeout=300)
+    assert max(clock.slept) == 60
+    assert sum(clock.slept) == pytest.approx(600)
+
+
+def test_the_sdk_retries_a_5xx_after_a_429_only_until_the_same_deadline(clock: _Clock) -> None:
+    """Each answer takes 50 s. After the 429 and about 1 s of backoff, 69 s are left, so
+    the SDK sends a 503 once more but not a third time, which a fresh 120 s would allow."""
+    statuses = [429, 503, 503, 503]
+
+    def answer(_request: httpx.Request) -> httpx.Response:
+        clock.now += 50
+        status = statuses.pop(0)
+        return httpx.Response(status, json={"error": {"code": status, "message": "busy"}})
+
+    with pytest.raises(OpenRouterError) as caught:
+        _chat(answer)
+    assert caught.value.status_code == 503
+    assert statuses == [503]
+
+
+@pytest.mark.parametrize("status", [400, 402])
+def test_any_other_4xx_raises_at_once(status: int, no_sleep: list[float]) -> None:
+    requests: list[httpx.Request] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json={"error": {"code": status, "message": "refused"}})
+
+    with pytest.raises(OpenRouterError) as caught:
+        _chat(refuse)
+    assert caught.value.status_code == status
+    assert len(requests) == 1
+    assert no_sleep == []
