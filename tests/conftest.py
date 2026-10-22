@@ -28,6 +28,8 @@ from android_app_graph.graph_files import (
     graph_steps_dir,
     observation_image_path,
     observation_tree_path,
+    save_embeddings,
+    text_embeddings_path,
 )
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import save_image_embeddings
@@ -419,14 +421,15 @@ def _member_element(observation_id: str) -> dict[str, object]:
 @pytest.fixture
 def write_member_graph() -> Callable[..., None]:
     """Write a graph file of ``com.demo`` nodes whose members have an image, a tree, an
-    image vector and a stored describe output in the step log beside it, and the
-    exploration transitions ``(before, after, action, from_node, to_node)``.
+    image vector and a stored describe output in the step log beside it and a text
+    vector in the file beside the graph, and the exploration transitions
+    ``(before, after, action, from_node, to_node)``.
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
-    the first its representative. Node ``n`` is described as ``Node n`` and member ``m``
-    as ``Screen m``. Each image holds its observation ID, so a fake verifier can tell
-    which members it was shown. The vectors are tagged with the model
-    ``model_environment`` names.
+    the first its representative; the vector is the member's image vector and its text
+    vector. Node ``n`` is described as ``Node n`` and member ``m`` as ``Screen m``. Each
+    image holds its observation ID, so a fake verifier can tell which members it was
+    shown. The vectors are tagged with the model ``model_environment`` names.
     """
 
     def write(
@@ -478,6 +481,7 @@ def write_member_graph() -> Callable[..., None]:
             }
             (steps_dir / f"{900000 + number}.json").write_text(json.dumps(record), "utf-8")
         save_image_embeddings(steps_dir, vectors, model="google/gemini-embedding-2")
+        save_embeddings(text_embeddings_path(path), vectors, model="google/gemini-embedding-2")
         document = {
             "package_name": "com.demo",
             "next_id": len(nodes),

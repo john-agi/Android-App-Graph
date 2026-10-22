@@ -11,8 +11,9 @@ An edge represents a device action that transitions between states.
 
 State matching compares a new screenshot with the members of the nodes of its app
 package, cheapest evidence first: an exact pixel match outside the status bar, then
-the node the caller expects, then a short list of nodes ranked by image and text
-similarity, each checked by the verifier against its member closest to the screen.
+the node the caller expects, then a short list of nodes ranked by the image and the
+description similarity of their members, each checked by the verifier against its
+member closest to the screen.
 Different Android activities that display the same screen are merged into a single
 node; the node stores all observed activities.
 
@@ -30,6 +31,7 @@ tells apart, split off or moved to the node screen matching confirms.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
@@ -45,10 +47,13 @@ from openrouter import OpenRouter
 from android_app_graph.android_packages import saved_node_package
 from android_app_graph.graph_files import (
     graph_steps_dir,
+    load_embeddings,
     observation_image_b64,
     observation_image_path,
     observation_tree_path,
     require_known_edge_endpoints,
+    save_embeddings,
+    text_embeddings_path,
     write_json_atomically,
 )
 from android_app_graph.member_groups import (
@@ -61,7 +66,6 @@ from android_app_graph.member_groups import (
     unit_vector,
 )
 from android_app_graph.payloads import (
-    as_float_list,
     as_int_list,
     as_object_dict,
     as_str,
@@ -177,7 +181,7 @@ class SetupTrail:
     trail last arrived there from elsewhere.
 
     The trail keeps the nodes it arrived at in order. Arriving at one of them again, such
-    as a form after one of its dropdowns, ends a round trip: the nodes after it are left
+    as a list after one of its rows, ends a round trip: the nodes after it are left
     behind, and the round trip's actions join its setup, as a self-loop's do. Arriving at
     any other node starts its setup empty. Node IDs are compared through
     ``resolve_node_id``, so a node renamed or merged while the trail holds it still matches.
@@ -246,19 +250,20 @@ class SetupTrail:
 @dataclass(frozen=True)
 class _ScreenDescription:
     page_description: str
-    embedding: list[float]
     detail_snapshot: dict[str, object]
     elements: list[dict[str, object]]
 
 
 @dataclass(frozen=True)
 class _EdgeToNormalize:
-    """An edge's normalize_edge inputs, copied so that a worker thread never reads the graph."""
+    """An edge's normalize_edge inputs, copied so that a worker thread never reads the graph,
+    and the hash of the recorded instructions they cover."""
 
     source: str
     target: str
     instructions: list[str]
     target_observations: list[str] | None
+    instructions_hash: str
 
 
 class _Described(NamedTuple):
@@ -367,11 +372,21 @@ def _image_scores(
 def _text_scores(
     graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
 ) -> list[tuple[str, float]]:
-    return score_by_cosine(
+    """Score each node by its member whose description vector is most similar to the
+    screen's."""
+    member_scores = score_by_cosine(
         query.description_embedding,
-        [(node_id, graph.description_embedding(node_id)) for node_id in node_ids],
+        [
+            ((node_id, member), graph.text_vector(member))
+            for node_id in node_ids
+            for member in _member_observations(graph.graph.nodes[node_id])
+        ],
         scope="identify_state description-embedding",
     )
+    best: dict[str, float] = {}
+    for (node_id, _), score in member_scores:
+        best[node_id] = max(score, best.get(node_id, score))
+    return list(best.items())
 
 
 SHORT_LIST_SOURCES = (
@@ -467,8 +482,9 @@ class _Decision:
 
 @dataclass(slots=True)
 class _Identification:
-    """One described screen on its way through ``identify_state``: its description,
-    which the step's first rejection refines, and the decision its record gets.
+    """One described screen on its way through ``identify_state``: its description and
+    that description's vector, which the step's first rejection refines, and the
+    decision its record gets.
 
     A member the audit identifies again from its stored describe output carries the
     run's ``verdicts``, which its verifier calls reuse and add to; it refines no
@@ -478,6 +494,7 @@ class _Identification:
     observation: Observation
     image_vector: list[float]
     screen: _ScreenDescription
+    text_vector: list[float]
     decision: _Decision
     rejected: bool = False
     verdicts: MemberVerdicts | None = None
@@ -640,7 +657,7 @@ def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any
     """Fold a removed node's visits, members, activities, state schema and elements into
     the kept one.
 
-    The kept node's description, representative and embedding stay as they are.
+    The kept node's description and representative stay as they are.
     """
     keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
     members = {*keep_data.get("observations", []), *remove_data.get("observations", [])}
@@ -773,6 +790,18 @@ def _action_costs(edge_data: dict[str, Any]) -> list[int]:
     ]
 
 
+def _instructions_hash(instructions: list[str]) -> str:
+    """SHA-256 of *instructions* as a JSON list, which keeps every instruction apart."""
+    return hashlib.sha256(json.dumps(instructions).encode()).hexdigest()
+
+
+def _drop_templates(edge_data: dict[str, Any]) -> None:
+    """Drop the edge's templates and the record of what they covered, so that the next
+    normalization rebuilds them."""
+    edge_data["instruction_templates"] = []
+    edge_data.pop("normalized_instructions_hash", None)
+
+
 def _member_observations(node: dict[str, Any]) -> list[str]:
     """Return a saved node's member observation IDs, or ``[]`` when it has none or
     they are not a list of strings."""
@@ -871,15 +900,12 @@ class GraphManager:
         self._node_aliases: dict[str, str] = {}
         self._image_vectors: dict[str, list[float]] = {}
         self._unit_vectors: dict[str, list[float]] = {}
+        # By observation ID, the vector of the description each described in-app screen
+        # ended with: its describe output's, or the one its step's first rejection
+        # refined it to.
+        self._text_vectors: dict[str, list[float]] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
         self.total_steps_completed = 0
-
-    @property
-    def embedding_model(self) -> str:
-        if self.embedding is None:
-            msg = "GraphManager needs embedding settings for this operation"
-            raise RuntimeError(msg)
-        return self.embedding.model
 
     def _page_detail(self) -> tuple[OpenRouter, ModelSettings] | None:
         if self.client is None or self.page_detail is None:
@@ -929,27 +955,13 @@ class GraphManager:
             request_timeout=image_embedding.request_timeout,
         )
 
-    def _text_embedding(self, node_id: str, data: dict[str, object]) -> list[float]:
-        vector = data.get("description_embedding")
-        model = data.get("description_embedding_model")
-        if vector and model != self.embedding_model:
-            msg = (
-                f"Text embedding for node {node_id!r} has model provenance {model!r}; "
-                f"the configured model is {self.embedding_model!r}. Rebuild or re-explore "
-                "the graph with the configured embedding model before comparing text vectors. "
-                "Do not relabel existing vectors."
-            )
-            raise ValueError(msg)
-        return as_float_list(vector)
-
-    def description_embedding(self, node_id: str) -> list[float]:
-        """Return the embedding of a node's description, ``[]`` when it has none; one
-        from another embedding model raises ``ValueError``."""
-        return self._text_embedding(node_id, self.graph.nodes[node_id])
-
     def image_vector(self, observation_id: str) -> list[float] | None:
         """Return the image vector of an observation, or ``None`` when it has none."""
         return self._image_vectors.get(observation_id)
+
+    def text_vector(self, observation_id: str) -> list[float] | None:
+        """Return the vector of an observation's description, or ``None`` when it has none."""
+        return self._text_vectors.get(observation_id)
 
     def closest_member(self, node_id: str, image_vector: list[float]) -> ClosestMember:
         """Return the member of ``node_id`` whose image vector is most similar to
@@ -1131,19 +1143,20 @@ class GraphManager:
             len(described.elements),
             "model" if thin_tree else "tree",
         )
-        screen = _ScreenDescription(
-            described.page_description, [], described.state, described.elements
-        )
         decision = _Decision(expected_node)
-        identification = _Identification(observation, image_vector, screen, decision)
         if described.is_external_web:
             decision.stage = "external_web"
             node_id = self._record_external_web_visit(observation)
         else:
-            identification.screen = replace(
-                screen, embedding=self._embed(described.page_description)
+            screen = _ScreenDescription(
+                described.page_description, described.state, described.elements
+            )
+            text_vector = self._embed(described.page_description)
+            identification = _Identification(
+                observation, image_vector, screen, text_vector, decision
             )
             node_id = self._assign(identification)
+            self._text_vectors[observation.observation_id] = identification.text_vector
             self._stored_screens[observation.observation_id] = _StoredScreen(
                 observation.pixel_hash, described
             )
@@ -1171,11 +1184,7 @@ class GraphManager:
 
     def _same_package_nodes(self, package: str) -> _SamePackageNodes:
         """Collect *package*'s in-app nodes that have members, and the descriptions and
-        state keys of all its nodes.
-
-        Every text embedding's provenance is checked, so a vector from another embedding
-        model raises here, before any model request.
-        """
+        state keys of all its nodes."""
         node_ids: list[str] = []
         descriptions: list[str] = []
         keys: list[str] = []
@@ -1183,7 +1192,6 @@ class GraphManager:
             node_id = _node_id(raw_id)
             if data.get("package") != package or self._is_external(node_id):
                 continue
-            self._text_embedding(node_id, data)
             if data.get("representative_observation"):
                 node_ids.append(node_id)
             desc = data.get("page_description", "")
@@ -1219,7 +1227,7 @@ class GraphManager:
         self, observation: Observation, node_id: str, member: str, *, expected_node: str | None
     ) -> str:
         """Add the screen to ``node_id`` as an exact copy of its ``member``, whose
-        describe output it takes, and record that on the screen's record."""
+        describe output and text vector it takes, and record that on the screen's record."""
         described = self._stored_screens[member].described
         logger.info(
             "Exact pixel match with member %s of %s; reusing its description", member, node_id
@@ -1229,6 +1237,7 @@ class GraphManager:
         self._stored_screens[observation.observation_id] = _StoredScreen(
             observation.pixel_hash, described
         )
+        self._text_vectors[observation.observation_id] = self._text_vectors[member]
         decision = _Decision(expected_node, "exact", exact_match=member)
         annotate_observation(
             self._require_steps_dir(),
@@ -1305,7 +1314,7 @@ class GraphManager:
             for node_id in self._same_package_nodes(identification.observation.package).node_ids
             if node_id not in excluded
         ]
-        query = ScreenQuery(identification.image_vector, identification.screen.embedding)
+        query = ScreenQuery(identification.image_vector, identification.text_vector)
         candidates = self.short_list(query, node_ids)
         identification.decision.candidates = [candidate.as_record() for candidate in candidates]
         logger.info(
@@ -1420,7 +1429,7 @@ class GraphManager:
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
     ) -> None:
         """Give the rejected node and the screen the verifier's refined descriptions,
-        re-embedding both; the node is renamed to match its new description."""
+        embedding the screen's; the node is renamed to match its new description."""
         refined_existing = as_str(verdict.get("existing_description"), "")
         refined_new = as_str(verdict.get("new_description"), "")
         renamed = node_id
@@ -1429,11 +1438,8 @@ class GraphManager:
         ):
             renamed = self.rename_node(node_id, refined_existing)
         if refined_new:
-            identification.screen = replace(
-                identification.screen,
-                page_description=refined_new,
-                embedding=self._embed(refined_new),
-            )
+            identification.screen = replace(identification.screen, page_description=refined_new)
+            identification.text_vector = self._embed(refined_new)
         if renamed != node_id or refined_new:
             identification.decision.refinement = {
                 "node": node_id,
@@ -1463,8 +1469,6 @@ class GraphManager:
             page_description=screen.page_description,
             state_schema={},
             interactable_elements=[],
-            description_embedding=screen.embedding,
-            description_embedding_model=self.embedding_model,
             last_normalized_visit_milestone=0,
             visit_count=0,
         )
@@ -1542,8 +1546,6 @@ class GraphManager:
         new_node_id = self._renamed_node_id(node_id, page_description)
 
         node_data["page_description"] = page_description
-        node_data["description_embedding"] = self._embed(page_description)
-        node_data["description_embedding_model"] = self.embedding_model
 
         if new_node_id != node_id:
             nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
@@ -1650,7 +1652,7 @@ class GraphManager:
         - Outgoing edges from *remove_id* are rewired from *keep_id*.
         - State schemas are merged (union of keys and values).
         - Visit counts are summed, and member observations are united in step order.
-        - The kept node retains its description, representative, and embedding.
+        - The kept node retains its description and representative.
         - The removed node is deleted from the graph, and its ID resolves to *keep_id*.
 
         Returns True if the merge was performed, False if either node is missing
@@ -1861,7 +1863,7 @@ class GraphManager:
         moved["visit_count"] = 1
         if remaining["actions"]:
             edge_data.update(remaining)
-            edge_data["instruction_templates"] = []
+            _drop_templates(edge_data)
         else:
             self.graph.remove_edge(source, target)
         self._merge_edge_data(source, new_target, moved)
@@ -1877,7 +1879,7 @@ class GraphManager:
         edge_data = self.graph[source][target]
         edge_data.update(_aligned_lists(edge_data))
         edge_data["instructions"][index] = instruction
-        edge_data["instruction_templates"] = []
+        _drop_templates(edge_data)
 
     def member_plans(self, floor: float = GROUPING_FLOOR) -> list[tuple[str, MemberPlan]]:
         """Return, in node order, the groups of the members of every in-app node at the
@@ -1910,7 +1912,10 @@ class GraphManager:
         self, node_id: str, members: Sequence[str], transitions: Sequence[TransitionRecord]
     ) -> dict[str, object]:
         """Move ``members`` of ``node_id`` to a new node built from their stored describe
-        output, move the edge actions their ``transitions`` took, and return the change."""
+        output, move the edge actions their ``transitions`` took, and return the change.
+
+        The new node has no text vector of its own: the ``text`` source scores it by the
+        vectors its members keep, so no embedding is requested."""
         new_node = self._node_from_stored(node_id, members)
         return {"new_node": True, **self._relocate(node_id, members, new_node, transitions)}
 
@@ -1926,16 +1931,16 @@ class GraphManager:
         confirms for it, or to a new node when none does, move the edge actions its
         ``transitions`` took, and return the change.
 
-        The member's stored describe output stands in for the describe call, so the
-        short list costs one text embedding and its verifier calls; the node it leaves
-        is not on the list, and no description is refined. The member's tree, or the
-        reason it has none, is read from the step log.
+        The member's stored describe output stands in for the describe call and its text
+        vector for the description's embedding, so the short list costs only its
+        verifier calls; the node it leaves is not on the list, and no description is
+        refined. The member's tree, or the reason it has none, is read from the step log.
         """
         identification = self._stored_identification(node_id, member, verdicts)
         destination = self._verify_short_list(identification, excluded={node_id})
         new_node = destination is None
         if destination is None:
-            destination = self._node_from_stored(node_id, [member], identification.screen.embedding)
+            destination = self._node_from_stored(node_id, [member])
         decision = identification.decision
         return {
             "new_node": new_node,
@@ -1965,16 +1970,12 @@ class GraphManager:
             ui_tree_settled=record.get("ui_tree_settled") is True,
         )
         described = stored.described
-        screen = _ScreenDescription(
-            described.page_description,
-            self._embed(described.page_description),
-            described.state,
-            described.elements,
-        )
+        screen = _ScreenDescription(described.page_description, described.state, described.elements)
         return _Identification(
             observation,
             self._image_vectors[member],
             screen,
+            self._text_vectors[member],
             _Decision(expected_node=None),
             verdicts=verdicts,
         )
@@ -1983,19 +1984,12 @@ class GraphManager:
         record = read_observation_record(self._require_steps_dir(), member) or {}
         return as_str(record.get("activity"), "")
 
-    def _node_from_stored(
-        self, node_id: str, members: Sequence[str], embedding: list[float] | None = None
-    ) -> str:
+    def _node_from_stored(self, node_id: str, members: Sequence[str]) -> str:
         """Add a node for ``members`` of ``node_id`` from the stored describe output of the
-        earliest of them, its representative: its description, embedded unless
-        ``embedding`` is given, and its elements."""
+        earliest of them, its representative: its description and its elements."""
         earliest = min(members, key=_step_order)
         described = self._stored_screens[earliest].described
-        if embedding is None:
-            embedding = self._embed(described.page_description)
-        screen = _ScreenDescription(
-            described.page_description, embedding, described.state, described.elements
-        )
+        screen = _ScreenDescription(described.page_description, described.state, described.elements)
         new_node = self._add_screen_node(
             screen,
             as_str(self.graph.nodes[node_id].get("package"), ""),
@@ -2137,13 +2131,15 @@ class GraphManager:
             return
         edge_data.update(remaining)
         if indices:
-            edge_data["instruction_templates"] = []
+            _drop_templates(edge_data)
         edge_data["visit_count"] = max(
             len(remaining["actions"]), edge_data.get("visit_count", 0) - traversals
         )
 
     def _edge_to_normalize(self, source: str, target: str) -> _EdgeToNormalize | None:
-        """Return the edge's normalize_edge inputs, or None when the skip rules spare it a call."""
+        """Return the edge's normalize_edge inputs, or None when the skip rules spare it a call:
+        it has no instruction, its last normalization covered the instructions it has, or it has
+        one short instruction with no value in it."""
         edge_data = self.graph[source][target]
         instructions = edge_data.get("instructions", [])
         observations = edge_data.get("target_observations", [])
@@ -2152,15 +2148,9 @@ class GraphManager:
         if not recorded:
             return None
 
-        existing_templates = edge_data.get("instruction_templates", [])
-        if existing_templates:
-            examples = (
-                existing_templates[0].get("examples", [])
-                if isinstance(existing_templates[0], dict)
-                else []
-            )
-            if len(examples) >= len(recorded):
-                return None
+        instructions_hash = _instructions_hash(recorded)
+        if edge_data.get("normalized_instructions_hash") == instructions_hash:
+            return None
 
         if len(recorded) == 1:
             instr = recorded[0]
@@ -2175,11 +2165,13 @@ class GraphManager:
             target,
             list(instructions),
             list(observations) if any(observations) else None,
+            instructions_hash,
         )
 
-    def _apply_edge_template(self, edge: _EdgeToNormalize, result: dict[str, Any]) -> bool:
-        """Write normalize_edge's *result* to the edge; return whether it is a template."""
+    def _apply_edge_template(self, edge: _EdgeToNormalize, result: dict[str, Any]) -> None:
+        """Write normalize_edge's *result* to the edge, and record the instructions it covered."""
         edge_data = self.graph[edge.source][edge.target]
+        edge_data["normalized_instructions_hash"] = edge.instructions_hash
         if result.get("is_template"):
             edge_data["instruction_templates"] = [
                 {
@@ -2196,21 +2188,20 @@ class GraphManager:
                 result["instruction_template"],
                 len(result.get("examples", [])),
             )
-            return True
-
-        edge_data["instruction_templates"] = []
-        return False
+        else:
+            edge_data["instruction_templates"] = []
 
     def _normalize_edges(self, edges: Iterable[tuple[str, str]]) -> int:
         """Normalize *edges* into templates, sending their calls concurrently.
 
         The skip rules choose the edges that need a call, and the results are written and
         logged in the order of *edges*, both on this thread, whichever call returns first.
-        Returns the number of edges that produced a template.
+        Returns the number of *edges* that hold a template afterwards, including those the
+        skip rules spared a call.
         """
         client, settings = self._require_page_detail()
-        chosen = [self._edge_to_normalize(source, target) for source, target in edges]
-        templatized = 0
+        edge_list = list(edges)
+        chosen = [self._edge_to_normalize(source, target) for source, target in edge_list]
 
         def call(edge: _EdgeToNormalize) -> dict[str, Any]:
             return normalize_edge(
@@ -2220,20 +2211,22 @@ class GraphManager:
                 settings=settings,
             )
 
-        def apply(edge: _EdgeToNormalize, result: dict[str, Any]) -> None:
-            nonlocal templatized
-            if self._apply_edge_template(edge, result):
-                templatized += 1
-
         call_concurrently(
-            "normalize_edge", call, [edge for edge in chosen if edge is not None], apply
+            "normalize_edge",
+            call,
+            [edge for edge in chosen if edge is not None],
+            self._apply_edge_template,
         )
-        return templatized
+        return sum(
+            1
+            for source, target in edge_list
+            if self.graph[source][target].get("instruction_templates")
+        )
 
     def normalize_node_edges(self, node_id: str) -> int:
         """Normalize all outgoing edges from one node.
 
-        Returns the number of outgoing edges that produced a parameterized template.
+        Returns the number of outgoing edges that hold a template afterwards.
         """
         if self._page_detail() is None or node_id not in self.graph:
             return 0
@@ -2278,9 +2271,10 @@ class GraphManager:
         exploration finishes. Replaces per-edge on-the-fly normalization to
         save API costs.
 
-        For each edge, groups all instructions and their target observations,
-        then calls the normalizer to produce templates with {param} placeholders.
-        Returns the number of edges that produced a parameterized template.
+        For each edge whose instructions changed since its last normalization, groups
+        all instructions and their target observations, then calls the normalizer to
+        produce templates with {param} placeholders. Returns the number of edges that
+        hold a template afterwards.
         """
         if self._page_detail() is None:
             logger.warning("No page_detail settings — skipping normalization")
@@ -2640,14 +2634,9 @@ class GraphManager:
                 ranked[-1] = start_candidate
         return ranked
 
-    @staticmethod
-    def embeddings_path(graph_path: Path) -> Path:
-        """Return the companion embeddings file path for a graph JSON."""
-        return graph_path.with_suffix(".emb.json")
-
     def save_graph(self, path: str | Path) -> None:
-        """Save graph to a JSON file, with text embeddings in a separate file and the
-        image vectors in the step log beside it."""
+        """Save graph to a JSON file, with its members' text vectors in the file
+        ``text_embeddings_path`` names and the image vectors in the step log beside it."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2659,8 +2648,6 @@ class GraphManager:
             "nodes": [],
             "edges": [],
         }
-
-        embeddings: dict[str, dict[str, object]] = {}
 
         for node_id, attrs in self.graph.nodes(data=True):
             activities = attrs.get("activities", [attrs.get("activity", "")])
@@ -2680,13 +2667,6 @@ class GraphManager:
             }
             data["nodes"].append(node_data)
 
-            emb = attrs.get("description_embedding")
-            if emb:
-                embeddings[node_id] = {
-                    "model": attrs.get("description_embedding_model") or None,
-                    "embedding": emb,
-                }
-
         for source, target, attrs in self.graph.edges(data=True):
             edge_data = {
                 "source": source,
@@ -2700,15 +2680,19 @@ class GraphManager:
                 "action_flags": attrs.get("action_flags", []),
                 "visit_count": attrs.get("visit_count", 0),
             }
-            for key in ("schema_deltas", "setups", "setup_anchors"):
+            for key in ("schema_deltas", "setups", "setup_anchors", "normalized_instructions_hash"):
                 if attrs.get(key):
                     edge_data[key] = attrs[key]
             data["edges"].append(edge_data)
 
+        # Before the graph: loading requires a text vector for every described member,
+        # so a crash between the two writes must not leave a member without one.
+        if self.embedding is not None and self._text_vectors:
+            save_embeddings(
+                text_embeddings_path(path), self._text_vectors, model=self.embedding.model
+            )
         write_json_atomically(path, data, indent=2, ensure_ascii=False)
 
-        emb_path = self.embeddings_path(path)
-        write_json_atomically(emb_path, embeddings, ensure_ascii=False)
         if self.image_embedding is not None and self._image_vectors:
             save_image_embeddings(
                 graph_steps_dir(path), self._image_vectors, model=self.image_embedding.model
@@ -2719,14 +2703,16 @@ class GraphManager:
         )
 
     def load_graph(self, path: str | Path, *, default_package_name: str = "") -> None:
-        """Load graph from a JSON file (and companion embeddings file), with the step
-        log beside it as the manager's ``steps_dir``, its image vectors when the
-        manager has image-embedding settings, and its members' stored screens.
+        """Load graph from a JSON file, with its members' text vectors when the manager
+        has embedding settings, the step log beside it as the manager's ``steps_dir``,
+        its image vectors when the manager has image-embedding settings, and its
+        members' stored screens.
 
         ``default_package_name`` stands in for the ``package_name`` of a file that has
         none. A node without member observations, or whose representative has no image
         in the step log, or neither a tree there nor a recorded reason it has none,
-        raises ``ValueError`` naming it.
+        raises ``ValueError`` naming it, and so does a text-vector file without the
+        vector of every member with a stored screen.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2743,19 +2729,16 @@ class GraphManager:
             if self.image_embedding is not None
             else {}
         )
-
-        emb_path = self.embeddings_path(path)
-        embeddings: dict[str, list[float]] = {}
-        embedding_models: dict[str, str] = {}
-        if emb_path.exists():
-            with emb_path.open(encoding="utf-8") as f:
-                for node_id, entry in as_str_dict(json.load(f)).items():
-                    if isinstance(entry, dict):
-                        tagged = as_str_dict(entry)
-                        embeddings[node_id] = as_float_list(tagged.get("embedding"))
-                        embedding_models[node_id] = as_str(tagged.get("model"), "")
-                    else:
-                        embeddings[node_id] = as_float_list(entry)
+        text_vectors = (
+            load_embeddings(
+                text_embeddings_path(path),
+                model=self.embedding.model,
+                kind="text",
+                required=stored_screens.keys(),
+            )
+            if self.embedding is not None
+            else {}
+        )
 
         self.package_name = as_str(data.get("package_name"), "") or default_package_name
         self._next_id = data.get("next_id", 0)
@@ -2763,6 +2746,7 @@ class GraphManager:
         self.steps_dir = steps_dir
         self._image_vectors = image_vectors
         self._unit_vectors = {}
+        self._text_vectors = text_vectors
         self._stored_screens = stored_screens
         self._node_aliases = {
             old: new
@@ -2773,7 +2757,6 @@ class GraphManager:
 
         for node_data in data.get("nodes", []):
             node_id = node_data["id"]
-            emb = embeddings.get(node_id, node_data.get("description_embedding", []))
             activities = node_data.get("activities", [node_data.get("activity", "")])
             self.graph.add_node(
                 node_id,
@@ -2784,12 +2767,6 @@ class GraphManager:
                 state_schema=node_data.get("state_schema", {}),
                 last_detail_snapshot=node_data.get("last_detail_snapshot", {}),
                 interactable_elements=node_data.get("interactable_elements", []),
-                description_embedding=emb,
-                description_embedding_model=(
-                    embedding_models.get(node_id, "")
-                    if node_id in embeddings
-                    else as_str(node_data.get("description_embedding_model"), "")
-                ),
                 last_normalized_visit_milestone=node_data.get("last_normalized_visit_milestone", 0),
                 visit_count=node_data.get("visit_count", 0),
                 observations=_member_observations(node_data),
@@ -2807,7 +2784,7 @@ class GraphManager:
                 "action_flags": edge_data.get("action_flags", []),
                 "visit_count": edge_data.get("visit_count", 0),
             }
-            for key in ("schema_deltas", "setups", "setup_anchors"):
+            for key in ("schema_deltas", "setups", "setup_anchors", "normalized_instructions_hash"):
                 if edge_data.get(key):
                     edge_attrs[key] = edge_data[key]
             self.graph.add_edge(
@@ -2822,24 +2799,6 @@ class GraphManager:
             self.graph.number_of_nodes(),
             self.graph.number_of_edges(),
         )
-
-    def find_node_by_description(self, query: str) -> list[tuple[str, float]]:
-        """Find nodes whose page_description is most similar to the query.
-
-        Returns a list of (node_id, similarity) sorted descending.
-        """
-        candidates = [
-            (_node_id(node_id), self._text_embedding(_node_id(node_id), data))
-            for node_id, data in self.graph.nodes(data=True)
-        ]
-        query_emb = self._embed(query)
-        results = score_by_cosine(
-            query_emb,
-            candidates,
-            scope="find_node_by_description description-embedding",
-        )
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results
 
     def shortest_path(self, source: str, target: str) -> list[str] | None:
         """Find shortest weighted path between two nodes. Returns list of node IDs or None."""

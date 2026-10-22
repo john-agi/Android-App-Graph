@@ -1,8 +1,8 @@
 """Tests for android_app_graph.utils.graph_manager.
 
 Most VLM and embedding calls are replaced by scripted fakes patched onto the
-graph_manager module namespace; the text-embedding provenance tests run the real
-SDK over the offline mock transport. No test needs a device, the network or keys.
+graph_manager module namespace; a few tests run the real SDK over the offline mock
+transport. No test needs a device, the network or keys.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import io
 import itertools
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -31,6 +32,7 @@ from openrouter import OpenRouter
 from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
+from android_app_graph.graph_files import save_embeddings, text_embeddings_path
 from android_app_graph.step_log import (
     ActionEffect,
     ActionHit,
@@ -46,6 +48,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     MAX_SETUP_ACTIONS,
     NORMALIZE_EVERY_N_VISITS,
+    SHORT_LIST_SOURCES,
     SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
     GraphManager,
@@ -243,13 +246,28 @@ def add_screen(
         "state_schema": {},
         "last_detail_snapshot": {},
         "interactable_elements": [],
-        "description_embedding": EMBEDDINGS.get(description, UNKNOWN_EMBEDDING),
-        "description_embedding_model": gm.embedding_model,
         "last_normalized_visit_milestone": 0,
         "visit_count": 0,
     }
     attrs.update(overrides)
     gm.graph.add_node(node_id, **attrs)
+
+
+def with_text_vectors(gm: GraphManager, steps_dir: Path) -> GraphManager:
+    """Return ``gm`` loaded back from a graph file beside ``steps_dir`` that gives each
+    member a text vector, the embedding of its node's description, as exploration
+    gives each screen it describes."""
+    path = steps_dir.parent / "graph.json"
+    gm.save_graph(path)
+    vectors = {
+        member: EMBEDDINGS.get(data["page_description"], UNKNOWN_EMBEDDING)
+        for _, data in gm.graph.nodes(data=True)
+        for member in data.get("observations", [])
+    }
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+    loaded = make_manager()
+    loaded.load_graph(path)
+    return loaded
 
 
 @dataclass
@@ -343,12 +361,6 @@ def vlm(monkeypatch: pytest.MonkeyPatch) -> FakeVlm:
     monkeypatch.setattr(gm_module, "get_embedding", fake.get_embedding)
     monkeypatch.setattr(gm_module, "get_image_embedding", fake.get_image_embedding)
     return fake
-
-
-def test_a_manager_without_embedding_settings_rejects_reading_its_model() -> None:
-    gm = GraphManager(client=FAKE_CLIENT)
-    with pytest.raises(RuntimeError, match="needs embedding settings"):
-        _ = gm.embedding_model
 
 
 def test_network_guard_blocks_outbound_connections() -> None:
@@ -735,7 +747,7 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(
     assert second == "s1_promo_overlay"
     assert vlm.kinds() == [
         *("image", "describe", "embed"),
-        *("image", "describe", "embed", "verify", "embed", "embed"),
+        *("image", "describe", "embed", "verify", "embed"),
     ]
     renamed = gm.get_node("s0_home_feed")
     assert renamed is not None
@@ -826,79 +838,35 @@ def test_identify_state_lists_a_state_key_shared_by_two_nodes_once(
     assert vlm.calls[1][1]["existing_keys"] == ["tab", "sort", "filter"]
 
 
-def test_identify_state_skips_candidates_without_an_embedding(
-    vlm: FakeVlm, screen: Screens
+def test_the_text_source_skips_text_vectors_of_another_dimension_with_one_warning(
+    vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens, tmp_path: Path
 ) -> None:
-    vlm.descriptions.append(("Home screen", {}, []))
+    """A vector tagged with the configured embedding model but of another dimension is
+    never scored against the screen's (see cosine_similarity's ValueError)."""
     gm = make_manager(screen.steps_dir)
-    add_screen(gm, "s0_home", "Home screen", description_embedding=None)
-
-    node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
-
-    assert node_id == "s0_home_screen"
-
-
-def test_identify_state_skips_an_empty_embedding_without_a_stale_warning(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
-) -> None:
-    """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
-    companion ``_embeddings.json`` nor an inline vector; that is a missing
-    embedding, not a stale-dimension one, and must be skipped silently.
-    """
+    add_screen(gm, "s0_stale", "Home screen", **members(screen.steps_dir, b"stale", b"stale-2"))
+    add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
+    vlm.images.update({b64(b"stale"): FAR, b64(b"stale-2"): FAR})
+    gm.embed_missing_members()
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    (home,) = gm.graph.nodes["s1_home"]["observations"]
+    vectors = {member: [1.0, 0.0] for member in gm.graph.nodes["s0_stale"]["observations"]}
+    vectors[home] = EMBEDDINGS["Home feed"]
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+    loaded = make_manager()
+    loaded.load_graph(path)
     vlm.descriptions.append(("Home screen", {}, []))
     vlm.verdicts.append({"same": True, "reason": "same page"})
-    gm = make_manager(screen.steps_dir)
-    add_screen(
-        gm,
-        "s0_empty",
-        "Home screen",
-        description_embedding=[],
-        **members(screen.steps_dir, b"empty"),
-    )
-    add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
-    vlm.images[b64(b"empty")] = FAR
-    gm.embed_missing_members()
 
     with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+        node_id = loaded.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
     assert node_id == "s1_home"
-    assert "stale" not in caplog.text
-
-
-def test_identify_state_skips_a_stale_dimension_embedding_and_logs_once(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
-) -> None:
-    """A vector tagged with the configured embedding model but of a different
-    dimension must never be scored against the fresh query vector (see
-    cosine_similarity's ValueError); it is skipped and warned about once, not
-    once per candidate. A vector tagged with a different model never gets
-    here: its provenance is rejected first.
-    """
-    vlm.descriptions.append(("Home screen", {}, []))
-    vlm.verdicts.append({"same": True, "reason": "same page"})
-    gm = make_manager(screen.steps_dir)
-    add_screen(
-        gm,
-        "s0_stale",
-        "Home screen",
-        description_embedding=[1.0, 0.0],
-        **members(screen.steps_dir, b"stale"),
-    )
-    add_screen(gm, "s1_home", "Home feed", **members(screen.steps_dir))
-    vlm.images[b64(b"stale")] = FAR
-    gm.embed_missing_members()
-
-    with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
-
-    assert node_id == "s1_home"
-    stale_warnings = [
+    (stale_warning,) = [
         m for m in caplog.messages if "description-embedding: embedding cache is stale" in m
     ]
-    assert len(stale_warnings) == 1
-    assert "query dim=3" in stale_warnings[0]
-    assert "dim(s)=[2]" in stale_warnings[0]
+    assert "stale for 2 vector(s): query dim=3, cached dim(s)=[2]" in stale_warning
 
 
 def test_a_node_whose_description_scores_low_is_verified(vlm: FakeVlm, screen: Screens) -> None:
@@ -942,10 +910,13 @@ def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
 ) -> None:
     """Its description scores 0 and its representative looks unlike the screen; its other
     member is the screen's look-alike."""
-    gm = make_manager(screen.steps_dir)
-    add_screen(gm, "s0_settings", "Settings page", **members(screen.steps_dir, b"rep", b"twin"))
+    explored = make_manager(screen.steps_dir)
+    add_screen(
+        explored, "s0_settings", "Settings page", **members(screen.steps_dir, b"rep", b"twin")
+    )
     vlm.images.update({b64(b"rep"): FAR, b64(b"twin"): NEAR, SHOT_A: NEAR})
-    gm.embed_missing_members()
+    explored.embed_missing_members()
+    gm = with_text_vectors(explored, screen.steps_dir)
     vlm.calls.clear()
     vlm.descriptions.append(("Search results", {}, []))
     vlm.verdicts.append({"same": True, "reason": "a scrolled list"})
@@ -959,9 +930,10 @@ def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
     assert candidate["sources"] == {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}
 
 
-def _three_image_matches_and_a_text_match(gm: GraphManager, vlm: FakeVlm, steps_dir: Path) -> None:
+def _three_image_matches_and_a_text_match(vlm: FakeVlm, steps_dir: Path) -> GraphManager:
     """s0-s2 look like the screen and are described otherwise; s3 is described as it is
     and looks unlike it."""
+    gm = make_manager(steps_dir)
     for number, image in enumerate((b"a", b"b", b"c")):
         add_screen(gm, f"s{number}_lookalike", "Settings page", **members(steps_dir, image))
         vlm.images[b64(image)] = NEAR
@@ -971,13 +943,13 @@ def _three_image_matches_and_a_text_match(gm: GraphManager, vlm: FakeVlm, steps_
     gm.embed_missing_members()
     vlm.calls.clear()
     vlm.descriptions.append(("Search results", {}, []))
+    return with_text_vectors(gm, steps_dir)
 
 
 def test_the_best_text_match_is_verified_within_the_cap_behind_three_image_matches(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the results"}])
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -994,8 +966,7 @@ def test_the_best_text_match_is_verified_within_the_cap_behind_three_image_match
 
 
 def test_verification_stops_at_the_first_confirmation(vlm: FakeVlm, screen: Screens) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.append({"same": True, "reason": "the same list"})
 
     assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == "s0_lookalike"
@@ -1006,8 +977,7 @@ def test_verification_stops_at_the_first_confirmation(vlm: FakeVlm, screen: Scre
 def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend(_rejection(node) for node in ("s0", "s3", "s1"))
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -1039,8 +1009,7 @@ def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once
 def test_an_expected_node_is_verified_right_after_the_describe_call_and_skips_the_short_list(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.append({"same": True, "reason": "the page the replay leads to"})
     observation = screen(HOME, SHOT_A, PACKAGE)
 
@@ -1056,14 +1025,13 @@ def test_an_expected_node_is_verified_right_after_the_describe_call_and_skips_th
 def test_a_rejected_expected_node_stays_off_the_short_list(vlm: FakeVlm, screen: Screens) -> None:
     """The order of model calls: image embedding, describe, text embedding, the expected
     node, the short list."""
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the same list"}])
     observation = screen(HOME, SHOT_A, PACKAGE)
 
     assert gm.identify_state(observation, expected_node="s0_lookalike") == "s1_lookalike"
 
-    assert vlm.kinds() == ["image", "describe", "embed", "verify", "embed", "embed", "verify"]
+    assert vlm.kinds() == ["image", "describe", "embed", "verify", "embed", "verify"]
     assert verified(vlm) == [b64(b"a"), b64(b"b")]
     identify = screen.record(observation)["identify"]
     assert [c["node"] for c in identify["candidates"]] == [
@@ -1076,8 +1044,7 @@ def test_a_rejected_expected_node_stays_off_the_short_list(vlm: FakeVlm, screen:
 
 
 def test_an_expected_node_adds_one_verifier_call_to_the_cap(vlm: FakeVlm, screen: Screens) -> None:
-    gm = make_manager(screen.steps_dir)
-    _three_image_matches_and_a_text_match(gm, vlm, screen.steps_dir)
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend(_rejection(node) for node in ("s2", "s0", "s3", "s1"))
 
     gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_node="s2_lookalike")
@@ -1213,6 +1180,92 @@ def test_a_reloaded_graph_matches_its_members_exactly(vlm: FakeVlm, tmp_path: Pa
     assert loaded.graph.nodes[node_id]["last_detail_snapshot"] == {"tab": "home"}
     record = json.loads((steps_dir / f"{second.observation_id}.json").read_text("utf-8"))
     assert record["describe"]["copied_from"] == first.observation_id
+
+
+def test_a_described_screen_s_text_vector_is_saved_beside_the_graph_and_loaded_back(
+    vlm: FakeVlm, screen: Screens, tmp_path: Path
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    observation = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(observation)
+    path = tmp_path / "graph.json"
+
+    gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    assert json.loads((tmp_path / "graph_text_emb.json").read_text("utf-8")) == {
+        "model": EMBEDDING.model,
+        "embeddings": {observation.observation_id: EMBEDDINGS["Home screen"]},
+    }
+    assert loaded.text_vector(observation.observation_id) == EMBEDDINGS["Home screen"]
+
+
+def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
+    tmp_path: Path,
+) -> None:
+    steps_dir = tmp_path / "steps"
+    member = members(steps_dir, b"kept", b"lost")
+    kept, lost = member["observations"]
+    describe = {"page_description": "Home screen", "state": {}, "elements": []}
+    for observation_id in (kept, lost):
+        record = {"pixel_hash": f"hash-{observation_id}", "describe": describe}
+        (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+    path = tmp_path / "graph.json"
+    path.write_text(
+        json.dumps({"package_name": PACKAGE, "nodes": [{"id": "s0_home", **member}]}), "utf-8"
+    )
+    vectors = {kept: EMBEDDINGS["Home screen"]}
+    save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
+
+    with pytest.raises(ValueError, match=r"graph_text_emb\.json has no vector") as raised:
+        make_manager().load_graph(path)
+
+    assert str(raised.value).endswith(
+        f"for observation(s) {lost}. Explore the app again into a new graph directory."
+    )
+
+
+def test_an_exact_match_records_its_member_s_text_vector_without_a_request(
+    vlm: FakeVlm, screen: Screens, tmp_path: Path
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    member = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(member)
+    copy = screen(HOME, SHOT_A, PACKAGE)
+
+    gm.identify_state(copy)
+    gm.save_graph(tmp_path / "graph.json")
+
+    assert vlm.kinds() == ["image", "describe", "embed", "image"]
+    stored = json.loads((tmp_path / "graph_text_emb.json").read_text("utf-8"))
+    assert stored["embeddings"] == {
+        member.observation_id: EMBEDDINGS["Home screen"],
+        copy.observation_id: EMBEDDINGS["Home screen"],
+    }
+
+
+def test_a_screen_keeps_the_vector_of_the_description_its_first_rejection_refined(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
+    vlm.verdicts.append(
+        {
+            "same": False,
+            "reason": "an overlay",
+            "existing_description": "",
+            "new_description": "Promo overlay",
+        }
+    )
+    gm = make_manager(screen.steps_dir)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    overlay = screen(HOME, SHOT_B, PACKAGE)
+
+    gm.identify_state(overlay)
+
+    assert gm.text_vector(overlay.observation_id) == EMBEDDINGS["Promo overlay"]
 
 
 @pytest.mark.parametrize(
@@ -1366,6 +1419,30 @@ def test_closest_member_raises_for_a_node_without_members() -> None:
         gm.closest_member("s0_home", NEAR)
 
 
+def test_the_text_source_ranks_a_node_by_its_member_closest_to_the_screen(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """The settings node's first member was described as a settings page and its second
+    as the search results the screen shows; the banner's only member is described less
+    like them."""
+    vlm.descriptions.extend(
+        [("Settings page", {}, []), ("Search results", {}, []), ("Promo banner", {}, [])]
+    )
+    vlm.verdicts.extend(
+        [{"same": True, "reason": "a scrolled list"}, {"same": False, "reason": "a banner"}]
+    )
+    gm = make_manager(screen.steps_dir)
+    settings = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    assert gm.identify_state(screen(HOME, SHOT_B, PACKAGE)) == settings
+    banner = gm.identify_state(screen(HOME, b64(b"banner"), PACKAGE))
+    (text,) = (source for source in SHORT_LIST_SOURCES if source.name == "text")
+    query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=EMBEDDINGS["Search results"])
+
+    ranked = sorted(text.scores(gm, query, [banner, settings]), key=lambda kv: kv[1], reverse=True)
+
+    assert ranked == [(settings, pytest.approx(1.0)), (banner, pytest.approx(3**-0.5))]
+
+
 def test_the_short_list_orders_ties_in_rank_by_image_score(vlm: FakeVlm, tmp_path: Path) -> None:
     steps_dir = tmp_path / "steps"
     gm = make_manager(steps_dir)
@@ -1375,7 +1452,7 @@ def test_the_short_list_orders_ties_in_rank_by_image_score(vlm: FakeVlm, tmp_pat
     gm.embed_missing_members()
 
     query = ScreenQuery(image_vector=NEAR, description_embedding=EMBEDDINGS["Search results"])
-    ranked = gm.short_list(query, ["s0_text", "s1_image"])
+    ranked = with_text_vectors(gm, steps_dir).short_list(query, ["s0_text", "s1_image"])
 
     assert [(c.node_id, c.best_rank, c.sources) for c in ranked] == [
         ("s1_image", 0, {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}),
@@ -1399,18 +1476,22 @@ def test_rename_node_returns_a_missing_id_unchanged() -> None:
     assert gm.rename_node("s9_missing", "Anything") == "s9_missing"
 
 
-def test_rename_node_tags_the_recomputed_embedding_with_the_current_model(vlm: FakeVlm) -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", description_embedding_model="provider/old")
+def test_a_rename_keeps_the_members_text_vectors_without_a_request(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    observation = screen(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(observation)
+    vlm.calls.clear()
 
-    new_id = gm.rename_node("s0_home", "Settings page")
+    gm.rename_node(node_id, "Settings page")
 
-    assert vlm.kinds() == ["embed"]
-    assert gm.graph.nodes[new_id]["description_embedding"] == EMBEDDINGS["Settings page"]
-    assert gm.graph.nodes[new_id]["description_embedding_model"] == gm.embedding_model
+    assert vlm.calls == []
+    assert gm.text_vector(observation.observation_id) == EMBEDDINGS["Home screen"]
 
 
-def test_rename_node_keeps_the_numeric_prefix_and_relabels_edges(vlm: FakeVlm) -> None:
+def test_rename_node_keeps_the_numeric_prefix_and_relabels_edges() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
@@ -1420,31 +1501,26 @@ def test_rename_node_keeps_the_numeric_prefix_and_relabels_edges(vlm: FakeVlm) -
 
     assert new_id == "s0_home_feed"
     assert gm.graph.has_edge("s0_home_feed", "s1_settings")
-    assert vlm.kinds() == ["embed"]
-    node = gm.get_node(new_id)
-    assert node is not None
-    assert node["description_embedding"] == EMBEDDINGS["Home feed"]
+    assert gm.graph.nodes[new_id]["page_description"] == "Home feed"
 
 
-def test_rename_node_suffixes_the_id_on_collision(vlm: FakeVlm) -> None:
+def test_rename_node_suffixes_the_id_on_collision() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s0_settings_page", "Settings page")
     add_screen(gm, "s0_settings_page_2", "Settings page")
 
     assert gm.rename_node("s0_home", "Settings page") == "s0_settings_page_3"
-    assert vlm.kinds() == ["embed"]
 
 
-def test_rename_node_without_an_underscore_uses_the_whole_id_as_prefix(vlm: FakeVlm) -> None:
+def test_rename_node_without_an_underscore_uses_the_whole_id_as_prefix() -> None:
     gm = make_manager()
     add_screen(gm, "start", "Home screen")
 
     assert gm.rename_node("start", "Home feed") == "start_home_feed"
-    assert vlm.kinds() == ["embed"]
 
 
-def test_rename_node_to_the_same_id_only_refreshes_the_embedding(vlm: FakeVlm) -> None:
+def test_rename_node_to_the_same_id_records_no_alias() -> None:
     gm = make_manager()
     add_screen(
         gm,
@@ -1456,15 +1532,12 @@ def test_rename_node_to_the_same_id_only_refreshes_the_embedding(vlm: FakeVlm) -
 
     assert gm.rename_node("s0_home_screen", "Home screen") == "s0_home_screen"
 
-    assert vlm.kinds() == ["embed"]
     assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
     assert gm.graph.nodes["s0_home_screen"]["observations"] == ["000000"]
     assert gm.graph.nodes["s0_home_screen"]["representative_observation"] == "000000"
 
 
-def test_rename_node_keeps_the_members_and_representative_under_the_new_id(
-    vlm: FakeVlm,
-) -> None:
+def test_rename_node_keeps_the_members_and_representative_under_the_new_id() -> None:
     gm = make_manager()
     add_screen(
         gm,
@@ -1476,7 +1549,6 @@ def test_rename_node_keeps_the_members_and_representative_under_the_new_id(
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
-    assert vlm.kinds() == ["embed"]
     assert new_id == "s0_home_feed"
     assert gm.graph.nodes[new_id]["observations"] == ["000000", "000004"]
     assert gm.graph.nodes[new_id]["representative_observation"] == "000000"
@@ -1490,7 +1562,7 @@ def test_an_exact_match_joins_the_node_under_its_new_id(vlm: FakeVlm, screen: Sc
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
     assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == new_id
-    assert vlm.kinds() == ["image", "describe", "embed", "embed", "image"]
+    assert vlm.kinds() == ["image", "describe", "embed", "image"]
 
 
 @pytest.mark.usefixtures("vlm")
@@ -2694,7 +2766,100 @@ def test_normalize_all_edges_templatizes_and_then_skips(normalizer: FakeNormaliz
     assert normalizer.calls[0]["target_observations"] is None
     assert normalizer.calls[0]["settings"] == PAGE_DETAIL
 
-    gm.normalize_all_edges()  # the existing template already covers every instruction
+    gm.normalize_all_edges()  # nothing changed since the last normalization
+
+    assert len(normalizer.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("result", "templated"),
+    [({**TEMPLATE_RESULT, "examples": []}, 1), ({"is_template": False}, 0)],
+    ids=["template", "not-a-template"],
+)
+def test_normalize_all_edges_does_not_send_a_normalized_edge_again(
+    normalizer: FakeNormalizer, result: dict[str, Any], templated: int
+) -> None:
+    """Whatever the model answered, and however many examples its template lists."""
+    normalizer.result = result
+    gm = make_manager()
+    _search_graph(gm)
+
+    assert gm.normalize_all_edges() == templated
+    assert gm.normalize_all_edges() == templated
+
+    assert len(normalizer.calls) == 1
+
+
+def test_normalize_all_edges_sends_an_edge_again_once_it_gains_an_instruction(
+    normalizer: FakeNormalizer,
+) -> None:
+    """However many examples its template lists: here two, as many as the instructions it ends
+    with."""
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_results", "Search results")
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "shoes"},
+        details=EdgeDetails(instruction='search for "shoes"'),
+    )
+    gm.normalize_all_edges()
+    gm.normalize_all_edges()
+    gm.add_edge(
+        "s0_home",
+        "s1_results",
+        {"type": "hats"},
+        details=EdgeDetails(instruction='search for "hats"'),
+    )
+
+    gm.normalize_all_edges()
+
+    assert [call["instructions"] for call in normalizer.calls] == [
+        ['search for "shoes"'],
+        ['search for "shoes"', 'search for "hats"'],
+    ]
+
+
+def test_normalize_all_edges_sends_a_relabelled_edge_again_even_under_the_same_instruction(
+    normalizer: FakeNormalizer,
+) -> None:
+    """Relabelling drops the edge's templates, so the next normalization rebuilds them."""
+    gm = make_manager()
+    _search_graph(gm)
+    gm.normalize_all_edges()
+
+    gm.relabel_edge_action("s0_home", "s1_results", 1, 'search for "hats"')
+    gm.normalize_all_edges()
+
+    assert len(normalizer.calls) == 2
+    assert gm.graph["s0_home"]["s1_results"]["instruction_templates"][0]["template"] == (
+        "search for {query}"
+    )
+
+
+def test_a_reloaded_graph_keeps_what_each_edge_last_normalization_covered(
+    normalizer: FakeNormalizer, tmp_path: Path
+) -> None:
+    normalizer.result = {**TEMPLATE_RESULT, "examples": []}
+    steps_dir = tmp_path / "steps"
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir))
+    add_screen(gm, "s1_results", "Search results", **members(steps_dir))
+    for query in ("shoes", "hats"):
+        gm.add_edge(
+            "s0_home",
+            "s1_results",
+            {"type": query},
+            details=EdgeDetails(instruction=f'search for "{query}"'),
+        )
+    gm.normalize_all_edges()
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    loaded.normalize_all_edges()
 
     assert len(normalizer.calls) == 1
 
@@ -2713,21 +2878,6 @@ def test_normalize_all_edges_passes_target_observations(normalizer: FakeNormaliz
     gm.normalize_all_edges()
 
     assert normalizer.calls[0]["target_observations"] == ["shoe results"]
-
-
-def test_normalize_all_edges_renormalizes_past_a_non_dict_template(
-    normalizer: FakeNormalizer,
-) -> None:
-    gm = make_manager()
-    _search_graph(gm)
-    gm.graph["s0_home"]["s1_results"]["instruction_templates"] = ["stale string"]
-
-    gm.normalize_all_edges()
-
-    assert len(normalizer.calls) == 1
-    assert gm.graph["s0_home"]["s1_results"]["instruction_templates"][0]["template"] == (
-        "search for {query}"
-    )
 
 
 def test_normalize_all_edges_clears_templates_when_the_result_is_not_a_template(
@@ -2777,7 +2927,7 @@ def test_normalize_all_edges_counts_only_the_recorded_instructions(
     )
 
     gm.normalize_all_edges()
-    gm.normalize_all_edges()  # two examples cover the two recorded instructions
+    gm.normalize_all_edges()  # nothing changed since the last normalization
 
     assert len(normalizer.calls) == 1
     assert normalizer.calls[0]["instructions"] == [
@@ -3714,10 +3864,6 @@ def test_identify_state_keeps_apart_packages_that_share_three_segments(
     assert vlm.calls[1][1]["existing_nodes"] is None
 
 
-def test_embeddings_path_is_a_companion_of_the_graph_file() -> None:
-    assert GraphManager.embeddings_path(Path("/graphs/app.json")) == Path("/graphs/app.emb.json")
-
-
 def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     tmp_path: Path, vlm: FakeVlm
 ) -> None:
@@ -3732,8 +3878,8 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     gm.save_graph(graph_path)
 
     assert sorted(path.name for path in graph_path.parent.iterdir()) == [
-        "graph.emb.json",
         "graph.json",
+        "graph_text_emb.json",
         "steps",
     ]
     assert sorted(path.name for path in steps_dir.iterdir()) == [
@@ -3756,14 +3902,11 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     assert restored is not None
     assert restored["observations"] == [observation.observation_id]
     assert restored["representative_observation"] == observation.observation_id
-    assert restored["description_embedding"] == EMBEDDINGS["Home screen"]
-    assert restored["description_embedding_model"] == gm.embedding_model
     assert loaded.steps_dir == steps_dir
-    assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
     assert loaded.image_vector(observation.observation_id) == [0.0, 0.6, 0.8]
 
 
-def test_node_aliases_survive_save_and_load(tmp_path: Path, vlm: FakeVlm) -> None:
+def test_node_aliases_survive_save_and_load(tmp_path: Path) -> None:
     """A node ID recorded before a rename and a merge still resolves after a reload."""
     steps_dir = tmp_path / "steps"
     gm = make_manager()
@@ -3778,7 +3921,6 @@ def test_node_aliases_survive_save_and_load(tmp_path: Path, vlm: FakeVlm) -> Non
     loaded = make_manager()
     loaded.load_graph(path)
 
-    assert vlm.kinds() == ["embed", "embed"]
     assert json.loads(path.read_text(encoding="utf-8"))["node_aliases"] == {
         "s1_home": renamed,
         renamed: "s0_home",
@@ -3819,38 +3961,36 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     assert data["nodes"][0]["representative_observation"] == "000000"
     assert data["node_aliases"] == {}
     assert data["edges"][0]["schema_deltas"] == [{"tab": {"after": "settings"}}]
-    embeddings = json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8"))
-    assert embeddings["s0_home"] == {
-        "embedding": EMBEDDINGS["Home screen"],
-        "model": gm.embedding_model,
-    }
 
 
-def test_save_graph_omits_an_empty_activity_list_and_embedding(tmp_path: Path) -> None:
+def test_save_graph_omits_an_empty_activity_list_and_writes_no_empty_text_vectors(
+    tmp_path: Path,
+) -> None:
     gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", activities=[], description_embedding=[])
+    add_screen(gm, "s0_home", "Home screen", activities=[])
     path = tmp_path / "graph.json"
 
     gm.save_graph(path)
 
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["nodes"][0]["activity"] == ""
-    assert json.loads((tmp_path / "graph.emb.json").read_text(encoding="utf-8")) == {}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["graph.json"]
 
 
 def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, screen: Screens
 ) -> None:
     """A crash partway through json.dump must leave the previous complete graph
-    file and its embeddings companion in place, never a truncated mix of the
-    old and new content, and must not leave a stray temp file behind: both
-    files are written through graph_files.write_json_atomically.
+    file and its text vectors in place, never a truncated mix of the old and new
+    content, and must not leave a stray temp file behind: both files are written
+    through graph_files.write_json_atomically.
     """
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
     path = tmp_path / "graph.json"
     gm.save_graph(path)
-    emb_path = tmp_path / "graph.emb.json"
+    emb_path = tmp_path / "graph_text_emb.json"
     original_graph = path.read_text(encoding="utf-8")
     original_emb = emb_path.read_text(encoding="utf-8")
 
@@ -3866,10 +4006,60 @@ def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
 
     assert path.read_text(encoding="utf-8") == original_graph
     assert emb_path.read_text(encoding="utf-8") == original_emb
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["graph.emb.json", "graph.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "graph.json",
+        "graph_text_emb.json",
+        "steps",
+    ]
 
 
-def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("failing_file", "copy_vector"),
+    [
+        pytest.param("graph.json", EMBEDDINGS["Home screen"], id="graph file"),
+        pytest.param("graph_text_emb.json", None, id="text vectors"),
+    ],
+)
+def test_a_save_that_stops_at_either_file_leaves_a_graph_that_loads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    vlm: FakeVlm,
+    screen: Screens,
+    failing_file: str,
+    copy_vector: list[float] | None,
+) -> None:
+    """The text vectors are written before the graph, so a save that stops at the graph
+    file leaves the new member's vector beside the previous graph, and one that stops at
+    the vectors leaves both files as they were: the graph on disk never lists a member
+    without a vector."""
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    member = screen(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(member)
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    copy = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(copy)
+    original_replace = os.replace
+
+    def _replace_unless_failing(src: Path, dst: Path) -> None:
+        if dst.name == failing_file:
+            msg = "No space left on device"
+            raise OSError(msg)
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _replace_unless_failing)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    assert loaded.graph.nodes[node_id]["observations"] == [member.observation_id]
+    assert loaded.text_vector(copy.observation_id) == copy_vector
+
+
+def test_load_graph_defaults_the_activities_and_the_step_count(tmp_path: Path) -> None:
     path = tmp_path / "graph.json"
     path.write_text(
         json.dumps(
@@ -3880,7 +4070,6 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
                         "id": "s0_home",
                         "activity": HOME,
                         "page_description": "Home screen",
-                        "description_embedding": [1.0, 0.0, 0.0],
                         **members(tmp_path / "steps"),
                     }
                 ],
@@ -3895,48 +4084,8 @@ def test_load_graph_falls_back_to_an_inline_embedding(tmp_path: Path) -> None:
 
     node = gm.get_node("s0_home")
     assert node is not None
-    assert node["description_embedding"] == [1.0, 0.0, 0.0]
     assert node["activities"] == [HOME]
     assert gm.total_steps_completed == 0
-
-
-def test_load_graph_then_identify_state_does_not_warn_about_a_missing_embedding(
-    tmp_path: Path, vlm: FakeVlm, caplog: pytest.LogCaptureFixture, screen: Screens
-) -> None:
-    """``load_graph`` sets ``description_embedding=[]`` for a node with neither a
-    companion ``_embeddings.json`` nor an inline vector; ``identify_state`` must
-    treat that as a missing embedding, not warn that the cache is stale.
-    """
-    path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "package_name": PACKAGE,
-                "nodes": [
-                    {
-                        "id": "s0_home",
-                        "activity": HOME,
-                        "page_description": "Home screen",
-                        **members(tmp_path / "steps"),
-                    }
-                ],
-                "edges": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    gm = make_manager(screen.steps_dir)
-    gm.load_graph(path)
-    assert gm.graph.nodes["s0_home"]["description_embedding"] == []
-    gm.embed_missing_members()
-
-    vlm.descriptions.append(("Home screen", {}, []))
-    vlm.verdicts.append({"same": False, "reason": "another page"})
-    with caplog.at_level("WARNING"):
-        node_id = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
-
-    assert node_id == "s0_home_screen"
-    assert "stale" not in caplog.text
 
 
 def test_save_graph_and_load_graph_round_trip_the_package_name(tmp_path: Path) -> None:
@@ -4343,71 +4492,6 @@ def test_load_graph_rejects_an_int_edge_endpoint_naming_the_path(tmp_path: Path)
     assert str(path) in str(excinfo.value)
 
 
-def test_find_node_by_description_sorts_by_similarity(vlm: FakeVlm) -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
-    add_screen(gm, "s1_settings", "Settings page")
-    add_screen(gm, "s2_blank", "Blank screen", description_embedding=None)
-
-    results = gm.find_node_by_description("Home screen")
-
-    assert [node_id for node_id, _ in results] == ["s0_home", "s1_settings"]
-    assert results[0][1] == pytest.approx(1.0)
-    assert results[1][1] == pytest.approx(0.0)
-    assert vlm.kinds() == ["embed"]
-
-
-def test_find_node_by_description_skips_an_empty_embedding_without_a_stale_warning(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Same as ``identify_state``: an empty ``description_embedding`` (what
-    ``load_graph`` produces for a node with no cached vector at all) is a
-    missing embedding, not a stale-dimension one.
-    """
-    gm = make_manager()
-    add_screen(gm, "s0_empty", "Home screen", description_embedding=[])
-    add_screen(gm, "s1_home", "Home feed")
-
-    with caplog.at_level("WARNING"):
-        results = gm.find_node_by_description("Home screen")
-
-    assert [node_id for node_id, _ in results] == ["s1_home"]
-    assert "stale" not in caplog.text
-    assert vlm.kinds() == ["embed"]
-
-
-def test_find_node_by_description_skips_a_stale_dimension_embedding_and_logs_once(
-    vlm: FakeVlm, caplog: pytest.LogCaptureFixture
-) -> None:
-    gm = make_manager()
-    add_screen(gm, "s0_stale", "Home screen", description_embedding=[1.0, 0.0])
-    add_screen(gm, "s1_home", "Home feed")
-
-    with caplog.at_level("WARNING"):
-        results = gm.find_node_by_description("Home screen")
-
-    assert [node_id for node_id, _ in results] == ["s1_home"]
-    assert vlm.kinds() == ["embed"]
-    stale_warnings = [
-        m for m in caplog.messages if "description-embedding: embedding cache is stale" in m
-    ]
-    assert len(stale_warnings) == 1
-    assert "query dim=3" in stale_warnings[0]
-    assert "dim(s)=[2]" in stale_warnings[0]
-
-
-def test_find_node_by_description_stringifies_non_string_node_ids(vlm: FakeVlm) -> None:
-    gm = make_manager()
-    gm.graph.add_node(
-        7, description_embedding=[1.0, 0.0, 0.0], description_embedding_model=gm.embedding_model
-    )
-
-    results = gm.find_node_by_description("Home screen")
-
-    assert results == [("7", pytest.approx(1.0))]
-    assert vlm.kinds() == ["embed"]
-
-
 def test_summary_counts_nodes_edges_and_element_progress() -> None:
     gm = make_manager()
     add_screen(
@@ -4719,10 +4803,6 @@ screen_attrs = st.fixed_dictionaries(
             ),
             max_size=4,
         ),
-        "description_embedding": st.lists(
-            st.floats(allow_nan=False, allow_infinity=False), max_size=4
-        ),
-        "description_embedding_model": st.none() | st.text(min_size=1, max_size=30),
         "last_normalized_visit_milestone": st.integers(min_value=0, max_value=10),
         "visit_count": st.integers(min_value=0, max_value=100),
     }
@@ -4738,6 +4818,7 @@ edge_attrs = st.fixed_dictionaries(
         "visit_count": st.integers(min_value=0, max_value=20),
         "schema_deltas": small_dicts,
         "setups": st.lists(setup_entries, max_size=3),
+        "normalized_instructions_hash": st.none() | st.text(max_size=12),
     }
 )
 graphs = st.tuples(
@@ -4757,11 +4838,6 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "state_schema": d.get("state_schema", {}),
             "last_detail_snapshot": d.get("last_detail_snapshot", {}),
             "interactable_elements": d.get("interactable_elements", []),
-            "description_embedding": d.get("description_embedding") or [],
-            # A tag is stored with its vector; "" and None both mean untagged.
-            "description_embedding_model": (d.get("description_embedding_model") or None)
-            if d.get("description_embedding")
-            else None,
             "last_normalized_visit_milestone": d.get("last_normalized_visit_milestone", 0),
             "visit_count": d.get("visit_count", 0),
             "observations": d.get("observations", []),
@@ -4779,6 +4855,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "visit_count": d.get("visit_count", 0),
             "schema_deltas": d.get("schema_deltas") or None,
             "setups": d.get("setups") or None,
+            "normalized_instructions_hash": d.get("normalized_instructions_hash") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
     }
@@ -4815,9 +4892,6 @@ def test_save_then_load_round_trips(
     again = tmp_path_factory.mktemp("roundtrip") / "graph.json"
     loaded.save_graph(again)
     assert again.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
-    assert again.with_suffix(".emb.json").read_text(encoding="utf-8") == path.with_suffix(
-        ".emb.json"
-    ).read_text(encoding="utf-8")
 
 
 @given(
@@ -4969,103 +5043,6 @@ def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path
     with pytest.raises(TypeError, match="must be an object") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
-
-
-@pytest.mark.parametrize("other_package", [False, True])
-def test_identify_state_allows_untagged_empty_vectors_and_other_packages(
-    other_package: bool,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-    screen: Screens,
-) -> None:
-    manager = GraphManager(
-        client=router_client,
-        page_detail=PAGE_DETAIL,
-        embedding=EMBEDDING,
-        image_embedding=IMAGE_EMBEDDING,
-    )
-    manager.steps_dir = screen.steps_dir
-    manager.graph.add_node(
-        "old",
-        package="com.other" if other_package else "com.demo",
-        activity="com.other.Home" if other_package else "com.demo.Home",
-        description_embedding=[0.25, 0.75] if other_package else [],
-    )
-    router_responses.extend(
-        [
-            httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
-            httpx.Response(200, json=embedding_body),
-        ]
-    )
-    node = manager.identify_state(screen("com.demo.Home", png_screenshot, "com.demo"))
-    assert manager.graph.nodes[node]["description_embedding_model"] == manager.embedding_model
-    assert len(router_requests) == 3
-
-
-@pytest.mark.parametrize("stored", ["inline untagged", "bare sidecar", "mismatched sidecar"])
-@pytest.mark.parametrize("operation", ["find", "identify"])
-def test_text_embedding_unknown_or_mismatched_provenance_blocks_comparison(
-    stored: str,
-    operation: str,
-    tmp_path: Path,
-    router_client: OpenRouter,
-    router_responses: list[httpx.Response],
-    router_requests: list[httpx.Request],
-    embedding_body: dict[str, object],
-    png_screenshot: str,
-    chat_response: Callable[..., httpx.Response],
-    screen: Screens,
-) -> None:
-    path = tmp_path / "demo.json"
-    node: dict[str, object] = {
-        "id": "home",
-        "activity": "com.demo.Home",
-        "page_description": "home",
-        **members(tmp_path / "steps"),
-    }
-    if stored == "inline untagged":
-        node["description_embedding"] = [0.25, 0.75]
-    path.write_text(
-        json.dumps({"package_name": "com.demo", "nodes": [node], "edges": []}), encoding="utf-8"
-    )
-    if stored != "inline untagged":
-        entry: object = (
-            [0.25, 0.75]
-            if stored == "bare sidecar"
-            else {"model": "provider/old-same-dimensions", "embedding": [0.25, 0.75]}
-        )
-        path.with_suffix(".emb.json").write_text(json.dumps({"home": entry}), encoding="utf-8")
-    manager = GraphManager(
-        client=router_client,
-        page_detail=PAGE_DETAIL,
-        embedding=EMBEDDING,
-        image_embedding=IMAGE_EMBEDDING,
-    )
-    manager.load_graph(path)
-    router_responses.extend(
-        [
-            chat_response(content='{"page_description":"home","state":{},"elements":[]}'),
-            httpx.Response(200, json=embedding_body),
-        ]
-        if operation == "identify"
-        else [httpx.Response(200, json=embedding_body)]
-    )
-
-    def compare() -> None:
-        if operation == "find":
-            manager.find_node_by_description("home")
-        else:
-            manager.identify_state(screen("com.demo.Home", png_screenshot, "com.demo"))
-
-    for _ in range(2):
-        with pytest.raises(ValueError, match=r"Text embedding.*Rebuild or re-explore"):
-            compare()
-        assert router_requests == []
 
 
 PLAIN_LIST = fixture_tree("windows_plain_list")
