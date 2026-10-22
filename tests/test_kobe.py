@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -2439,7 +2440,15 @@ def test_exploration_embeds_every_member_again_when_the_vectors_are_from_another
     }
 
 
+@pytest.mark.parametrize(
+    "vector_file_name",
+    [
+        pytest.param("steps/image_emb.json", id="image vectors"),
+        pytest.param("demo_text_emb.json", id="text vectors"),
+    ],
+)
 def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
+    vector_file_name: str,
     tmp_path: Path,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
@@ -2450,12 +2459,14 @@ def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
     graph_path = tmp_path / "demo" / "demo.json"
     graph_path.parent.mkdir()
     write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}], "edges": []})
-    vector_file = graph_path.parent / "steps" / "image_emb.json"
+    vector_file = graph_path.parent / vector_file_name
     truncated = '{"model": "provider/embedding", "embeddings": {"s0_home-observation": [1.0,'
     vector_file.write_text(truncated, encoding="utf-8")
     router_responses.append(httpx.Response(200, json=embedding_body))
 
-    with pytest.raises(ValueError, match=r"image_emb\.json cannot be read or parsed"):
+    with pytest.raises(
+        ValueError, match=rf"{re.escape(vector_file.name)} cannot be read or parsed"
+    ):
         _explorer(
             _Device(AssertionError("loading must not read the device")), tmp_path, router_client
         )

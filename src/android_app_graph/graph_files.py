@@ -146,6 +146,15 @@ def image_embeddings_path(steps: Path) -> Path:
     return steps / "image_emb.json"
 
 
+def text_embeddings_path(graph_path: Path) -> Path:
+    """Return where the graph at ``graph_path`` keeps its members' description vectors.
+
+    A description depends on the other nodes' descriptions in its prompt, so its vector
+    belongs to the graph beside it rather than to the step log the graph shares.
+    """
+    return graph_path.with_name(f"{graph_path.stem}_text_emb.json")
+
+
 type VectorKind = Literal["image", "text"]
 
 

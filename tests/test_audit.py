@@ -1707,6 +1707,47 @@ def test_the_audit_embeds_the_members_the_explored_graph_has_no_image_vector_for
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_the_audited_copy_starts_its_text_vectors_from_the_explored_graph_s(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, Any]], None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    """The explored graph's home screen has a text vector; its settings screen was
+    described but has none, so loading the graph embeds its description."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    app_dir = tmp_path / "graphs" / "demo"
+    app_dir.mkdir(parents=True)
+    write_graph_file(
+        app_dir / "demo.json", {"nodes": [{"id": "s0_home"}, {"id": "s1_settings"}], "edges": []}
+    )
+    members = ["s0_home-observation", "s1_settings-observation"]
+    write_image_vectors(app_dir / "steps", members)
+    describe = {"page_description": "Settings", "state": {}, "elements": []}
+    (app_dir / "steps" / "s1_settings-observation.json").write_text(
+        json.dumps({"describe": describe}), encoding="utf-8"
+    )
+    explored = {"model": "google/gemini-embedding-2", "embeddings": {members[0]: [1.0, 0.0]}}
+    (app_dir / "demo_text_emb.json").write_text(json.dumps(explored), encoding="utf-8")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+    monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
+    config = _write_config(tmp_path, str(tmp_path / "graphs"))
+
+    assert audit.main(["-c", str(config), "--app", "demo"]) == 0
+
+    assert len(router_requests) == 1
+    audited = json.loads((app_dir / "demo_audited_text_emb.json").read_text(encoding="utf-8"))
+    assert audited == {
+        "model": "google/gemini-embedding-2",
+        "embeddings": {members[0]: [1.0, 0.0], members[1]: [0.25, 0.75]},
+    }
+    assert json.loads((app_dir / "demo_text_emb.json").read_text(encoding="utf-8")) == explored
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
 def test_audit_skips_a_configured_app_without_a_graph_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

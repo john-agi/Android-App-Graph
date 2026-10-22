@@ -330,33 +330,39 @@ the command.
 
 ### Embedding caches
 
-Text sidecars (`*.emb.json`) store each node's vector with its exact model ID
-as `{node_id: {"model": model_id, "embedding": vector}}`. Bare vectors
-and inline vectors without model metadata have unknown provenance. Graphs
-can still be loaded for inspection, but text comparisons reject unknown or
-mismatched models even when dimensions match. These checks run before description
-or embedding requests, so a rejected graph does not spend on model calls.
-Rebuild or re-explore into a new graph directory with the configured embedding
-model before resuming text matching; do not relabel old vectors. Newly generated
-or renamed descriptions carry their model metadata through save/load.
+Screenshot and description vectors are both kept by observation, in files of the form
+`{"model": model_id, "embeddings": {observation_id: vector}}`. A file tagged with
+another model counts as empty after one warning. A damaged file stops exploration or
+the audit as it loads the graph, before any member is embedded, with an error naming
+the file and the damage: the file cannot be read or parsed, has no model tag or no
+`embeddings` object, or holds a malformed or non-finite vector, named by observation.
+Nothing is pruned, since observation IDs never change.
 
-Screenshot vectors live in the [step log](#step-log), `steps/image_emb.json`, as
-`{"model": model_id, "embeddings": {observation_id: vector}}`, so the explored
-graph and its audited copy share them. Every screenshot that
+Screenshot vectors live in the [step log](#step-log), `steps/image_emb.json`, so the
+explored graph and its audited copy share them: a screenshot's vector depends only on
+the screenshot and the model. Every screenshot that
 [screen matching](#screen-matching) takes is embedded once and kept. Nothing reads
 the vector of any other screenshot, so none is made for the screens of other apps,
 including one a Back press leaves in front, or for a screenshot read without being
-matched, such as the one after a wait. A file tagged with another model counts as
-empty after one warning. A damaged file stops exploration or the audit as it loads
-the graph, before any member is embedded, with an error naming the file and the
-damage: the file cannot be read or parsed, has no model tag or no `embeddings`
-object, or holds a malformed or non-finite vector, named by observation. Nothing is
-pruned, since observation IDs never change.
+matched, such as the one after a wait.
+
+Description vectors live beside the graph file, in `<graph file stem>_text_emb.json`:
+`<app_name>_text_emb.json` for the explored graph and `<app_name>_audited_text_emb.json`
+for the audited copy, which starts from the explored graph's. A description depends on
+the other nodes' descriptions in its prompt, so its vector belongs to one graph. An
+in-app screenshot the description model describes keeps the vector of the description
+it ends with: its `describe` output's `page_description`, or the description the step's
+first rejection refined it to (`identify.refinement.new_description`), which also names
+the node the screen starts when every check rejects it. An exact match copies its
+member's vector without a request. The file is written with the graph.
 
 When exploration resumes a graph and when the audit loads one, every member of an
-in-app node that has no vector is embedded first, as when `image_emb.json` is missing
-or tagged with another model. The log names the count before and the cost after. To
-embed every screenshot again, delete the file.
+in-app node that has no image vector is embedded first, as when `image_emb.json` is
+missing or tagged with another model. So is every such member whose record holds a
+`describe` output and that has no description vector: the description it ended with is
+read from its record, an exact match's from the member its `copied_from` names, and each
+distinct description is embedded once. The log names each count before and its cost
+after. To embed every screenshot or description again, delete its file.
 
 One 670x1490 WebP screenshot, embedded with `voyageai/voyage-multimodal-3.5`, was
 1,782 prompt tokens and $0.000599 on 2026-10-21; Voyage bills images by pixel, so a
@@ -613,20 +619,22 @@ what each step found.
    [Embedding caches](#embedding-caches)).
 2. **Exact match.** A member with the screenshot's `pixel_hash` decides alone when
    every such member belongs to one node: the screen copies that member's
-   description, state and elements, so neither the description model nor the
-   verifier runs. Members of two nodes with the same hash decide nothing.
+   description, state, elements and description vector, so neither the description
+   model nor the verifier runs. Members of two nodes with the same hash decide nothing.
 3. **Description.** The description model describes the screen; web content from
-   outside the app goes to `ext_web`. The description is embedded.
+   outside the app goes to `ext_web`. The description is embedded (see
+   [Embedding caches](#embedding-caches)).
 4. **Expected node.** Where the caller knows where the screen should be, that node is
    verified first, against its member closest to the screen: the node a replay leads
    to, the screen a step left when Back closes an outside web page or another app, the
    start node after a restart, and the target of the audit's retried edge. A
    confirmation decides; a rejection leaves the node off the short list.
 5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
-   each node's closest member, proposes 3, and `text`, by the cosine of the
-   description embeddings, proposes 2. The nodes are taken once each, in the order of
-   their best rank in either source, ties broken by image cosine. The verifier checks
-   them in that order against each one's closest member and stops at the first
+   each node's closest member, proposes 3, and `text`, by the highest description
+   cosine among each node's members, proposes 2; a member without a description vector
+   is left out of `text`. The nodes are taken once each, in the order of their best
+   rank in either source, ties broken by image cosine. The verifier checks them in that
+   order against each one's closest member by image and stops at the first
    confirmation, after 3 calls at most (4 with an expected node).
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
@@ -766,8 +774,9 @@ the node's home.
   - a lone member is a move check. When the verifier tells it apart from its closest
     home member, the member goes through the short list of
     [screen matching](#screen-matching) again, without the node it leaves, with its
-    stored describe output in place of the describe call, and with no description
-    refined. It moves to the first node the verifier confirms, or to a new node.
+    stored describe output in place of the describe call and its description vector
+    in place of the description's embedding, and with no description refined. It
+    moves to the first node the verifier confirms, or to a new node.
 - A node gets three checks at most, larger groups first; the rest are `unchecked`.
   A node of one member is never checked. Since home holds at least half the members,
   a node of fewer than four is never split: of two or three, only a member can move.
@@ -780,10 +789,10 @@ the node's home.
 
 A node a split or a move makes takes its description and elements from the stored
 describe output of its earliest member, its representative, and its state schema
-from all its members' states; its description is embedded once. Members carry their
-visits, states and activities; the node they leave keeps its description,
-representative, state schema and elements. No node ID changes, so no alias is
-recorded: a node's `observations` say where each observation belongs.
+from all its members' states. Members carry their visits, states, activities and
+description vectors, so no embedding is requested. The node they leave keeps its
+description, representative, state schema and elements. No node ID changes, so no
+alias is recorded: a node's `observations` say where each observation belongs.
 
 Edge actions follow the members. An action on an edge of the node is matched to each
 exploration transition (see [Step log](#step-log)) with the same action whose
@@ -883,10 +892,10 @@ model usage. Android-App-Graph is a Python package and does not produce an APK.
 
    Expect model-selected actions on the emulator, saved graph nodes that each
    list their `observations`, a `.webp` image and an `observation` record in
-   `<app_name>/steps/` for every screenshot, and model-tagged text vectors in the
-   `.emb.json` sidecar. The second run should continue the saved graph and the
-   step numbering. The models receive every screenshot as `image/webp`, so a
-   provider that rejects it fails the first screen description or the first
+   `<app_name>/steps/` for every screenshot, and `<app_name>_text_emb.json` beside the
+   graph, tagged with the embedding model. The second run should continue the saved
+   graph and the step numbering. The models receive every screenshot as `image/webp`,
+   so a provider that rejects it fails the first screen description or the first
    screenshot embedding.
 
    Also expect:

@@ -1,9 +1,9 @@
 """The audit from members: one set of merge proposals from the model's text and from
 close member images, and the split and move checks on each node's member groups.
 
-Every graph here has synthetic image vectors, and the verifier and the text embedding
-are scripted fakes; describing a screen fails the test, since the audit works from
-the describe output the step log stores.
+Every graph here has synthetic image and text vectors, and the verifier and the text
+embedding are scripted fakes; describing a screen fails the test, since the audit works
+from the describe output the step log stores.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import pytest
 from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
-from android_app_graph.graph_files import graph_steps_dir
+from android_app_graph.graph_files import graph_steps_dir, text_embeddings_path
 from android_app_graph.member_groups import GROUPING_FLOOR, MERGE_FLOOR
 from android_app_graph.step_log import read_exploration_transitions
 from android_app_graph.utils import ModelSettings, graph_manager
@@ -370,6 +370,7 @@ def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions
 def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_output(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
+    """Its members keep their text vectors, so no embedding is requested."""
     write_member_graph(graph_path, SPLIT)
     graph = _load(graph_path)
 
@@ -384,8 +385,7 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
     assert node["state_schema"] == {"seen_in": ["000003", "000004"]}
     assert node["activities"] == ["com.demo.Activity000003", "com.demo.Activity000004"]
     assert (node["visit_count"], graph.graph.nodes["s0_home"]["visit_count"]) == (2, 2)
-    assert node["description_embedding"] == [1.0, 0.0]
-    assert models.embedded == ["Screen 000003"]
+    assert models.embedded == []
 
 
 def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
@@ -436,7 +436,8 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
     write_member_graph: Callable[..., None],
 ) -> None:
     """A rejected member goes to the first node the short list confirms, without the
-    node it leaves; when none does, it starts a node of its own."""
+    node it leaves; when none does, it starts a node of its own. Its text vector is the
+    short list's text query, so no embedding is requested."""
     write_member_graph(graph_path, MOVE, edges=MOVE_EDGES, transitions=MOVE_TRANSITIONS)
     graph = _load(graph_path)
     if confirmed is not None:
@@ -448,15 +449,17 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
     assert models.shown == shown
     assert "000003" in graph.graph.nodes[destination]["observations"]
     assert (destination, "s2_menu") in graph.graph.edges
+    assert models.embedded == []
     if destination == "s0_home":
-        assert models.embedded == []
         return
     assert graph.graph.nodes["s0_home"]["observations"] == ["000001", "000002"]
     assert ("s0_home", "s2_menu") not in graph.graph.edges
-    # The member's stored description is embedded once, for the short list and the new node.
-    assert models.embedded == ["Screen 000003"]
     candidates = check["change"]["short_list"]["candidates"]
-    assert [candidate["node"] for candidate in candidates] == ["s1_list", "s2_menu"]
+    # Member 000003's text vector is Y, so List's member scores LINKED and Menu's 0.
+    assert [(candidate["node"], candidate["sources"]) for candidate in candidates] == [
+        ("s1_list", {"image": pytest.approx(LINKED), "text": pytest.approx(LINKED)}),
+        ("s2_menu", {"image": pytest.approx(0.0), "text": pytest.approx(0.0)}),
+    ]
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
@@ -615,6 +618,8 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     monkeypatch: pytest.MonkeyPatch,
     write_member_graph: Callable[..., None],
 ) -> None:
+    """The saved copy's text vectors are the explored graph's, since the split requests
+    no embedding."""
     write_member_graph(graph_path, SPLIT)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
@@ -637,3 +642,9 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     assert [node["id"] for node in audited["nodes"]] == ["s0_home", "s1_list", "s2_screen_000003"]
     assert not (app_dir / "demo_merge.json").exists()
     assert models.shown == [("000002", "000003")]
+    assert models.embedded == []
+    explored_vectors = text_embeddings_path(graph_path).read_text(encoding="utf-8")
+    audited_vectors = text_embeddings_path(app_dir / "demo_audited.json").read_text(
+        encoding="utf-8"
+    )
+    assert json.loads(audited_vectors) == json.loads(explored_vectors)
