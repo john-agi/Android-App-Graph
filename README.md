@@ -823,9 +823,9 @@ alike first, and verified in rounds, as Wang et al. do in
 - once its answers are in, every open pair they decide is deduced, never asked;
 - the rounds go on until every pair is asked or deduced.
 
-Asked in that order, a round never asks a pair whose answer could contradict the
-answers before it, and the rounds ask the same pairs that one question at a time in
-that order would.
+Asked in that order, a pair is asked exactly when the answers on the pairs before it
+leave it open, so a round never asks a pair whose answer could contradict the answers
+before it.
 
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage

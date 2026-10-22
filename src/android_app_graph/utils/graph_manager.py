@@ -3017,8 +3017,8 @@ class GraphManager:
         """Merge each cluster into its first node, and give each pair its status.
 
         The pairs inside a cluster are merged in proposal order, each into the
-        lower-numbered of its two nodes, so consistent answers give the graph that
-        merging each confirmed pair as it is verified gives.
+        lower-numbered of its two nodes, so the action lists of edges that land on one
+        another are appended in proposal order, whatever order the rounds asked in.
         """
         cluster_of = {node: cluster for cluster in clusters for node in cluster}
         for check in checks:

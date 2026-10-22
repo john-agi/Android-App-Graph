@@ -8,10 +8,10 @@ al. do [1], the pairs are ordered most likely one screen first, and a round asks
 open pair that the pairs before it could not decide even if all of them were one
 screen. Once its answers are in, every open pair they decide is deduced.
 
-A round therefore never asks a pair whose answer could contradict the answers before
-it, and the rounds ask exactly the pairs that asking one at a time in the same order
-would. The "same" answers join the nodes into clusters, and no "different" answer ever
-falls inside one, so the clusters need no settling.
+A pair is therefore asked exactly when the answers on the pairs before it leave it
+open, so a round never asks a pair whose answer could contradict the answers before
+it. The "same" answers join the nodes into clusters, and no "different" answer ever
+falls inside one.
 
 [1] Wang, Li, Kraska, Franklin, Feng, "Leveraging Transitive Relations for Crowdsourced
     Joins", SIGMOD 2013, https://arxiv.org/abs/1408.6916.
