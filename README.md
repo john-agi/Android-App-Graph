@@ -448,7 +448,7 @@ weighed by its cheapest action: the action's own steps and its
 [setup](#graph-edges), so a path whose actions need no setup is preferred. On
 each edge it sends that action's setup first, such as the swipe that scrolled a
 list or the dropdown choice that filled in a form, so the action finds the screen
-as exploration did. The log names each setup action, as in
+as exploration did. Exploration's log names each setup action, as in
 `Replay 2/3: setup 1/1 on s30_apps via swipe`.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
@@ -667,8 +667,7 @@ when the setup is unknown or too long:
   on without a replay, after a step that leaves the app, and after a replay that
   ends elsewhere than its node, until exploration arrives at that screen from
   another one.
-- A setup of more than 8 actions is dropped, and the log says so: a long
-  excursion is not a recipe for the screen's state.
+- A setup of more than 8 actions is dropped, and the log says so.
 
 An action recorded again keeps the shorter of its known setups. A graph file
 without `setups` loads unchanged, and its actions replay without a setup.
