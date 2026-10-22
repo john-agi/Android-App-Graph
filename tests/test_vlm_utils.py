@@ -795,8 +795,8 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     """Screens that differ only by an open menu or an expanded section are the SAME
-    screen, nothing on the DIFFERENT side or in the refined descriptions names a menu,
-    and a dialog with its own purpose stays DIFFERENT from the page beneath it."""
+    screen, no DIFFERENT case names a menu, and a dialog with its own purpose stays
+    DIFFERENT from the page beneath it."""
     router_responses.append(chat_response(content='{"same":true,"reason":"menu only"}'))
     vlm.verify_same_node(
         router_client, png_screenshot, png_screenshot, "Wi-Fi settings", settings=PAGE_DETAIL
@@ -804,10 +804,31 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     same_cases, different_cases = prompt.split("Two screenshots are DIFFERENT screens", 1)
     same_cases = same_cases[same_cases.index("Two screenshots are the SAME screen") :]
+    different_cases = different_cases[: different_cases.index("Answer with ONLY")]
     for kind in ("overflow menu", "dropdown", "picker", "popup", "context menu", "expanded"):
         assert kind in same_cases, kind
     assert "menu" not in different_cases
     assert "its own purpose" in different_cases
+
+
+def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """The descriptions the verifier writes for two different screens, which rename the
+    rejected node, leave out what "page_description" leaves out, so a node whose closest
+    member has a menu open is not renamed after the menu."""
+    router_responses.append(chat_response(content='{"same":true,"reason":"same page"}'))
+    vlm.verify_same_node(
+        router_client, png_screenshot, png_screenshot, "Wi-Fi Direct", settings=PAGE_DETAIL
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    refinement = prompt[prompt.index("If they are DIFFERENT screens") :]
+    for kind in ("keyboard", "focus", "scrolled", "menu", "dropdown", "picker", "expanded"):
+        assert kind in refinement, kind
 
 
 def test_the_merge_audit_no_longer_excludes_a_page_with_its_menu_open(
