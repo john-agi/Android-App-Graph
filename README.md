@@ -720,6 +720,17 @@ when the setup is unknown or too long:
 An action recorded again keeps the shorter of its known setups. A graph file
 without `setups` loads unchanged, and its actions replay without a setup.
 
+Edge normalization asks the page-detail model to generalize an edge's
+instructions into `instruction_templates`, in the passes listed under
+[Requests and recovery](#requests-and-recovery). Each time it asks
+about an edge, it stores a SHA-256 of the instructions it sent in
+`normalized_instructions_hash`, whatever the answer: a template, no template, or
+the fallback for a reply that was cut off or timed out. A later pass skips an
+edge whose instructions still match that hash, so an edge is asked again only
+after it gains, loses or changes an instruction; an edge without the hash is
+asked on the next pass. A pass also skips an edge with a single instruction of
+at most six words and no quote or digit, which keeps no template.
+
 ## Visualize or Audit a Graph
 
 Create an HTML graph visualization. `app-graph-plot` needs the optional `viz` extra
