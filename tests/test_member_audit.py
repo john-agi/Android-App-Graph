@@ -319,7 +319,7 @@ def test_two_black_nodes_of_different_activities_are_kept_apart_unverified_whoev
     models.confirm("000001", "000002")
     issue = {"type": "merge_nodes", "node_a": "s0_pattern", "node_b": "s1_pin"}
 
-    (result,) = graph.verify_merge_proposals(graph.merge_proposals([issue]), {})
+    (result,) = graph.verify_merge_proposals(graph.merge_proposals([issue]), {}).pairs
 
     assert result["sources"] == ["text_audit", "image"]
     assert (result["status"], result["reason"]) == (
