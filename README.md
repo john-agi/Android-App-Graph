@@ -648,7 +648,8 @@ what each step found.
 6. **New node.** A screen every check rejects starts a new node with itself as
    representative. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later
-   rejections refine nothing.
+   rejections refine nothing. Refined descriptions, like every description, leave out
+   the state listed in [Graph nodes](#graph-nodes), such as an open menu.
 
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.

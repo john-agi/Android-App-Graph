@@ -448,7 +448,11 @@ If they are the SAME screen:
 
 If they are DIFFERENT screens, you must also provide slightly more specific descriptions that \
 distinguish them from each other. Usually adding one or two extra distinguishing words is enough. \
-Keep the descriptions concise (under 10 words each) and clearly differentiate the two screens:
+Keep the descriptions concise (under 10 words each) and clearly differentiate the two screens. \
+Name each screen by its purpose, never by its current state: leave out the on-screen keyboard, \
+which input field has focus, how far a list is scrolled, any overflow menu, dropdown, picker, \
+popup or context menu open over it, and which of its sections are expanded, even when a \
+screenshot shows them:
 {{"same": false, "reason": "brief explanation", \
 "existing_description": "more specific description for the first screenshot", \
 "new_description": "more specific description for the second screenshot"}}"""
