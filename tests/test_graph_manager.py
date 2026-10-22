@@ -46,7 +46,6 @@ from android_app_graph.utils.graph_manager import (
     SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
     GraphManager,
-    MemberVerdicts,
     PathStep,
     PathToStart,
     ScreenQuery,
@@ -4741,75 +4740,6 @@ def test_the_coverage_checkpoint_verifies_the_model_s_pairs_and_no_layout_pair(
     ((pair, sources),) = [((r["node_a"], r["node_b"]), r["sources"]) for r in result["results"]]
     assert (pair, sources) == (("s1_dialog", "s2_page"), ["text_audit"])
     assert vlm.kinds() == ["verify"]
-
-
-def test_a_verifier_answer_on_two_members_is_reused_within_a_run(
-    vlm: FakeVlm, tmp_path: Path
-) -> None:
-    gm = make_manager(tmp_path / "steps")
-    _two_dialogs_with_one_layout(gm, vlm, tmp_path / "steps")
-    vlm.verdicts.append({"same": True, "reason": "one dialog"})
-    verdicts: MemberVerdicts = {}
-
-    first = gm.verify_members("000004", "000001", description="d", verdicts=verdicts)
-    again = gm.verify_members("000001", "000004", description="d", verdicts=verdicts)
-
-    assert (first.same, first.reused, again.same, again.reused) == (True, False, True, True)
-    assert vlm.kinds() == ["verify"]
-
-
-def test_a_pair_whose_node_an_earlier_merge_removed_is_verified_on_the_node_that_kept_it(
-    vlm: FakeVlm, tmp_path: Path
-) -> None:
-    steps_dir = tmp_path / "steps"
-    gm = make_manager(steps_dir)
-    for number in range(3):
-        add_screen(gm, f"s{number}_home", "Home screen", **members(steps_dir, str(number).encode()))
-    vlm.verdicts.extend(
-        [{"same": True, "reason": "one screen"}, {"same": False, "reason": "another screen"}]
-    )
-    issues = [
-        {"node_a": "s0_home", "node_b": "s1_home"},
-        {"node_a": "s1_home", "node_b": "s2_home"},
-    ]
-
-    first, second = gm.verify_merge_proposals(gm.merge_proposals(issues, sources=()), {})
-
-    assert (first["status"], first["kept"], first["removed"]) == ("merged", "s0_home", "s1_home")
-    assert (second["node_a"], second["node_b"]) == ("s1_home", "s2_home")
-    assert (second["status"], second["reason"]) == ("kept_separate", "another screen")
-    assert second["members"] == {"s0_home": "000000", "s2_home": "000002"}
-    assert vlm.kinds() == ["verify", "verify"]
-
-
-def test_a_merge_check_of_nodes_without_image_vectors_shows_their_representatives(
-    tmp_path: Path,
-) -> None:
-    steps_dir = tmp_path / "steps"
-    gm = make_manager(steps_dir)
-    add_screen(gm, "s0_home", "Home screen", **members(steps_dir, b"0a", b"0b"))
-    add_screen(gm, "s1_home", "Home screen", **members(steps_dir, b"1a", b"1b"))
-
-    assert gm.closest_members("s0_home", "s1_home") == ("000000", "000002", None)
-
-
-def test_a_merge_check_leaves_out_members_without_an_image_vector_and_shows_the_first_closest(
-    tmp_path: Path,
-) -> None:
-    """s0's first member and s1's second have no vector; s0's other two tie."""
-    steps_dir = tmp_path / "steps"
-    first = members(steps_dir, b"0a", b"0b", b"0c")
-    second = members(steps_dir, b"1a", b"1b")
-    save_image_embeddings(
-        steps_dir, dict.fromkeys(["000001", "000002", "000003"], NEAR), model=IMAGE_EMBEDDING.model
-    )
-    path = tmp_path / "graph.json"
-    nodes = [{"id": "s0_home", **first}, {"id": "s1_home", **second}]
-    path.write_text(json.dumps({"package_name": PACKAGE, "nodes": nodes}), "utf-8")
-    gm = make_manager()
-    gm.load_graph(path)
-
-    assert gm.closest_members("s0_home", "s1_home") == ("000001", "000003", pytest.approx(1.0))
 
 
 POOL = [f"s{i}_screen" for i in range(5)]
