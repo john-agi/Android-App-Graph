@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -63,11 +64,13 @@ def _member(image_b64: str) -> str:
 
 @dataclass
 class FakeModels:
-    """A verifier that confirms the member pairs in ``same`` and records each pair it
-    is shown as ``(existing, new)``, a text embedding that records each text, and an
-    edge normalizer whose every template is ``template``."""
+    """A verifier that confirms the member pairs in ``same``, gives no answer once for
+    each entry of ``unanswered``, and records each pair it is shown as
+    ``(existing, new)``, a text embedding that records each text, and an edge normalizer
+    whose every template is ``template``."""
 
     same: set[frozenset[str]] = field(default_factory=set)
+    unanswered: list[frozenset[str]] = field(default_factory=list)
     shown: list[tuple[str, str]] = field(default_factory=list)
     descriptions: list[str] = field(default_factory=list)
     embedded: list[str] = field(default_factory=list)
@@ -75,6 +78,9 @@ class FakeModels:
 
     def confirm(self, first: str, second: str) -> None:
         self.same.add(frozenset((first, second)))
+
+    def give_no_answer(self, first: str, second: str) -> None:
+        self.unanswered.append(frozenset((first, second)))
 
     def verify_same_node(
         self,
@@ -88,6 +94,9 @@ class FakeModels:
         pair = (_member(screenshot_existing_b64), _member(screenshot_new_b64))
         self.shown.append(pair)
         self.descriptions.append(existing_description)
+        if frozenset(pair) in self.unanswered:
+            self.unanswered.remove(frozenset(pair))
+            return {"same": False, "answered": False, "reason": "timed out"}
         return {"same": frozenset(pair) in self.same, "reason": "scripted"}
 
     def get_embedding(
@@ -410,6 +419,20 @@ def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
     assert _edges(graph) == before
 
 
+def test_a_split_check_the_verifier_gives_no_answer_on_splits_the_group_off(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    write_member_graph(graph_path, SPLIT)
+    graph = _load(graph_path)
+    models.give_no_answer("000002", "000003")
+
+    (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    assert (check["same"], check["reason"]) == (False, "timed out")
+    assert check["change"]["to"] == "s2_screen_000003"
+    assert graph.graph.nodes["s2_screen_000003"]["observations"] == ["000003", "000004"]
+
+
 # The third member of Home looks like List's member, and nothing like Menu's.
 MOVE = {
     "s0_home": [("000001", X), ("000002", _toward(X, Y, LINKED)), ("000003", Y)],
@@ -528,6 +551,49 @@ def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
     templates = _templates_around_member_checks(graph, graph_path, models)
 
     assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
+
+
+def test_a_moving_member_without_an_answer_on_a_near_identical_node_does_not_join_it(
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """List's member has the moving member's image vector and description vector, so
+    screen matching would keep the member there without an answer. A member the audit
+    moves counts the check as a rejection, and its record says no answer."""
+    write_member_graph(
+        graph_path,
+        {**MOVE, "s1_list": [("000004", Y)]},
+        edges=MOVE_EDGES,
+        transitions=MOVE_TRANSITIONS,
+    )
+    graph = _load(graph_path)
+    models.give_no_answer("000004", "000003")
+
+    with caplog.at_level(logging.INFO):
+        (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    short_list = check["change"]["short_list"]
+    assert short_list["candidates"][0] == {
+        "node": "s1_list",
+        "sources": {"image": pytest.approx(1.0), "text": pytest.approx(1.0)},
+        "closest_member": "000004",
+        "image_score": pytest.approx(1.0),
+    }
+    assert short_list["verifications"][0] == {
+        "node": "s1_list",
+        "member": "000004",
+        "same": False,
+        "answered": False,
+        "reason": "timed out",
+    }
+    assert "Verifier gave no answer on node s1_list against member 000004 (timed out); " in (
+        caplog.text
+    )
+    assert "unverified" not in caplog.text
+    assert check["change"]["to"] == "s3_screen_000003"
+    assert models.shown == [("000002", "000003"), ("000004", "000003"), ("000005", "000003")]
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
