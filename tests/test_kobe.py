@@ -1850,6 +1850,64 @@ def test_a_step_into_another_app_returns_to_the_app_before_the_next_step(
     assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
 
 
+@pytest.mark.parametrize(
+    ("after_the_tap", "reached"),
+    [
+        pytest.param(_SEARCH_SCREEN, f"ext_{_SEARCH}", id="another app"),
+        pytest.param(
+            _screen("com.demo.ArticleActivity", "blue"), EXTERNAL_WEB_NODE, id="outside web page"
+        ),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_a_step_that_leaves_the_app_marks_the_element_the_planner_names(
+    after_the_tap: dict[str, object],
+    reached: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The element is explored as after a step that stays in the app, so the planner is
+    not offered it again and the coverage ranking no longer counts it."""
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    explorer = _explorer(
+        screens_by_log(HOME_SCREEN, after_the_tap, HOME_SCREEN), tmp_path, router_client
+    )
+    home = {
+        "page_description": "home",
+        "elements": [
+            {"description": "Dark mode toggle", "position": "top"},
+            {"description": "Search button", "position": "top right"},
+        ],
+    }
+    identifying_the_web_page = [
+        httpx.Response(200, json=embedding_body),
+        chat_response(content='{"page_description":"news article","is_external_web":true}'),
+    ]
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=json.dumps(home)),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"element":2,"instruction":"Tap the Search button"}'),
+            chat_response(content=_TAP_REPLY),
+            *(identifying_the_web_page if reached == EXTERNAL_WEB_NODE else []),
+            # Back shows home again: an exact match.
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert list(explorer.graph.graph.edges) == [("s0_home", reached)]
+    elements = explorer.graph.graph.nodes["s0_home"]["interactable_elements"]
+    assert [e["description"] for e in elements if e["explored"]] == ["Search button"]
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
     tmp_path: Path,
@@ -2018,6 +2076,150 @@ def test_a_replay_expects_the_node_it_replays_to(
     assert identified == ["s1_list", "s0_home"]
 
 
+_BACK_REPLY = '{"action":"system_button","button":"Back"}'
+_OPEN_LIST = {"action": "tap", "coordinate": [10, 20]}
+
+
+def _planning_back(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Make the planner choose Back on every screen; return the list the page description
+    of each screen it plans from is appended to."""
+    planned_from: list[object] = []
+    monkeypatch.setattr(
+        "android_app_graph.kobe.plan_next_action", _planner("Go back", planned_from)
+    )
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    return planned_from
+
+
+def _requested_models(router_requests: list[httpx.Request]) -> list[str]:
+    return [json.loads(request.content)["model"] for request in router_requests]
+
+
+@pytest.mark.parametrize("action_reply", [_BACK_REPLY, '{"action":"end"}'], ids=["back", "end"])
+@pytest.mark.usefixtures("no_sleep")
+def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
+    action_reply: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """Back on the start screen would leave the app, which then restarts onto the same
+    screen. The Back is not sent: the coverage checkpoint's target choice runs at once,
+    without its merge audit, its replay reaches the target, and the next step plans from
+    there. The step counts, so two planned steps end a two-step run."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    expected = _identifying(explorer, monkeypatch, "s0_home", "s1_list")
+    planned_from = _planning_back(monkeypatch)
+    router_responses.extend(
+        [
+            chat_response(content=action_reply),
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=2)
+
+    assert device_log == [*_FIRST_RESTART, _OPEN_LIST]
+    assert expected == [None, "s1_list"]
+    assert planned_from == ["s0_home", "s1_list"]
+    assert _requested_models(router_requests) == [
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+    ]
+    target_choice = json.loads(router_requests[1].content)
+    assert target_choice["response_format"]["json_schema"]["name"] == "exploration_target"
+    assert "node_id=s0_home" not in target_choice["messages"][0]["content"]
+    assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list")]
+    assert (
+        "Step 1/2: Back on s0_home leaves the app; continuing from ranked target s1_list "
+        "instead." in caplog.text
+    )
+    assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
+        ("observation", "main_loop"),
+        ("action", "navigation_replay"),
+        ("observation", "navigation_replay"),
+        ("observation", "coverage_checkpoint"),
+        ("observation", "main_loop"),
+    ]
+
+
+@pytest.mark.parametrize("screen", ["s0_home", "s1_list"], ids=["start screen", "other screen"])
+@pytest.mark.usefixtures("no_sleep")
+def test_back_is_pressed_on_other_screens_and_when_no_other_node_is_ranked(
+    screen: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recorded edge leads from the start screen to the list, so on the start screen no
+    other node is ranked. On the list the start screen is ranked, and Back is pressed all
+    the same, as on any screen other than the start screen. Either way the Back is
+    recorded and no target is chosen."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    _identifying(explorer, monkeypatch, screen, "s0_home")
+    _planning_back(monkeypatch)
+    router_responses.append(chat_response(content=_BACK_REPLY))
+
+    explorer.explore(max_steps=1)
+
+    assert device_log == [_BACK]
+    assert _requested_models(router_requests) == ["provider/action"]
+    assert explorer.graph.graph.edges[screen, "s0_home"]["actions"] == [[_BACK]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_back_on_the_start_screen_whose_replay_cannot_restart_the_app_stays_there(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused force-stop leaves the start screen showing, as at a coverage checkpoint:
+    Back is still not pressed, the step counts, and the next step plans from the start
+    screen."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    expected = _identifying(explorer, monkeypatch, "s0_home", "s0_home")
+    monkeypatch.setattr(subprocess, "run", _adb_refusing_once(device_log, _FORCE_STOP))
+    planned_from = _planning_back(monkeypatch)
+    router_responses.extend(
+        [
+            chat_response(content=_BACK_REPLY),
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+
+    explorer.explore(max_steps=2)
+
+    assert device_log == [_FORCE_STOP]
+    assert expected == [None]
+    assert planned_from == ["s0_home", "s0_home"]
+    assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list")]
+
+
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     tmp_path: Path,
     router_client: OpenRouter,
@@ -2047,6 +2249,57 @@ def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
         "model": "provider/embedding",
         "embeddings": {"s0_home-observation": [1.0, 0.0], "s1_list-observation": [0.25, 0.75]},
     }
+
+
+def test_exploration_embeds_every_member_again_when_the_vectors_are_from_another_model(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, object]], None],
+    write_image_vectors: Callable[..., None],
+) -> None:
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}, {"id": "s1_list"}], "edges": []})
+    steps_dir = graph_path.parent / "steps"
+    members = ["s0_home-observation", "s1_list-observation"]
+    write_image_vectors(steps_dir, members, model="provider/older-embedding")
+    router_responses.extend(httpx.Response(200, json=embedding_body) for _ in members)
+
+    _explorer(_Device(AssertionError("loading must not read the device")), tmp_path, router_client)
+
+    assert len(router_requests) == len(members)
+    assert json.loads((steps_dir / "image_emb.json").read_text(encoding="utf-8")) == {
+        "model": "provider/embedding",
+        "embeddings": {member: [0.25, 0.75] for member in members},
+    }
+
+
+def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
+    write_graph_file: Callable[[Path, dict[str, object]], None],
+) -> None:
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}], "edges": []})
+    vector_file = graph_path.parent / "steps" / "image_emb.json"
+    truncated = '{"model": "provider/embedding", "embeddings": {"s0_home-observation": [1.0,'
+    vector_file.write_text(truncated, encoding="utf-8")
+    router_responses.append(httpx.Response(200, json=embedding_body))
+
+    with pytest.raises(ValueError, match=r"image_emb\.json cannot be read or parsed"):
+        _explorer(
+            _Device(AssertionError("loading must not read the device")), tmp_path, router_client
+        )
+
+    assert router_requests == []
+    assert vector_file.read_text(encoding="utf-8") == truncated
 
 
 @pytest.mark.usefixtures("no_sleep")
