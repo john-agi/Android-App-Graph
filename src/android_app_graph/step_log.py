@@ -102,6 +102,42 @@ class Transition:
     to_node: str
 
 
+@dataclass(frozen=True, slots=True)
+class TransitionRecord:
+    """A transition as its record in the step log keeps it: the observations before
+    and after the action, the action, and the nodes both were assigned to then."""
+
+    before: str
+    after: str
+    action: object
+    from_node: str
+    to_node: str
+
+
+def read_exploration_transitions(steps: Path) -> list[TransitionRecord]:
+    """Return the transition records exploration runs wrote to the step log ``steps``,
+    in step order.
+
+    An explored graph holds the edges of its exploration runs only: the audit's
+    re-exploration records its transitions against the audited copy.
+    """
+    paths = [path for path in steps.glob("*.json") if path.stem.isascii() and path.stem.isdigit()]
+    transitions: list[TransitionRecord] = []
+    for path in sorted(paths, key=lambda path: (len(path.stem), path.stem)):
+        record = as_object_dict(json.loads(path.read_text(encoding="utf-8")))
+        if record.get("kind") == "transition" and record.get("run_kind") == "explore":
+            transitions.append(
+                TransitionRecord(
+                    before=as_str(record.get("before"), ""),
+                    after=as_str(record.get("after"), ""),
+                    action=record.get("action"),
+                    from_node=as_str(record.get("from_node"), ""),
+                    to_node=as_str(record.get("to_node"), ""),
+                )
+            )
+    return transitions
+
+
 def read_observation_record(steps: Path, observation_id: str) -> dict[str, object] | None:
     """Return the record of observation ``observation_id`` in the step log ``steps``, or
     ``None`` when it has none."""

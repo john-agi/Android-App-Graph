@@ -2055,23 +2055,6 @@ def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
     }
 
 
-def test_representative_image_needs_a_step_log() -> None:
-    gm = make_manager()
-    add_screen(
-        gm, "s0_home", "Home screen", observations=["000000"], representative_observation="000000"
-    )
-
-    with pytest.raises(RuntimeError, match="needs a steps_dir"):
-        gm.representative_image_b64("s0_home")
-
-
-def test_representative_image_is_read_from_the_step_log(tmp_path: Path) -> None:
-    gm = make_manager(steps_dir=tmp_path / "steps")
-    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps", b"home-image"))
-
-    assert gm.representative_image_b64("s0_home") == b64(b"home-image")
-
-
 def test_merge_nodes_adds_only_the_schema_values_the_kept_node_lacks() -> None:
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", state_schema={"tab": ["home"]})
@@ -3481,7 +3464,6 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     assert restored["description_embedding"] == EMBEDDINGS["Home screen"]
     assert restored["description_embedding_model"] == gm.embedding_model
     assert loaded.steps_dir == steps_dir
-    assert loaded.representative_image_b64(node_id) == SHOT_A
     assert loaded.find_node_by_description("Home screen") == [(node_id, pytest.approx(1.0))]
     assert loaded.image_vector(observation.observation_id) == [0.0, 0.6, 0.8]
 
@@ -3788,7 +3770,6 @@ def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     gm.load_graph(path)
 
     assert gm.steps_dir == app_dir / "steps"
-    assert gm.representative_image_b64("s0_home") == b64(b"home-image")
 
 
 def write_graph(path: Path, nodes: list[dict[str, object]]) -> None:
