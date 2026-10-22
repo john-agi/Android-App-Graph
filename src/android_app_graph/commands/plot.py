@@ -26,9 +26,8 @@ import networkx as nx
 from android_app_graph.graph_files import (
     edge_problems,
     graph_steps_dir,
-    nodes_without_members,
+    member_problems,
     observation_image_b64,
-    observation_image_path,
     require_graph_shape,
     unloadable_graph,
 )
@@ -79,37 +78,21 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph).
 
     A file that ``require_graph_shape`` rejects, a node that does not list its member
-    observations with its representative among them, an edge without actions or whose
-    per-action lists do not hold one entry per action, and a member whose image is
-    missing from the step log raise ``ValueError`` naming the file and each of them.
+    observations, a member whose image is missing from the step log, and an edge
+    without actions or whose per-action lists do not hold one entry per action raise
+    ``ValueError`` naming the file and each of them.
     """
     path = Path(graph_path)
     with path.open("r", encoding="utf-8") as f:
         data = require_graph_shape(json.load(f), path)
-    problems = []
-    if without_members := nodes_without_members(data["nodes"]):
-        problems.append(
-            f"node(s) with no member observations with a representative: {without_members}"
-        )
-    problems.extend(edge_problems(data["edges"]))
+    steps_dir = graph_steps_dir(path)
+    problems = [*member_problems(data["nodes"], steps_dir), *edge_problems(data["edges"])]
     if problems:
         raise unloadable_graph(path, problems)
-    steps_dir = graph_steps_dir(path)
-    without_image = [
-        observation
-        for node in data["nodes"]
-        for observation in node["observations"]
-        if not observation_image_path(steps_dir, observation).is_file()
-    ]
-    if without_image:
-        raise unloadable_graph(
-            path, [f"member(s) without an image in {steps_dir}: {without_image}"]
-        )
 
     graph = nx.DiGraph()
 
     for node in data["nodes"]:
-        screenshot_uri = _image_uri(steps_dir, node["representative_observation"])
         observations = node["observations"]
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
@@ -123,7 +106,6 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
             elements=elements,
             elements_explored=n_explored,
             elements_total=len(elements),
-            screenshot_uri=screenshot_uri,
             member_image_uris=[
                 _image_uri(steps_dir, observation)
                 for observation in observations[:_PANEL_MEMBER_LIMIT]
@@ -624,10 +606,8 @@ _NODE_TOOLTIPS = """
     });
     var image = document.createElement("img");
     image.className = "node-tooltip-image";
-    image.alt = "Representative screenshot";
-    image.src = typeof node.representativeMember === "number"
-      ? node.memberImages[node.representativeMember]
-      : node.representativeImage;
+    image.alt = "Earliest screenshot";
+    image.src = node.memberImages[0];
     tooltip.appendChild(image);
     return tooltip;
   }
@@ -796,22 +776,14 @@ def plot_pyvis(
     for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
         desc = data.get("page_description", node_id)
         short_desc = shorten_words(desc, style.max_node_words, 40)
-        screenshot_uri = data.get("screenshot_uri")
         member_images = data.get("member_image_uris", [])
         member_total = data.get("member_total", 0)
-        # The tooltip reuses the panel's copy of the representative, so the page embeds
-        # each image once.
-        representative_member = (
-            member_images.index(screenshot_uri) if screenshot_uri in member_images else None
-        )
         bg = palette[idx % len(palette)]
 
         net.add_node(
             node_id,
             label=f"{short_desc}\n[{member_total} screenshot{'s' if member_total != 1 else ''}]",
             tooltipRows=_tooltip_rows(data, desc),
-            representativeMember=representative_member,
-            representativeImage=screenshot_uri if representative_member is None else None,
             memberImages=member_images,
             memberTotal=member_total,
             color={

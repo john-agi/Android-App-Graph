@@ -131,7 +131,6 @@ def write_observation_image(steps_dir: Path, image: bytes) -> str:
 
 class Membership(TypedDict):
     observations: list[str]
-    representative_observation: str
 
 
 def write_member_record(steps_dir: Path, observation_id: str) -> None:
@@ -148,14 +147,14 @@ def write_member_record(steps_dir: Path, observation_id: str) -> None:
 
 
 def members(steps_dir: Path, *images: bytes) -> Membership:
-    """The membership fields of a node whose observations, ``b"screenshot-a"`` unless
-    given, are members in ``steps_dir``; the first is the representative."""
+    """The membership field of a node whose observations, ``b"screenshot-a"`` unless
+    given, are members in ``steps_dir``."""
     observation_ids = []
     for image in images or (b"screenshot-a",):
         observation_id = write_observation_image(steps_dir, image)
         write_member_record(steps_dir, observation_id)
         observation_ids.append(observation_id)
-    return {"observations": observation_ids, "representative_observation": observation_ids[0]}
+    return {"observations": observation_ids}
 
 
 def fake_pixel_hash(screenshot: str) -> str:
@@ -441,7 +440,6 @@ def test_identify_state_creates_the_first_node(vlm: FakeVlm, screen: Screens) ->
     assert node["visit_count"] == 1
     assert node["state_schema"] == {"tab": ["home"]}
     assert node["observations"] == [observation.observation_id]
-    assert node["representative_observation"] == observation.observation_id
     assert node["interactable_elements"] == [
         {"description": "Search box", "position": "10,20", "explored": False}
     ]
@@ -514,7 +512,6 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
         first_observation.observation_id,
         second_observation.observation_id,
     ]
-    assert node["representative_observation"] == first_observation.observation_id
     assert node["visit_count"] == 2
     assert node["activities"] == [HOME, SETTINGS]
     assert node["last_detail_snapshot"] == {"tab": "home"}
@@ -608,7 +605,6 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(
         "replay_misses": 0,
         "visit_count": 2,
         "observations": [article.observation_id, sign_in.observation_id],
-        "representative_observation": article.observation_id,
     }
     assert vlm.kinds() == ["image", "describe", "image", "describe"]
     assert gm.get_start_node() is None
@@ -656,7 +652,6 @@ def test_identify_state_verified_match_merges_into_existing_node(
     assert node["visit_count"] == 2
     assert node["state_schema"] == {"tab": ["home", "deals"]}
     assert node["observations"] == [home.observation_id, banner.observation_id]
-    assert node["representative_observation"] == home.observation_id
     identify = screen.record(banner)["identify"]
     assert identify["stage"] == "short_list"
     assert identify["candidates"] == [
@@ -742,10 +737,8 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(
     assert renamed is not None
     assert renamed["page_description"] == "Home feed"
     assert renamed["observations"] == [home.observation_id]
-    assert renamed["representative_observation"] == home.observation_id
     split = gm.graph.nodes[second]
     assert split["observations"] == [overlay.observation_id]
-    assert split["representative_observation"] == overlay.observation_id
     identify = screen.record(overlay)["identify"]
     assert (identify["stage"], identify["node"]) == ("new", second)
     assert identify["refinement"] == {
@@ -897,7 +890,7 @@ def _rejection(node: str) -> dict[str, Any]:
 def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
     vlm: FakeVlm, screen: Screens
 ) -> None:
-    """Its description scores 0 and its representative looks unlike the screen; its other
+    """Its description scores 0 and its first member looks unlike the screen; its other
     member is the screen's look-alike."""
     explored = make_manager(screen.steps_dir)
     add_screen(
@@ -1346,12 +1339,7 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
         path,
         [
             {"id": "s0_home", "replay_misses": 0, **home},
-            {
-                "id": EXTERNAL_WEB_NODE,
-                "replay_misses": 0,
-                "observations": [browser],
-                "representative_observation": browser,
-            },
+            {"id": EXTERNAL_WEB_NODE, "replay_misses": 0, "observations": [browser]},
         ],
     )
 
@@ -1438,7 +1426,6 @@ def test_black_screens_of_one_activity_share_its_node(vlm: FakeVlm, tmp_path: Pa
     assert vlm.kinds() == ["image", "image"]
     node = gm.graph.nodes[PATTERN_NODE]
     assert node["observations"] == [first.observation_id, second.observation_id]
-    assert node["representative_observation"] == first.observation_id
     assert node["visit_count"] == 2
     assert node["activities"] == [SET_PATTERN]
 
@@ -1739,9 +1726,10 @@ def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vect
     gm.load_graph(path)
     gm.save_graph(path)
 
-    assert gm.image_vector(member["representative_observation"]) is None
+    (observation,) = member["observations"]
+    assert gm.image_vector(observation) is None
     assert json.loads((tmp_path / "steps" / "image_emb.json").read_text("utf-8"))["embeddings"] == {
-        member["representative_observation"]: [1.0, 0.0]
+        observation: [1.0, 0.0]
     }
 
 
@@ -1791,6 +1779,68 @@ def test_closest_member_raises_for_a_node_without_members() -> None:
 
     with pytest.raises(ValueError, match="'s0_home' has no members"):
         gm.closest_member("s0_home", NEAR)
+
+
+@pytest.mark.parametrize(
+    "choose",
+    [
+        pytest.param(lambda gm: gm.closest_members("s0_home", "s1_feed"), id="closest members"),
+        pytest.param(lambda gm: gm.member_plans(), id="member plans"),
+        pytest.param(lambda gm: gm.close_member_pairs(), id="close member pairs"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("vectors", "without"),
+    [
+        pytest.param({}, {"s0_home": [0, 1], "s1_feed": [2]}, id="no member has one"),
+        pytest.param({0: NEAR, 2: FAR}, {"s0_home": [1]}, id="one of several has none"),
+    ],
+)
+def test_choosing_a_node_image_raises_naming_each_node_and_member_without_an_image_vector(
+    choose: Callable[[GraphManager], object],
+    vectors: dict[int, list[float]],
+    without: dict[str, list[int]],
+    tmp_path: Path,
+) -> None:
+    """The closest members of two nodes, the member groups of every node and the close
+    member pairs of the graph all need the image vector of every member they compare."""
+    steps_dir = tmp_path / "steps"
+    home = members(steps_dir, b"home", b"home-2")
+    feed = members(steps_dir, b"feed")
+    observations = [*home["observations"], *feed["observations"]]
+    save_image_embeddings(
+        steps_dir,
+        {observations[index]: vector for index, vector in vectors.items()},
+        model=IMAGE_EMBEDDING.model,
+    )
+    path = tmp_path / "graph.json"
+    write_graph(
+        path,
+        [
+            {"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **home},
+            {"id": "s1_feed", "package": PACKAGE, "replay_misses": 0, **feed},
+        ],
+    )
+    write_text_vectors(path, home, feed)
+    gm = make_manager()
+    gm.load_graph(path)
+
+    with pytest.raises(ValueError, match="without an image vector") as caught:
+        choose(gm)
+
+    message = str(caught.value)
+    assert [node for node in ("s0_home", "s1_feed") if f"'{node}'" in message] == list(without)
+    named = [observation for observation in observations if observation in message]
+    assert named == [observations[index] for indices in without.values() for index in indices]
+
+
+def test_closest_members_raises_for_nodes_without_members() -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_feed", "Home feed")
+
+    with pytest.raises(ValueError, match="'s0_home' or 's1_feed' has no members"):
+        gm.closest_members("s0_home", "s1_feed")
 
 
 def test_the_text_source_ranks_a_node_by_its_member_closest_to_the_screen(
@@ -1896,36 +1946,22 @@ def test_rename_node_without_an_underscore_uses_the_whole_id_as_prefix() -> None
 
 def test_rename_node_to_the_same_id_records_no_alias() -> None:
     gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home_screen",
-        "Home screen",
-        observations=["000000"],
-        representative_observation="000000",
-    )
+    add_screen(gm, "s0_home_screen", "Home screen", observations=["000000"])
 
     assert gm.rename_node("s0_home_screen", "Home screen") == "s0_home_screen"
 
     assert gm.resolve_node_id("s0_home_screen") == "s0_home_screen"
     assert gm.graph.nodes["s0_home_screen"]["observations"] == ["000000"]
-    assert gm.graph.nodes["s0_home_screen"]["representative_observation"] == "000000"
 
 
-def test_rename_node_keeps_the_members_and_representative_under_the_new_id() -> None:
+def test_rename_node_keeps_the_members_under_the_new_id() -> None:
     gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home_screen",
-        "Home screen",
-        observations=["000000", "000004"],
-        representative_observation="000000",
-    )
+    add_screen(gm, "s0_home_screen", "Home screen", observations=["000000", "000004"])
 
     new_id = gm.rename_node("s0_home_screen", "Home feed")
 
     assert new_id == "s0_home_feed"
     assert gm.graph.nodes[new_id]["observations"] == ["000000", "000004"]
-    assert gm.graph.nodes[new_id]["representative_observation"] == "000000"
 
 
 def test_an_exact_match_joins_the_node_under_its_new_id(vlm: FakeVlm, screen: Screens) -> None:
@@ -2562,29 +2598,16 @@ def test_merge_nodes_unions_activities_schemas_elements_and_visits() -> None:
     assert "s1_home_two" not in gm.graph
 
 
-def test_merge_nodes_unites_the_members_in_step_order_and_keeps_the_representative() -> None:
+def test_merge_nodes_unites_the_members_in_step_order() -> None:
     """Step IDs are zero-padded integers, so a longer ID sorts after every shorter one."""
     gm = make_manager()
-    add_screen(
-        gm,
-        "s0_home",
-        "Home screen",
-        observations=["000003", "000010", "1000000"],
-        representative_observation="000010",
-    )
-    add_screen(
-        gm,
-        "s1_home_two",
-        "Home screen again",
-        observations=["000001", "000010", "000012"],
-        representative_observation="000001",
-    )
+    add_screen(gm, "s0_home", "Home screen", observations=["000003", "000010", "1000000"])
+    add_screen(gm, "s1_home_two", "Home screen again", observations=["000001", "000010", "000012"])
 
     assert gm.merge_nodes("s0_home", "s1_home_two") is True
 
     kept = gm.graph.nodes["s0_home"]
     assert kept["observations"] == ["000001", "000003", "000010", "000012", "1000000"]
-    assert kept["representative_observation"] == "000010"
 
 
 def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
@@ -2606,7 +2629,6 @@ def test_record_external_app_visit_adds_each_screen_to_one_node_per_app(
         "replay_misses": 0,
         "is_external": True,
         "observations": [first.observation_id, second.observation_id],
-        "representative_observation": first.observation_id,
     }
 
 
@@ -4117,14 +4139,12 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     }
     saved = json.loads(graph_path.read_text(encoding="utf-8"))["nodes"][0]
     assert saved["observations"] == [observation.observation_id]
-    assert saved["representative_observation"] == observation.observation_id
 
     loaded = make_manager()
     loaded.load_graph(graph_path)
     restored = loaded.get_node(node_id)
     assert restored is not None
     assert restored["observations"] == [observation.observation_id]
-    assert restored["representative_observation"] == observation.observation_id
     assert loaded.steps_dir == steps_dir
     assert loaded.image_vector(observation.observation_id) == [0.0, 0.6, 0.8]
 
@@ -4155,14 +4175,7 @@ def test_node_aliases_survive_save_and_load(tmp_path: Path) -> None:
 def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
     gm = make_manager()
     gm.total_steps_completed = 42
-    add_screen(
-        gm,
-        "s0_home",
-        "Home screen",
-        visit_count=3,
-        observations=["000000", "000002"],
-        representative_observation="000000",
-    )
+    add_screen(gm, "s0_home", "Home screen", visit_count=3, observations=["000000", "000002"])
     add_screen(gm, "s1_settings", "Settings page")
     gm.add_edge(
         "s0_home",
@@ -4178,10 +4191,23 @@ def test_save_graph_persists_nodes_edges_and_counters(tmp_path: Path) -> None:
 
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["total_steps_completed"] == 42
+    assert sorted(data["nodes"][0]) == [
+        "activities",
+        "activity",
+        "id",
+        "interactable_elements",
+        "last_detail_snapshot",
+        "last_normalized_visit_milestone",
+        "observations",
+        "package",
+        "page_description",
+        "replay_misses",
+        "state_schema",
+        "visit_count",
+    ]
     assert data["nodes"][0]["activity"] == HOME
     assert data["nodes"][0]["visit_count"] == 3
     assert data["nodes"][0]["observations"] == ["000000", "000002"]
-    assert data["nodes"][0]["representative_observation"] == "000000"
     assert data["node_aliases"] == {}
     assert data["edges"][0]["schema_deltas"] == [{"tab": {"after": "settings"}}]
 
@@ -4361,22 +4387,8 @@ def write_graph(path: Path, nodes: list[dict[str, object]]) -> None:
 
 @pytest.mark.parametrize(
     "membership",
-    [
-        {},
-        {"observations": [], "representative_observation": None},
-        {"observations": "000000", "representative_observation": "000000"},
-        {"observations": ["000000", 1], "representative_observation": "000000"},
-        {"observations": ["000000"]},
-        {"observations": ["000000"], "representative_observation": "000001"},
-    ],
-    ids=[
-        "no-members",
-        "empty-members",
-        "members-not-a-list",
-        "a-member-not-a-string",
-        "no-representative",
-        "representative-not-a-member",
-    ],
+    [{}, {"observations": []}, {"observations": "000000"}, {"observations": ["000000", 1]}],
+    ids=["no-members", "empty-members", "members-not-a-list", "a-member-not-a-string"],
 )
 def test_load_graph_rejects_a_node_without_members_naming_it(
     tmp_path: Path, membership: dict[str, object]
@@ -4403,19 +4415,19 @@ def test_load_graph_rejects_a_node_without_members_naming_it(
     assert "Explore the app again into a new graph directory" in message
 
 
-def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
+def test_load_graph_rejects_a_graph_naming_every_member_without_an_image(
     tmp_path: Path,
 ) -> None:
+    """Every member of every node needs its image, a later member's and a member of an
+    ``ext_`` node's as much as the earliest's."""
+    steps_dir = tmp_path / "steps"
     path = tmp_path / "graph.json"
     write_graph(
         path,
         [
-            {"id": "s0_home", **members(tmp_path / "steps")},
-            {
-                "id": "s1_settings",
-                "observations": ["000007"],
-                "representative_observation": "000007",
-            },
+            {"id": "s0_home", "observations": [*members(steps_dir)["observations"], "000007"]},
+            {"id": "s1_settings", "observations": ["000008"]},
+            {"id": EXTERNAL_WEB_NODE, "observations": ["000009"]},
         ],
     )
     gm = make_manager()
@@ -4423,9 +4435,10 @@ def test_load_graph_rejects_a_representative_without_an_image_naming_the_node(
     with pytest.raises(ValueError, match="without an image") as excinfo:
         gm.load_graph(path)
 
-    assert "['s1_settings']" in str(excinfo.value)
-    assert str(tmp_path / "steps") in str(excinfo.value)
-    assert "no member observations" not in str(excinfo.value)
+    message = str(excinfo.value)
+    assert f"member(s) without an image in {steps_dir}: ['000007', '000008', '000009']" in message
+    assert "no member observations" not in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 @pytest.mark.parametrize(
@@ -4469,17 +4482,16 @@ def test_load_graph_names_every_node_it_rejects_and_keeps_the_loaded_graph(
         path,
         [
             {"id": "s0_home"},
-            {
-                "id": "s1_settings",
-                "observations": ["000007"],
-                "representative_observation": "000007",
-            },
+            {"id": "s1_settings", "observations": ["000007"]},
         ],
     )
     gm = make_manager()
     gm.load_graph(previous)
 
-    with pytest.raises(ValueError, match=r"\['s0_home'\].*\['s1_settings'\]"):
+    with pytest.raises(
+        ValueError,
+        match=r"\['s0_home'\].*\['000007'\].*replay_misses.*\['s0_home', 's1_settings'\]",
+    ):
         gm.load_graph(path)
 
     assert list(gm.graph.nodes) == ["s9_stale"]
@@ -4760,16 +4772,16 @@ def test_run_node_merge_audit_skips_a_self_pair(
     assert vlm.kinds() == []
 
 
-@pytest.mark.parametrize("without_representative", ["s0_home", "s1_home_two"])
-def test_run_node_merge_audit_skips_a_node_without_a_representative(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, without_representative: str
+@pytest.mark.parametrize("without_members", ["s0_home", "s1_home_two"])
+def test_run_node_merge_audit_skips_a_node_without_members(
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, without_members: str
 ) -> None:
     fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s1_home_two"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     gm = make_manager(steps_dir=tmp_path / "steps")
     add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
     add_screen(gm, "s1_home_two", "Home screen again", **members(tmp_path / "steps"))
-    del gm.graph.nodes[without_representative]["representative_observation"]
+    gm.graph.nodes[without_members]["observations"] = []
 
     result = gm.run_node_merge_audit()
 
@@ -4782,7 +4794,7 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, external_side: str
 ) -> None:
     """An ``ext_`` node stands for every screen of another app or the web, so its
-    representative is no screen of the app to compare with."""
+    members are no screens of the app to compare with."""
     pair = {"node_a": "s0_home", "node_b": "s1_home_two", external_side: EXTERNAL_WEB_NODE}
     fake = FakeAudit(result={"issues": [pair]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
@@ -4817,6 +4829,8 @@ def test_run_node_merge_audit_merges_a_confirmed_duplicate(
         **members(steps_dir, b"home-two-image"),
     )
     removed_members = gm.graph.nodes["s2_home_two"]["observations"]
+    gm.embed_missing_members()
+    vlm.calls.clear()
 
     result = gm.run_node_merge_audit()
 
@@ -4827,7 +4841,7 @@ def test_run_node_merge_audit_merges_a_confirmed_duplicate(
     assert gm.graph.nodes["s0_home"]["observations"][1:] == removed_members
     # The description of the more-visited node is the verifier's reference.
     assert vlm.calls[0][1]["existing_description"] == "Home screen again"
-    # Each side's representative image comes from the step log.
+    # Each side's member image comes from the step log.
     assert vlm.calls[0][1]["existing"] == b64(b"home-two-image")
     assert vlm.calls[0][1]["new"] == b64(b"home-image")
 
@@ -4842,6 +4856,7 @@ def test_run_node_merge_audit_orders_non_numeric_ids_last(
     gm = make_manager(steps_dir=tmp_path / "steps")
     add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
     add_screen(gm, other, "Search results", **members(tmp_path / "steps"))
+    gm.embed_missing_members()
 
     result = gm.run_node_merge_audit()
 
@@ -4857,6 +4872,7 @@ def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     gm = make_manager(steps_dir=tmp_path / "steps")
     add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
     add_screen(gm, "s1_home_two", "Home screen again", **members(tmp_path / "steps"))
+    gm.embed_missing_members()
 
     result = gm.run_node_merge_audit()
 
@@ -4881,11 +4897,7 @@ setup_entries = st.none() | st.lists(actions, max_size=3)
 step_ids = st.lists(
     st.integers(min_value=0, max_value=10_000_000), min_size=1, max_size=4, unique=True
 ).map(lambda numbers: [f"{number:06d}" for number in numbers])
-memberships = step_ids.flatmap(
-    lambda ids: st.fixed_dictionaries(
-        {"observations": st.just(ids), "representative_observation": st.sampled_from(ids)}
-    )
-)
+memberships = st.fixed_dictionaries({"observations": step_ids})
 screen_attrs = st.fixed_dictionaries(
     {
         "package": st.text(min_size=1, max_size=30),
@@ -4971,7 +4983,6 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "visit_count": d.get("visit_count", 0),
             "replay_misses": d["replay_misses"],
             "observations": d.get("observations", []),
-            "representative_observation": d.get("representative_observation"),
         }
         for node_id, d in gm.graph.nodes(data=True)
     }
@@ -5010,7 +5021,7 @@ def test_save_then_load_round_trips(
     for attrs in nodes.values():
         for observation_id in attrs["observations"]:
             write_member_record(path.parent / "steps", observation_id)
-        (path.parent / "steps" / f"{attrs['representative_observation']}.webp").write_bytes(b"x")
+            (path.parent / "steps" / f"{observation_id}.webp").write_bytes(b"x")
 
     gm.save_graph(path)
     loaded = GraphManager()

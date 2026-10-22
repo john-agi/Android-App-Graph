@@ -341,19 +341,36 @@ def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
     return problems
 
 
-def nodes_without_members(nodes: Iterable[dict[str, Any]]) -> list[str]:
-    """Return the IDs of the saved ``nodes`` that do not list their member observations,
-    as a list of observation IDs with the node's representative among them."""
-    return [node["id"] for node in nodes if not _lists_members(node)]
+def member_problems(nodes: Iterable[dict[str, Any]], steps: Path) -> list[str]:
+    """Return what keeps the saved ``nodes`` from loading: the nodes that do not list
+    their member observations as a non-empty list of observation IDs, and the members
+    whose image is missing from the step log ``steps``."""
+    without_members: list[str] = []
+    without_image: list[str] = []
+    for node in nodes:
+        observations = _listed_members(node)
+        if observations is None:
+            without_members.append(node["id"])
+            continue
+        without_image.extend(
+            observation
+            for observation in observations
+            if not observation_image_path(steps, observation).is_file()
+        )
+    problems = []
+    if without_members:
+        problems.append(f"node(s) with no member observations: {without_members}")
+    if without_image:
+        problems.append(f"member(s) without an image in {steps}: {without_image}")
+    return problems
 
 
-def _lists_members(node: dict[str, Any]) -> bool:
+def _listed_members(node: dict[str, Any]) -> list[str] | None:
     observations = node.get("observations")
-    return (
-        isinstance(observations, list)
-        and all(isinstance(observation, str) for observation in observations)
-        and node.get("representative_observation") in observations
-    )
+    if not isinstance(observations, list):
+        return None
+    members: list[str] = [o for o in observations if isinstance(o, str)]
+    return members if members and len(members) == len(observations) else None
 
 
 def unloadable_graph(path: Path, problems: Iterable[str]) -> ValueError:

@@ -188,7 +188,7 @@ def check_members(
     graph: GraphManager, verdicts: MemberVerdicts, transitions: Sequence[TransitionRecord]
 ) -> MemberReport:
     """Check the members of every in-app node, grouped at ``GROUPING_FLOOR``, against
-    the group that holds its representative; README.md#member-checks.
+    its largest group; README.md#member-checks.
 
     Every split check of every node is asked at once and applied before the move
     checks are asked, so a moved member can go to a node a split made. ``verdicts``

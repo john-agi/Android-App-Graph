@@ -373,10 +373,9 @@ def write_image_vectors() -> Callable[..., None]:
 
 
 @pytest.fixture
-def add_representative(png_screenshot: str) -> Callable[..., None]:
-    """Give a node of a manager one member observation, its representative, with an image
-    and a record in the manager's step log; ``image`` defaults to ``png_screenshot`` as
-    WebP.
+def add_member(png_screenshot: str) -> Callable[..., None]:
+    """Give a node of a manager one member observation, with an image and a record in the
+    manager's step log; ``image`` defaults to ``png_screenshot`` as WebP.
 
     The observation ID is not a step number, so a StepRecorder on the same step log
     never reuses it.
@@ -392,7 +391,6 @@ def add_representative(png_screenshot: str) -> Callable[..., None]:
         )
         _write_member_record(steps_dir, observation_id)
         graph.graph.nodes[node_id]["observations"] = [observation_id]
-        graph.graph.nodes[node_id]["representative_observation"] = observation_id
 
     return add
 
@@ -427,11 +425,11 @@ def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
 def write_graph_file(png_screenshot: str) -> Callable[..., None]:
     """Write ``document`` as a graph file that ``load_graph`` accepts, with what exploration
     records where ``document`` gives none: every node but an ``ext_`` one gets the package
-    ``com.demo``, every node gets a ``replay_misses`` of 0 and one member observation, its
-    representative, with an image and a record holding a pixel hash and a describe output
-    in the step log beside it, every member of a node but an ``ext_`` one gets a text
-    vector in the file beside the graph, tagged with ``embedding_model``, and every edge
-    gets the per-action lists ``add_edge`` records."""
+    ``com.demo``, every node gets a ``replay_misses`` of 0 and one member observation,
+    with an image and a record holding a pixel hash and a describe output in the step log
+    beside it, every member of a node but an ``ext_`` one gets a text vector in the file
+    beside the graph, tagged with ``embedding_model``, and every edge gets the per-action
+    lists ``add_edge`` records."""
 
     def write(
         path: Path, document: dict[str, Any], embedding_model: str = "google/gemini-embedding-2"
@@ -453,7 +451,6 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
                 "package": "com.demo" if in_app else "",
                 "replay_misses": 0,
                 "observations": [observation_id],
-                "representative_observation": observation_id,
             }
             nodes.append(recorded | node)
         edges = [_saved_edge(edge) for edge in document.get("edges", [])]
@@ -473,9 +470,9 @@ def write_member_graph() -> Callable[..., None]:
     the file beside the graph, and the exploration transitions
     ``(before, after, action, from_node, to_node)``.
 
-    ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order,
-    the first its representative; the vector is the member's image vector and its text
-    vector. Node ``n`` is described as ``Node n`` and member ``m`` as ``Screen m``.
+    ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order;
+    the vector is the member's image vector and its text vector. Node ``n`` is described
+    as ``Node n`` and member ``m`` as ``Screen m``.
     ``black`` maps each member whose screenshot is black to its activity; as screen
     matching records a black screenshot, its record holds no describe output and it has
     no text vector. Each image holds its observation ID, so a fake verifier can tell
@@ -546,7 +543,6 @@ def write_member_graph() -> Callable[..., None]:
                     "visit_count": len(members),
                     "replay_misses": 0,
                     "observations": [observation_id for observation_id, _ in members],
-                    "representative_observation": members[0][0],
                 }
                 for node_id, members in nodes.items()
             ],

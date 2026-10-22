@@ -41,10 +41,11 @@ def _axis(index: int) -> list[float]:
     return [float(index == position) for position in range(8)]
 
 
-def test_a_unit_vector_has_length_one_and_a_zero_vector_none() -> None:
+def test_a_unit_vector_has_length_one_and_a_zero_vector_stays_zero() -> None:
     unit = unit_vector([3.0, 4.0])
     assert unit == pytest.approx([0.6, 0.8])
-    assert unit_vector([0.0, 0.0]) is None
+    assert unit_vector([0.0, 0.0]) == [0.0, 0.0]
+    assert cosine(unit_vector([0.0, 0.0]), unit) == 0.0
 
 
 def test_the_cosine_of_unit_vectors_is_their_dot_product() -> None:
@@ -68,8 +69,8 @@ def test_the_earliest_pair_wins_a_tie() -> None:
     assert closest_pair(["a", "b"], ["c"], units) == MemberPair("a", "c", cosine(_at(0), _at(10)))
 
 
-def test_a_set_without_vectors_has_no_closest_pair() -> None:
-    assert closest_pair(["a"], ["b"], _units(a=0)) is None
+def test_an_empty_set_has_no_closest_pair() -> None:
+    assert closest_pair([], ["b"], _units(b=0)) is None
 
 
 def test_single_linkage_joins_a_chain_whose_ends_are_apart() -> None:
@@ -117,25 +118,33 @@ def test_groups_are_the_connected_components_of_the_links(angles: list[float]) -
 
 
 def test_a_single_member_node_gets_no_check() -> None:
-    plan = plan_member_checks(["r"], "r", _units(r=0))
-    assert plan is not None
-    assert (plan.groups, plan.diffuse, plan.checks, plan.unchecked) == ([["r"]], False, [], [])
+    plan = plan_member_checks(["first"], _units(first=0))
+    assert (plan.groups, plan.diffuse, plan.checks, plan.unchecked) == ([["first"]], False, [], [])
 
 
-def test_a_node_whose_representative_has_no_vector_has_no_plan() -> None:
-    assert plan_member_checks(["r", "a"], "r", _units(a=0)) is None
+def test_home_is_the_largest_group_so_an_earliest_member_apart_gets_a_move_check() -> None:
+    """The earliest member alone below the floor, the four later ones linked: home is the
+    four, and the earliest member is checked against its closest home member."""
+    units = _units(first=90, a=0, b=LINKED, c=0, d=LINKED)
+    plan = plan_member_checks(["first", "a", "b", "c", "d"], units)
+    assert plan.groups == [["a", "b", "c", "d"], ["first"]]
+    assert not plan.diffuse
+    (check,) = plan.checks
+    assert check.group == ["first"]
+    assert (check.pair.first, check.pair.second) == ("b", "first")
 
 
-def test_members_without_a_vector_are_left_out() -> None:
-    plan = plan_member_checks(["r", "a", "b"], "r", _units(r=0, b=90))
-    assert plan is not None
-    assert plan.groups == [["r"], ["b"]]
+def test_a_tie_for_the_largest_group_goes_to_the_group_of_the_earliest_member() -> None:
+    units = _units(first=0, a=90, b=90 + LINKED, c=LINKED)
+    plan = plan_member_checks(["first", "a", "b", "c"], units)
+    assert plan.groups == [["first", "c"], ["a", "b"]]
+    (check,) = plan.checks
+    assert check.group == ["a", "b"]
 
 
 def test_a_lone_member_is_checked_against_its_closest_home_member() -> None:
-    units = _units(r=0, h=LINKED, far=LINKED + 50)
-    plan = plan_member_checks(["r", "h", "far"], "r", units)
-    assert plan is not None
+    units = _units(first=0, h=LINKED, far=LINKED + 50)
+    plan = plan_member_checks(["first", "h", "far"], units)
     (check,) = plan.checks
     assert check.group == ["far"]
     assert (check.pair.first, check.pair.second) == ("h", "far")
@@ -143,17 +152,15 @@ def test_a_lone_member_is_checked_against_its_closest_home_member() -> None:
 
 
 def test_a_three_member_node_is_never_split() -> None:
-    """Two members apart from the representative leave home under half: diffuse."""
-    plan = plan_member_checks(["r", "a", "b"], "r", _units(r=0, a=90, b=90))
-    assert plan is not None
+    """Three members apart from one another leave home under half: diffuse."""
+    plan = plan_member_checks(["first", "a", "b"], _units(first=0, a=90, b=180))
     assert plan.diffuse
     assert (plan.checks, plan.unchecked) == ([], [])
 
 
 def test_a_group_of_two_beside_a_home_of_two_is_a_split_check() -> None:
-    units = _units(r=0, h=LINKED, a=90, b=90 + LINKED)
-    plan = plan_member_checks(["r", "a", "h", "b"], "r", units)
-    assert plan is not None
+    units = _units(first=0, h=LINKED, a=90, b=90 + LINKED)
+    plan = plan_member_checks(["first", "a", "h", "b"], units)
     assert not plan.diffuse
     (check,) = plan.checks
     assert check.group == ["a", "b"]
@@ -161,11 +168,10 @@ def test_a_group_of_two_beside_a_home_of_two_is_a_split_check() -> None:
 
 
 def test_a_node_whose_home_holds_under_half_its_members_is_diffuse() -> None:
-    units = _units(r=0, a=90, b=180, c=270, h=LINKED)
-    plan = plan_member_checks(["r", "a", "b", "c", "h"], "r", units)
-    assert plan is not None
+    units = _units(first=0, a=90, b=180, c=270, h=LINKED)
+    plan = plan_member_checks(["first", "a", "b", "c", "h"], units)
     assert plan.diffuse
-    assert plan.groups == [["r", "h"], ["a"], ["b"], ["c"]]
+    assert plan.groups == [["first", "h"], ["a"], ["b"], ["c"]]
     assert (plan.checks, plan.unchecked) == ([], [])
 
 
@@ -174,17 +180,14 @@ def test_no_node_gets_more_than_three_checks_and_larger_groups_come_first() -> N
     lone = {"x": _axis(1), "y": _axis(2), "z": _axis(3)}
     pair = {"p": _axis(4), "q": _axis(4)}
     units = {**home, **lone, **pair}
-    plan = plan_member_checks([*home, *lone, *pair], "h0", units)
-    assert plan is not None
+    plan = plan_member_checks([*home, *lone, *pair], units)
     assert [check.group for check in plan.checks] == [["p", "q"], ["x"], ["y"]]
     assert len(plan.checks) == CHECKS_PER_NODE
     assert plan.unchecked == [["z"]]
 
 
 def test_a_lower_floor_links_more_members() -> None:
-    units = _units(r=0, a=2 * LINKED)
-    default = plan_member_checks(["r", "a"], "r", units)
-    lower = plan_member_checks(["r", "a"], "r", units, floor=cosine(_at(0), _at(2 * LINKED)))
-    assert default is not None
-    assert lower is not None
-    assert (default.groups, lower.groups) == ([["r"], ["a"]], [["r", "a"]])
+    units = _units(first=0, a=2 * LINKED)
+    default = plan_member_checks(["first", "a"], units)
+    lower = plan_member_checks(["first", "a"], units, floor=cosine(_at(0), _at(2 * LINKED)))
+    assert (default.groups, lower.groups) == ([["first"], ["a"]], [["first", "a"]])

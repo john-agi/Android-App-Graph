@@ -233,7 +233,6 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "page_description": "Home",
                         "replay_misses": 0,
                         "observations": ["s0_home-observation"],
-                        "representative_observation": "s0_home-observation",
                     },
                     {
                         "id": "s1_detail",
@@ -241,7 +240,6 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "page_description": "Detail",
                         "replay_misses": 0,
                         "observations": ["s1_detail-observation"],
-                        "representative_observation": "s1_detail-observation",
                     },
                 ],
                 "edges": [
@@ -261,7 +259,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
         encoding="utf-8",
     )
     for node_id in ("s0_home", "s1_detail"):
-        _write_representative(graph_path, node_id)
+        _write_member(graph_path, node_id)
     graph = GraphManager()
     graph.load_graph(graph_path)
     return graph, graph_path
@@ -292,9 +290,9 @@ def _identifying(
     return expected
 
 
-def _write_representative(graph_path: Path, node_id: str) -> None:
-    """Put the representative a node of ``graph_path`` names in its step log: its image,
-    and its record with a pixel hash and a describe output."""
+def _write_member(graph_path: Path, node_id: str) -> None:
+    """Put the member a node of ``graph_path`` lists in its step log: its image, and its
+    record with a pixel hash and a describe output."""
     steps_dir = graph_steps_dir(graph_path)
     steps_dir.mkdir(exist_ok=True)
     observation_id = f"{node_id}-observation"
@@ -1604,14 +1602,12 @@ def _install_fake_adb(monkeypatch: pytest.MonkeyPatch, controller: DeviceControl
 def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
     graph_dir = tmp_path / "graphs"
     app_dir = graph_dir / "demo"
-    _save_with_representatives(
-        _flagged_graph(), app_dir / "demo.json", add_representative, write_image_vectors
-    )
+    _save_with_members(_flagged_graph(), app_dir / "demo.json", add_member, write_image_vectors)
     config = tmp_path / "audit.yaml"
     config.write_text(
         json.dumps(
@@ -1782,17 +1778,17 @@ def test_audit_saves_the_merge_results_and_an_audited_graph_only_after_a_merge(
     same: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
     """Each merge result names the sources that proposed the pair and the member of each
     node the verifier was shown."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     app_dir = tmp_path / "graphs" / "demo"
-    _save_with_representatives(
+    _save_with_members(
         _graph_with_nodes(("s0_home", {}), ("s1_home", {})),
         app_dir / "demo.json",
-        add_representative,
+        add_member,
         write_image_vectors,
     )
     config = _write_config(tmp_path, str(tmp_path / "graphs"))
@@ -1844,24 +1840,24 @@ def _graph_with_a_dead_end(dead_end: str) -> GraphManager:
     return graph
 
 
-def _save_with_representatives(
+def _save_with_members(
     graph: GraphManager,
     path: Path,
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    """Save *graph* to *path* with a representative for every node, its image and image
-    vector in the step log beside it and its text vector in the file beside the graph, so
-    the audit can load it without embedding any."""
+    """Save *graph* to *path* with a member for every node, its image and image vector in
+    the step log beside it and its text vector in the file beside the graph, so the audit
+    can load it without embedding any."""
     graph.steps_dir = graph_steps_dir(path)
     for node_id in list(graph.graph):
-        add_representative(graph, node_id)
+        add_member(graph, node_id)
     graph.save_graph(path)
-    representatives = [f"{node_id}-observation" for node_id in graph.graph]
-    write_image_vectors(graph.steps_dir, representatives)
+    observations = [f"{node_id}-observation" for node_id in graph.graph]
+    write_image_vectors(graph.steps_dir, observations)
     save_embeddings(
         text_embeddings_path(path),
-        {representative: [1.0, 0.0] for representative in representatives},
+        {observation: [1.0, 0.0] for observation in observations},
         model="google/gemini-embedding-2",
     )
 
@@ -1897,13 +1893,13 @@ def test_audit_adds_the_nodes_with_no_path_to_the_start_node_to_the_model_s_repo
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     router_requests: list[httpx.Request],
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    _save_with_representatives(
+    _save_with_members(
         _graph_with_a_dead_end("s2_dialog"),
         tmp_path / "graphs" / "demo" / "demo.json",
-        add_representative,
+        add_member,
         write_image_vectors,
     )
     caplog.set_level(logging.INFO, logger=audit.logger.name)
@@ -1931,16 +1927,14 @@ def test_audit_reports_no_path_to_the_start_node_for_the_graph_after_its_merges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    add_representative: Callable[..., None],
+    add_member: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
     """A dead end merged into a node with a path back is gone from the audited graph."""
     app_dir = tmp_path / "graphs" / "demo"
     explored = _graph_with_a_dead_end("s2_list")
     assert explored.nodes_without_path_to_start().in_app == ["s2_list"]
-    _save_with_representatives(
-        explored, app_dir / "demo.json", add_representative, write_image_vectors
-    )
+    _save_with_members(explored, app_dir / "demo.json", add_member, write_image_vectors)
     monkeypatch.setattr(
         graph_manager,
         "verify_same_node",

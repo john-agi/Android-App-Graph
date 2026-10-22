@@ -177,7 +177,7 @@ def _checks(report: audit.MemberReport) -> list[dict[str, Any]]:
     return json.loads(json.dumps(report.as_record()))["checks"]
 
 
-# Two nodes whose representatives look nothing alike, but whose second members do.
+# Two nodes whose first members look nothing alike, but whose second members do.
 CLOSE_PAIR = {
     "s0_home": [("000001", X), ("000002", Y)],
     "s1_home": [("000003", Z), ("000004", _toward(Y, Z, PROPOSED))],
@@ -452,7 +452,6 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
 
     node = graph.graph.nodes["s2_screen_000003"]
     assert node["page_description"] == "Screen 000003"
-    assert node["representative_observation"] == "000003"
     assert node["interactable_elements"] == [
         {"description": "Button 000003", "position": "", "explored": False}
     ]
@@ -785,20 +784,19 @@ def test_an_action_that_follows_moved_members_keeps_its_setup(
     assert _actions_and_setups(graph) == expected
 
 
-def test_single_member_diffuse_and_vectorless_nodes_get_no_check(
+def test_single_member_diffuse_and_external_nodes_get_no_check(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
     write_member_graph(
         graph_path,
         {
-            "s0_home": [("000001", X), ("000002", [0.0, 0.0, 0.0])],
+            "s0_home": [("000001", X)],
             "s1_feed": [
                 ("000003", X),
                 ("000004", Y),
                 ("000005", Z),
                 ("000006", _toward(Y, Z, 0.7)),
             ],
-            "s2_blank": [("000007", [0.0, 0.0, 0.0]), ("000008", X)],
             "ext_com.other": [("000009", X), ("000010", Y)],
         },
     )
