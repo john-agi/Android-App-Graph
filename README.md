@@ -303,12 +303,13 @@ temperature and timeout.
 Edge normalization sends up to 16 requests at once: exploration's pass over a
 node's outgoing edges at every tenth visit and its final pass over every edge,
 and the audit's pass over every edge. Each request keeps its own timeout, retries
-and fallback as above, and logs its own warnings, such as a timeout, when they
-happen. The templates are written and logged in the graph's edge order, whichever
-request is answered first, and the usage summary counts every request. A request
-that raises, such as one refused for lack of credit or with HTTP 429, cancels the
-requests not yet sent; the templates of those already answered are still written,
-and then the error stops the command.
+and fallback as above, and logs its own warnings, such as a timeout or a 429 sent
+again, when they happen. The templates are written and logged in the graph's edge
+order, whichever request is answered first, and the usage summary counts every
+request. A request that raises, such as one refused for lack of credit or still
+answered with 429 at its deadline, cancels the requests not yet sent; the
+templates of those already answered are still written, and then the error stops
+the command.
 
 Every read of the screen, in exploration and in the audit, runs three adb
 commands: the UI dump, the screenshot and `dumpsys window`. Each one that runs
