@@ -1,9 +1,9 @@
 """The audit from members: one set of merge proposals from the model's text and from
 close member images, and the split and move checks on each node's member groups.
 
-Every graph here has synthetic image vectors, and the verifier and the text embedding
-are scripted fakes; describing a screen fails the test, since the audit works from
-the describe output the step log stores.
+Every graph here has synthetic image and text vectors, and the verifier, the text
+embedding and the edge normalizer are scripted fakes; describing a screen fails the
+test, since the audit works from the describe output the step log stores.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import pytest
 from openrouter import OpenRouter
 
 from android_app_graph.commands import audit
-from android_app_graph.graph_files import graph_steps_dir
+from android_app_graph.graph_files import graph_steps_dir, text_embeddings_path
 from android_app_graph.member_groups import GROUPING_FLOOR, MERGE_FLOOR
 from android_app_graph.step_log import read_exploration_transitions
 from android_app_graph.utils import ModelSettings, graph_manager
@@ -64,12 +64,14 @@ def _member(image_b64: str) -> str:
 @dataclass
 class FakeModels:
     """A verifier that confirms the member pairs in ``same`` and records each pair it
-    is shown as ``(existing, new)``, and a text embedding that records each text."""
+    is shown as ``(existing, new)``, a text embedding that records each text, and an
+    edge normalizer whose every template is ``template``."""
 
     same: set[frozenset[str]] = field(default_factory=set)
     shown: list[tuple[str, str]] = field(default_factory=list)
     descriptions: list[str] = field(default_factory=list)
     embedded: list[str] = field(default_factory=list)
+    template: str = "before"
 
     def confirm(self, first: str, second: str) -> None:
         self.same.add(frozenset((first, second)))
@@ -94,6 +96,9 @@ class FakeModels:
         self.embedded.append(text)
         return [1.0, 0.0]
 
+    def normalize_edge(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {"is_template": True, "instruction_template": self.template}
+
 
 def _no_describe(*_args: object, **_kwargs: object) -> NoReturn:
     msg = "the audit must not describe a screen"
@@ -105,6 +110,7 @@ def models(monkeypatch: pytest.MonkeyPatch) -> FakeModels:
     fake = FakeModels()
     monkeypatch.setattr(graph_manager, "verify_same_node", fake.verify_same_node)
     monkeypatch.setattr(graph_manager, "get_embedding", fake.get_embedding)
+    monkeypatch.setattr(graph_manager, "normalize_edge", fake.normalize_edge)
     monkeypatch.setattr(graph_manager, "describe_page_and_state", _no_describe)
     return fake
 
@@ -370,6 +376,7 @@ def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions
 def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_output(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
+    """Its members keep their text vectors, so no embedding is requested."""
     write_member_graph(graph_path, SPLIT)
     graph = _load(graph_path)
 
@@ -396,8 +403,7 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
     assert node["state_schema"] == {"seen_in": ["000003", "000004"]}
     assert node["activities"] == ["com.demo.Activity000003", "com.demo.Activity000004"]
     assert (node["visit_count"], graph.graph.nodes["s0_home"]["visit_count"]) == (2, 2)
-    assert node["description_embedding"] == [1.0, 0.0]
-    assert models.embedded == ["Screen 000003"]
+    assert models.embedded == []
 
 
 @pytest.mark.usefixtures("models")
@@ -466,7 +472,8 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
     write_member_graph: Callable[..., None],
 ) -> None:
     """A rejected member goes to the first node the short list confirms, without the
-    node it leaves; when none does, it starts a node of its own."""
+    node it leaves; when none does, it starts a node of its own. Its text vector is the
+    short list's text query, so no embedding is requested."""
     write_member_graph(graph_path, MOVE, edges=MOVE_EDGES, transitions=MOVE_TRANSITIONS)
     graph = _load(graph_path)
     if confirmed is not None:
@@ -478,15 +485,79 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
     assert models.shown == shown
     assert "000003" in graph.graph.nodes[destination]["observations"]
     assert (destination, "s2_menu") in graph.graph.edges
+    assert models.embedded == []
     if destination == "s0_home":
-        assert models.embedded == []
         return
     assert graph.graph.nodes["s0_home"]["observations"] == ["000001", "000002"]
     assert ("s0_home", "s2_menu") not in graph.graph.edges
-    # The member's stored description is embedded once, for the short list and the new node.
-    assert models.embedded == ["Screen 000003"]
     candidates = check["change"]["short_list"]["candidates"]
-    assert [candidate["node"] for candidate in candidates] == ["s1_list", "s2_menu"]
+    # Member 000003's text vector is Y, so List's member scores LINKED and Menu's 0.
+    assert [(candidate["node"], candidate["sources"]) for candidate in candidates] == [
+        ("s1_list", {"image": pytest.approx(LINKED), "text": pytest.approx(LINKED)}),
+        ("s2_menu", {"image": pytest.approx(0.0), "text": pytest.approx(0.0)}),
+    ]
+
+
+def _templates_around_member_checks(
+    graph: GraphManager, path: Path, models: FakeModels
+) -> dict[tuple[str, str], list[str]]:
+    """Normalize every edge, check the members, normalize again, and return each edge's
+    templates: ``before`` as the first pass wrote them, ``after`` as the second did."""
+    graph.normalize_all_edges()
+    _check_members(graph, path, {})
+    models.template = "after"
+    graph.normalize_all_edges()
+    return {
+        (s, t): [template["template"] for template in data["instruction_templates"]]
+        for s, t, data in graph.graph.edges(data=True)
+    }
+
+
+@pytest.mark.parametrize("instruction", ["do 1", ""], ids=["instructed", "no-instruction"])
+def test_a_split_has_only_the_edges_whose_actions_it_changes_normalized_again(
+    instruction: str,
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """An edge that loses an action, with an instruction or without one, and every edge
+    of the new node are sent again. An edge whose actions all stay is not, even when its
+    visit count drops, and neither is an edge of another node."""
+    home_to_list, *other_edges = SPLIT_EDGES
+    edges = (
+        {**home_to_list, "instructions": ["do 0", instruction, "do 2", "do 3"]},
+        *other_edges,
+        _edge("s1_list", "s1_list", SCROLL),
+    )
+    write_member_graph(graph_path, SPLIT, edges=edges, transitions=SPLIT_TRANSITIONS)
+    graph = _load(graph_path)
+
+    templates = _templates_around_member_checks(graph, graph_path, models)
+
+    new = "s2_screen_000003"
+    assert templates == {
+        ("s0_home", "s1_list"): ["after"],
+        (new, "s1_list"): ["after"],
+        (new, new): ["after"],
+        ("s1_list", new): ["after"],
+        ("s0_home", "s0_home"): ["before"],
+        ("s1_list", "s1_list"): ["before"],
+    }
+
+
+def test_a_move_has_the_edge_that_gains_the_member_s_action_normalized_again(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """The edge the moved member's action joins is sent again; another edge of the node
+    the member joins is not."""
+    edges = (*MOVE_EDGES, _edge("s1_list", "s2_menu", TAP_B), _edge("s2_menu", "s1_list", BACK))
+    write_member_graph(graph_path, MOVE, edges=edges, transitions=MOVE_TRANSITIONS)
+    graph = _load(graph_path)
+    models.confirm("000004", "000003")
+
+    templates = _templates_around_member_checks(graph, graph_path, models)
+
+    assert templates == {("s1_list", "s2_menu"): ["after"], ("s2_menu", "s1_list"): ["before"]}
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
@@ -645,6 +716,8 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     monkeypatch: pytest.MonkeyPatch,
     write_member_graph: Callable[..., None],
 ) -> None:
+    """The saved copy's text vectors are the explored graph's, since the split requests
+    no embedding."""
     write_member_graph(graph_path, SPLIT)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": []})
@@ -667,3 +740,9 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     assert [node["id"] for node in audited["nodes"]] == ["s0_home", "s1_list", "s2_screen_000003"]
     assert not (app_dir / "demo_merge.json").exists()
     assert models.shown == [("000002", "000003")]
+    assert models.embedded == []
+    explored_vectors = text_embeddings_path(graph_path).read_text(encoding="utf-8")
+    audited_vectors = text_embeddings_path(app_dir / "demo_audited.json").read_text(
+        encoding="utf-8"
+    )
+    assert json.loads(audited_vectors) == json.loads(explored_vectors)
