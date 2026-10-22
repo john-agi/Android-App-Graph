@@ -795,7 +795,7 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     """Screens that differ only by an open menu or an expanded section are the SAME
-    screen, no DIFFERENT case names a menu, and a dialog with its own purpose stays
+    screen, the DIFFERENT cases name no menu, and a dialog with its own purpose is
     DIFFERENT from the page beneath it."""
     router_responses.append(chat_response(content='{"same":true,"reason":"menu only"}'))
     vlm.verify_same_node(
@@ -820,7 +820,7 @@ def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
 ) -> None:
     """The descriptions the verifier writes for two different screens, which rename the
     rejected node, leave out what "page_description" leaves out, so a node whose closest
-    member has a menu open is not renamed after the menu."""
+    member has a menu open is named after its page's purpose."""
     router_responses.append(chat_response(content='{"same":true,"reason":"same page"}'))
     vlm.verify_same_node(
         router_client, png_screenshot, png_screenshot, "Wi-Fi Direct", settings=PAGE_DETAIL
@@ -831,12 +831,14 @@ def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
         assert kind in refinement, kind
 
 
-def test_the_merge_audit_does_not_exclude_a_page_with_its_menu_open(
+def test_the_merge_audit_may_report_a_page_with_its_menu_open(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
 ) -> None:
+    """The look-alike screens the merge audit leaves unreported have different purposes,
+    so it may report a page and the same page with a menu open for the verifier."""
     router_responses.append(chat_response(content='{"issues":[],"summary":"fine"}'))
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
