@@ -535,6 +535,21 @@ def test_a_far_member_moves_only_when_its_closest_home_member_is_another_screen(
     ]
 
 
+def test_moving_a_member_without_a_description_vector_raises_naming_it(
+    graph_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    """Loaded without embedding settings, the graph keeps no description vector."""
+    write_member_graph(graph_path, MOVE)
+    graph = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, image_embedding=EMBEDDING)
+    graph.load_graph(graph_path)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Node 's0_home' has members without a description vector: 000001, 000002, 000003$",
+    ):
+        graph.move_member("s0_home", "000003", verdicts={}, transitions=())
+
+
 def _templates_around_member_checks(
     graph: GraphManager, path: Path, models: FakeModels
 ) -> dict[tuple[str, str], list[str]]:

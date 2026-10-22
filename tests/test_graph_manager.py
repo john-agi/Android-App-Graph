@@ -1277,6 +1277,30 @@ def test_an_exact_match_records_its_member_s_text_vector_without_a_request(
     }
 
 
+@pytest.mark.usefixtures("vlm")
+def test_an_exact_match_with_a_member_without_a_description_vector_raises_naming_it(
+    write_member_graph: Callable[..., None], tmp_path: Path
+) -> None:
+    """The member's description vector is read before the screen joins its node, so the
+    graph is left as it was."""
+    path = tmp_path / "graph.json"
+    write_member_graph(path, {"s0_home": [("000001", NEAR)]})
+    gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, image_embedding=EMBEDDING)
+    gm.load_graph(path)
+    # Loaded without embedding settings, the graph keeps no description vector.
+    gm.embedding = EMBEDDING
+    same_pixels = Observation(
+        "000002", SHOT_A, "com.demo.Activity000001", "com.demo", "hash-000001", black=False
+    )
+
+    with pytest.raises(
+        ValueError, match=r"^Node 's0_home' has members without a description vector: 000001$"
+    ):
+        gm.identify_state(same_pixels)
+
+    assert gm.graph.nodes["s0_home"]["observations"] == ["000001"]
+
+
 def test_a_screen_keeps_the_vector_of_the_description_its_first_rejection_refined(
     vlm: FakeVlm, screen: Screens
 ) -> None:
@@ -1865,6 +1889,51 @@ def test_the_text_source_ranks_a_node_by_its_member_closest_to_the_screen(
     ranked = sorted(text.scores(gm, query, [banner, settings]), key=lambda kv: kv[1], reverse=True)
 
     assert ranked == [(settings, pytest.approx(1.0)), (banner, pytest.approx(3**-0.5))]
+
+
+def _home_beside_a_black_node(write_member_graph: Callable[..., None], path: Path) -> GraphManager:
+    """Load a graph whose home node has a described member, with the description vector
+    NEAR, and a black one, beside a node whose only member is black."""
+    write_member_graph(
+        path,
+        {"s0_home": [("000001", NEAR), ("000002", FAR)], "s1_pin": [("000003", FAR)]},
+        black={"000002": SET_PIN, "000003": SET_PIN},
+    )
+    gm = GraphManager(embedding=EMBEDDING)
+    gm.load_graph(path)
+    return gm
+
+
+def test_the_text_source_ranks_a_node_by_its_members_that_are_not_black(
+    write_member_graph: Callable[..., None], tmp_path: Path
+) -> None:
+    """A black member is never described, so it has no description vector; a node whose
+    members are all black gets no ``text`` score."""
+    gm = _home_beside_a_black_node(write_member_graph, tmp_path / "graph.json")
+    (text,) = (source for source in SHORT_LIST_SOURCES if source.name == "text")
+    query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=NEAR)
+
+    assert text.scores(gm, query, ["s0_home", "s1_pin"]) == [("s0_home", pytest.approx(1.0))]
+
+
+def test_the_text_source_raises_naming_each_node_and_member_without_a_description_vector(
+    write_member_graph: Callable[..., None], tmp_path: Path
+) -> None:
+    """Every member but a black one needs a description vector: here one the home node
+    lists beside its described and black members, and the only member of another node."""
+    gm = _home_beside_a_black_node(write_member_graph, tmp_path / "graph.json")
+    gm.graph.nodes["s0_home"]["observations"].append("000004")
+    add_screen(gm, "s2_feed", "Home feed", observations=["000005"])
+    (text,) = (source for source in SHORT_LIST_SOURCES if source.name == "text")
+    query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=NEAR)
+
+    with pytest.raises(ValueError, match="without a description vector") as caught:
+        text.scores(gm, query, ["s0_home", "s1_pin", "s2_feed"])
+
+    assert str(caught.value) == (
+        "Node 's0_home' has members without a description vector: 000004. "
+        "Node 's2_feed' has members without a description vector: 000005"
+    )
 
 
 def test_the_short_list_orders_ties_in_rank_by_image_score(vlm: FakeVlm, tmp_path: Path) -> None:
