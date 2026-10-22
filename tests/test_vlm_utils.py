@@ -27,7 +27,7 @@ from openrouter.chat import Chat
 from openrouter.components.chatresult import ChatResult
 from openrouter.components.chatusage import ChatUsage
 from openrouter.embeddings import Embeddings
-from openrouter.errors import OpenRouterError, ResponseValidationError
+from openrouter.errors import ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsUsage
 from openrouter.utils import RetryConfig
 
@@ -952,26 +952,47 @@ _RESULTS: dict[str, object] = {
     "action": {"action": "tap", "x": 540, "y": 960},
     "description": "home",
 }
+_CALL_TYPES: dict[str, str] = {
+    "chat": "chat",
+    "text": "embedding",
+    "image": "image_embedding",
+    "action": "action",
+    "description": "page_describe_and_state",
+}
 
 
 @pytest.mark.parametrize("operation", ["chat", "text", "image", "action", "description"])
-def test_a_429_is_retried_by_neither_the_sdk_nor_the_app(
+def test_a_429_is_sent_again_after_a_short_backoff_and_logged_with_its_call_type(
     operation: str,
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
+    embedding_body: dict[str, object],
     png_screenshot: str,
     no_sleep: list[float],
+    chat_response: Callable[..., httpx.Response],
     tracked_usage: vlm.TokenTracker,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    router_responses.append(
-        httpx.Response(429, json={"error": {"code": 429, "message": "upstream failed"}})
+    router_responses.extend(
+        [
+            httpx.Response(429, json={"error": {"code": 429, "message": "rate limited"}}),
+            httpx.Response(200, json=embedding_body)
+            if operation in {"text", "image"}
+            else chat_response(content=_GOOD_REPLIES[operation]),
+        ]
     )
-    with pytest.raises(OpenRouterError, match="upstream failed"):
-        _request(operation, router_client, png_screenshot)
-    assert len(router_requests) == 1
-    assert no_sleep == []
-    assert tracked_usage.snapshot()["calls"] == 0
+    with caplog.at_level("WARNING"):
+        assert _request(operation, router_client, png_screenshot) == _RESULTS[operation]
+    assert len(router_requests) == 2
+    assert router_requests[1].content == router_requests[0].content
+    assert len(no_sleep) == 1
+    assert 0.5 <= no_sleep[0] <= 1.5
+    assert (
+        f"{_CALL_TYPES[operation]}: rate limited (HTTP 429); sending again in {no_sleep[0]:.1f} s"
+        in caplog.text
+    )
+    assert tracked_usage.snapshot()["calls"] == 1
 
 
 def test_the_sdk_retries_a_503_after_a_short_backoff(
