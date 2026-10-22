@@ -1,4 +1,5 @@
-"""The one image format a screenshot takes after capture, and the hash of its pixels.
+"""The one image format a screenshot takes after capture, the hash of its pixels, and
+whether it is black.
 
 Every screenshot is encoded once, when it is captured, as lossless WebP of at most
 ``MAX_PIXELS``: the size the models receive, and a format the chat and embedding
@@ -15,7 +16,7 @@ import io
 import math
 from typing import TYPE_CHECKING
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,6 +26,9 @@ MAX_PIXELS = 1_000_000
 # Shrinking with LANCZOS blends each source row into the 3 output rows on either side of
 # it, so the rows just below a shrunk status bar still carry some of its pixels.
 _LANCZOS_REACH_ROWS = 3
+# A secure window captures as pixels of exactly 0; the margin also counts a capture
+# that is black to the eye.
+BLACK_LEVEL = 8
 
 
 def _shrink_to_max_pixels(image: Image.Image) -> Image.Image:
@@ -83,3 +87,11 @@ def pixel_hash(image: bytes, band_rows: int) -> str:
     digest = hashlib.sha256(f"{kept.mode} {kept.width}x{kept.height}\n".encode("ascii"))
     digest.update(kept.tobytes())
     return digest.hexdigest()
+
+
+def is_black(image: bytes) -> bool:
+    """Return whether no colour channel of any pixel of ``image``, encoded bytes such as
+    the WebP ``encode_screenshot`` returns, is above ``BLACK_LEVEL``."""
+    with Image.open(io.BytesIO(image)) as decoded:
+        extrema = ImageStat.Stat(decoded.convert("RGB")).extrema
+    return all(highest <= BLACK_LEVEL for _, highest in extrema)

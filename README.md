@@ -356,9 +356,10 @@ first rejection refined it to (`identify.refinement.new_description`), which als
 the node the screen starts when every check rejects it. An exact match copies its
 member's vector without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
-member of an in-app node: a missing file, one tagged with another model, or one
-without such a member's vector stops exploration or the audit as it loads the graph,
-with an error naming the file and the problem.
+member of an in-app node but a [black](#step-log) one, which is never described: a
+missing file, one tagged with another model, or one without such a member's vector
+stops exploration or the audit as it loads the graph, with an error naming the file
+and the problem.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no image vector is embedded first, as when `image_emb.json` is
@@ -555,7 +556,7 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows` and `pixel_hash`; `describe` and `identify` once [screen matching](#screen-matching) has taken it |
+| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash` and `black`; `identify` once [screen matching](#screen-matching) has taken it, with `describe` unless it is black |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
 
@@ -577,12 +578,19 @@ emulator it is 142 of 2424 rows in portrait. A bar that is hidden, as in immersi
 mode, not at the top, or not reported gives `null` and 0 rows, and the whole image
 is hashed, which can miss an exact match but never invents one.
 
+`black` is `true` when no colour channel of any pixel of the image is above 8 of
+255. Android keeps a window flagged
+[`FLAG_SECURE`](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE),
+such as the screens that set a lock-screen pattern, PIN or password in Settings, out
+of screenshots, and `screencap` captures it with every pixel 0.
+
 `describe` holds the screen description model's `page_description`, `state`,
 `elements` and `is_external_web`; an exact match copies them from the member it
-matched and names it in `copied_from`. `identify` holds what decided the screen's
-node:
+matched and names it in `copied_from`. A black screenshot has no `describe`: its
+description is made from its activity (see [Black screenshots](#screen-matching)).
+`identify` holds what decided the screen's node:
 
-- `stage`: `exact`, `expected`, `short_list`, `new` or `external_web`;
+- `stage`: `black`, `exact`, `expected`, `short_list`, `new` or `external_web`;
 - `expected_node`, the node the caller expected, or `null`;
 - `exact_match`, the member an exact match copied;
 - `candidates`: each short-list node with the `sources` that proposed it and their
@@ -653,10 +661,11 @@ what each step found.
 
 1. **Image embedding.** The screenshot is embedded (see
    [Embedding caches](#embedding-caches)).
-2. **Exact match.** A member with the screenshot's `pixel_hash` decides alone when
-   every such member belongs to one node: the screen copies that member's
-   description, state, elements and description vector, so neither the description
-   model nor the verifier runs. Members of two nodes with the same hash decide nothing.
+2. **Exact match.** A member with a `describe` output and the screenshot's
+   `pixel_hash` decides alone when every such member belongs to one node: the screen
+   copies that member's description, state, elements and description vector, so
+   neither the description model nor the verifier runs. Members of two nodes with the
+   same hash decide nothing.
 3. **Description.** The description model describes the screen; web content from
    outside the app goes to `ext_web`. The description is embedded (see
    [Embedding caches](#embedding-caches)).
@@ -677,6 +686,18 @@ what each step found.
    rejections refine nothing. Refined descriptions, like every description, leave out
    the state listed in [Graph nodes](#graph-nodes), such as an open menu.
 
+**Black screenshots.** A [`black`](#step-log) screenshot shows nothing to describe or
+compare, and every black capture has the same `pixel_hash`, so after its image
+embedding it is matched by its activity instead of steps 2 to 6. It joins the node
+that has a black member of its package and activity, or starts a node described from
+the activity's class name, such as `secure screen: ChooseLockPattern`, with no
+elements. Neither the description model, the text embedding nor the verifier runs:
+its `identify` stage is `black`, and its record holds no `describe` output, so it has
+no description vector. The `text` source never ranks a node by a black member, and an
+exact match never copies one: a screenshot black only below the status bar is
+described. Each secure screen of an app gets a node per activity, so flows that reach
+different secure screens stay apart.
+
 A member without an image vector of the screenshot's dimension stops the command with
 an error naming it and its node.
 
@@ -687,9 +708,9 @@ still resolves.
 Loading a graph fails with an error naming the file and what is wrong: the file
 has no `nodes` or `edges` list, a node lists no observations or its representative
 is not one of them, a representative's image is missing from `steps/`, a member of
-an in-app node has no `pixel_hash` or `describe` in its record in `steps/`, or an
-edge has no actions or per-action lists (see [Graph edges](#graph-edges)) that do
-not hold one entry per action. `app-graph-plot` fails the same way, except that it
+an in-app node has no `pixel_hash` in its record in `steps/`, or no `describe` there
+and is not [`black`](#step-log), or an edge has no actions or per-action lists (see
+[Graph edges](#graph-edges)) that do not hold one entry per action. `app-graph-plot` fails the same way, except that it
 reads no record in `steps/` and needs the image of every member, not only of the
 representative. Explore the app again into a new graph directory.
 
@@ -848,11 +869,12 @@ representative is the node's home.
   was verified on, so it reuses that answer and the node stays whole.
 
 A node a split or a move makes takes its description and elements from the stored
-describe output of its earliest member, its representative, and its state schema
-from all its members' states. Members carry their visits, states, activities and
-description vectors, so no embedding is requested. The node they leave keeps its
-description, representative, state schema and elements. No node ID changes, so no
-alias is recorded: a node's `observations` say where each observation belongs.
+describe output of its earliest member, its representative, or from its activity
+when that member is black, and its state schema from all its members' states.
+Members carry their visits, states, activities and description vectors, so no
+embedding is requested. The node they leave keeps its description, representative,
+state schema and elements. No node ID changes, so no alias is recorded: a node's
+`observations` say where each observation belongs.
 
 Edge actions follow the members. An action on an edge of the node is matched to each
 exploration transition (see [Step log](#step-log)) with the same action whose

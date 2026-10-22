@@ -1,6 +1,6 @@
 """Tests for android_app_graph.screen_image: every screenshot is encoded once, at
-capture, as lossless WebP of at most 1,000,000 pixels, and its pixels below the status
-bar are hashed."""
+capture, as lossless WebP of at most 1,000,000 pixels, its pixels below the status bar
+are hashed, and an image without a pixel brighter than the black level is black."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ import pytest
 from PIL import Image, ImageDraw
 
 from android_app_graph.screen_image import (
+    BLACK_LEVEL,
     MAX_PIXELS,
     MEDIA_TYPE,
     encode_screenshot,
+    is_black,
     pixel_hash,
     status_bar_rows,
 )
@@ -145,3 +147,25 @@ def test_the_hash_covers_the_mode_of_the_pixels() -> None:
     assert gray.tobytes() == palette.tobytes()
 
     assert pixel_hash(_png(gray), 0) != pixel_hash(_png(palette), 0)
+
+
+def test_an_opaque_screenshot_whose_every_pixel_is_zero_is_black() -> None:
+    """``screencap -p`` captures a secure window as opaque RGBA pixels of 0."""
+    assert is_black(_webp(Image.new("RGBA", (64, 48), (0, 0, 0, 255))))
+
+
+@pytest.mark.parametrize("channel", [0, 1, 2], ids=["red", "green", "blue"])
+@pytest.mark.parametrize(("level", "black"), [(BLACK_LEVEL, True), (BLACK_LEVEL + 1, False)])
+def test_one_channel_of_one_pixel_above_the_black_level_makes_a_screenshot_not_black(
+    channel: int, level: int, black: bool
+) -> None:
+    dim = Image.new("RGB", (64, 48), (BLACK_LEVEL, BLACK_LEVEL, BLACK_LEVEL))
+    pixel = [BLACK_LEVEL] * 3
+    pixel[channel] = level
+    dim.putpixel((40, 30), tuple(pixel))
+
+    assert is_black(_webp(dim)) is black
+
+
+def test_the_black_level_is_8() -> None:
+    assert BLACK_LEVEL == 8
