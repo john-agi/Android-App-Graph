@@ -2695,6 +2695,52 @@ def test_back_is_pressed_where_no_recorded_back_has_left_the_app(
     assert explorer.graph.graph.edges["s1_list", "s0_home"]["actions"] == [[_BACK]]
 
 
+@pytest.mark.usefixtures("no_sleep")
+def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both replays to the list that Back on the start screen continues with land on the
+    start screen, and each counts a miss on the list. The list is then no longer ranked,
+    so the third Back on the start screen is pressed without a model call to choose a
+    target."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    expected = _identifying(explorer, monkeypatch, *["s0_home"] * 6)
+    planned_from = _planning_back(monkeypatch)
+    choose_list = '{"node_id":"s1_list","reason":"unexplored"}'
+    router_responses.extend(
+        [
+            chat_response(content=_BACK_REPLY),
+            chat_response(content=choose_list),
+            chat_response(content=_BACK_REPLY),
+            chat_response(content=choose_list),
+            chat_response(content=_BACK_REPLY),
+        ]
+    )
+
+    explorer.explore(max_steps=3)
+
+    assert device_log == [*_FIRST_RESTART, _OPEN_LIST, *_RESTART, _OPEN_LIST, _BACK]
+    assert expected == [None, "s0_home", "s1_list", "s0_home", "s1_list", None]
+    assert planned_from == ["s0_home"] * 3
+    assert _requested_models(router_requests) == [
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+        "provider/page_detail",
+        "provider/action",
+    ]
+    assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 2
+
+
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     tmp_path: Path,
     router_client: OpenRouter,
