@@ -864,6 +864,29 @@ def test_the_verifier_is_shown_each_screenshot_with_its_own_description(
     assert refinement.count("_description") == 1
 
 
+def test_the_verifier_tells_navigation_destinations_apart_and_keeps_their_content_together(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    verifier_prompts: Callable[[], list[str]],
+) -> None:
+    """Destinations the app names in its navigation, such as Files' Downloads and
+    Internal storage, are DIFFERENT screens even when they share a layout, and a
+    subfolder, query or list inside one destination is the SAME screen as it."""
+    router_responses.append(chat_response(content='{"same":false,"reason":"drawer entry"}'))
+    _verify_itself(router_client, png_screenshot, "Downloads file list")
+    (prompt,) = verifier_prompts()
+    for navigation in ("a tab", "a bottom navigation bar item", "a navigation drawer entry"):
+        assert navigation in prompt, navigation
+    assert "different destinations are DIFFERENT screens, even when they share a layout" in prompt
+    assert "Downloads, Recent and Internal storage" in prompt
+    assert (
+        "Content inside one destination is the SAME screen as that destination: a subfolder "
+        "opened inside it, a different search query or a different list."
+    ) in prompt
+
+
 def test_the_merge_audit_may_report_a_page_with_its_menu_open(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],

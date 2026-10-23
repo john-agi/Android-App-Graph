@@ -1348,6 +1348,41 @@ def test_a_verifier_that_never_answers_is_asked_twice_and_the_screen_starts_a_ne
     ]
 
 
+def test_screen_matching_asks_the_verifier_to_tell_navigation_destinations_apart(
+    vlm: FakeVlm,
+    screen: Screens,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    verifier_prompts: Callable[[], list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verifier question on the expected node and the one on the short list each
+    count different navigation destinations as different screens and content inside one
+    destination as that destination."""
+    monkeypatch.setattr(gm_module, "verify_same_node", vlm_utils.verify_same_node)
+    vlm.descriptions.extend([("Home screen", {}, [])] * 3)
+    router_responses.extend(
+        chat_response(content='{"same":true,"reason":"one destination"}') for _ in range(2)
+    )
+    gm = make_manager(screen.steps_dir, client=router_client)
+    home = screen(HOME, SHOT_A, PACKAGE)
+    node_id = gm.identify_state(home)
+
+    expected = gm.identify_state(
+        screen(HOME, SHOT_B, PACKAGE), expected_observation=home.observation_id
+    )
+    short_listed = gm.identify_state(screen(HOME, SHOT_C, PACKAGE))
+
+    assert (expected, short_listed) == (node_id, node_id)
+
+    prompts = verifier_prompts()
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert "different destinations are DIFFERENT screens" in prompt
+        assert "Content inside one destination is the SAME screen" in prompt
+
+
 def _png(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
