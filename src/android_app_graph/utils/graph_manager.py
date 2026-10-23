@@ -25,10 +25,10 @@ observed values.
 A node holds no image. It lists the step-log observations assigned to it, in step
 order, and each use of a node's image chooses a member by its own rule, reading that
 member's image from the step log. The audit compares nodes on their members:
-merge proposals from the model's text and from close member images, verified in
-rounds on their closest members with every answer that follows from earlier ones
-deduced, and member groups whose closest pair the verifier tells apart, split off or
-moved to the node screen matching confirms.
+merge proposals from the model's text and from close member images and descriptions,
+verified in rounds on their closest members with every answer that follows from
+earlier ones deduced, and member groups whose closest pair the verifier tells apart,
+split off or moved to the node screen matching confirms.
 """
 
 from __future__ import annotations
@@ -64,10 +64,10 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.member_groups import (
-    GROUPING_FLOOR,
-    MERGE_FLOOR,
+    IMAGE_MERGE_FLOOR,
+    TEXT_MERGE_FLOOR,
+    MemberCheck,
     MemberPair,
-    MemberPlan,
     closest_pair,
     plan_member_checks,
     unit_vector,
@@ -504,14 +504,27 @@ class MergeSource:
     pairs: MergePairs
 
 
-def _close_member_images(graph: GraphManager) -> list[tuple[str, str, dict[str, object]]]:
+def _found(
+    pairs: Iterable[tuple[str, str, MemberPair]],
+) -> list[tuple[str, str, dict[str, object]]]:
     return [
         (node_a, node_b, {"members": [pair.first, pair.second], "score": pair.score})
-        for node_a, node_b, pair in graph.close_member_pairs()
+        for node_a, node_b, pair in pairs
     ]
 
 
-MERGE_SOURCES = (MergeSource("image", _close_member_images),)
+def _close_member_images(graph: GraphManager) -> list[tuple[str, str, dict[str, object]]]:
+    return _found(graph.close_member_images())
+
+
+def _close_member_descriptions(graph: GraphManager) -> list[tuple[str, str, dict[str, object]]]:
+    return _found(graph.close_member_descriptions())
+
+
+MERGE_SOURCES = (
+    MergeSource("image", _close_member_images),
+    MergeSource("text", _close_member_descriptions),
+)
 
 
 @dataclass(slots=True)
@@ -1252,26 +1265,57 @@ class GraphManager:
         _raise_for_members_without("a description vector", without)
         return vectors
 
-    def close_member_pairs(self, floor: float = MERGE_FLOOR) -> list[tuple[str, str, MemberPair]]:
-        """Return every pair of in-app nodes of one package whose closest members, by
-        image, reach the cosine ``floor``, with those members, in node order.
+    def _member_description_units(self, node_ids: Iterable[str]) -> dict[str, list[float]]:
+        """Return the description vector of every member of ``node_ids`` that is not
+        black, scaled to length 1, as ``member_description_vectors`` reads them."""
+        return {
+            member: unit_vector(vector)
+            for (_, member), vector in self.member_description_vectors(node_ids).items()
+        }
+
+    def close_member_images(self) -> list[tuple[str, str, MemberPair]]:
+        """Return every pair of in-app nodes of one package whose closest members by image
+        reach ``IMAGE_MERGE_FLOOR``, with those members, in node order.
 
         A member without an image vector raises ``ValueError`` naming its node and every
         such member.
         """
+        by_package = self._in_app_nodes_by_package()
+        units = self._member_units(itertools.chain.from_iterable(by_package))
+        return self._close_member_pairs(by_package, units, IMAGE_MERGE_FLOOR)
+
+    def close_member_descriptions(self) -> list[tuple[str, str, MemberPair]]:
+        """Return every pair of in-app nodes of one package whose closest members by
+        description reach ``TEXT_MERGE_FLOOR``, with those members, in node order.
+
+        A black member, never described, is left out, so a node whose members are all
+        black is in no pair. Any other member without a description vector raises
+        ``ValueError`` naming its node and every such member.
+        """
+        by_package = self._in_app_nodes_by_package()
+        units = self._member_description_units(itertools.chain.from_iterable(by_package))
+        return self._close_member_pairs(by_package, units, TEXT_MERGE_FLOOR)
+
+    def _in_app_nodes_by_package(self) -> list[list[str]]:
+        """Return the in-app nodes of each package, in node order."""
         by_package: dict[str, list[str]] = {}
         for raw_id, data in self.graph.nodes(data=True):
             node_id = _node_id(raw_id)
             if not self._is_external(node_id):
                 by_package.setdefault(as_str(data.get("package"), ""), []).append(node_id)
-        units = self._member_units(itertools.chain.from_iterable(by_package.values()))
+        return [sorted(node_ids, key=self._node_numeric_order) for node_ids in by_package.values()]
+
+    def _close_member_pairs(
+        self, by_package: Iterable[Sequence[str]], units: Mapping[str, list[float]], floor: float
+    ) -> list[tuple[str, str, MemberPair]]:
+        """Return every pair of nodes of one package of ``by_package`` whose closest
+        members with a vector in ``units`` reach ``floor``, with those members."""
         found: list[tuple[str, str, MemberPair]] = []
-        for node_ids in by_package.values():
-            ordered = sorted(node_ids, key=self._node_numeric_order)
-            for node_a, node_b in itertools.combinations(ordered, 2):
+        for node_ids in by_package:
+            for node_a, node_b in itertools.combinations(node_ids, 2):
                 pair = closest_pair(
-                    _member_observations(self.graph.nodes[node_a]),
-                    _member_observations(self.graph.nodes[node_b]),
+                    [m for m in _member_observations(self.graph.nodes[node_a]) if m in units],
+                    [m for m in _member_observations(self.graph.nodes[node_b]) if m in units],
                     units,
                 )
                 if pair is not None and pair.score >= floor:
@@ -2203,26 +2247,25 @@ class GraphManager:
         edge_data["instructions"][index] = instruction
         _drop_templates(edge_data)
 
-    def member_plans(self, floor: float = GROUPING_FLOOR) -> list[tuple[str, MemberPlan]]:
-        """Return, in node order, the groups of the members of every in-app node at the
-        cosine ``floor`` and the checks to make on them.
+    def member_checks(self) -> list[tuple[str, MemberCheck]]:
+        """Return, in node order, the checks ``plan_member_checks`` plans on the member
+        groups of every in-app node, each with its node.
 
         A member without an image vector raises ``ValueError`` naming its node and every
-        such member.
+        such member, and so does a member but a black one without a description vector.
         """
         node_ids = sorted(
             (node_id for node_id in map(_node_id, self.graph) if not self._is_external(node_id)),
             key=self._node_numeric_order,
         )
-        units = self._member_units(node_ids)
+        images = self._member_units(node_ids)
+        descriptions = self._member_description_units(node_ids)
         return [
-            (
-                node_id,
-                plan_member_checks(
-                    _member_observations(self.graph.nodes[node_id]), units, floor=floor
-                ),
-            )
+            (node_id, check)
             for node_id in node_ids
+            for check in plan_member_checks(
+                _member_observations(self.graph.nodes[node_id]), images, descriptions
+            )
         ]
 
     def split_members(
@@ -3489,8 +3532,8 @@ class GraphManager:
     def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
         """Run a lightweight node-merge audit and merge verified duplicates.
 
-        Only the model's pairs are verified: image proposals would bring back at every
-        checkpoint each pair an earlier one kept apart.
+        Only the model's pairs are verified: image and text proposals would bring back at
+        every checkpoint each pair an earlier one kept apart.
         """
         page_detail = self._page_detail()
         if page_detail is None:

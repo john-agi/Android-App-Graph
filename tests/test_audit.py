@@ -2081,7 +2081,8 @@ def _save_with_members(
 ) -> None:
     """Save *graph* to *path* with a member for every node, its image and image vector in
     the step log beside it and its describe output and text vector in the files beside
-    the graph, so the audit can load it without embedding any."""
+    the graph, so the audit can load it without embedding any. The vectors are
+    orthogonal, so no two of the screens look or read alike to the audit."""
     graph.steps_dir = graph_steps_dir(path)
     graph.identify_file = identify_file_path(path)
     for node_id in list(graph.graph):
@@ -2091,7 +2092,10 @@ def _save_with_members(
     write_image_vectors(graph.steps_dir, observations)
     save_embeddings(
         text_embeddings_path(path),
-        {observation: [1.0, 0.0] for observation in observations},
+        {
+            observation: [float(index == position) for position in range(len(observations))]
+            for index, observation in enumerate(observations)
+        },
         model="google/gemini-embedding-2",
     )
 

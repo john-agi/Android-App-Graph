@@ -1935,8 +1935,8 @@ def test_closest_member_raises_for_a_node_without_members() -> None:
     "choose",
     [
         pytest.param(lambda gm: gm.closest_members("s0_home", "s1_feed"), id="closest members"),
-        pytest.param(lambda gm: gm.member_plans(), id="member plans"),
-        pytest.param(lambda gm: gm.close_member_pairs(), id="close member pairs"),
+        pytest.param(lambda gm: gm.member_checks(), id="member checks"),
+        pytest.param(lambda gm: gm.close_member_images(), id="close member images"),
     ],
 )
 @pytest.mark.parametrize(
@@ -1952,8 +1952,9 @@ def test_choosing_a_node_image_raises_naming_each_node_and_member_without_an_ima
     without: dict[str, list[int]],
     tmp_path: Path,
 ) -> None:
-    """The closest members of two nodes, the member groups of every node and the close
-    member pairs of the graph all need the image vector of every member they compare."""
+    """The closest members of two nodes, the member groups of every node and the pairs
+    of nodes with close member images all need the image vector of every member they
+    compare."""
     steps_dir = tmp_path / "steps"
     home = members(steps_dir, b"home", b"home-2")
     feed = members(steps_dir, b"feed")
@@ -2042,19 +2043,35 @@ def test_the_text_source_ranks_a_node_by_its_members_that_are_not_black(
     assert text.scores(gm, query, ["s0_home", "s1_pin"]) == [("s0_home", pytest.approx(1.0))]
 
 
-def test_the_text_source_raises_naming_each_node_and_member_without_a_description_vector(
-    write_member_graph: Callable[..., None], tmp_path: Path
+def _text_scores(gm: GraphManager) -> object:
+    (text,) = (s for s in short_list_sources(DEFAULT_MATCHING) if s.name == "text")
+    query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=NEAR)
+    return text.scores(gm, query, ["s0_home", "s1_pin", "s2_feed"])
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(_text_scores, id="the short list's text source"),
+        pytest.param(lambda gm: gm.close_member_descriptions(), id="close member descriptions"),
+        pytest.param(lambda gm: gm.member_checks(), id="member checks"),
+    ],
+)
+def test_reading_member_descriptions_raises_naming_each_node_and_member_without_a_vector(
+    read: Callable[[GraphManager], object],
+    write_member_graph: Callable[..., None],
+    tmp_path: Path,
 ) -> None:
     """Every member but a black one needs a description vector: here one the home node
-    lists beside its described and black members, and the only member of another node."""
+    lists beside its described and black members, and the only member of another node.
+    Every member has an image vector."""
     gm = _home_beside_a_black_node(write_member_graph, tmp_path / "graph.json")
     gm.graph.nodes["s0_home"]["observations"].append("000004")
     add_screen(gm, "s2_feed", "Home feed", observations=["000005"])
-    (text,) = (s for s in short_list_sources(DEFAULT_MATCHING) if s.name == "text")
-    query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=NEAR)
+    gm.use_image_vectors({f"{number:06d}": NEAR for number in range(1, 6)})
 
     with pytest.raises(ValueError, match="without a description vector") as caught:
-        text.scores(gm, query, ["s0_home", "s1_pin", "s2_feed"])
+        read(gm)
 
     assert str(caught.value) == (
         "Node 's0_home' has members without a description vector: 000004. "

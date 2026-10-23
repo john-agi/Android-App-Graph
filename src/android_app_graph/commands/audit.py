@@ -50,9 +50,8 @@ from android_app_graph.device import (
 )
 from android_app_graph.graph_files import graph_steps_dir
 from android_app_graph.member_groups import (
-    CHECKS_PER_NODE,
-    GROUPING_FLOOR,
-    HOME_SHARE,
+    IMAGE_GROUPING_FLOOR,
+    TEXT_GROUPING_FLOOR,
     MemberCheck,
 )
 from android_app_graph.step_log import (
@@ -164,12 +163,9 @@ def select_apps_for_audit(
 
 @dataclass(frozen=True, slots=True)
 class MemberReport:
-    """Every member check the audit made, with the change each confirmed, and the
-    diffuse nodes and the groups left unchecked."""
+    """Every member check the audit made, with the change each confirmed."""
 
     checks: list[dict[str, object]]
-    diffuse: list[dict[str, object]]
-    unchecked: list[dict[str, object]]
 
     @property
     def changes(self) -> int:
@@ -177,43 +173,33 @@ class MemberReport:
 
     def as_record(self) -> dict[str, object]:
         return {
-            "grouping_floor": GROUPING_FLOOR,
-            "home_share": HOME_SHARE,
-            "checks_per_node": CHECKS_PER_NODE,
+            "image_grouping_floor": IMAGE_GROUPING_FLOOR,
+            "text_grouping_floor": TEXT_GROUPING_FLOOR,
             "checks": self.checks,
-            "diffuse": self.diffuse,
-            "unchecked": self.unchecked,
         }
 
 
 def check_members(
     graph: GraphManager, verdicts: MemberVerdicts, transitions: Sequence[TransitionRecord]
 ) -> MemberReport:
-    """Check the members of every in-app node, grouped at ``GROUPING_FLOOR``, against
-    its largest group; README.md#member-checks.
+    """Check every group of the members of every in-app node against its largest group;
+    README.md#member-checks.
 
     Every split check of every node is asked at once and applied before the move
     checks are asked, so a moved member can go to a node a split made. ``verdicts``
     holds the run's verifier answers, which the checks reuse and add to: two merged
-    nodes whose closest members fall below ``GROUPING_FLOOR`` are two groups of the
-    merged node, and their split check is the pair the merge was verified on, so the
-    merged node stays whole without a second verifier call. ``transitions`` are the
-    exploration's transition records, by which edge actions follow the members that
-    move.
+    nodes whose members are linked by neither images nor descriptions are two groups
+    of the merged node, and their split check is the pair the merge was verified on,
+    so the merged node stays whole without a second verifier call. ``transitions`` are
+    the exploration's transition records, by which edge actions follow the members
+    that move.
     """
-    plans = graph.member_plans()
-    checks = [(node, check) for node, plan in plans for check in plan.checks]
+    checks = graph.member_checks()
     splits = [(node, check) for node, check in checks if len(check.group) > 1]
     moves = [(node, check) for node, check in checks if len(check.group) == 1]
     results = _check_member_groups(graph, splits, verdicts, transitions)
     results += _check_member_groups(graph, moves, verdicts, transitions)
-    return MemberReport(
-        checks=results,
-        diffuse=[{"node": node, "groups": plan.groups} for node, plan in plans if plan.diffuse],
-        unchecked=[
-            {"node": node, "groups": plan.unchecked} for node, plan in plans if plan.unchecked
-        ],
-    )
+    return MemberReport(checks=results)
 
 
 def _check_member_groups(
@@ -923,11 +909,10 @@ def _check_members(
     members_path = _app_file(run.graph_dir, app_name, "_members")
     _write_json(members_path, report.as_record())
     logger.info(
-        "Member checks saved to %s: %d check(s), %d change(s), %d diffuse node(s)",
+        "Member checks saved to %s: %d check(s), %d change(s)",
         members_path,
         len(report.checks),
         report.changes,
-        len(report.diffuse),
     )
     if report.changes:
         _save_audited_graph(run, graph, app_name, f"{report.changes} member change(s)")
