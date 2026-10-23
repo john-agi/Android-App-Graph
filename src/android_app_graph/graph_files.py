@@ -155,6 +155,65 @@ def text_embeddings_path(graph_path: Path) -> Path:
     return graph_path.with_name(f"{graph_path.stem}_text_emb.json")
 
 
+def identify_file_path(graph_path: Path) -> Path:
+    """Return where the graph at ``graph_path`` keeps the decisions that placed its
+    screenshots, one JSON line per screenshot it identified.
+
+    A screen's description depends on the other nodes' descriptions in its prompt, and
+    its node on the matching settings and every earlier decision, so both belong to the
+    graph beside them rather than to the step log the graph shares.
+    """
+    return graph_path.with_name(f"{graph_path.stem}_identify.jsonl")
+
+
+def append_json_line(path: Path, record: Mapping[str, object]) -> None:
+    """Append ``record`` to ``path`` as one line of JSON, creating the file when it is
+    missing, and flush and fsync it before returning.
+
+    A last line a crash tore off before its newline is cut off first, so the new line
+    starts a line of its own.
+    """
+    line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    with path.open("a+b") as f:
+        size = f.seek(0, os.SEEK_END)
+        if size:
+            f.seek(size - 1)
+            if f.read(1) != b"\n":
+                f.seek(0)
+                f.truncate(f.read().rfind(b"\n") + 1)
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def read_json_lines(path: Path) -> list[dict[str, object]]:
+    """Return the JSON object on each line of ``path``, in order; a missing file has none.
+
+    A last line without its newline, torn off by a crash, is left out. Any other line
+    that is not a JSON object raises ``ValueError`` naming the file and the line.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    records: list[dict[str, object]] = []
+    for number, line in enumerate(text.split("\n")[:-1], start=1):
+        record = _json_object(line)
+        if record is None:
+            msg = f"{path}: line {number} is not a JSON object"
+            raise ValueError(msg)
+        records.append(record)
+    return records
+
+
+def _json_object(line: str) -> dict[str, object] | None:
+    try:
+        value = json.loads(line)
+    except ValueError:
+        return None
+    return as_object_dict(value) if isinstance(value, dict) else None
+
+
 type VectorKind = Literal["image", "text"]
 
 

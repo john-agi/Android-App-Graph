@@ -63,11 +63,13 @@ from android_app_graph.step_log import (
     read_exploration_transitions,
 )
 from android_app_graph.utils import (
+    MatchingSettings,
     ModelSettings,
     check_config_keys,
     open_client,
     resolve_api_key,
     resolve_audit_timeout,
+    resolve_matching_settings,
     resolve_model_settings,
 )
 from android_app_graph.utils.graph_manager import (
@@ -316,9 +318,12 @@ class _Step:
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
     wrote, which differs when an ``end`` is recorded as a back press. ``setup`` is what
-    ``SetupTrail.setup`` read for the action, ``None`` when unknown.
+    ``SetupTrail.setup`` read for the action, ``None`` when unknown. ``start`` is the
+    screenshot the run last matched before the step, which shows the screen the step
+    starts from.
     """
 
+    start: str | None
     before: Observation
     instruction: str
     planned_instruction: str
@@ -328,11 +333,13 @@ class _Step:
 
 
 def _identify(
-    run: _ReExploreRun, device_state: dict[str, Any], *, expected_node: str | None = None
+    run: _ReExploreRun, device_state: dict[str, Any], *, expected_observation: str | None = None
 ) -> str:
-    return run.graph.identify_state(
-        Observation.from_state(device_state), expected_node=expected_node
-    )
+    """Record a match of the screen in ``device_state``, which the caller expects to show
+    the screen of ``expected_observation`` when it names one, and return its node."""
+    observation = Observation.from_state(device_state)
+    run.recorder.record_match(observation, expected_observation)
+    return run.graph.identify_state(observation, expected_observation=expected_observation)
 
 
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
@@ -360,7 +367,9 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         logger.warning("No path from %s to %s", start, target_node)
         return None
 
-    opened_on = _identify(run, run.recorder.get_state(), expected_node=start)
+    opened_on = _identify(
+        run, run.recorder.get_state(), expected_observation=run.graph.earliest_member(start)
+    )
     start, target_node = run.graph.resolve_node_id(start), run.graph.resolve_node_id(target_node)
     if opened_on != start:
         logger.info(
@@ -374,7 +383,11 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
             for setup_action in step.setup:
                 _execute(run.recorder, setup_action)
             _execute(run.recorder, step.action)
-        actual = _identify(run, run.recorder.get_state(), expected_node=target_node)
+        actual = _identify(
+            run,
+            run.recorder.get_state(),
+            expected_observation=run.graph.earliest_member(target_node),
+        )
     if actual != target_node:
         logger.warning(
             "Expected to reach %s but arrived at %s",
@@ -384,19 +397,22 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     return actual
 
 
-def _leave_external_web(run: _ReExploreRun, source: str) -> str:
+def _leave_external_web(run: _ReExploreRun, expected_observation: str | None) -> str:
     """Press back until the screen is no longer an outside web page, restarting the
     app if a few presses do not leave it, and return the screen's node.
 
-    A back press is expected to return to ``source``, the node whose step opened the
-    page, and a restart to the start node. A step from the shared ``ext_web`` node
-    would act on a page outside the app, and ``add_edge`` would refuse its edge.
+    A back press is expected to return to the screen of ``expected_observation``, the
+    screenshot of the screen whose step opened the page, and a restart to the start
+    node. A step from the shared ``ext_web`` node would act on a page outside the app,
+    and ``add_edge`` would refuse its edge.
     """
     with run.recorder.source("external_web_recovery"):
         for _ in range(EXTERNAL_WEB_BACK_PRESSES):
             run.recorder.exe_action({"action": "back"})
             time.sleep(1)
-            node = _identify(run, run.recorder.get_state(), expected_node=source)
+            node = _identify(
+                run, run.recorder.get_state(), expected_observation=expected_observation
+            )
             if node != EXTERNAL_WEB_NODE:
                 return node
         logger.warning(
@@ -405,7 +421,11 @@ def _leave_external_web(run: _ReExploreRun, source: str) -> str:
             run.target.package_name,
         )
         restart_app(run.recorder, run.app_launch, logger)
-        return _identify(run, run.recorder.get_state(), expected_node=run.start_node)
+        return _identify(
+            run,
+            run.recorder.get_state(),
+            expected_observation=run.graph.earliest_member(run.start_node),
+        )
 
 
 def _plan_and_act(
@@ -460,6 +480,7 @@ def _plan_and_act(
     else:
         run.recorder.exe_action(action)
     return _Step(
+        start=run.recorder.last_match,
         before=before,
         instruction=instruction,
         planned_instruction=planned_instruction,
@@ -480,7 +501,7 @@ def _record_step(
     """
     instruction, action = step.instruction, step.action
     after = Observation.from_state(device_state)
-    new_node = run.graph.identify_state(after)
+    new_node = _identify(run, device_state)
     source = run.graph.resolve_node_id(source)
 
     new_node_data = run.graph.get_node(new_node)
@@ -526,7 +547,7 @@ def _record_step(
     run.graph.save_graph(run.target.graph_path)
     if new_node == EXTERNAL_WEB_NODE:
         logger.warning("Opened an external web page during re-explore, pressing back")
-        return _leave_external_web(run, source), step_result
+        return _leave_external_web(run, step.start), step_result
     return new_node, step_result
 
 
@@ -568,7 +589,7 @@ def _explore_steps(
             logger.warning("Left app during re-explore, pressing back")
             with run.recorder.source("external_app_recovery"):
                 device_state = return_to_app(run.recorder, run.app_launch, logger)
-            current_node = _identify(run, device_state, expected_node=current_node)
+            current_node = _identify(run, device_state, expected_observation=step.start)
             trail.begin(current_node, None)
             continue
 
@@ -609,7 +630,7 @@ def _correct_flagged_edge(
     reached = (
         f"ext_{after['package'].strip()}"
         if _left_app(run, after)
-        else _identify(run, after, expected_node=target)
+        else _identify(run, after, expected_observation=run.graph.earliest_member(target))
     )
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
     run.recorder.record_transition(
@@ -843,13 +864,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 @dataclass(frozen=True, slots=True)
 class _AuditRun:
-    """The config, client, model settings and device session every audited app shares."""
+    """The config, client, model and matching settings and device session every audited
+    app shares."""
 
     config: dict[str, Any]
     vlm_config: dict[str, Any]
     graph_dir: Path
     client: OpenRouter
     settings: dict[str, ModelSettings]
+    matching: MatchingSettings
     session: ReExploreSession | None
 
 
@@ -976,6 +999,7 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         image_embedding=run.settings["image_embedding"],
         audit_timeout=resolve_audit_timeout(run.vlm_config),
     )
+    graph.matching = run.matching
 
     graph_path = _app_file(run.graph_dir, app_name)
     if not graph_path.exists():
@@ -989,6 +1013,8 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
         graph.graph.number_of_nodes(),
         graph.graph.number_of_edges(),
     )
+    audited_graph_path = _app_file(run.graph_dir, app_name, "_audited")
+    graph.copy_identify_file(audited_graph_path)
     graph.embed_missing_members()
 
     report_path = _app_file(run.graph_dir, app_name, "_audit")
@@ -1012,7 +1038,6 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
     if run.session is not None and other_issues:
         _re_explore_app(run, run.session, graph, app, other_issues)
 
-    audited_graph_path = _app_file(run.graph_dir, app_name, "_audited")
     normalize_and_save_audited_graph(graph, audited_graph_path)
     _report_no_path_to_start(graph, audit_result, report_path, audited_graph_path)
 
@@ -1046,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = resolve_model_settings(
             vlm_config, roles=RE_EXPLORE_ROLES if args.re_explore else AUDIT_ROLES
         )
+        matching = resolve_matching_settings(vlm_config)
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
@@ -1067,6 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
             graph_dir=graph_dir,
             client=client,
             settings=settings,
+            matching=matching,
             session=session,
         )
         for app in selected_apps:

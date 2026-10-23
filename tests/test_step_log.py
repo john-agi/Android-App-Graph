@@ -1,6 +1,6 @@
 """Tests for android_app_graph.step_log: the recorder writes every screenshot and
-action of the controller it wraps into the step log, callers add transitions and
-annotate observations, and the step log keeps its observations' image vectors."""
+action of the controller it wraps into the step log, callers add match requests and
+transitions, and the step log keeps its observations' image vectors."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from android_app_graph.step_log import (
     StepRecorder,
     Transition,
     TransitionRecord,
-    annotate_observation,
     load_image_embeddings,
     read_exploration_transitions,
     read_observation_record,
@@ -411,24 +410,44 @@ def test_observation_from_state_rejects_a_state_the_recorder_did_not_return(
         Observation.from_state(device.get_state())
 
 
-def test_annotate_observation_adds_fields_and_keeps_the_record(
+def test_record_match_names_the_screenshot_asked_for_and_the_one_expected(
     device: _Device, steps: Path
 ) -> None:
     recorder = _recorder(device, steps)
-    recorder.get_state()
-    before = _record(steps, "000000")
+    observation = Observation.from_state(recorder.get_state())
+    assert recorder.last_match is None
 
-    annotate_observation(steps, "000000", {"describe": {"page_description": "Home"}})
+    with recorder.source("navigation_replay"):
+        recorder.record_match(observation, "000042")
 
-    assert _record(steps, "000000") == {**before, "describe": {"page_description": "Home"}}
+    record = _record(steps, "000001")
+    record.pop("timestamp")
+    assert record == {
+        "id": "000001",
+        "kind": "match",
+        "run_id": recorder.run_id,
+        "run_kind": "explore",
+        "source": "navigation_replay",
+        **HOME,
+        "observation": "000000",
+        "expected_observation": "000042",
+    }
+    assert recorder.last_match == "000000"
+
+
+def test_a_match_without_an_expectation_names_none(device: _Device, steps: Path) -> None:
+    recorder = _recorder(device, steps)
+
+    recorder.record_match(Observation.from_state(recorder.get_state()), None)
+
+    assert _record(steps, "000001")["expected_observation"] is None
+
+
+def test_read_observation_record_reads_a_record_or_none(device: _Device, steps: Path) -> None:
+    _recorder(device, steps).get_state()
+
     assert read_observation_record(steps, "000000") == _record(steps, "000000")
-
-
-def test_annotating_an_observation_without_a_record_raises(steps: Path) -> None:
-    steps.mkdir(parents=True)
-    with pytest.raises(FileNotFoundError):
-        annotate_observation(steps, "000000", {"identify": {}})
-    assert read_observation_record(steps, "000000") is None
+    assert read_observation_record(steps, "000001") is None
 
 
 MODEL = "voyageai/voyage-multimodal-3.5"

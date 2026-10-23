@@ -32,16 +32,22 @@ from openrouter import OpenRouter
 from openrouter.components.chatusage import ChatUsage
 from PIL import Image, ImageDraw
 
-from android_app_graph.graph_files import PER_ACTION_LISTS, save_embeddings, text_embeddings_path
+from android_app_graph.graph_files import (
+    PER_ACTION_LISTS,
+    append_json_line,
+    identify_file_path,
+    read_json_lines,
+    save_embeddings,
+    text_embeddings_path,
+)
+from android_app_graph.payloads import as_object_dict
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
-from android_app_graph.utils import ModelSettings, vlm_utils
+from android_app_graph.utils import DEFAULT_MATCHING, MatchingSettings, ModelSettings, vlm_utils
 from android_app_graph.utils import graph_manager as gm_module
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     MAX_SETUP_ACTIONS,
     NORMALIZE_EVERY_N_VISITS,
-    SHORT_LIST_SOURCES,
-    SHORT_LIST_VERIFICATIONS,
     EdgeDetails,
     GraphManager,
     PathStep,
@@ -50,6 +56,7 @@ from android_app_graph.utils.graph_manager import (
     SetupTrail,
     _merge_elements,
     _merge_into_schema,
+    short_list_sources,
 )
 from android_app_graph.utils.vlm_utils import MAX_REQUESTS_IN_FLIGHT, TokenTracker
 
@@ -107,9 +114,14 @@ SHOT_B = b64(b"screenshot-b")
 SHOT_C = b64(b"screenshot-c")
 
 
+def graph_beside(steps_dir: Path) -> Path:
+    """The graph file whose step log is ``steps_dir``."""
+    return steps_dir.parent / "graph.json"
+
+
 def make_manager(steps_dir: Path | None = None, client: OpenRouter = FAKE_CLIENT) -> GraphManager:
-    """A manager whose client is a sentinel unless given; every caller of the sentinel is
-    patched."""
+    """A manager whose client is a sentinel unless given, every caller of which is
+    patched, and whose identify file is that of ``graph_beside(steps_dir)``."""
     gm = GraphManager(
         client=client,
         page_detail=PAGE_DETAIL,
@@ -117,6 +129,8 @@ def make_manager(steps_dir: Path | None = None, client: OpenRouter = FAKE_CLIENT
         image_embedding=IMAGE_EMBEDDING,
     )
     gm.steps_dir = steps_dir
+    if steps_dir is not None:
+        gm.identify_file = identify_file_path(graph_beside(steps_dir))
     return gm
 
 
@@ -134,16 +148,23 @@ class Membership(TypedDict):
 
 
 def write_member_record(steps_dir: Path, observation_id: str) -> None:
-    """Write the record exploration leaves for a member observation in ``steps_dir``: its
-    pixel hash and describe output."""
+    """Write what exploration leaves for a member observation: its record with its pixel
+    hash in ``steps_dir``, and its describe output in the identify file of
+    ``graph_beside(steps_dir)``."""
     steps_dir.mkdir(parents=True, exist_ok=True)
-    record = {
-        "id": observation_id,
-        "kind": "observation",
-        "pixel_hash": f"member-{observation_id}",
-        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
-    }
+    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"member-{observation_id}"}
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+    write_describe(steps_dir, observation_id, DESCRIBED_BLANK)
+
+
+DESCRIBED_BLANK = {"page_description": "", "state": {}, "elements": [], "is_external_web": False}
+
+
+def write_describe(steps_dir: Path, observation_id: str, describe: object) -> None:
+    """Give ``observation_id`` the describe output ``describe`` in the identify file of
+    ``graph_beside(steps_dir)``."""
+    line = {"observation": observation_id, "describe": describe}
+    append_json_line(identify_file_path(graph_beside(steps_dir)), line)
 
 
 def members(steps_dir: Path, *images: bytes) -> Membership:
@@ -186,6 +207,20 @@ class Screens:
     def record(self, observation: Observation) -> dict[str, Any]:
         path = self.steps_dir / f"{observation.observation_id}.json"
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def decision(self, observation: Observation) -> dict[str, Any]:
+        return decision_line(self.steps_dir, observation.observation_id)
+
+
+def decision_line(steps_dir: Path, observation_id: str) -> dict[str, Any]:
+    """The line naming ``observation_id`` in the identify file of
+    ``graph_beside(steps_dir)``, where ``make_manager``'s managers append their decisions."""
+    (line,) = (
+        line
+        for line in read_json_lines(identify_file_path(graph_beside(steps_dir)))
+        if line["observation"] == observation_id
+    )
+    return dict(line)
 
 
 @pytest.fixture
@@ -415,6 +450,7 @@ def test_identify_state_without_embedding_settings_raises(vlm: FakeVlm, screen: 
 def test_identify_state_without_image_embedding_settings_raises(screen: Screens) -> None:
     gm = GraphManager(client=FAKE_CLIENT, page_detail=PAGE_DETAIL, embedding=EMBEDDING)
     gm.steps_dir = screen.steps_dir
+    gm.identify_file = identify_file_path(graph_beside(screen.steps_dir))
     with pytest.raises(RuntimeError, match="needs a client and image_embedding settings"):
         gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
@@ -422,6 +458,13 @@ def test_identify_state_without_image_embedding_settings_raises(screen: Screens)
 def test_identify_state_without_a_step_log_raises(screen: Screens) -> None:
     with pytest.raises(RuntimeError, match="needs a steps_dir"):
         make_manager().identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+
+def test_identify_state_without_an_identify_file_raises(screen: Screens) -> None:
+    gm = make_manager(screen.steps_dir)
+    gm.identify_file = None
+    with pytest.raises(RuntimeError, match="needs an identify_file"):
+        gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
 
 
 def test_identify_state_creates_the_first_node(vlm: FakeVlm, screen: Screens) -> None:
@@ -453,26 +496,32 @@ def test_identify_state_records_the_describe_output_and_the_decision(
     vlm.descriptions.append(("Home screen", {"tab": "home"}, elements))
     gm = make_manager(screen.steps_dir)
     observation = screen(HOME, SHOT_A, PACKAGE)
+    record = screen.record(observation)
 
     gm.identify_state(observation)
 
-    record = screen.record(observation)
-    assert (record["id"], record["kind"]) == (observation.observation_id, "observation")
-    assert record["describe"] == {
-        "page_description": "Home screen",
-        "state": {"tab": "home"},
-        "elements": elements,
-        "is_external_web": False,
-    }
-    assert record["identify"] == {
-        "stage": "new",
-        "expected_node": None,
-        "exact_match": None,
-        "candidates": [],
-        "verifications": [],
-        "refinement": None,
-        "node": "s0_home_screen",
-    }
+    assert screen.record(observation) == record
+    assert read_json_lines(identify_file_path(graph_beside(screen.steps_dir))) == [
+        {
+            "observation": observation.observation_id,
+            "describe": {
+                "page_description": "Home screen",
+                "state": {"tab": "home"},
+                "elements": elements,
+                "is_external_web": False,
+            },
+            "identify": {
+                "stage": "new",
+                "expected_observation": None,
+                "expected_node": None,
+                "exact_match": None,
+                "candidates": [],
+                "verifications": [],
+                "refinement": None,
+                "node": "s0_home_screen",
+            },
+        }
+    ]
 
 
 def test_identify_state_passes_the_configured_models_and_clients(
@@ -503,7 +552,7 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
     first = gm.identify_state(first_observation)
     second_observation = screen(SETTINGS, SHOT_A, PACKAGE)
 
-    second = gm.identify_state(second_observation, expected_node="s9_elsewhere")
+    second = gm.identify_state(second_observation, expected_observation="000042")
 
     assert second == first
     assert vlm.kinds() == ["image", "describe", "embed", "image"]
@@ -515,7 +564,7 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
     assert node["visit_count"] == 2
     assert node["activities"] == [HOME, SETTINGS]
     assert node["last_detail_snapshot"] == {"tab": "home"}
-    record = screen.record(second_observation)
+    record = screen.decision(second_observation)
     assert record["describe"] == {
         "page_description": "Home screen",
         "state": {"tab": "home"},
@@ -525,7 +574,8 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
     }
     assert record["identify"] == {
         "stage": "exact",
-        "expected_node": "s9_elsewhere",
+        "expected_observation": "000042",
+        "expected_node": None,
         "exact_match": first_observation.observation_id,
         "candidates": [],
         "verifications": [],
@@ -547,7 +597,7 @@ def test_an_exact_match_copies_from_the_latest_member_with_the_pixels(
     third = screen(HOME, SHOT_A, PACKAGE)
     gm.identify_state(third)
 
-    assert screen.record(third)["describe"]["copied_from"] == copy.observation_id
+    assert screen.decision(third)["describe"]["copied_from"] == copy.observation_id
 
 
 def test_an_observation_without_a_pixel_hash_is_never_an_exact_match(
@@ -582,7 +632,7 @@ def test_a_pixel_hash_shared_by_members_of_two_nodes_does_not_decide(
     gm.identify_state(observation)
 
     assert vlm.kinds() == ["image", "describe", "embed", "verify"]
-    identify = screen.record(observation)["identify"]
+    identify = screen.decision(observation)["identify"]
     assert (identify["stage"], identify["exact_match"]) == ("short_list", None)
 
 
@@ -608,9 +658,9 @@ def test_identify_state_reports_external_web_pages_as_one_shared_node(
     }
     assert vlm.kinds() == ["image", "describe", "image", "describe"]
     assert gm.get_start_node() is None
-    assert screen.record(article)["describe"]["is_external_web"] is True
-    assert screen.record(article)["identify"]["stage"] == "external_web"
-    assert screen.record(article)["identify"]["node"] == EXTERNAL_WEB_NODE
+    assert screen.decision(article)["describe"]["is_external_web"] is True
+    assert screen.decision(article)["identify"]["stage"] == "external_web"
+    assert screen.decision(article)["identify"]["node"] == EXTERNAL_WEB_NODE
     assert gm.image_vector(article.observation_id) == ANY_IMAGE
 
 
@@ -652,7 +702,7 @@ def test_identify_state_verified_match_merges_into_existing_node(
     assert node["visit_count"] == 2
     assert node["state_schema"] == {"tab": ["home", "deals"]}
     assert node["observations"] == [home.observation_id, banner.observation_id]
-    identify = screen.record(banner)["identify"]
+    identify = screen.decision(banner)["identify"]
     assert identify["stage"] == "short_list"
     assert identify["candidates"] == [
         {
@@ -739,7 +789,7 @@ def test_identify_state_rejected_match_renames_existing_and_creates_new(
     assert renamed["observations"] == [home.observation_id]
     split = gm.graph.nodes[second]
     assert split["observations"] == [overlay.observation_id]
-    identify = screen.record(overlay)["identify"]
+    identify = screen.decision(overlay)["identify"]
     assert (identify["stage"], identify["node"]) == ("new", second)
     assert identify["refinement"] == {
         "node": first,
@@ -770,7 +820,7 @@ def test_identify_state_rejected_match_without_refinements_creates_new(
     assert first in gm.graph  # no rename: the verifier repeated the existing description
     assert second == "s1_home_screen_with_banner"
     assert vlm.kinds() == ["image", "describe", "embed", "image", "describe", "embed", "verify"]
-    assert screen.record(banner)["identify"]["refinement"] is None
+    assert screen.decision(banner)["identify"]["refinement"] is None
 
 
 def test_a_node_without_members_is_never_a_candidate(vlm: FakeVlm, screen: Screens) -> None:
@@ -908,7 +958,7 @@ def test_a_node_whose_member_image_ranks_first_is_verified_against_that_member(
     assert gm.identify_state(observation) == "s0_settings"
 
     assert verified(vlm) == [b64(b"twin")]
-    (candidate,) = screen.record(observation)["identify"]["candidates"]
+    (candidate,) = screen.decision(observation)["identify"]["candidates"]
     assert candidate["closest_member"] == gm.graph.nodes["s0_settings"]["observations"][1]
     assert candidate["sources"] == {"image": pytest.approx(1.0), "text": pytest.approx(0.0)}
 
@@ -939,7 +989,7 @@ def test_the_best_text_match_is_verified_within_the_cap_behind_three_image_match
     assert gm.identify_state(observation) == "s3_results"
 
     assert verified(vlm) == [b64(b"a"), b64(b"d")]
-    candidates = screen.record(observation)["identify"]["candidates"]
+    candidates = screen.decision(observation)["identify"]["candidates"]
     assert [(c["node"], sorted(c["sources"])) for c in candidates] == [
         ("s0_lookalike", ["image", "text"]),
         ("s3_results", ["text"]),
@@ -966,7 +1016,7 @@ def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once
 
     node_id = gm.identify_state(observation)
 
-    assert len(verified(vlm)) == SHORT_LIST_VERIFICATIONS == 3
+    assert len(verified(vlm)) == DEFAULT_MATCHING.verifier_calls == 3
     assert node_id == "s0_search_results"
     assert sorted(gm.graph) == [
         "s0_s0_refined",
@@ -975,7 +1025,7 @@ def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once
         "s2_lookalike",
         "s3_results",
     ]
-    identify = screen.record(observation)["identify"]
+    identify = screen.decision(observation)["identify"]
     assert [v["node"] for v in identify["verifications"]] == [
         "s0_lookalike",
         "s3_results",
@@ -989,19 +1039,51 @@ def test_the_short_list_makes_at_most_three_verifier_calls_and_refines_only_once
     }
 
 
+@pytest.mark.parametrize(
+    ("matching", "verified_images"),
+    [
+        pytest.param(MatchingSettings(verifier_calls=4), [b"a", b"d", b"b", b"c"], id="4 calls"),
+        pytest.param(MatchingSettings(verifier_calls=1), [b"a"], id="1 call"),
+        pytest.param(
+            MatchingSettings(image_candidates=1, text_candidates=1), [b"a", b"d"], id="1 of each"
+        ),
+        pytest.param(
+            MatchingSettings(image_candidates=0, text_candidates=1), [b"d"], id="text only"
+        ),
+    ],
+)
+def test_the_matching_settings_size_the_short_list_and_cap_its_verifier_calls(
+    matching: MatchingSettings, verified_images: list[bytes], vlm: FakeVlm, screen: Screens
+) -> None:
+    gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
+    gm.matching = matching
+    vlm.verdicts.extend(
+        _rejection(node) for node in ("s0", "s3", "s1", "s2")[: len(verified_images)]
+    )
+
+    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE)) == "s0_search_results"
+
+    assert verified(vlm) == [b64(image) for image in verified_images]
+
+
 def test_an_expected_node_is_verified_right_after_the_describe_call_and_skips_the_short_list(
     vlm: FakeVlm, screen: Screens
 ) -> None:
     gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.append({"same": True, "reason": "the page the replay leads to"})
     observation = screen(HOME, SHOT_A, PACKAGE)
+    expected = gm.earliest_member("s2_lookalike")
 
-    assert gm.identify_state(observation, expected_node="s2_lookalike") == "s2_lookalike"
+    assert gm.identify_state(observation, expected_observation=expected) == "s2_lookalike"
 
     assert vlm.kinds() == ["image", "describe", "embed", "verify"]
     assert verified(vlm) == [b64(b"c")]
-    identify = screen.record(observation)["identify"]
-    assert (identify["stage"], identify["expected_node"]) == ("expected", "s2_lookalike")
+    identify = screen.decision(observation)["identify"]
+    assert (identify["stage"], identify["expected_observation"], identify["expected_node"]) == (
+        "expected",
+        expected,
+        "s2_lookalike",
+    )
     assert identify["candidates"] == []
 
 
@@ -1011,12 +1093,13 @@ def test_a_rejected_expected_node_stays_off_the_short_list(vlm: FakeVlm, screen:
     gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend([_rejection("s0"), {"same": True, "reason": "the same list"}])
     observation = screen(HOME, SHOT_A, PACKAGE)
+    expected = gm.earliest_member("s0_lookalike")
 
-    assert gm.identify_state(observation, expected_node="s0_lookalike") == "s1_lookalike"
+    assert gm.identify_state(observation, expected_observation=expected) == "s1_lookalike"
 
     assert vlm.kinds() == ["image", "describe", "embed", "verify", "embed", "verify"]
     assert verified(vlm) == [b64(b"a"), b64(b"b")]
-    identify = screen.record(observation)["identify"]
+    identify = screen.decision(observation)["identify"]
     assert [c["node"] for c in identify["candidates"]] == [
         "s1_lookalike",
         "s3_results",
@@ -1030,7 +1113,9 @@ def test_an_expected_node_adds_one_verifier_call_to_the_cap(vlm: FakeVlm, screen
     gm = _three_image_matches_and_a_text_match(vlm, screen.steps_dir)
     vlm.verdicts.extend(_rejection(node) for node in ("s2", "s0", "s3", "s1"))
 
-    gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_node="s2_lookalike")
+    expected = gm.earliest_member("s2_lookalike")
+
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_observation=expected)
 
     assert verified(vlm) == [b64(image) for image in (b"c", b"a", b"d", b"b")]
 
@@ -1038,14 +1123,13 @@ def test_an_expected_node_adds_one_verifier_call_to_the_cap(vlm: FakeVlm, screen
 @pytest.mark.parametrize(
     "expected_node",
     [
-        pytest.param("s9_missing", id="not in the graph"),
+        pytest.param(None, id="listed by no node"),
         pytest.param("s1_other_app", id="of another package"),
-        pytest.param("s2_no_members", id="without members"),
         pytest.param("ext_org.other.tool", id="external"),
     ],
 )
-def test_an_expected_node_that_cannot_be_compared_is_not_checked(
-    expected_node: str, vlm: FakeVlm, screen: Screens
+def test_an_expected_screenshot_on_no_node_to_compare_with_is_not_checked(
+    expected_node: str | None, vlm: FakeVlm, screen: Screens
 ) -> None:
     gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir))
@@ -1059,27 +1143,60 @@ def test_an_expected_node_that_cannot_be_compared_is_not_checked(
     vlm.calls.clear()
     vlm.descriptions.append(("Home screen", {}, []))
     vlm.verdicts.append({"same": True, "reason": "home"})
+    expected = gm.earliest_member(expected_node) if expected_node else "000999"
+    observation = screen(HOME, SHOT_A, PACKAGE)
 
-    assert gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_node=expected_node) == (
-        "s0_home"
-    )
+    assert gm.identify_state(observation, expected_observation=expected) == "s0_home"
 
     assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    identify = screen.decision(observation)["identify"]
+    assert (identify["stage"], identify["expected_observation"], identify["expected_node"]) == (
+        "short_list",
+        expected,
+        expected_node,
+    )
 
 
-def test_an_expected_node_is_followed_through_its_renames(vlm: FakeVlm, screen: Screens) -> None:
+def test_an_expected_screenshot_names_the_node_that_lists_it_after_a_rename(
+    vlm: FakeVlm, screen: Screens
+) -> None:
     gm = make_manager(screen.steps_dir)
     add_screen(gm, "s0_home", "Home screen", **members(screen.steps_dir))
     gm.embed_missing_members()
+    expected = gm.earliest_member("s0_home")
     renamed = gm.rename_node("s0_home", "Home feed")
     vlm.calls.clear()
     vlm.descriptions.append(("Home screen", {}, []))
     vlm.verdicts.append({"same": True, "reason": "home"})
     observation = screen(HOME, SHOT_A, PACKAGE)
 
-    assert gm.identify_state(observation, expected_node="s0_home") == renamed
+    assert gm.identify_state(observation, expected_observation=expected) == renamed
 
-    assert screen.record(observation)["identify"]["stage"] == "expected"
+    identify = screen.decision(observation)["identify"]
+    assert (identify["stage"], identify["expected_node"]) == ("expected", renamed)
+
+
+def test_an_expected_screenshot_names_the_node_that_lists_it_in_each_graph(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """Two graphs built from one step log place a screenshot on nodes of different IDs,
+    and each verifies its own node of the screenshot first."""
+    expected = screen(HOME, SHOT_B, PACKAGE).observation_id
+    for node_id in ("s0_home", "s4_home_feed"):
+        gm = make_manager(screen.steps_dir)
+        add_screen(gm, "s1_settings", "Settings page", **members(screen.steps_dir, b"settings"))
+        add_screen(gm, node_id, "Home screen", observations=[expected])
+        gm.embed_missing_members()
+        vlm.calls.clear()
+        vlm.descriptions.append(("Home screen", {}, []))
+        vlm.verdicts.append({"same": True, "reason": "home"})
+        observation = screen(HOME, SHOT_A, PACKAGE)
+
+        assert gm.identify_state(observation, expected_observation=expected) == node_id
+
+        assert verified(vlm) == [SHOT_B]
+        identify = screen.decision(observation)["identify"]
+        assert (identify["stage"], identify["expected_node"]) == ("expected", node_id)
 
 
 def test_a_verifier_that_never_answers_is_asked_twice_and_the_screen_starts_a_new_node(
@@ -1111,7 +1228,7 @@ def test_a_verifier_that_never_answers_is_asked_twice_and_the_screen_starts_a_ne
         f"Verifier gave no answer on node {first} against member {home.observation_id} "
         "(timed out); it counts as a rejection"
     ) in caplog.text
-    identify = screen.record(again)["identify"]
+    identify = screen.decision(again)["identify"]
     assert identify["stage"] == "new"
     assert identify["verifications"] == [
         {
@@ -1204,8 +1321,11 @@ def test_a_reloaded_graph_matches_its_members_exactly(vlm: FakeVlm, tmp_path: Pa
     assert loaded.identify_state(second) == node_id
     assert vlm.kinds() == ["image"]
     assert loaded.graph.nodes[node_id]["last_detail_snapshot"] == {"tab": "home"}
-    record = json.loads((steps_dir / f"{second.observation_id}.json").read_text("utf-8"))
-    assert record["describe"]["copied_from"] == first.observation_id
+    identify_file = identify_file_path(tmp_path / "graph.json")
+    assert loaded.identify_file == identify_file
+    *_, line = read_json_lines(identify_file)
+    assert line["observation"] == second.observation_id
+    assert as_object_dict(line["describe"])["copied_from"] == first.observation_id
 
 
 def test_a_described_screen_s_text_vector_is_saved_beside_the_graph_and_loaded_back(
@@ -1234,20 +1354,8 @@ def test_a_graph_without_the_text_vector_of_a_described_member_fails_to_load(
     steps_dir = tmp_path / "steps"
     member = members(steps_dir, b"kept", b"lost")
     kept, lost = member["observations"]
-    describe = {"page_description": "Home screen", "state": {}, "elements": []}
-    for observation_id in (kept, lost):
-        record = {"pixel_hash": f"hash-{observation_id}", "describe": describe}
-        (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "nodes": [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}],
-                "edges": [],
-            }
-        ),
-        "utf-8",
-    )
+    write_graph(path, [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}])
     vectors = {kept: EMBEDDINGS["Home screen"]}
     save_embeddings(text_embeddings_path(path), vectors, model=EMBEDDING.model)
 
@@ -1328,29 +1436,27 @@ DESCRIBED = {"page_description": "Home", "state": {}, "elements": [], "is_extern
 
 
 @pytest.mark.parametrize(
-    "record",
+    ("record", "describe"),
     [
-        pytest.param(None, id="no-record"),
-        pytest.param({"describe": DESCRIBED}, id="no-pixel-hash"),
-        pytest.param({"pixel_hash": "abc"}, id="no-describe"),
-        pytest.param({"pixel_hash": "abc", "black": False}, id="no-describe-not-black"),
-        pytest.param({"black": True, "activity": "com.example.app.Home"}, id="black-no-pixel-hash"),
+        pytest.param(None, DESCRIBED, id="no-record"),
+        pytest.param({}, DESCRIBED, id="no-pixel-hash"),
+        pytest.param({"pixel_hash": "abc"}, None, id="no-describe"),
+        pytest.param({"pixel_hash": "abc", "black": False}, None, id="no-describe-not-black"),
         pytest.param(
-            {"pixel_hash": "abc", "describe": {**DESCRIBED, "page_description": 3}},
-            id="description",
+            {"black": True, "activity": "com.example.app.Home"}, None, id="black-no-pixel-hash"
         ),
-        pytest.param({"pixel_hash": "abc", "describe": {**DESCRIBED, "state": []}}, id="state"),
-        pytest.param(
-            {"pixel_hash": "abc", "describe": {**DESCRIBED, "elements": {}}}, id="elements"
-        ),
+        pytest.param({"pixel_hash": "abc"}, {**DESCRIBED, "page_description": 3}, id="description"),
+        pytest.param({"pixel_hash": "abc"}, {**DESCRIBED, "state": []}, id="state"),
+        pytest.param({"pixel_hash": "abc"}, {**DESCRIBED, "elements": {}}, id="elements"),
     ],
 )
 def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_output(
-    record: dict[str, object] | None, tmp_path: Path
+    record: dict[str, object] | None, describe: dict[str, object] | None, tmp_path: Path
 ) -> None:
     """Exact matching and member checks read both from every member of an in-app node,
-    except a black one, whose description comes from its activity; a member of an
-    ``ext_`` node needs neither."""
+    the pixel hash from its record in the step log and the describe output from the
+    identify file, except a black one, whose description comes from its activity; a
+    member of an ``ext_`` node needs neither."""
     steps_dir = tmp_path / "steps"
     home = members(steps_dir, b"home", b"home-2")
     undescribed = home["observations"][1]
@@ -1359,6 +1465,11 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
         step_record.unlink()
     else:
         step_record.write_text(json.dumps(record), "utf-8")
+    line = {"observation": undescribed}
+    append_json_line(
+        identify_file_path(graph_beside(steps_dir)),
+        line if describe is None else {**line, "describe": describe},
+    )
     browser = write_observation_image(steps_dir, b"browser")
     path = tmp_path / "graph.json"
     write_graph(
@@ -1370,11 +1481,12 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     )
 
     with pytest.raises(
-        ValueError, match="no pixel hash, or no describe output and is not of a black screenshot"
+        ValueError, match="no pixel hash, or that have no describe output"
     ) as excinfo:
         make_manager().load_graph(path)
 
     message = str(excinfo.value)
+    assert f"in {identify_file_path(path)} and are not of a black screenshot" in message
     assert f"[{undescribed!r}]" in message
     assert str(path) in message
     assert "Explore the app again into a new graph directory" in message
@@ -1464,7 +1576,7 @@ def test_a_black_screen_is_described_from_its_activity_and_recorded_as_matched_b
     (pattern,) = _captures(steps_dir, _secure(SET_PATTERN))
     gm = make_manager(steps_dir)
 
-    gm.identify_state(pattern, expected_node="s9_elsewhere")
+    gm.identify_state(pattern, expected_observation="000042")
 
     node = gm.graph.nodes[PATTERN_NODE]
     assert node["package"] == PACKAGE
@@ -1474,10 +1586,12 @@ def test_a_black_screen_is_described_from_its_activity_and_recorded_as_matched_b
     assert gm.text_vector(pattern.observation_id) is None
     record = json.loads((steps_dir / f"{pattern.observation_id}.json").read_text("utf-8"))
     assert record["black"] is True
-    assert "describe" not in record
-    assert record["identify"] == {
+    line = decision_line(steps_dir, pattern.observation_id)
+    assert "describe" not in line
+    assert line["identify"] == {
         "stage": "black",
-        "expected_node": "s9_elsewhere",
+        "expected_observation": "000042",
+        "expected_node": None,
         "exact_match": None,
         "candidates": [],
         "verifications": [],
@@ -1583,7 +1697,7 @@ def test_a_screen_black_below_the_status_bar_alone_is_described_not_copied_from_
     assert not observation.black
     assert observation.pixel_hash == black_screen.pixel_hash
     assert vlm.kinds() == ["image", "image", "describe", "embed", "verify"]
-    record = json.loads((recorder.steps / f"{observation.observation_id}.json").read_text("utf-8"))
+    record = decision_line(recorder.steps, observation.observation_id)
     assert record["identify"]["stage"] == "new"
     assert [(c["node"], sorted(c["sources"])) for c in record["identify"]["candidates"]] == [
         (black_node, ["image"])
@@ -1742,10 +1856,7 @@ def test_a_manager_without_image_embedding_settings_neither_loads_nor_saves_vect
 ) -> None:
     path = tmp_path / "graph.json"
     member = members(tmp_path / "steps")
-    path.write_text(
-        json.dumps({"nodes": [{"id": "s0_home", "replay_misses": 0, **member}], "edges": []}),
-        "utf-8",
-    )
+    write_graph(path, [{"id": "s0_home", "replay_misses": 0, **member}])
     write_image_vectors(tmp_path / "steps", member["observations"])
     gm = GraphManager()
 
@@ -1779,15 +1890,7 @@ def test_closest_member_raises_naming_the_node_and_every_member_without_a_usable
         model=IMAGE_EMBEDDING.model,
     )
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "nodes": [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}],
-                "edges": [],
-            }
-        ),
-        "utf-8",
-    )
+    write_graph(path, [{"id": "s0_home", "package": PACKAGE, "replay_misses": 0, **member}])
     write_text_vectors(path, member)
     gm = make_manager()
     gm.load_graph(path)
@@ -1885,7 +1988,7 @@ def test_the_text_source_ranks_a_node_by_its_member_closest_to_the_screen(
     settings = gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
     assert gm.identify_state(screen(HOME, SHOT_B, PACKAGE)) == settings
     banner = gm.identify_state(screen(HOME, b64(b"banner"), PACKAGE))
-    (text,) = (source for source in SHORT_LIST_SOURCES if source.name == "text")
+    (text,) = (s for s in short_list_sources(DEFAULT_MATCHING) if s.name == "text")
     query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=EMBEDDINGS["Search results"])
 
     ranked = sorted(text.scores(gm, query, [banner, settings]), key=lambda kv: kv[1], reverse=True)
@@ -1912,7 +2015,7 @@ def test_the_text_source_ranks_a_node_by_its_members_that_are_not_black(
     """A black member is never described, so it has no description vector; a node whose
     members are all black gets no ``text`` score."""
     gm = _home_beside_a_black_node(write_member_graph, tmp_path / "graph.json")
-    (text,) = (source for source in SHORT_LIST_SOURCES if source.name == "text")
+    (text,) = (s for s in short_list_sources(DEFAULT_MATCHING) if s.name == "text")
     query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=NEAR)
 
     assert text.scores(gm, query, ["s0_home", "s1_pin"]) == [("s0_home", pytest.approx(1.0))]
@@ -1926,7 +2029,7 @@ def test_the_text_source_raises_naming_each_node_and_member_without_a_descriptio
     gm = _home_beside_a_black_node(write_member_graph, tmp_path / "graph.json")
     gm.graph.nodes["s0_home"]["observations"].append("000004")
     add_screen(gm, "s2_feed", "Home feed", observations=["000005"])
-    (text,) = (source for source in SHORT_LIST_SOURCES if source.name == "text")
+    (text,) = (s for s in short_list_sources(DEFAULT_MATCHING) if s.name == "text")
     query = ScreenQuery(image_vector=ANY_IMAGE, description_embedding=NEAR)
 
     with pytest.raises(ValueError, match="without a description vector") as caught:
@@ -4107,9 +4210,11 @@ def test_a_screen_identified_as_a_node_replay_missed_clears_its_misses(
     vlm.verdicts.append({"same": True, "reason": "the settings page"})
     observation = screen(SETTINGS, screenshot, PACKAGE)
 
-    assert gm.identify_state(observation, expected_node=expected_node) == "s1_settings_page"
+    expected = gm.earliest_member(expected_node)
 
-    assert screen.record(observation)["identify"]["stage"] == stage
+    assert gm.identify_state(observation, expected_observation=expected) == "s1_settings_page"
+
+    assert screen.decision(observation)["identify"]["stage"] == stage
     assert "s1_settings_page" in _candidate_ids(gm)
     gm.record_replay_miss("s1_settings_page")
     assert "s1_settings_page" in _candidate_ids(gm)
@@ -4197,6 +4302,7 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
 
     assert sorted(path.name for path in graph_path.parent.iterdir()) == [
         "graph.json",
+        "graph_identify.jsonl",
         "graph_text_emb.json",
         "steps",
     ]
@@ -4219,6 +4325,123 @@ def test_save_graph_writes_members_but_no_image_and_load_graph_restores_them(
     assert restored["observations"] == [observation.observation_id]
     assert loaded.steps_dir == steps_dir
     assert loaded.image_vector(observation.observation_id) == [0.0, 0.6, 0.8]
+
+
+def test_the_matching_settings_are_saved_in_the_graph_file_and_loaded_back(
+    tmp_path: Path,
+) -> None:
+    matching = MatchingSettings(verifier_calls=5, image_candidates=4, text_candidates=1)
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    gm.matching = matching
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir))
+    path = graph_beside(steps_dir)
+
+    save_with_text_vectors(gm, path)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["matching"] == {
+        "verifier_calls": 5,
+        "image_candidates": 4,
+        "text_candidates": 1,
+    }
+    loaded = make_manager()
+    loaded.matching = matching
+    loaded.load_graph(path)
+    assert loaded.matching == matching
+
+
+def test_a_graph_built_with_other_matching_settings_fails_to_load(tmp_path: Path) -> None:
+    steps_dir = tmp_path / "steps"
+    gm = make_manager(steps_dir)
+    gm.matching = MatchingSettings(verifier_calls=5)
+    add_screen(gm, "s0_home", "Home screen", **members(steps_dir))
+    path = graph_beside(steps_dir)
+    save_with_text_vectors(gm, path)
+    loaded = make_manager()
+
+    with pytest.raises(ValueError, match="verifier_calls=5") as raised:
+        loaded.load_graph(path)
+
+    assert str(raised.value).startswith(f"{path} was built with the matching settings")
+    assert str(raised.value).endswith("Set vlm.matching to the graph's settings.")
+    assert list(loaded.graph) == []
+
+
+@pytest.mark.parametrize(
+    "matching",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param({"verifier_calls": 3, "image_candidates": 3}, id="one left out"),
+        pytest.param({**DEFAULT_MATCHING._asdict(), "text_candidates": "2"}, id="a string"),
+        pytest.param({**DEFAULT_MATCHING._asdict(), "verifier_calls": True}, id="a boolean"),
+    ],
+)
+def test_a_graph_that_names_no_matching_settings_fails_to_load(
+    matching: dict[str, object] | None, tmp_path: Path
+) -> None:
+    steps_dir = tmp_path / "steps"
+    path = graph_beside(steps_dir)
+    document: dict[str, object] = {
+        "nodes": [{"id": "s0_home", "replay_misses": 0, **members(steps_dir)}],
+        "edges": [],
+    }
+    if matching is not None:
+        document["matching"] = matching
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no matching settings, a whole number for each of"):
+        make_manager().load_graph(path)
+
+
+def test_copy_identify_file_starts_the_copy_s_decisions_from_the_graph_s(
+    vlm: FakeVlm, screen: Screens, tmp_path: Path
+) -> None:
+    vlm.descriptions.extend([("Home screen", {}, []), ("Settings page", {}, [])])
+    vlm.verdicts.append({"same": False, "reason": "another page"})
+    gm = make_manager(screen.steps_dir)
+    home = screen(HOME, SHOT_A, PACKAGE)
+    gm.identify_state(home)
+    original = gm.identify_file
+    assert original is not None
+    before = original.read_bytes()
+    copy = tmp_path / "graph_audited.json"
+
+    gm.copy_identify_file(copy)
+    settings = screen(SETTINGS, SHOT_B, PACKAGE)
+    gm.identify_state(settings)
+
+    assert original.read_bytes() == before
+    assert gm.identify_file == identify_file_path(copy)
+    assert [line["observation"] for line in read_json_lines(identify_file_path(copy))] == [
+        home.observation_id,
+        settings.observation_id,
+    ]
+
+
+def test_copying_an_identify_file_that_does_not_exist_yet_starts_an_empty_one(
+    tmp_path: Path,
+) -> None:
+    gm = make_manager(tmp_path / "steps")
+    copy = tmp_path / "graph_audited.json"
+
+    gm.copy_identify_file(copy)
+
+    assert identify_file_path(copy).read_bytes() == b""
+
+
+def test_node_of_and_earliest_member_name_nothing_for_nothing(tmp_path: Path) -> None:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps", b"one", b"two"))
+    add_screen(gm, "s1_empty", "Settings page")
+    first, second = gm.graph.nodes["s0_home"]["observations"]
+
+    assert (gm.node_of(first), gm.node_of(second)) == ("s0_home", "s0_home")
+    assert gm.node_of("000999") is None
+    assert gm.node_of(None) is None
+    assert gm.earliest_member("s0_home") == first
+    assert gm.earliest_member("s1_empty") is None
+    assert gm.earliest_member("s9_missing") is None
+    assert gm.earliest_member(None) is None
 
 
 def test_node_aliases_survive_save_and_load(tmp_path: Path) -> None:
@@ -4329,6 +4552,7 @@ def test_save_graph_leaves_the_previous_files_intact_on_a_failed_dump(
     assert emb_path.read_text(encoding="utf-8") == original_emb
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "graph.json",
+        "graph_identify.jsonl",
         "graph_text_emb.json",
         "steps",
     ]
@@ -4436,25 +4660,30 @@ def test_an_audited_graph_shares_the_step_log_of_the_graph_it_was_derived_from(
     app_dir = tmp_path / "demo"
     membership = members(app_dir / "steps", b"home-image")
     path = app_dir / "demo_audited.json"
-    path.write_text(
-        json.dumps(
-            {
-                "nodes": [{"id": "s0_home", "activity": HOME, "replay_misses": 0, **membership}],
-                "edges": [],
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_graph(path, [{"id": "s0_home", "activity": HOME, "replay_misses": 0, **membership}])
+    describe_members(path, membership)
     write_text_vectors(path, membership)
     gm = make_manager()
 
     gm.load_graph(path)
 
     assert gm.steps_dir == app_dir / "steps"
+    assert gm.identify_file == app_dir / "demo_audited_identify.jsonl"
 
 
 def write_graph(path: Path, nodes: list[dict[str, object]]) -> None:
-    path.write_text(json.dumps({"nodes": nodes, "edges": []}), encoding="utf-8")
+    """Write a graph file of ``nodes`` and no edges, made under the default matching
+    settings."""
+    document = {"matching": DEFAULT_MATCHING._asdict(), "nodes": nodes, "edges": []}
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def describe_members(path: Path, membership: Membership) -> None:
+    """Give each member of ``membership`` a describe output in the identify file of the
+    graph at ``path``."""
+    for member in membership["observations"]:
+        line = {"observation": member, "describe": DESCRIBED_BLANK}
+        append_json_line(identify_file_path(path), line)
 
 
 @pytest.mark.parametrize(
@@ -4609,12 +4838,14 @@ def test_load_graph_rejects_a_node_without_an_id_naming_the_path(tmp_path: Path)
         json.dumps(
             {
                 "next_id": 7,
+                "matching": DEFAULT_MATCHING._asdict(),
                 "nodes": [{"id": "s9_stale", "replay_misses": 0, **membership}],
                 "edges": [],
             }
         ),
         encoding="utf-8",
     )
+    describe_members(previous, membership)
     write_text_vectors(previous, membership)
     gm = make_manager()
     gm.load_graph(previous)

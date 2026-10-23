@@ -25,14 +25,16 @@ from android_app_graph import cli, device
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
 from android_app_graph.graph_files import (
+    append_json_line,
     graph_steps_dir,
+    identify_file_path,
     observation_image_path,
     save_embeddings,
     text_embeddings_path,
 )
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import save_image_embeddings
-from android_app_graph.utils import open_client
+from android_app_graph.utils import DEFAULT_MATCHING, open_client
 from android_app_graph.utils.graph_manager import GraphManager
 
 # Hypothesis's built-in "ci" profile, its own choice when CI is set, is deterministic,
@@ -375,7 +377,8 @@ def write_image_vectors() -> Callable[..., None]:
 @pytest.fixture
 def add_member(png_screenshot: str) -> Callable[..., None]:
     """Give a node of a manager one member observation, with an image and a record in the
-    manager's step log; ``image`` defaults to ``png_screenshot`` as WebP.
+    manager's step log and a describe output in its identify file; ``image`` defaults to
+    ``png_screenshot`` as WebP.
 
     The observation ID is not a step number, so a StepRecorder on the same step log
     never reuses it.
@@ -384,27 +387,25 @@ def add_member(png_screenshot: str) -> Callable[..., None]:
     def add(graph: GraphManager, node_id: str, image: bytes | None = None) -> None:
         steps_dir = graph.steps_dir
         assert steps_dir is not None, "set the manager's steps_dir first"
+        assert graph.identify_file is not None, "set the manager's identify_file first"
         observation_id = f"{node_id}-observation"
         steps_dir.mkdir(parents=True, exist_ok=True)
         observation_image_path(steps_dir, observation_id).write_bytes(
             encode_screenshot(png_screenshot) if image is None else image
         )
-        _write_member_record(steps_dir, observation_id)
+        _write_member_record(steps_dir, graph.identify_file, observation_id)
         graph.graph.nodes[node_id]["observations"] = [observation_id]
 
     return add
 
 
-def _write_member_record(steps_dir: Path, observation_id: str) -> None:
-    """Write the record exploration leaves for a member observation: its pixel hash and
-    describe output."""
-    record = {
-        "id": observation_id,
-        "kind": "observation",
-        "pixel_hash": f"hash-{observation_id}",
-        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
-    }
+def _write_member_record(steps_dir: Path, identify_file: Path, observation_id: str) -> None:
+    """Write what exploration leaves for a member observation: its record with its pixel
+    hash in ``steps_dir``, and its describe output in ``identify_file``."""
+    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"hash-{observation_id}"}
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
+    describe = {"page_description": "", "state": {}, "elements": [], "is_external_web": False}
+    append_json_line(identify_file, {"observation": observation_id, "describe": describe})
 
 
 def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
@@ -424,12 +425,13 @@ def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
 @pytest.fixture
 def write_graph_file(png_screenshot: str) -> Callable[..., None]:
     """Write ``document`` as a graph file that ``load_graph`` accepts, with what exploration
-    records where ``document`` gives none: every node but an ``ext_`` one gets the package
-    ``com.demo``, every node gets a ``replay_misses`` of 0 and one member observation,
-    with an image and a record holding a pixel hash and a describe output in the step log
-    beside it, every member of a node but an ``ext_`` one gets a text vector in the file
-    beside the graph, tagged with ``embedding_model``, and every edge gets the per-action
-    lists ``add_edge`` records."""
+    records where ``document`` gives none: the default matching settings, every node but an
+    ``ext_`` one gets the package ``com.demo``, every node gets a ``replay_misses`` of 0
+    and one member observation, with an image and a record holding a pixel hash in the
+    step log beside it and a describe output in the identify file beside the graph, every
+    member of a node but an ``ext_`` one gets a text vector in the file beside the graph,
+    tagged with ``embedding_model``, and every edge gets the per-action lists ``add_edge``
+    records."""
 
     def write(
         path: Path, document: dict[str, Any], embedding_model: str = "google/gemini-embedding-2"
@@ -443,7 +445,7 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
             observation_image_path(steps_dir, observation_id).write_bytes(
                 encode_screenshot(png_screenshot)
             )
-            _write_member_record(steps_dir, observation_id)
+            _write_member_record(steps_dir, identify_file_path(path), observation_id)
             in_app = not node["id"].startswith("ext_")
             if in_app:
                 text_vectors[observation_id] = [1.0, 0.0]
@@ -455,7 +457,8 @@ def write_graph_file(png_screenshot: str) -> Callable[..., None]:
             nodes.append(recorded | node)
         edges = [_saved_edge(edge) for edge in document.get("edges", [])]
         save_embeddings(text_embeddings_path(path), text_vectors, model=embedding_model)
-        path.write_text(json.dumps({**document, "nodes": nodes, "edges": edges}), "utf-8")
+        saved = {"matching": DEFAULT_MATCHING._asdict(), **document, "nodes": nodes, "edges": edges}
+        path.write_text(json.dumps(saved), "utf-8")
 
     return write
 
@@ -465,10 +468,10 @@ type Members = dict[str, list[tuple[str, list[float]]]]
 
 @pytest.fixture
 def write_member_graph() -> Callable[..., None]:
-    """Write a graph file of ``com.demo`` nodes whose members have an image, an image
-    vector and a stored describe output in the step log beside it and a text vector in
-    the file beside the graph, and the exploration transitions
-    ``(before, after, action, from_node, to_node)``.
+    """Write a graph file of ``com.demo`` nodes, made under the default matching settings,
+    whose members have an image and an image vector in the step log beside it and a
+    stored describe output and a text vector in the files beside the graph, and the
+    exploration transitions ``(before, after, action, from_node, to_node)``.
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order;
     the vector is the member's image vector and its text vector. Node ``n`` is described
@@ -510,12 +513,14 @@ def write_member_graph() -> Callable[..., None]:
                     "black": black_activity is not None,
                 }
                 if black_activity is None:
-                    record["describe"] = {
+                    describe = {
                         "page_description": f"Screen {observation_id}",
                         "state": {"seen_in": observation_id},
                         "elements": [{"description": f"Button {observation_id}"}],
                         "is_external_web": False,
                     }
+                    line = {"observation": observation_id, "describe": describe}
+                    append_json_line(identify_file_path(path), line)
                     text_vectors[observation_id] = vector
                 (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
         for number, (before, after, action, from_node, to_node) in enumerate(transitions):
@@ -534,6 +539,7 @@ def write_member_graph() -> Callable[..., None]:
         save_embeddings(text_embeddings_path(path), text_vectors, model="google/gemini-embedding-2")
         document = {
             "next_id": len(nodes),
+            "matching": DEFAULT_MATCHING._asdict(),
             "nodes": [
                 {
                     "id": node_id,

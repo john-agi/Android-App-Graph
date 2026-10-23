@@ -167,6 +167,11 @@ def test_explorer_reports_all_missing_models_before_any_device_work(
     [
         ({"action": {"temperature": "warm"}}, "test", "action.temperature must be"),
         (
+            {"matching": {"text_candidates": "two"}},
+            "test",
+            "vlm.matching.text_candidates must be a whole number of 0 or more",
+        ),
+        (
             {"instruction": {"max_tokens": 512}},
             "test",
             "Unknown configuration keys: vlm.instruction.max_tokens",
