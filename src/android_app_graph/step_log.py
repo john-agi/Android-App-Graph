@@ -27,6 +27,7 @@ from PIL import Image
 from android_app_graph.graph_files import (
     image_embeddings_path,
     load_embeddings,
+    observation_image_b64,
     observation_image_path,
     save_embeddings,
     step_record_path,
@@ -124,6 +125,34 @@ class TransitionRecord:
     to_node: str
 
 
+def step_order(step_id: str) -> tuple[int, str]:
+    """Sort key of a step ID: zero-padded integers, so a longer ID is a later step."""
+    return len(step_id), step_id
+
+
+def read_records(steps: Path) -> list[dict[str, object]]:
+    """Return every record of the step log ``steps``, in step order."""
+    paths = [path for path in steps.glob("*.json") if path.stem.isascii() and path.stem.isdigit()]
+    return [
+        as_object_dict(json.loads(path.read_text(encoding="utf-8")))
+        for path in sorted(paths, key=lambda path: step_order(path.stem))
+    ]
+
+
+def recorded_observation(steps: Path, record: Mapping[str, object]) -> Observation:
+    """Return the observation the record ``record`` of the step log ``steps`` keeps, with
+    its image as base64."""
+    observation_id = as_str(record.get("id"), "")
+    return Observation(
+        observation_id=observation_id,
+        screenshot_b64=observation_image_b64(steps, observation_id),
+        activity=as_str(record.get("activity"), ""),
+        package=as_str(record.get("package"), ""),
+        pixel_hash=as_str(record.get("pixel_hash"), ""),
+        black=record.get("black") is True,
+    )
+
+
 def read_exploration_transitions(steps: Path) -> list[TransitionRecord]:
     """Return the transition records exploration runs wrote to the step log ``steps``,
     in step order.
@@ -131,21 +160,17 @@ def read_exploration_transitions(steps: Path) -> list[TransitionRecord]:
     An explored graph holds the edges of its exploration runs only: the audit's
     re-exploration records its transitions against the audited copy.
     """
-    paths = [path for path in steps.glob("*.json") if path.stem.isascii() and path.stem.isdigit()]
-    transitions: list[TransitionRecord] = []
-    for path in sorted(paths, key=lambda path: (len(path.stem), path.stem)):
-        record = as_object_dict(json.loads(path.read_text(encoding="utf-8")))
-        if record.get("kind") == "transition" and record.get("run_kind") == "explore":
-            transitions.append(
-                TransitionRecord(
-                    before=as_str(record.get("before"), ""),
-                    after=as_str(record.get("after"), ""),
-                    action=record.get("action"),
-                    from_node=as_str(record.get("from_node"), ""),
-                    to_node=as_str(record.get("to_node"), ""),
-                )
-            )
-    return transitions
+    return [
+        TransitionRecord(
+            before=as_str(record.get("before"), ""),
+            after=as_str(record.get("after"), ""),
+            action=record.get("action"),
+            from_node=as_str(record.get("from_node"), ""),
+            to_node=as_str(record.get("to_node"), ""),
+        )
+        for record in read_records(steps)
+        if record.get("kind") == "transition" and record.get("run_kind") == "explore"
+    ]
 
 
 def read_observation_record(steps: Path, observation_id: str) -> dict[str, object] | None:

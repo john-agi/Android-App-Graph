@@ -33,8 +33,9 @@ class MatchingSettings(NamedTuple):
 
 DEFAULT_MATCHING = MatchingSettings()
 
-# Every key app-graph or app-graph-audit uses and no other, by path; "[]" stands for each
-# entry of a list. Both commands accept all of them, since they share one config file.
+# Every key app-graph, app-graph-audit or app-graph-build uses and no other, by path; "[]"
+# stands for each entry of a list. Every command accepts all of them, since they share one
+# config file.
 CONFIG_KEYS = frozenset(
     {
         "device.udid",

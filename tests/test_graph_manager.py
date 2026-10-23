@@ -531,6 +531,20 @@ def test_identify_state_records_the_describe_output_and_the_decision(
     ]
 
 
+def test_a_screenshot_with_an_image_vector_is_not_embedded_again(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    vlm.descriptions.append(("Home screen", {}, []))
+    gm = make_manager(screen.steps_dir)
+    observation = screen(HOME, SHOT_A, PACKAGE)
+    gm.use_image_vectors({observation.observation_id: NEAR})
+
+    gm.identify_state(observation)
+
+    assert vlm.kinds() == ["describe", "embed"]
+    assert gm.image_vector(observation.observation_id) == NEAR
+
+
 def test_identify_state_passes_the_configured_models_and_clients(
     vlm: FakeVlm, screen: Screens
 ) -> None:

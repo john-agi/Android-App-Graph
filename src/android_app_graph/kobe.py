@@ -35,6 +35,8 @@ from android_app_graph.utils.graph_manager import (
     EdgeDetails,
     GraphManager,
     SetupTrail,
+    schema_delta,
+    target_observation,
 )
 from android_app_graph.utils.vlm_utils import (
     ActionRequest,
@@ -58,35 +60,6 @@ _STEP_AGENT_NAMES = (
 
 class NoPathError(ValueError):
     """The graph records no path from its start node to the target, so no replay began."""
-
-
-def _compute_schema_delta(
-    before: dict[str, Any], after: dict[str, Any]
-) -> dict[str, dict[str, Any]] | None:
-    """Compute the schema delta between two detail snapshots.
-
-    Returns a dict of changed keys: {"key": {"before": old, "after": new}}
-    Returns None if nothing changed.
-    """
-    delta: dict[str, dict[str, Any]] = {}
-    all_keys = set(before.keys()) | set(after.keys())
-    for key in all_keys:
-        val_before = before.get(key)
-        val_after = after.get(key)
-        if val_before != val_after:
-            delta[key] = {"before": val_before, "after": val_after}
-    return delta or None
-
-
-def _target_observation(description: str, detail_snapshot: dict[str, Any]) -> str:
-    """Return ``"<description> (key=value, ...)"`` for the details that have a value, or
-    the bare description when none has."""
-    details = (
-        ", ".join(f"{k}={v}" for k, v in detail_snapshot.items() if v is not None)
-        if detail_snapshot
-        else ""
-    )
-    return f"{description} ({details})" if details else description
 
 
 @dataclass(frozen=True, slots=True)
@@ -779,11 +752,11 @@ class Kobe:
     ) -> _Position:
         new_node_data = self._require_node(new_node)
         detail_after = new_node_data.get("last_detail_snapshot", {})
-        schema_delta = None
+        delta = None
         if new_node == move.source:
-            schema_delta = _compute_schema_delta(move.detail_before, detail_after)
-            if schema_delta:
-                self.logger.info("  Schema delta: %s", dict(schema_delta))
+            delta = schema_delta(move.detail_before, detail_after)
+            if delta:
+                self.logger.info("  Schema delta: %s", dict(delta))
 
         self._record_edge(
             move,
@@ -791,10 +764,10 @@ class Kobe:
             device_state,
             EdgeDetails(
                 instruction=move.instruction,
-                target_observation=_target_observation(
+                target_observation=target_observation(
                     self.graph.latest_description(new_node), detail_after
                 ),
-                schema_delta=schema_delta,
+                schema_delta=delta,
                 num_steps=len(move.action_sequence),
             ),
         )
