@@ -127,14 +127,20 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
         events.append("grant")
 
     monkeypatch.setattr(cli, "grant_runtime_permissions", grant)
-    monkeypatch.setattr(cli, "launch_app", lambda *_args: events.append("launch"))
+
+    def launch(_config: dict[str, object], app: dict[str, str], _logger: logging.Logger) -> str:
+        events.append("launch")
+        return app.get("launch_activity", f"{app['package_name']}/.Home")
+
+    monkeypatch.setattr(cli, "launch_app", launch)
     monkeypatch.setattr(
         sys, "argv", ["app-graph", "-c", str(config), "--max-steps", "3", "--resume-from", "auto"]
     )
     main()
     assert events == ["avd", "device", *["terminate", "grant", "launch", "explore", "save"] * 2]
     assert grants == [("emulator-5554", "com.demo"), ("emulator-5554", "com.other")]
-    assert launch_activities == [None, "com.other/.Main"]
+    # The explorer restarts each app through the component its launch started.
+    assert launch_activities == ["com.demo/.Home", "com.other/.Main"]
     assert opened_clients == clients[:1] == clients[1:]
     assert opened_clients[0].sdk_configuration.client is None
 

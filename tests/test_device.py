@@ -19,18 +19,7 @@ _PM = ["adb", "-s", "test-device", "shell", "pm"]
 _LAUNCHER_INTENT = ["-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER"]
 _RESOLVE_LAUNCHER = [*_PM, "resolve-activity", "--brief", *_LAUNCHER_INTENT, "com.demo"]
 _QUERY_LAUNCHERS = [*_PM, "query-activities", "--brief", *_LAUNCHER_INTENT, "com.demo"]
-_PACKAGE_LAUNCH = [
-    "adb",
-    "-s",
-    "test-device",
-    "shell",
-    "monkey",
-    "-p",
-    "com.demo",
-    "-c",
-    "android.intent.category.LAUNCHER",
-    "1",
-]
+_CONFIG = {"device": {"udid": "test-device"}}
 
 
 class _Device:
@@ -116,7 +105,7 @@ def test_restart_app_starts_the_first_of_several_launcher_activities_and_names_t
     start = _clear_task_start("com.demo/.Home")
     assert device_log == [_FORCE_STOP, _RESOLVE_LAUNCHER, _QUERY_LAUNCHERS, start]
     warning = (
-        "com.demo has several launcher activities; restarting it through com.demo/.Home, "
+        "com.demo has several launcher activities; starting it through com.demo/.Home, "
         "not com.demo/.Widgets. Set launch_activity to choose another."
     )
     assert caplog.messages == [warning]
@@ -141,9 +130,7 @@ def test_restart_app_without_a_launcher_activity_asks_for_a_launch_activity_and_
 _STARTING_GONE = "Starting: Intent { flg=0x10008000 cmp=com.demo/.Gone }\n"
 _GONE = "Error type 3\nError: Activity class {com.demo/com.demo.Gone} does not exist.\n"
 _GONE_ON_ONE_LINE = "Error type 3 Error: Activity class {com.demo/com.demo.Gone} does not exist."
-
-
-@pytest.mark.parametrize(
+_START_REFUSALS = pytest.mark.parametrize(
     ("returncode", "stdout", "stderr", "error"),
     [
         (1, _STARTING_GONE, _GONE, _GONE_ON_ONE_LINE),
@@ -152,32 +139,45 @@ _GONE_ON_ONE_LINE = "Error type 3 Error: Activity class {com.demo/com.demo.Gone}
     ],
     ids=["exit status", "error line"],
 )
-@pytest.mark.usefixtures("no_sleep")
-def test_restart_app_launches_the_package_when_am_start_cannot_start_the_activity(
+
+
+def _refuse(
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    refused: list[str],
+    reply: tuple[int, str, str],
+) -> None:
+    """Answer ``refused`` with ``reply``, its exit status, stdout and stderr; every other
+    adb command succeeds without output."""
+    returncode, stdout, stderr = reply
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        device_log.append(command)
+        if command == refused:
+            return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(device.subprocess, "run", run)
+
+
+@_START_REFUSALS
+def test_restart_app_raises_naming_the_component_when_am_start_cannot_start_it(
     returncode: int,
     stdout: str,
     stderr: str,
     error: str,
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
-    caplog: pytest.LogCaptureFixture,
+    no_sleep: list[float],
 ) -> None:
     start = _clear_task_start("com.demo/.Gone")
-
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        device_log.append(command)
-        if command == start:
-            return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(device.subprocess, "run", run)
+    _refuse(monkeypatch, device_log, start, (returncode, stdout, stderr))
     app = device.AppLaunch("demo", "com.demo", "com.demo/.Gone")
-    with caplog.at_level(logging.WARNING, logger="test"):
+    with pytest.raises(RuntimeError) as raised:
         device.restart_app(_Device(), app, logging.getLogger("test"))
-    assert device_log == [_FORCE_STOP, start, _PACKAGE_LAUNCH]
-    assert caplog.messages == [
-        f"Activity launch failed for demo; falling back to package launch. error={error}"
-    ]
+    assert str(raised.value) == f"am start could not start com.demo/.Gone: {error}"
+    assert device_log == [_FORCE_STOP, start]
+    assert no_sleep == []
 
 
 @pytest.mark.usefixtures("adb_on_path")
@@ -202,29 +202,67 @@ def test_restart_app_launches_nothing_when_the_force_stop_fails(
     assert no_sleep == []
 
 
-_ACTIVITY_LAUNCH = ["adb", "-s", "test-device", "shell", "am", "start", "-n", "com.demo/.Main"]
+def _start(component: str) -> list[str]:
+    return ["adb", "-s", "test-device", "shell", "am", "start", "-n", component]
 
 
 @pytest.mark.parametrize(
-    ("returncode", "launches"),
-    [(0, [_ACTIVITY_LAUNCH]), (1, [_ACTIVITY_LAUNCH, _PACKAGE_LAUNCH])],
-    ids=["started", "refused"],
+    ("app", "launches", "component"),
+    [
+        pytest.param(
+            {"name": "demo", "package_name": "com.demo"},
+            [_RESOLVE_LAUNCHER, _start("com.demo/.Home")],
+            "com.demo/.Home",
+            id="launcher activity",
+        ),
+        pytest.param(
+            {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Main"},
+            [_start("com.demo/.Main")],
+            "com.demo/.Main",
+            id="launch activity",
+        ),
+    ],
 )
-def test_launch_app_starts_the_launch_activity_or_else_the_package_without_clearing_the_task(
+def test_launch_app_starts_the_launch_activity_or_else_the_launcher_activity_and_returns_it(
+    app: dict[str, str], launches: list[list[str]], component: str, device_log: list[object]
+) -> None:
+    """The launch returns the component it started, which the run's restarts start too."""
+    assert device.launch_app(_CONFIG, app, logging.getLogger("test")) == component
+    assert device_log == launches
+
+
+def test_launch_app_without_a_launcher_activity_raises_naming_the_package_and_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    _answer_pm(
+        monkeypatch, device_log, resolved="No activity found\n", listed="No activities found\n"
+    )
+    with pytest.raises(
+        device.NoLauncherActivityError,
+        match=r"^com\.demo has no launcher activity; set launch_activity for it in the config$",
+    ):
+        device.launch_app(
+            _CONFIG, {"name": "demo", "package_name": "com.demo"}, logging.getLogger("test")
+        )
+    assert device_log == [_RESOLVE_LAUNCHER, _QUERY_LAUNCHERS]
+
+
+@_START_REFUSALS
+def test_launch_app_raises_naming_the_component_when_am_start_cannot_start_it(
     returncode: int,
-    launches: list[list[str]],
+    stdout: str,
+    stderr: str,
+    error: str,
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
 ) -> None:
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        device_log.append(command)
-        refused = command == _ACTIVITY_LAUNCH and returncode
-        return subprocess.CompletedProcess(command, returncode if refused else 0, "", "")
-
-    monkeypatch.setattr(device.subprocess, "run", run)
-    app = {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Main"}
-    device.launch_app({"device": {"udid": "test-device"}}, app, logging.getLogger("test"))
-    assert device_log == launches
+    start = _start("com.demo/.Gone")
+    _refuse(monkeypatch, device_log, start, (returncode, stdout, stderr))
+    app = {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Gone"}
+    with pytest.raises(RuntimeError) as raised:
+        device.launch_app(_CONFIG, app, logging.getLogger("test"))
+    assert str(raised.value) == f"am start could not start com.demo/.Gone: {error}"
+    assert device_log == [start]
 
 
 def test_adb_executable_raises_file_not_found_naming_adb_when_adb_is_not_on_path(
@@ -529,7 +567,9 @@ class _FakeAdb:
     ``events`` records each adb argv and each sleep in the order they happened, and
     ``timeouts`` the timeout of each adb call. ``replies`` maps the arguments after
     ``adb`` to an exit status and raw stdout; any other command exits 0 with no
-    output. Stdout stays bytes unless the caller asks for text, which must name its
+    output. ``queued`` maps the arguments after ``adb`` to replies of the same form,
+    one for each of their next calls, before ``replies`` answers them. Stdout stays
+    bytes unless the caller asks for text, which must name its
     encoding: the host's locale differs between machines, and Android writes UTF-8.
     ``stalls`` maps the arguments after ``adb`` to how many of their next calls stall
     until their timeout expires. Every call must name a timeout: a call without one
@@ -540,6 +580,7 @@ class _FakeAdb:
         self.events: list[list[str] | float] = []
         self.timeouts: list[float | None] = []
         self.replies: dict[tuple[str, ...], tuple[int, bytes]] = {}
+        self.queued: dict[tuple[str, ...], list[tuple[int, bytes]]] = {}
         self.stalls: dict[tuple[str, ...], int] = {}
 
     def run(
@@ -561,7 +602,8 @@ class _FakeAdb:
         if self.stalls.get(args, 0) > 0:
             self.stalls[args] -= 1
             raise subprocess.TimeoutExpired(command, timeout)
-        returncode, stdout = self.replies.get(args, (0, b""))
+        queued = self.queued.get(args)
+        returncode, stdout = queued.pop(0) if queued else self.replies.get(args, (0, b""))
         if check and returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
         if not text:
@@ -914,17 +956,80 @@ def test_an_unknown_action_raises_value_error_naming_it(
     assert adb.events == []
 
 
-def test_terminate_all_apps_opens_recents_swipes_and_taps_at_scaled_coordinates(
+def _recent_apps(name: str) -> bytes:
+    """Return ``uiautomator dump`` output of the recent apps screen, trailer included."""
+    return (Path(__file__).parent / "data" / f"uiautomator_recents_{name}.xml").read_bytes()
+
+
+# Captured on a Redroid container, Android 16, 720x1280, with Launcher3: the list
+# scrolled to its end, Clear all at [72,512][264,608] beside the oldest app's card;
+# and the list on open, the newest app's card in the middle and no Clear all.
+_CLEAR_ALL_SHOWN = _recent_apps("api36_redroid_clear_all")
+_CARDS_ONLY = _recent_apps("api36_redroid_cards")
+_OPEN_RECENT_APPS = [*_INPUT, "keyevent", "KEYCODE_APP_SWITCH"]
+_LOOK = ["adb", *_UI_DUMP]
+_LOOK_AND_SWIPE = [_LOOK, [*_INPUT, "swipe", "108", "1200", "972", "1200", "300"], 1]
+
+
+@pytest.mark.parametrize(
+    ("dump", "tap"),
+    [
+        pytest.param(_CLEAR_ALL_SHOWN, ["168", "560"], id="Launcher3 id"),
+        pytest.param(
+            b'<hierarchy><node text="Clear all" '
+            b'resource-id="com.google.android.apps.nexuslauncher:id/clear_all" '
+            b'bounds="[48,1100][352,1240]" /></hierarchy>',
+            ["200", "1170"],
+            id="text",
+        ),
+        pytest.param(
+            b'<hierarchy><node bounds="[0,10][100,30]" text="CLEAR ALL" /></hierarchy>',
+            ["50", "20"],
+            id="text in capitals",
+        ),
+    ],
+)
+def test_terminate_all_apps_taps_the_clear_all_button_the_recent_apps_show(
+    controller: device.AdbController, adb: _FakeAdb, dump: bytes, tap: list[str]
+) -> None:
+    adb.replies[_UI_DUMP] = (0, dump)
+    controller.terminate_all_apps()
+    assert adb.events == [_OPEN_RECENT_APPS, 1, _LOOK, [*_INPUT, "tap", *tap], 1.5]
+
+
+def test_terminate_all_apps_swipes_toward_clear_all_until_it_appears(
     controller: device.AdbController, adb: _FakeAdb
 ) -> None:
+    """Each swipe moves the list by one app, toward the oldest, which Clear all follows."""
+    adb.queued[_UI_DUMP] = [(0, _CARDS_ONLY), (0, _CARDS_ONLY)]
+    adb.replies[_UI_DUMP] = (0, _CLEAR_ALL_SHOWN)
     controller.terminate_all_apps()
     assert adb.events == [
-        [*_INPUT, "keyevent", "KEYCODE_APP_SWITCH"],
+        _OPEN_RECENT_APPS,
         1,
-        [*_INPUT, "swipe", "108", "1200", "972", "1200", "100"],
-        1,
-        [*_INPUT, "tap", "216", "1152"],
+        *_LOOK_AND_SWIPE * 2,
+        _LOOK,
+        [*_INPUT, "tap", "168", "560"],
         1.5,
+    ]
+
+
+def test_terminate_all_apps_presses_home_and_warns_when_clear_all_never_appears(
+    controller: device.AdbController, adb: _FakeAdb, caplog: pytest.LogCaptureFixture
+) -> None:
+    adb.replies[_UI_DUMP] = (0, _CARDS_ONLY)
+    with caplog.at_level(logging.WARNING, logger="test"):
+        controller.terminate_all_apps()
+    assert adb.events == [
+        _OPEN_RECENT_APPS,
+        1,
+        *_LOOK_AND_SWIPE * 10,
+        _LOOK,
+        [*_INPUT, "keyevent", "KEYCODE_HOME"],
+        1,
+    ]
+    assert caplog.messages == [
+        "Clear all did not appear in recent apps after 10 swipes; pressing Home."
     ]
 
 

@@ -30,18 +30,6 @@ from android_app_graph.utils.vlm_utils import PlanRequest
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
-_PACKAGE_LAUNCH = [
-    "adb",
-    "-s",
-    "test-device",
-    "shell",
-    "monkey",
-    "-p",
-    "com.demo",
-    "-c",
-    "android.intent.category.LAUNCHER",
-    "1",
-]
 _RESOLVE_LAUNCHER = [
     *("adb", "-s", "test-device", "shell", "pm", "resolve-activity", "--brief"),
     *("-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "com.demo"),
@@ -2035,8 +2023,7 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     device_log: list[object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launch that fails after the force-stop, through the launcher intent too, leaves
-    the launcher on the screen."""
+    """A launch that fails after the force-stop leaves the launcher on the screen."""
     launcher = {
         **_screen("com.android.launcher3.Launcher", "black"),
         "package": "com.android.launcher3",
@@ -2051,16 +2038,14 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
         ]
     )
     main_start = _clear_task_start("com.demo/.Main")
-    monkeypatch.setattr(
-        subprocess, "run", _adb_refusing_once(device_log, main_start, _PACKAGE_LAUNCH)
-    )
+    monkeypatch.setattr(subprocess, "run", _adb_refusing_once(device_log, main_start))
     nodes = {"com.demo.Home": "s0_home"}
     monkeypatch.setattr(
         explorer.graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
     )
 
     assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail") == "s0_home"
-    assert device_log == [_FORCE_STOP, main_start, _PACKAGE_LAUNCH, _FORCE_STOP, main_start]
+    assert device_log == [_FORCE_STOP, main_start, _FORCE_STOP, main_start]
 
 
 @pytest.mark.usefixtures("no_sleep")
