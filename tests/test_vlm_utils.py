@@ -685,10 +685,10 @@ def test_strict_schemas_close_every_object_and_free_form_ones_keep_their_format(
     for name, schema in strict.items():
         assert _strict_violations(schema["schema"]) == [], name
     assert schemas["exploration_target"]["schema"]["properties"]["node_id"]["enum"] == ["a", "b"]
-    assert schemas["node_verification"]["schema"]["properties"]["new_description"]["type"] == [
-        "string",
-        "null",
-    ]
+    verification = schemas["node_verification"]["schema"]
+    assert sorted(verification["properties"]) == ["new_description", "reason", "same"]
+    assert sorted(verification["required"]) == ["new_description", "reason", "same"]
+    assert verification["properties"]["new_description"]["type"] == ["string", "null"]
     state = schemas["page_description"]["schema"]["properties"]["state"]
     assert state["additionalProperties"] == {"type": ["string", "number", "boolean", "null"]}
     examples = schemas["edge_template"]["schema"]["properties"]["examples"]

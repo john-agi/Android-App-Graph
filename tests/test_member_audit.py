@@ -3,8 +3,9 @@ close member images and descriptions, verified in rounds, and the split and move
 on each node's member groups.
 
 Every graph here has synthetic image and text vectors, and the verifier, the text
-embedding and the edge normalizer are scripted fakes; describing a screen fails the
-test, since the audit works from the describe output the step log stores.
+embedding and the edge normalizer are scripted fakes, except where a test reads the
+verifier's requests from the mock transport; describing a screen fails the test, since
+the audit works from the describe output the step log stores.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+import httpx
 import pytest
 from openrouter import OpenRouter
 
@@ -225,6 +227,92 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
     else:
         assert result["status"] == "kept_separate"
         assert list(graph.graph) == ["s0_home", "s1_home"]
+
+
+def _load_over_the_router(path: Path, router_client: OpenRouter) -> GraphManager:
+    """The graph at ``path``, whose verifier calls go to the mock transport."""
+    graph = GraphManager(
+        client=router_client,
+        page_detail=PAGE_DETAIL,
+        embedding=EMBEDDING,
+        image_embedding=EMBEDDING,
+    )
+    graph.load_graph(path)
+    return graph
+
+
+def test_a_merge_check_shows_the_verifier_each_member_with_its_own_description(
+    graph_path: Path,
+    write_member_graph: Callable[..., None],
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    shown_descriptions: Callable[[httpx.Request], list[str]],
+) -> None:
+    """The more-visited node's member comes first; each member is shown with the
+    description its screen ended with, refined or not."""
+    write_member_graph(
+        graph_path,
+        CLOSE_PAIR,
+        described={"000002": "Wi-Fi settings"},
+        refined={"000004": "Network preferences"},
+    )
+    graph = _load_over_the_router(graph_path, router_client)
+    graph.graph.nodes["s1_home"]["visit_count"] = 5
+    router_responses.append(
+        chat_response(content='{"same":false,"reason":"two screens","new_description":null}')
+    )
+
+    graph.verify_merge_proposals(graph.merge_proposals([]), {})
+
+    assert [shown_descriptions(request) for request in router_requests] == [
+        [
+            'First screenshot (existing node), described as "Network preferences":',
+            'Second screenshot (new screen), described as "Wi-Fi settings":',
+        ]
+    ]
+
+
+def test_member_checks_show_the_verifier_each_member_with_its_own_description(
+    graph_path: Path,
+    write_member_graph: Callable[..., None],
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    shown_descriptions: Callable[[httpx.Request], list[str]],
+) -> None:
+    """The check against the node's home and the short list's check of the node the
+    member moves to both show each member with its own description."""
+    write_member_graph(
+        graph_path,
+        MOVE,
+        edges=MOVE_EDGES,
+        transitions=MOVE_TRANSITIONS,
+        described={"000002": "Home feed", "000003": "Promo page", "000004": "Product list"},
+    )
+    graph = _load_over_the_router(graph_path, router_client)
+    router_responses.extend(
+        [
+            chat_response(content='{"same":false,"reason":"two screens","new_description":"x"}'),
+            chat_response(content='{"same":true,"reason":"one screen","new_description":null}'),
+        ]
+    )
+
+    (check,) = _checks(_check_members(graph, graph_path, {}))
+
+    assert check["change"]["to"] == "s1_list"
+    assert [shown_descriptions(request) for request in router_requests] == [
+        [
+            'First screenshot (existing node), described as "Home feed":',
+            'Second screenshot (new screen), described as "Promo page":',
+        ],
+        [
+            'First screenshot (existing node), described as "Product list":',
+            'Second screenshot (new screen), described as "Promo page":',
+        ],
+    ]
 
 
 def test_a_pair_the_model_the_images_and_the_descriptions_propose_is_verified_once_naming_each(

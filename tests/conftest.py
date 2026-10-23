@@ -579,6 +579,22 @@ def write_member_graph() -> Callable[..., None]:
 
 
 @pytest.fixture
+def shown_descriptions() -> Callable[[httpx.Request], list[str]]:
+    """Read the text before each screenshot of a verifier request, which names the
+    screenshot and gives its description."""
+
+    def read(request: httpx.Request) -> list[str]:
+        content = json.loads(request.content)["messages"][0]["content"]
+        return [
+            content[index - 1]["text"]
+            for index, part in enumerate(content)
+            if part["type"] == "image_url"
+        ]
+
+    return read
+
+
+@pytest.fixture
 def step_records() -> Callable[[Path], list[dict[str, Any]]]:
     """Read every record of a step log, in step order."""
 
