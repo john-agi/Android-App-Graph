@@ -801,6 +801,48 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
     assert graph.graph[start][start]["target_observations"] == ["Chat search results"]
 
 
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_re_exploration_lists_a_self_loop_s_30_most_recent_instructions_as_exploration_does(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-exploration step plans with exploration's prompt, which lists the 30 most
+    recent distinct instructions of the screen's self-loop and counts the rest."""
+    graph, graph_path = _two_node_graph(tmp_path)
+    for day in range(31):
+        graph.add_edge(
+            "s1_detail",
+            "s1_detail",
+            action=[{"action": "tap", "coordinate": [day, 0]}],
+            details=EdgeDetails(instruction=f"Toggle day {day}", target_observation="Detail"),
+        )
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: "s1_detail")
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "wait"}, ""))
+    router_responses.append(chat_response(content='{"element":null,"instruction":"Scroll down"}'))
+
+    _re_explore(
+        graph,
+        [{"type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        FakeController("com.demo"),
+        router_client,
+        graph_path.parent,
+        steps_per_issue=1,
+    )
+
+    (plan,) = [json.loads(request.content) for request in router_requests]
+    prompt = plan["messages"][-1]["content"][0]["text"]
+    tried = prompt.split("where they led:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert tried == [
+        *(f'- "Toggle day {day}" → stayed on this screen' for day in range(1, 31)),
+        "- 1 more tried earlier also stayed on this screen",
+    ]
+
+
 @pytest.mark.usefixtures("_fake_device")
 def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_with_counts(
     client: OpenRouter,

@@ -2978,6 +2978,240 @@ def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
     assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 2
 
 
+_SCROLL_DOWN_PLAN = '{"element":null,"instruction":"Scroll down"}'
+
+
+def _toggles(explorer: Kobe, *days: int) -> None:
+    """Record a self-loop on the start screen with one action for each of ``days``, in
+    order, each with the instruction ``Toggle day <day>``."""
+    for index, day in enumerate(days):
+        explorer.graph.add_edge(
+            "s0_home",
+            "s0_home",
+            action=[{"action": "tap", "coordinate": [index, 0]}],
+            details=EdgeDetails(instruction=f"Toggle day {day}", target_observation="Alarms"),
+        )
+
+
+def _without_templates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the edge normalization the run's end asks for find no template."""
+    monkeypatch.setattr(
+        "android_app_graph.utils.graph_manager.normalize_edge",
+        lambda *_args, **_kwargs: {"is_template": False},
+    )
+
+
+def _tried_in_planner_prompt(router_requests: list[httpx.Request]) -> list[str]:
+    """Return the lines of the first request's prompt that list the instructions tried."""
+    request = json.loads(router_requests[0].content)
+    prompt = str(request["messages"][-1]["content"][0]["text"])
+    return prompt.split("where they led:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+
+
+@pytest.mark.parametrize(
+    ("days", "listed", "count_line"),
+    [
+        pytest.param(
+            [*range(1, 33), 2],
+            [*range(4, 33), 2],
+            ["- 2 more tried earlier also stayed on this screen"],
+            id="32 distinct instructions",
+        ),
+        pytest.param([*range(1, 31), 2], [1, *range(3, 31), 2], [], id="30 distinct instructions"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_the_planner_lists_a_self_loop_s_30_most_recent_distinct_instructions_and_counts_the_rest(
+    days: list[int],
+    listed: list[int],
+    count_line: list[str],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every action of a self-loop leads back to the screen the planner sees, so its
+    prompt lists the self-loop's 30 most recent distinct instructions, oldest first and
+    without where they led, and then how many more were tried. An instruction tried twice
+    counts once, at its latest action."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    _toggles(explorer, *days)
+    _identifying(explorer, monkeypatch, "s0_home")
+    _without_templates(monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(
+        [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_WAIT_REPLY)]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert _tried_in_planner_prompt(router_requests) == [
+        *(f'- "Toggle day {day}" → stayed on this screen' for day in listed),
+        *count_line,
+    ]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_the_planner_lists_every_action_tried_toward_another_screen_and_where_it_led(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """However many actions an edge to another screen holds, the planner's prompt lists
+    each of them with the observation it recorded, and the self-loop's instructions after
+    them."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    _toggles(explorer, 1)
+    for row in range(35):
+        explorer.graph.add_edge(
+            "s0_home",
+            "s1_list",
+            action=[{"action": "tap", "coordinate": [0, row]}],
+            details=EdgeDetails(instruction=f"Open row {row}", target_observation=f"Row {row}"),
+        )
+    _identifying(explorer, monkeypatch, "s0_home")
+    _without_templates(monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(
+        [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_WAIT_REPLY)]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert _tried_in_planner_prompt(router_requests) == [
+        *(f'- "Open row {row}" → led to: "Row {row}"' for row in range(35)),
+        '- "Toggle day 1" → stayed on this screen',
+    ]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_after_15_self_loops_on_a_screen_its_next_step_continues_from_a_ranked_target(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    device_log: list[object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fifteen steps in a row on the start screen each stay on it, so the sixteenth plans
+    nothing there: it continues from a ranked target, as a Back that leaves the app does,
+    and counts as a ``continue`` step. The continuation ends the start screen's run of
+    self-loops, so the next step there plans again."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    _identifying(explorer, monkeypatch, *["s0_home"] * 17, "s1_list", "s0_home")
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Toggle", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(15))
+    router_responses.extend(
+        [
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+            chat_response(content=_TAP_REPLY),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=18)
+
+    assert planned_from == [*["s0_home"] * 15, "s1_list", "s0_home"]
+    assert _requested_models(router_requests) == [
+        *["provider/action"] * 15,
+        "provider/page_detail",
+        "provider/action",
+        "provider/action",
+    ]
+    tap = device_log[0]
+    assert device_log == [*[tap] * 15, *_FIRST_RESTART, _OPEN_LIST, tap]
+    assert (
+        "The last 15 steps on s0_home stayed on it; continuing from ranked target s1_list "
+        "instead." in caplog.text
+    )
+    assert _numbered_steps(caplog.messages)[14:] == [
+        "Step 15/18: s0_home --[tap]--> s0_home",
+        "Step 16/18: s0_home --[continue]--> s1_list",
+        "Step 17/18: s1_list --[tap]--> s0_home",
+        "Step 18/18: s0_home --[wait]--> s0_home",
+    ]
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_after_15_self_loops_on_a_screen_with_no_other_node_ranked_its_next_step_plans(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No recorded edge leads from the start screen to the list, so no other node is
+    ranked, and the step after fifteen self-loops on the start screen plans and acts there
+    as any other step does."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    _identifying(explorer, monkeypatch, *["s0_home"] * 17)
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Toggle", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(16))
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=16)
+
+    assert planned_from == ["s0_home"] * 16
+    assert _requested_models(router_requests) == ["provider/action"] * 16
+    assert "The last 15 steps on s0_home stayed on it, but no other node is ranked." in caplog.text
+    assert _numbered_steps(caplog.messages)[-1] == "Step 16/16: s0_home --[tap]--> s0_home"
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_a_step_to_another_screen_starts_the_count_of_self_loops_again(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Seven self-loops on the start screen, a step to the list and back, and eight more
+    self-loops make fifteen, but a step that left the start screen ends the first seven's
+    run, so the next step there plans."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
+    _identifying(explorer, monkeypatch, *["s0_home"] * 8, "s1_list", *["s0_home"] * 9)
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Toggle", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(17))
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=18)
+
+    assert planned_from == [*["s0_home"] * 8, "s1_list", *["s0_home"] * 9]
+    assert _requested_models(router_requests) == ["provider/action"] * 18
+    assert _numbered_steps(caplog.messages)[-1] == "Step 18/18: s0_home --[wait]--> s0_home"
+
+
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(
     tmp_path: Path,
     router_client: OpenRouter,
