@@ -19,12 +19,12 @@ from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 from PIL import Image
 
-from android_app_graph.device import DeviceController, StillOutsideAppError
+from android_app_graph.device import DeviceController, DeviceUnreachableError, StillOutsideAppError
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
-from android_app_graph.utils import MatchingSettings
+from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 from android_app_graph.utils.vlm_utils import PlanRequest
 
@@ -130,6 +130,7 @@ def _explorer(
     router_client: OpenRouter,
     *,
     launch_activity: str | None = None,
+    unreachable_limit: float = DEFAULT_UNREACHABLE_LIMIT,
 ) -> Kobe:
     return Kobe(
         device,
@@ -139,6 +140,7 @@ def _explorer(
             graph_dir=tmp_path,
             vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
             launch_activity=launch_activity,
+            unreachable_limit=unreachable_limit,
         ),
         client=router_client,
         logger=logging.getLogger("test"),
@@ -3238,8 +3240,18 @@ def test_a_device_that_stops_answering_and_answers_again_continues_from_the_scre
     assert json.loads(explorer.graph_path.read_text("utf-8"))["total_steps_completed"] == 3
 
 
+@pytest.mark.parametrize(
+    ("limit", "minutes", "checks"),
+    [
+        pytest.param(DEFAULT_UNREACHABLE_LIMIT, "30", 61, id="default"),
+        pytest.param(90, "1.5", 4, id="configured"),
+    ],
+)
 @pytest.mark.usefixtures("adb_on_path")
 def test_a_device_that_does_not_answer_within_the_limit_stops_the_run_with_the_graph_saved(
+    limit: float,
+    minutes: str,
+    checks: int,
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -3248,33 +3260,32 @@ def test_a_device_that_does_not_answer_within_the_limit_stops_the_run_with_the_g
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The device is checked at once and then every 30 s, up to the default limit of 30
+    """The device is checked at once and then every 30 s, up to the limit, by default 30
     minutes. The run then stops with an error naming the device and the limit, and logs
     it without a traceback after saving the graph."""
     log: list[object] = []
     monkeypatch.setattr(subprocess, "run", _adb_probed(log, "timeout"))
     monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
     device = _StallingDevice(log, [HOME_SCREEN, _LIST_SCREEN], stalled_actions=(2,))
-    explorer = _explorer(device, tmp_path, router_client)
+    explorer = _explorer(device, tmp_path, router_client, unreachable_limit=limit)
     _list_reached_from_home(explorer)
     _identifying(explorer, monkeypatch, "s0_home", "s1_list")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Open it", []))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(2))
     caplog.set_level(logging.INFO, logger="test")
+    unreachable = f"Device test-device unreachable for {minutes} minutes"
 
-    with pytest.raises(RuntimeError, match=r"^Device test-device unreachable for 30 minutes$"):
+    with pytest.raises(DeviceUnreachableError) as raised:
         explorer.explore(max_steps=3)
 
-    assert log == [_TAP, _TAP, *[_PROBE] * 61]
-    assert no_sleep == [0.5, *[30] * 60]
+    assert str(raised.value) == unreachable
+    assert log == [_TAP, _TAP, *[_PROBE] * checks]
+    assert no_sleep == [0.5, *[30] * (checks - 1)]
     saved = json.loads(explorer.graph_path.read_text("utf-8"))
     assert saved["total_steps_completed"] == 1
     assert [(edge["source"], edge["target"]) for edge in saved["edges"]] == [("s0_home", "s1_list")]
-    stopped = (
-        "Device test-device unreachable for 30 minutes. Exploration stopped at step 1. "
-        "Graph saved. Re-run to resume."
-    )
+    stopped = f"{unreachable}. Exploration stopped at step 1. Graph saved. Re-run to resume."
     (record,) = [record for record in caplog.records if record.getMessage() == stopped]
     assert record.exc_info is None
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]

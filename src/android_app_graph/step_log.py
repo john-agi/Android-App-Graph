@@ -57,6 +57,7 @@ type StepSource = Literal[
     "coverage_checkpoint",
     "external_app_recovery",
     "external_web_recovery",
+    "device_recovery",
     "re_explore",
     "edge_retry",
 ]

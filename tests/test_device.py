@@ -240,6 +240,7 @@ def test_adb_executable_raises_file_not_found_naming_adb_when_adb_is_not_on_path
 def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A call that names no timeout gets the 30 s every read gets."""
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -281,7 +282,7 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
                 "text": True,
                 "encoding": "utf-8",
                 "errors": None,
-                "timeout": None,
+                "timeout": 30,
                 "check": False,
             },
         ),
@@ -993,7 +994,7 @@ def test_running_devices_raise_naming_the_server_adb_cannot_reach(
         b"adb: failed to check server version: cannot connect to daemon: Connection refused\n",
     )
 
-    with pytest.raises(ConnectionError) as raised:
+    with pytest.raises(device.AdbServerUnreachableError) as raised:
         device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
 
     assert str(raised.value) == (
@@ -1009,7 +1010,7 @@ def test_running_devices_raise_naming_the_server_when_adb_devices_times_out(
     monkeypatch.setenv("ADB_SERVER_SOCKET", "tcp:100.64.0.7:5037")
     adb.stalls[_DEVICES] = 1
 
-    with pytest.raises(ConnectionError) as raised:
+    with pytest.raises(device.AdbServerUnreachableError) as raised:
         device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
 
     assert str(raised.value) == (

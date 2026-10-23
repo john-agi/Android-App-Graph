@@ -56,7 +56,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     config.write_text(
         json.dumps(
             {
-                "device": {"udid": "emulator-5554"},
+                "device": {"udid": "emulator-5554", "unreachable_limit": 600},
                 "vlm": vlm,
                 "apps": [
                     {"name": "demo", "package_name": "com.demo"},
@@ -100,6 +100,7 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
             assert config.vlm_config == vlm
             assert config.graph_dir == str(tmp_path / "graphs")
             assert config.max_steps == 3
+            assert config.unreachable_limit == 600
             assert client.sdk_configuration.client is router_http
             clients.append(client)
             launch_activities.append(config.launch_activity)
@@ -210,6 +211,80 @@ def test_explorer_rejects_invalid_settings_before_any_device_work(
     assert opened_clients == []
 
 
+@pytest.mark.usefixtures("model_environment")
+def test_explorer_rejects_an_invalid_unreachable_limit_before_any_device_work(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    _deny_device_work(monkeypatch)
+    config = tmp_path / "explore.yaml"
+    config.write_text(
+        json.dumps({"device": {"udid": "emulator-5554", "unreachable_limit": 0}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(sys, "argv", ["app-graph", "--config", str(config)])
+
+    with pytest.raises(SystemExit) as caught:
+        main()
+
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "device.unreachable_limit must be a positive finite number of seconds" in error
+
+
+@pytest.mark.parametrize("unreachable", ["adb server", "device"])
+@pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
+def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
+    unreachable: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error ends the run with status 1 and no traceback, after the explorer saved its
+    graph."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "explore.yaml"
+    app = {"name": "demo", "package_name": "com.demo"}
+    config.write_text(
+        json.dumps({"device": {"udid": "emulator-5554"}, "apps": [app]}), encoding="utf-8"
+    )
+    server = device.AdbServerUnreachableError("adb devices timed out after 30 s")
+    stays = device.DeviceUnreachableError("Device emulator-5554 unreachable for 30 minutes")
+    saved: list[str] = []
+
+    def check_avd(*_args: object) -> None:
+        if unreachable == "adb server":
+            raise server
+
+    class Device:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def terminate_all_apps(self) -> None:
+            pass
+
+    class Explorer:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def explore(self, **_kwargs: object) -> NoReturn:
+            raise stays
+
+        def save_graph(self) -> None:
+            saved.append("saved")
+
+    monkeypatch.setattr(cli, "check_avd", check_avd)
+    monkeypatch.setattr(cli, "EmulatorManager", lambda _logger: object())
+    monkeypatch.setattr(cli, "AdbController", Device)
+    monkeypatch.setattr(cli, "grant_runtime_permissions", lambda *_args: None)
+    monkeypatch.setattr(cli, "launch_app", lambda *_args: None)
+    monkeypatch.setattr(cli, "Kobe", Explorer)
+    monkeypatch.setattr(sys, "argv", ["app-graph", "-c", str(config)])
+
+    with pytest.raises(SystemExit) as caught:
+        main()
+
+    error = server if unreachable == "adb server" else stays
+    assert caught.value.code == f"app-graph: error: {error}"
+    assert saved == ([] if unreachable == "adb server" else ["saved"])
+
+
 class _NoRunningAvd:
     def __init__(self) -> None:
         self.duplicated: list[str] = []
@@ -301,7 +376,7 @@ def test_check_avd_names_an_adb_server_it_cannot_reach_and_copies_and_starts_not
     (tmp_path / ".android" / "avd").mkdir(parents=True)
     logger = logging.getLogger("test")
 
-    with pytest.raises(ConnectionError) as raised:
+    with pytest.raises(device.AdbServerUnreachableError) as raised:
         cli.check_avd(device.EmulatorManager(logger), {"device": {"avd_name": "Pixel"}}, logger)
 
     assert str(raised.value) == f"adb cannot reach its server at tcp:100.64.0.7:5037: {cause}"

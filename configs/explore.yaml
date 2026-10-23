@@ -3,6 +3,7 @@ device:
   # Use "127.0.0.1:6555" for the default Genymotion device.
   udid: emulator-5554
   avd_name: AndroidWorldAvd
+  unreachable_limit: 1800
 
 experiment:
   graph_dir: graphs/

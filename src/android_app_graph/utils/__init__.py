@@ -40,6 +40,7 @@ CONFIG_KEYS = frozenset(
     {
         "device.udid",
         "device.avd_name",
+        "device.unreachable_limit",
         "experiment.graph_dir",
         "experiment.max_steps",
         "experiment.resume_from",
@@ -59,6 +60,7 @@ _SECTIONS = frozenset(
 )
 DEFAULT_REQUEST_TIMEOUT = 60.0
 DEFAULT_AUDIT_TIMEOUT = 300.0
+DEFAULT_UNREACHABLE_LIMIT = 1800.0
 MAX_TEMPERATURE = 2
 
 
@@ -189,6 +191,15 @@ def resolve_audit_timeout(vlm_config: Mapping[str, object]) -> float:
         as_object_dict(vlm_config.get("page_detail")).get("audit_request_timeout"),
         setting="page_detail.audit_request_timeout",
         default=DEFAULT_AUDIT_TIMEOUT,
+    )
+
+
+def resolve_unreachable_limit(config: Mapping[str, object]) -> float:
+    """Validate how long exploration waits for a device that stops answering."""
+    return _seconds(
+        as_object_dict(config.get("device")).get("unreachable_limit"),
+        setting="device.unreachable_limit",
+        default=DEFAULT_UNREACHABLE_LIMIT,
     )
 
 
