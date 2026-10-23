@@ -538,12 +538,23 @@ action, such as opening a row and pressing Back, is not part of the setup, so
 the replay does not send it. Exploration's log names each setup action, as in
 `Replay 2/3: setup 1/1 on s30 via swipe`.
 
+An action whose setup is unknown was sent in a state the replay cannot rebuild,
+except for the menu open over the screen, which the action records (see
+[Graph edges](#graph-edges)). When a menu was open, such as the navigation drawer
+whose row the action taps, the replay first opens it with a recorded self-loop
+action of the screen that opened that menu, the one that sends the fewest device
+actions with its own setup; one whose setup is unknown counts only when it was sent
+with no menu open, as a replay arrives. The opening counts toward the action's
+weight like a setup, and the log names its actions as setup actions. An action sent
+in a menu that no recorded action opens is in no path.
+
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
-first, without a model call. The ranking favours nodes with many unexplored
-elements, few outgoing edges and few visits. Each checkpoint lets the model choose
-among the `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also
-offers the app's start screen while it has unexplored elements, in the last of
-those places when it ranks below them.
+first, without a model call. The ranking holds the nodes a replay from the start
+screen can reach, and favours nodes with many unexplored elements, few outgoing
+edges and few visits. Each checkpoint lets the model choose among the
+`experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also offers the
+app's start screen while it has unexplored elements, in the last of those places
+when it ranks below them.
 
 Back on the start screen leaves the app for the home screen, as does Back on the
 screen an app opens on instead, and exploration then restarts the app onto the same
@@ -564,11 +575,12 @@ and plans as usual when no other node is ranked.
 When a replay for `--resume-from`, a checkpoint or a continuation from a ranked target
 lands on a node other than its target, from whichever screen it starts, it counts a
 miss on the target, saved in the graph file as the node's `replay_misses`. The ranking
-leaves out a node whose replay has missed twice in a row, so `--resume-from auto`, a
-checkpoint and a continuation pass it over, until a screenshot is
-assigned to that node again (see
-[Screen matching](#screen-matching)), by a replay that reaches it or by exploration.
-The start screen is never left out: its replay is the app's launch.
+leaves out a node whose last replay missed, so `--resume-from auto`, a checkpoint and
+a continuation pass it over, until exploration records a new action
+into that node from another one, which can give the replay another way there, and
+clears its `replay_misses`. Reaching the node again with an action already recorded,
+or an action that stays on it, leaves it out. The start screen is never left out: its
+replay is the app's launch.
 
 ### External apps and web pages
 
@@ -735,10 +747,10 @@ these as the same screen. So opening or closing a menu is a self-loop whose
 is a self-loop recording the value it changed, and choosing one that leaves the
 screen is an edge to where it leads. A menu's options join the screen's elements as
 rows revealed by scrolling do, and an option's action records the tap that opened
-the menu in its [setup](#graph-edges), so a replay opens the menu before choosing
-the option. A dialog, bottom sheet or full-screen picker that has its own purpose,
-such as a data usage warning dialog, is a node of its own, and a menu open over it
-is that node's state.
+the menu in its [setup](#graph-edges), or, when its setup is unknown, the menu it was
+sent in, so a replay opens the menu before choosing the option. A dialog, bottom
+sheet or full-screen picker that has its own purpose, such as a data usage warning
+dialog, is a node of its own, and a menu open over it is that node's state.
 
 A destination the app names in its own navigation, such as a tab, a bottom
 navigation bar item or a navigation drawer entry, is a node of its own too, even when
@@ -934,12 +946,16 @@ description. Explore the app again into a new graph directory.
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations`, `schema_deltas` and `setups` lists hold
-one entry per action, in the same order, so entry *i* of each describes
-`actions[i]`. An action that recorded no instruction or observation has `""` in
-that list, and an action that recorded no state change has `null` in
+`instructions`, `target_observations`, `schema_deltas`, `setups` and `open_menus`
+lists hold one entry per action, in the same order, so entry *i* of each
+describes `actions[i]`. An action that recorded no instruction or observation has
+`""` in that list, and an action that recorded no state change has `null` in
 `schema_deltas`; only self-loop actions record one. Skip those entries when you
 read an edge.
+
+An action's entry in `open_menus` is the `open_menu` of the source node's
+[state](#graph-nodes) when the action was sent, such as `"navigation drawer"`, or
+`null` when no menu was open.
 
 An action's entry in `setups` is the list of device actions a
 [replay](#replaying-to-a-node) sends on the edge's source node before the
@@ -971,7 +987,10 @@ The entry is `null` when the setup is unknown or too long:
 - A setup of more than 8 actions, counted without what was undone, is dropped,
   and the log says so.
 
-An action recorded again keeps the shorter of its known setups.
+An action recorded again keeps the shorter of its known setups. Of an action whose
+setup is unknown, a replay rebuilds only the menu in `open_menus`, by a recorded
+action that opened it, and no replay sends an action whose menu no recorded action
+opens (see [Replaying to a node](#replaying-to-a-node)).
 
 Edge normalization asks the page-detail model to generalize an edge's
 instructions into `instruction_templates`, in the passes listed under
@@ -1247,8 +1266,9 @@ device, following the node IDs each issue names through those merges. For each
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action
    recorded at the same position (see [Graph edges](#graph-edges));
-3. executes that action once, after its [setup](#graph-edges), and corrects the
-   edge by the screen it reaches:
+3. executes that action once, after what a replay sends before it (its
+   [setup](#graph-edges), or the opening of the menu it was sent in), and corrects
+   the edge by the screen it reaches:
    - another node: the action moves, with its entry in every per-action list, to
      the edge toward that node, which is created if needed, and keeps its target
      observation. The flagged edge is removed once no action is left on it.
@@ -1272,7 +1292,7 @@ Each issue's outcome is saved to `<app_name>_re_explore.json` as its `status`:
 | `relabelled` | The action reached the target | Instruction replaced by `instruction` |
 | `relabel_failed` | The action reached the target, but the instruction model gave no usable description | Unchanged |
 | `instruction_not_found` | The edge is gone, or the instruction is not on it word for word, for example because the auditor paraphrased it. Steps 3 and 4 are skipped | Unchanged |
-| `unverified` | The replay missed the source, or the action left for an app with no `ext_<package>` node; `reached` is where it ended. Nothing is explored | Unchanged |
+| `unverified` | The replay missed the source, the action's setup is unknown and no recorded action opens the menu it was sent in (see [Graph edges](#graph-edges)), so it is not sent, or the action left for an app with no `ext_<package>` node; `reached` is where it ended. Nothing is explored | Unchanged |
 | `skipped` | The source node is not in the graph, or is an `ext_` node, which keeps no outgoing edge | Unchanged |
 
 One replay can be misled by content that changes between runs, such as a feed;
