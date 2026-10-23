@@ -1329,7 +1329,8 @@ def test_a_verifier_that_never_answers_is_asked_twice_and_the_screen_starts_a_ne
 
     assert node_id == "s1"
     assert sorted(gm.graph) == [first, node_id]
-    assert caplog.text.count("node_verify: timed out after retries") == 2
+    last_attempt = "node_verify: attempt 2 timed out after 36.0 s; its deadline has passed"
+    assert caplog.text.count(last_attempt) == 2
     assert len(timed_out_requests) == 4
     assert (
         f"Verifier gave no answer on node {first} against member {home.observation_id} "

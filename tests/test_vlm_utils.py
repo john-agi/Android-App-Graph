@@ -30,12 +30,11 @@ from openrouter.components.chatusage import ChatUsage
 from openrouter.embeddings import Embeddings
 from openrouter.errors import ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsUsage
-from openrouter.utils import RetryConfig
 
 from android_app_graph.payloads import as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UNUSABLE_OUTPUT_ATTEMPTS, UnusableOutputError
 from android_app_graph.screen_image import encode_screenshot
-from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings, open_client
+from android_app_graph.utils import ModelSettings, open_client, resolve_model_settings
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 
@@ -1179,9 +1178,10 @@ def test_a_429_is_sent_again_after_a_short_backoff_and_logged_with_its_call_type
     assert router_requests[1].content == router_requests[0].content
     assert len(no_sleep) == 1
     assert 0.5 <= no_sleep[0] <= 1.5
-    assert (
-        f"{_CALL_TYPES[operation]}: rate limited (HTTP 429); sending again in {no_sleep[0]:.1f} s"
-        in caplog.text
+    assert re.search(
+        rf"{_CALL_TYPES[operation]}: attempt 1 was rate limited \(HTTP 429\) after \d+\.\d s; "
+        rf"sending again in {no_sleep[0]:.1f} s",
+        caplog.text,
     )
     assert tracked_usage.snapshot()["calls"] == 1
 
@@ -1247,7 +1247,58 @@ def _recording[**P, R](calls: list[dict[str, object]], method: Callable[P, R]) -
     return wrapper
 
 
-def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
+def _send_every_model_call(
+    client: OpenRouter,
+    screenshot: str,
+    settings: dict[str, ModelSettings],
+    responses: list[httpx.Response],
+    reply: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    """Make one call of every call type, each with its role's ``settings``."""
+    responses.extend(
+        [
+            reply(content='{"page_description":"home"}'),
+            reply(content='{"same":true}'),
+            reply(content="{}"),
+            reply(content="{}"),
+            reply(content="{}"),
+            reply(content="{}"),
+            reply(content="{}"),
+            reply(content="Tap Search"),
+            reply(content='{"action":"wait"}'),
+            httpx.Response(200, json=embedding_body),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    page_detail = settings["page_detail"]
+    shown = vlm.DescribedScreenshot(screenshot, "home")
+    vlm.describe_page_and_state(client, screenshot, settings=page_detail)
+    vlm.verify_same_node(client, existing=shown, new=shown, settings=page_detail)
+    vlm.normalize_edge(client, ["search milk"], settings=page_detail)
+    vlm.audit_merge_nodes(client, "home", settings=page_detail)
+    vlm.select_exploration_target(client, "demo", [{"node_id": "x"}], settings=page_detail)
+    vlm.audit_graph(client, "home", settings=page_detail)
+    vlm.describe_executed_action(
+        client, screenshot, {"action": "back"}, (1, 1), settings=settings["instruction"]
+    )
+    vlm.plan_next_action(
+        client,
+        vlm.PlanRequest(
+            screenshot_b64=screenshot, page_description="home", node="s0", explored_edges=[]
+        ),
+        settings=settings["instruction"],
+    )
+    vlm.predict_next_action(
+        client,
+        vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait"),
+        settings=settings["action"],
+    )
+    vlm.get_embedding(client, "home", model=settings["embedding"].model)
+    vlm.get_image_embedding(client, screenshot, model=settings["image_embedding"].model)
+
+
+def test_each_call_takes_its_call_types_own_timeout_when_its_role_sets_none(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     png_screenshot: str,
@@ -1255,64 +1306,56 @@ def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The SDK's own back-off and connection-error rule, with the total time capped
-    per request: 60 s roles and the 300 s audits alike."""
+    """The timeouts README.md#requests-and-recovery states, in the order of
+    ``_send_every_model_call``: describe, verifier, normalization, merge audit, target
+    choice, graph audit, relabelling, planner, action, text and image embeddings."""
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(Chat, "send", _recording(sent, Chat.send))
     monkeypatch.setattr(Embeddings, "generate", _recording(sent, Embeddings.generate))
-    audit = PAGE_DETAIL._replace(request_timeout=DEFAULT_AUDIT_TIMEOUT)
-    router_responses.extend(
-        [
-            chat_response(content='{"page_description":"home"}'),
-            chat_response(content='{"same":true}'),
-            chat_response(content="{}"),
-            chat_response(content="{}"),
-            chat_response(content="{}"),
-            chat_response(content="{}"),
-            chat_response(content="{}"),
-            chat_response(content="Tap Search"),
-            chat_response(content='{"action":"wait"}'),
-            httpx.Response(200, json=embedding_body),
-            httpx.Response(200, json=embedding_body),
-        ]
+    roles = ("page_detail", "embedding", "image_embedding", "instruction", "action")
+    settings = resolve_model_settings(
+        {role: {"model": f"provider/{role}"} for role in roles}, roles=roles
     )
-    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-    _verify_itself(router_client, png_screenshot, "home")
-    vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
-    vlm.audit_merge_nodes(router_client, "home", settings=audit)
-    vlm.select_exploration_target(router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL)
-    vlm.audit_graph(router_client, "home", settings=audit)
-    vlm.describe_executed_action(
-        router_client, png_screenshot, {"action": "back"}, (1, 1), settings=PAGE_DETAIL
+    _send_every_model_call(
+        router_client, png_screenshot, settings, router_responses, chat_response, embedding_body
     )
-    vlm.plan_next_action(
-        router_client,
-        vlm.PlanRequest(
-            screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
-        ),
-        settings=PAGE_DETAIL,
+    assert [kwargs["timeout_ms"] for kwargs in sent] == [
+        55_000,
+        35_000,
+        180_000,
+        300_000,
+        25_000,
+        300_000,
+        70_000,
+        70_000,
+        35_000,
+        15_000,
+        15_000,
+    ]
+
+
+def test_a_role_s_configured_timeout_is_the_timeout_of_every_one_of_its_calls(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+) -> None:
+    """The chat calls; GraphManager hands the embedding calls their role's timeout."""
+    config: dict[str, object] = {
+        "page_detail": {"model": "provider/page", "request_timeout": 12},
+        "instruction": {"model": "provider/instruction", "timeout": 13},
+        "action": {"model": "provider/action", "request_timeout": 14},
+        "embedding": {"model": "provider/embedding"},
+    }
+    roles = ("page_detail", "embedding", "image_embedding", "instruction", "action")
+    settings = resolve_model_settings(config, roles=roles)
+    _send_every_model_call(
+        router_client, png_screenshot, settings, router_responses, chat_response, embedding_body
     )
-    vlm.predict_next_action(
-        router_client,
-        vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="wait"),
-        settings=ACTION,
-    )
-    vlm.get_embedding(router_client, "home", model="google/gemini-embedding-2")
-    vlm.get_image_embedding(router_client, png_screenshot, model="google/gemini-embedding-2")
-    assert len(sent) == 11
-    assert {kwargs["timeout_ms"] for kwargs in sent} == {60_000, 300_000}
-    for kwargs in sent:
-        timeout_ms, retries = kwargs["timeout_ms"], kwargs["retries"]
-        assert isinstance(timeout_ms, int)
-        assert isinstance(retries, RetryConfig)
-        assert (retries.strategy, retries.retry_connection_errors) == ("backoff", True)
-        backoff = retries.backoff
-        assert (
-            backoff.initial_interval,
-            backoff.max_interval,
-            backoff.exponent,
-            backoff.max_elapsed_time,
-        ) == (500, 60_000, 1.5, 2 * timeout_ms)
+    reads = [request.extensions["timeout"]["read"] for request in router_requests]
+    assert reads[:9] == [12, 12, 12, 12, 12, 12, 13, 13, 14]
 
 
 @pytest.mark.parametrize("operation", ["audit", "planner", "action"])
@@ -1673,7 +1716,9 @@ def test_a_request_that_still_times_out_takes_the_truncated_reply_fallback(
     with caplog.at_level("WARNING"):
         result = _final_fallback(operation, timing_out_client, png_screenshot)
     assert result == fallback
-    assert f"{call_type}: timed out after retries" in caplog.text
+    assert re.search(
+        rf"{call_type}: attempt 2 timed out after \d+\.0 s; its deadline has passed", caplog.text
+    )
     assert len(timed_out_requests) == 2
 
 
@@ -1686,7 +1731,10 @@ def test_node_verification_that_times_out_is_asked_once_more_then_has_no_answer(
     with caplog.at_level("WARNING"):
         verdict = _verify_itself(timing_out_client, png_screenshot, "home")
     assert verdict == {"same": False, "answered": False, "reason": "timed out"}
-    assert caplog.text.count("node_verify: timed out after retries") == 2
+    assert (
+        caplog.text.count("node_verify: attempt 2 timed out after 36.0 s; its deadline has passed")
+        == 2
+    )
     assert "node_verify: asking once more" in caplog.text
     assert "node_verify: no answer (timed out)" in caplog.text
     assert len(timed_out_requests) == 4
@@ -1698,33 +1746,40 @@ def test_node_verification_takes_the_answer_to_its_second_ask(
     no_sleep: list[float],
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The first ask times out on both of the SDK's attempts; the second ask answers."""
+    """The first ask times out on both of its attempts, each a second past the verifier's
+    35 s timeout; the second ask answers."""
     del no_sleep  # requested for its side effect on time.sleep
     attempts: list[httpx.Request] = []
 
     def answer_late(request: httpx.Request) -> httpx.Response:
         attempts.append(request)
         if len(attempts) <= 2:
-            msg = "no complete response within 60 s"
+            msg = "no complete response within 35 s"
             raise httpx.ReadTimeout(msg, request=request)
         return chat_response(content='{"same":true,"reason":"same list"}')
 
-    monkeypatch.setattr(time, "time", lambda: 61.0 * len(attempts))
+    monkeypatch.setattr(time, "time", lambda: 36.0 * len(attempts))
+    monkeypatch.setattr(time, "monotonic", lambda: 36.0 * len(attempts))
     with (
+        caplog.at_level("WARNING"),
         httpx.Client(transport=httpx.MockTransport(answer_late)) as http_client,
         open_client("test-key", http_client=http_client) as client,
     ):
         verdict = _verify_itself(client, png_screenshot, "home")
     assert verdict == {"same": True, "reason": "same list"}
     assert len(attempts) == 3
+    assert "node_verify: attempt 2 timed out after 36.0 s; its deadline has passed" in caplog.text
+    assert "node_verify: asking once more" in caplog.text
 
 
 def test_each_node_verification_ask_sends_a_429_again_within_a_deadline_of_its_own(
     monkeypatch: pytest.MonkeyPatch, png_screenshot: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Each ask is answered 429 with a ``Retry-After`` that ends at its 120 s deadline, and
-    the request sent again then times out at 60 s, so no answer comes after 360 s."""
+    """Each ask is answered 429 with a ``Retry-After`` that ends at its 70 s deadline, twice
+    the verifier's 35 s timeout, and the request sent again then times out at 35 s, so no
+    answer comes after 210 s."""
     elapsed: list[float] = [0.0]
     attempts: list[httpx.Request] = []
 
@@ -1734,10 +1789,10 @@ def test_each_node_verification_ask_sends_a_429_again_within_a_deadline_of_its_o
             return httpx.Response(
                 429,
                 json={"error": {"code": 429, "message": "rate limited"}},
-                headers={"retry-after": "120"},
+                headers={"retry-after": "70"},
             )
-        elapsed[0] += 60
-        msg = "no complete response within 60 s"
+        elapsed[0] += 35
+        msg = "no complete response within 35 s"
         raise httpx.ReadTimeout(msg, request=request)
 
     def sleep(seconds: float) -> None:
@@ -1754,9 +1809,10 @@ def test_each_node_verification_ask_sends_a_429_again_within_a_deadline_of_its_o
         verdict = _verify_itself(client, png_screenshot, "home")
     assert verdict == {"same": False, "answered": False, "reason": "timed out"}
     assert len(attempts) == 4
-    assert caplog.text.count("node_verify: rate limited (HTTP 429); sending again in 120.0 s") == 2
+    rate_limited = "node_verify: attempt 1 was rate limited (HTTP 429) after 0.0 s"
+    assert caplog.text.count(f"{rate_limited}; sending again in 70.0 s") == 2
     assert "node_verify: asking once more" in caplog.text
-    assert elapsed[0] == 6 * PAGE_DETAIL.request_timeout
+    assert elapsed[0] == 210
 
 
 def test_node_verification_with_an_unparseable_reply_has_no_answer(
