@@ -666,6 +666,30 @@ own rule:
 - `app-graph-plot` shows the earliest member as the node's thumbnail, so a node shows
   the same image on every render.
 
+Each member also keeps the description its screen ended with: its `describe` output's
+`page_description`, or the description its step's first rejection refined it to
+(`identify.refinement.new_description`). An exact match takes the description of the
+member it copied, and a [black](#screen-matching) member the one made from its
+activity. Screen matching keeps each description as it places the screen, and loading
+a graph reads them back from its identify file (see [Screen matching](#screen-matching)).
+Each use of a description takes it by what it is about:
+
+- one screen takes its own: the planner is given the description of the screen the
+  device was last identified on, and told where each action tried from there led by
+  that action's target observation; a new edge action records the description of the
+  screen it reached as its target observation, which it keeps when the audit moves it
+  to another edge;
+- a whole node lists every distinct description of its members with the number of
+  members that have it, most first, then by earliest member, such as
+  `"Chrome app permissions overview" (14), "App permissions settings" (2)`: the
+  audit's text dump of the graph, the coverage checkpoint's candidates and the hint
+  of the audit's steps after a retried edge;
+- `app-graph-plot` draws a node by its earliest member's description, as it shows the
+  earliest member's image, and lists every distinct one when a node is hovered.
+
+An `ext_web` or `ext_<package>` node is named by its ID wherever a node's
+descriptions are listed.
+
 Where a node's image is chosen by image vector, a member without one stops the command
 with an error naming it and its node (see [Embedding caches](#embedding-caches) for
 when members are embedded). `ext_web` and `ext_<package>` nodes list the screens that
@@ -788,12 +812,13 @@ Loading a graph fails with an error naming the file and what is wrong: the file
 has no `nodes` or `edges` list or no `matching` settings, a node lists no
 observations, a member of any node has no image in `steps/`, a node has no integer
 `replay_misses` count (see [Replaying to a node](#replaying-to-a-node)), a member of
-an in-app node has no `pixel_hash` in its record in `steps/`, or no `describe` in the
-graph's identify file and is not [`black`](#step-log), or an edge has no actions or
-per-action lists (see [Graph edges](#graph-edges)) that do not hold one entry per
-action. `app-graph-plot` fails the same way, except that it reads neither
-`replay_misses`, `matching`, the identify file nor any record in `steps/`. Explore the
-app again into a new graph directory.
+an in-app node has no `pixel_hash` in its record in `steps/`, no `describe` in the
+graph's identify file and is not [`black`](#step-log), or no description (see
+[Graph nodes](#graph-nodes)), or an edge has no actions or per-action lists (see
+[Graph edges](#graph-edges)) that do not hold one entry per action. `app-graph-plot`
+fails the same way, except that it reads neither `replay_misses` nor `matching`, and
+of a member's line in the identify file and record in `steps/` only what gives its
+description. Explore the app again into a new graph directory.
 
 ### Graph edges
 
@@ -859,14 +884,18 @@ uv sync --extra viz
 uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 ```
 
-In the HTML view, each node's label ends with the number of screenshots the node
-holds, such as `[12 screenshots]`. Clicking a node opens a panel with its member
-screenshots, oldest first and at most ten, with Previous and Next buttons and the
-position, such as `3 / 10`. Clicking the background or an edge closes the panel.
+In the HTML view, each node's label is its earliest member's description, ending with
+the number of screenshots the node holds, such as `[12 screenshots]`, and the static
+renderers label and colour a node by that description too (see
+[Graph nodes](#graph-nodes)); an `ext_` node is labelled by its ID. Clicking a node
+opens a panel with its member screenshots, oldest first and at most ten, with Previous
+and Next buttons and the position, such as `3 / 10`. Clicking the background or an
+edge closes the panel.
 
-Hovering a node shows its ID, full page description, activity, visits, state keys,
-explored element count and first ten unexplored elements, then its earliest
-screenshot. Every value from the graph is shown as text, never read as HTML.
+Hovering a node shows its ID, every distinct description of its members with their
+counts, activity, visits, state keys, explored element count and first ten unexplored
+elements, then its earliest screenshot. Every value from the graph is shown as text,
+never read as HTML.
 
 The images are embedded in the HTML as data URIs, so the file opens anywhere
 without its step log. Base64 adds a third to each WebP: every member shown adds
@@ -1005,9 +1034,9 @@ the action is kept on every edge its transitions give, so an action taken from b
 groups stays on both edges, and an action no transition matches stays where it is.
 An action takes its entry in every per-action list with it, its
 [setup](#graph-edges) as recorded: the setup was sent on the screen the action was
-taken from, and the action stays with that screen. An action that now leads to
-another node takes that node's description as its observation, and an edge that lost
-an action drops its instruction templates, which the final normalization rebuilds.
+taken from, and the action stays with that screen. It keeps its target observation
+too, which describes the screen it reached. An edge that lost an action drops its
+instruction templates, which the final normalization rebuilds.
 
 `<app_name>_members.json` holds the `grouping_floor`, `home_share` and
 `checks_per_node`, and:
@@ -1049,9 +1078,8 @@ instruction looks wrong for where it leads, it:
 3. executes that action once, after its [setup](#graph-edges), and corrects the
    edge by the screen it reaches:
    - another node: the action moves, with its entry in every per-action list, to
-     the edge toward that node, which is created if needed, and its observation
-     becomes that node's description. The flagged edge is removed once no action
-     is left on it.
+     the edge toward that node, which is created if needed, and keeps its target
+     observation. The flagged edge is removed once no action is left on it.
    - the edge's target: the transition is real and its label is wrong. The
      instruction model describes the action from the screenshot taken before it
      ran, and that description replaces the instruction.
