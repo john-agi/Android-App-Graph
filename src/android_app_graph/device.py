@@ -176,16 +176,33 @@ _NODE_ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
 _BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 
 
-def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
-    """Return the centre of the recent apps' Clear all button in ``uiautomator dump``
-    output: the first node whose resource id is Launcher3's ``clear_all`` or whose text,
-    in any case, is "Clear all". ``None`` when no node is.
+def _ui_nodes(ui_dump: str) -> list[dict[str, str]]:
+    """Return the attributes of each node in ``uiautomator dump`` output, in order.
 
     uiautomator escapes ``<``, ``>`` and ``"`` inside attribute values, so each node
     tag and each attribute is one match.
     """
-    for node in _UI_NODE.findall(ui_dump):
-        attributes = dict(_NODE_ATTRIBUTE.findall(node))
+    return [dict(_NODE_ATTRIBUTE.findall(node)) for node in _UI_NODE.findall(ui_dump)]
+
+
+def _shows_no_recent_apps(ui_dump: str) -> bool:
+    """Return whether ``uiautomator dump`` output shows the recent apps screen with no
+    app in it: an ``overview_panel`` node and no ``task_view`` node, an app's card.
+
+    The ids are matched by name in any package, as Launcher3 and the launchers built on
+    it, such as the Pixel launcher, name these views alike.
+    """
+    resource_ids = [node.get("resource-id", "") for node in _ui_nodes(ui_dump)]
+    shows_recent_apps = any(rid.endswith(":id/overview_panel") for rid in resource_ids)
+    return shows_recent_apps and not any(":id/task_view" in rid for rid in resource_ids)
+
+
+def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
+    """Return the centre of the recent apps' Clear all button in ``uiautomator dump``
+    output: the first node whose resource id is Launcher3's ``clear_all`` or whose text,
+    in any case, is "Clear all". ``None`` when no node is.
+    """
+    for attributes in _ui_nodes(ui_dump):
         bounds = _BOUNDS.fullmatch(attributes.get("bounds", ""))
         is_clear_all = (
             attributes.get("resource-id") == _CLEAR_ALL_ID
@@ -279,40 +296,43 @@ class AdbController:
                 raise ValueError(msg)
 
     def terminate_all_apps(self) -> None:
-        """Open recent apps and tap their Clear all button, which ``_find_clear_all``
-        brings on screen.
+        """Open recent apps and tap their Clear all button, which ``_scroll_to_clear_all``
+        brings on screen, or press Home when they show no app.
 
-        When it does not appear, as with no app in recent apps, log a warning and press
-        Home; any recent apps stay.
+        When Clear all does not appear, log a warning and press Home; the recent apps
+        stay.
         """
         self._press("KEYCODE_APP_SWITCH")
-        clear_all = self._find_clear_all()
-        if clear_all is None:
+        ui_dump = self._scroll_to_clear_all()
+        clear_all = _clear_all_center(ui_dump)
+        if clear_all is not None:
+            self._tap(*clear_all)
+            time.sleep(1.5)
+            return
+        if not _shows_no_recent_apps(ui_dump):
             self._logger.warning(
                 "Clear all did not appear in recent apps after %d swipes; pressing Home.",
                 _CLEAR_ALL_SWIPES,
             )
-            self._press("KEYCODE_HOME")
-            return
-        self._tap(*clear_all)
-        time.sleep(1.5)
+        self._press("KEYCODE_HOME")
 
-    def _find_clear_all(self) -> tuple[int, int] | None:
-        """Return the centre of the Clear all button in the recent apps on screen, swiping
-        the list from left to right until the button appears or ``_CLEAR_ALL_SWIPES``
-        swipes have passed.
+    def _scroll_to_clear_all(self) -> str:
+        """Return the UI dump of the recent apps on screen once it shows Clear all or no
+        app, swiping the list from left to right before each look after the first, at
+        most ``_CLEAR_ALL_SWIPES`` times.
 
         In a left-to-right layout that swipe moves the list toward its oldest app, which
         Clear all follows.
         """
+        ui_dump = self._ui_dump()
         for _ in range(_CLEAR_ALL_SWIPES):
-            clear_all = _clear_all_center(self._ui_dump())
-            if clear_all is not None:
-                return clear_all
+            if _clear_all_center(ui_dump) is not None or _shows_no_recent_apps(ui_dump):
+                return ui_dump
             middle = int(0.5 * self.h)
             self._swipe(int(0.1 * self.w), middle, int(0.9 * self.w), middle, _RECENT_APPS_SWIPE_MS)
             time.sleep(1)
-        return _clear_all_center(self._ui_dump())
+            ui_dump = self._ui_dump()
+        return ui_dump
 
     def _input(self, *args: str, check: bool = False) -> None:
         """Run ``adb shell input`` with ``args``. A timeout raises
