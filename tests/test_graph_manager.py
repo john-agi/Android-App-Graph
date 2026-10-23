@@ -3245,8 +3245,7 @@ def _search_edge_templates(
     gm = make_manager(client=router_client)
     _search_graph(gm)
     gm.normalize_all_edges()
-    templates: list[dict[str, Any]] = gm.graph["s0_home"]["s1_results"]["instruction_templates"]
-    return templates
+    return gm.graph["s0_home"]["s1_results"]["instruction_templates"]
 
 
 def test_an_edge_answered_as_different_actions_keeps_no_template(
