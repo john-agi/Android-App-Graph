@@ -85,6 +85,7 @@ from android_app_graph.step_log import (
     load_image_embeddings,
     read_observation_record,
     save_image_embeddings,
+    step_order,
 )
 from android_app_graph.utils import (
     DEFAULT_AUDIT_TIMEOUT,
@@ -708,11 +709,6 @@ def _add_member(node_data: dict[str, Any], observation_id: str) -> None:
     node_data.setdefault("observations", []).append(observation_id)
 
 
-def _step_order(step_id: str) -> tuple[int, str]:
-    # Step IDs are zero-padded integers, so a longer ID is a later step.
-    return len(step_id), step_id
-
-
 def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
     """Fold a removed node's visits, members, activities, state schema and elements into
     the kept one.
@@ -721,10 +717,31 @@ def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any
     """
     keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
     members = {*keep_data.get("observations", []), *remove_data.get("observations", [])}
-    keep_data["observations"] = sorted(members, key=_step_order)
+    keep_data["observations"] = sorted(members, key=step_order)
     _merge_activities(keep_data, remove_data)
     _merge_schema_values(keep_data, remove_data)
     _merge_elements(keep_data, remove_data.get("interactable_elements", []))
+
+
+def schema_delta(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> dict[str, dict[str, Any]] | None:
+    """Return what changed between two detail snapshots of a node, as a self-loop's
+    ``schema_deltas`` entry records it, ``{"key": {"before": old, "after": new}}``, or
+    ``None`` when nothing changed."""
+    delta = {
+        key: {"before": before.get(key), "after": after.get(key)}
+        for key in before.keys() | after.keys()
+        if before.get(key) != after.get(key)
+    }
+    return delta or None
+
+
+def target_observation(page_description: str, detail_snapshot: Mapping[str, Any]) -> str:
+    """Return ``"<description> (key=value, ...)"`` for the details that have a value, or
+    the bare description when none has."""
+    details = ", ".join(f"{k}={v}" for k, v in detail_snapshot.items() if v is not None)
+    return f"{page_description} ({details})" if details else page_description
 
 
 def _default_num_steps(action: object) -> int:
@@ -1117,6 +1134,11 @@ class GraphManager:
         """Return the image vector of an observation, or ``None`` when it has none."""
         return self._image_vectors.get(observation_id)
 
+    def use_image_vectors(self, vectors: Mapping[str, list[float]]) -> None:
+        """Take ``vectors``, image vectors by observation ID, as the screenshots' own, so
+        screen matching embeds none of those screenshots again."""
+        self._image_vectors.update(vectors)
+
     def text_vector(self, observation_id: str) -> list[float] | None:
         """Return the vector of an observation's description, or ``None`` when it has none."""
         return self._text_vectors.get(observation_id)
@@ -1316,8 +1338,9 @@ class GraphManager:
         none does, add ``observation`` to its members, and append what decided it to the
         identify file.
 
-        The screen is embedded by image, then compared with the members of the in-app
-        nodes of its ``package``, cheapest evidence first:
+        The screen is embedded by image, unless it has an image vector already, then
+        compared with the members of the in-app nodes of its ``package``, cheapest
+        evidence first:
 
         1. A member with a describe output and the same ``pixel_hash`` decides alone,
            when it belongs to one node only: the screen takes that member's describe
@@ -1346,8 +1369,10 @@ class GraphManager:
         self._require_identify_file()
         decision = _Decision(expected_observation, self.node_of(expected_observation))
         same_package = self._same_package_nodes(observation.package)
-        image_vector = self._embed_image(observation.screenshot_b64)
-        self._image_vectors[observation.observation_id] = image_vector
+        image_vector = self._image_vectors.get(observation.observation_id)
+        if image_vector is None:
+            image_vector = self._embed_image(observation.screenshot_b64)
+            self._image_vectors[observation.observation_id] = image_vector
         if observation.black:
             return self._record_black_screen(observation, same_package.node_ids, decision)
         exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
@@ -2303,7 +2328,7 @@ class GraphManager:
     def _node_from_stored(self, node_id: str, members: Sequence[str]) -> str:
         """Add a node for ``members`` of ``node_id`` from the stored description of the
         earliest of them: its description and its elements."""
-        earliest = min(members, key=_step_order)
+        earliest = min(members, key=step_order)
         described = self._stored_screens[earliest].described
         screen = _ScreenDescription(described.page_description, described.state, described.elements)
         return self._add_screen_node(
@@ -2346,12 +2371,12 @@ class GraphManager:
             m for m in _member_observations(source_data) if m not in moving
         ]
         target_data["observations"] = sorted(
-            {*_member_observations(target_data), *moving}, key=_step_order
+            {*_member_observations(target_data), *moving}, key=step_order
         )
         source_data["visit_count"] = max(0, source_data.get("visit_count", 0) - len(moving))
         target_data["visit_count"] = target_data.get("visit_count", 0) + len(moving)
         schema = target_data.setdefault("state_schema", {})
-        for member in sorted(moving, key=_step_order):
+        for member in sorted(moving, key=step_order):
             _merge_into_schema(schema, dict(self._stored_screens[member].described.state))
             self._add_activity(destination, self._member_activity(member))
 

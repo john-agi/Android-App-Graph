@@ -30,6 +30,7 @@ maintainers = [
 [project.scripts]
 app-graph = "android_app_graph.cli:main"
 app-graph-audit = "android_app_graph.commands.audit:main"
+app-graph-build = "android_app_graph.commands.build:main"
 app-graph-plot = "android_app_graph.commands.plot:main"
 
 [project.urls]
