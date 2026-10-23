@@ -222,9 +222,11 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
         assert list(graph.graph) == ["s0_home", "s1_home"]
 
 
-def test_a_pair_the_model_and_the_images_propose_is_verified_once_naming_both_sources(
+def test_a_pair_the_model_the_images_and_the_descriptions_propose_is_verified_once_naming_each(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
+    """Each member's text vector is its image vector, so the members whose descriptions
+    are closest are the members whose images are."""
     write_member_graph(graph_path, CLOSE_PAIR)
     graph = _load(graph_path)
     issue = {"type": "merge_nodes", "node_a": "s1_home", "node_b": "s0_home"}
@@ -232,10 +234,43 @@ def test_a_pair_the_model_and_the_images_propose_is_verified_once_naming_both_so
     proposals = graph.merge_proposals([issue])
     (result,) = graph.verify_merge_proposals(proposals, {}).pairs
 
-    assert result["sources"] == ["text_audit", "image"]
-    assert [finding["source"] for finding in proposals[0].findings] == ["text_audit", "image"]
-    assert proposals[0].findings[0] == {"source": "text_audit", "issue": issue}
+    assert result["sources"] == ["text_audit", "image", "text"]
+    assert proposals[0].findings == [
+        {"source": "text_audit", "issue": issue},
+        {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(PROPOSED)},
+        {"source": "text", "members": ["000002", "000004"], "score": pytest.approx(PROPOSED)},
+    ]
     assert models.shown == [("000002", "000004")]
+
+
+# Two nodes whose closest member images, at a cosine of 0.5, fall below the merge floor,
+# and whose second members' descriptions, at 0.8, are alike.
+CLOSE_DESCRIPTIONS = {
+    "s0_home": [("000001", X), ("000002", X)],
+    "s1_home": [("000003", Y), ("000004", _toward(X, Y, 0.5))],
+}
+CLOSE_DESCRIPTION_TEXTS = {"000001": Z, "000002": Y, "000003": X, "000004": _toward(Y, X, 0.8)}
+
+
+def test_a_pair_whose_closest_member_descriptions_are_alike_is_verified_on_its_closest_images(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """The descriptions propose the pair, and the verifier is shown the members whose
+    images are closest, as for every proposal."""
+    write_member_graph(graph_path, CLOSE_DESCRIPTIONS, texts=CLOSE_DESCRIPTION_TEXTS)
+    graph = _load(graph_path)
+    models.confirm("000001", "000004")
+
+    (proposal,) = graph.merge_proposals([])
+    (result,) = graph.verify_merge_proposals([proposal], {}).pairs
+
+    assert proposal.findings == [
+        {"source": "text", "members": ["000002", "000004"], "score": pytest.approx(0.8)}
+    ]
+    assert result["members"] == {"s0_home": "000001", "s1_home": "000004"}
+    assert result["image_score"] == pytest.approx(0.5)
+    assert models.shown == [("000001", "000004")]
+    assert (result["status"], result["kept"]) == ("merged", "s0_home")
 
 
 def test_a_pair_whose_node_an_earlier_merge_removed_is_verified_on_the_node_that_kept_it(
@@ -461,6 +496,73 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
     assert node["activities"] == ["com.demo.Activity000003", "com.demo.Activity000004"]
     assert (node["visit_count"], graph.graph.nodes["s0_home"]["visit_count"]) == (2, 2)
     assert models.embedded == []
+
+
+SPLIT_VECTORS = [vector for _, vector in SPLIT["s0_home"]]
+
+
+@pytest.mark.parametrize(
+    ("images", "texts", "checked"),
+    [
+        (SPLIT_VECTORS, SPLIT_VECTORS, [["000003", "000004"]]),
+        (SPLIT_VECTORS, [X, X, X, X], []),
+        ([X, X, X, X], SPLIT_VECTORS, []),
+    ],
+    ids=["both-apart", "descriptions-alike", "images-alike"],
+)
+def test_a_group_is_apart_only_when_both_its_images_and_its_descriptions_are(
+    images: list[list[float]],
+    texts: list[list[float]],
+    checked: list[list[str]],
+    graph_path: Path,
+    models: FakeModels,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """Two members are linked when their images are alike or their descriptions are, so
+    only members apart on both form a group of their own."""
+    members = ["000001", "000002", "000003", "000004"]
+    write_member_graph(
+        graph_path,
+        {"s0_home": list(zip(members, images, strict=True))},
+        texts=dict(zip(members, texts, strict=True)),
+    )
+    graph = _load(graph_path)
+    models.confirm("000002", "000003")
+
+    report = _check_members(graph, graph_path, {})
+
+    assert [check["group"] for check in report.checks] == checked
+    assert list(graph.graph) == ["s0_home"]
+
+
+def _axis(index: int) -> list[float]:
+    """A unit vector along one of eight axes: two different axes have a cosine of 0."""
+    return [float(index == position) for position in range(8)]
+
+
+def test_every_group_of_a_node_is_checked_against_home_larger_groups_first(
+    graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
+) -> None:
+    """Home, the largest group and the earliest member's on a tie, holds two of the seven
+    members, and each of the four other groups is checked against it."""
+    axes = (0, 0, 1, 1, 2, 3, 4)
+    write_member_graph(
+        graph_path,
+        {"s0_home": [(f"{number:06d}", _axis(axis)) for number, axis in enumerate(axes, 1)]},
+    )
+    graph = _load(graph_path)
+    for member in ("000003", "000005", "000006", "000007"):
+        models.confirm("000001", member)
+
+    report = _check_members(graph, graph_path, {})
+
+    assert [(check["kind"], check["group"], check["members"]) for check in report.checks] == [
+        ("split", ["000003", "000004"], ["000001", "000003"]),
+        ("move", ["000005"], ["000001", "000005"]),
+        ("move", ["000006"], ["000001", "000006"]),
+        ("move", ["000007"], ["000001", "000007"]),
+    ]
+    assert list(graph.graph) == ["s0_home"]
 
 
 def test_a_node_whose_groups_the_verifier_calls_one_screen_is_left_whole(
