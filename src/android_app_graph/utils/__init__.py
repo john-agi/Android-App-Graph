@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
+from types import MappingProxyType
 from typing import NamedTuple
 
 import httpx
@@ -58,28 +59,55 @@ CONFIG_KEYS = frozenset(
 _SECTIONS = frozenset(
     key[: separator.start()] for key in CONFIG_KEYS for separator in re.finditer(r"\.|\[\]", key)
 )
-DEFAULT_REQUEST_TIMEOUT = 60.0
 DEFAULT_AUDIT_TIMEOUT = 300.0
 DEFAULT_UNREACHABLE_LIMIT = 1800.0
+# Seconds one attempt of each call type may take, README.md#requests-and-recovery: three
+# times the 99th percentile of its answered attempts in long exploration runs, rounded up
+# to 5 s and at least 15 s. The relabelling of a flagged edge, which those runs never
+# made, takes the planner's, the other instruction call on one screenshot.
+REQUEST_TIMEOUTS: Mapping[str, float] = MappingProxyType(
+    {
+        "page_describe_and_state": 55.0,
+        "node_verify": 35.0,
+        "normalize_edge": 180.0,
+        "exploration_target": 25.0,
+        "node_merge_audit": DEFAULT_AUDIT_TIMEOUT,
+        "graph_audit": DEFAULT_AUDIT_TIMEOUT,
+        "instruction": 70.0,
+        "action_description": 70.0,
+        "action": 35.0,
+        "embedding": 15.0,
+        "image_embedding": 15.0,
+    }
+)
 MAX_TEMPERATURE = 2
 
 
 class ModelSettings(NamedTuple):
-    """One role's per-request settings, resolved before any device or network work."""
+    """One role's per-request settings, resolved before any device or network work.
+
+    ``request_timeout`` is the role's configured timeout, which every call of the role
+    takes instead of its call type's own in ``REQUEST_TIMEOUTS``.
+    """
 
     model: str
     temperature: float | None = None
-    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
+    request_timeout: float | None = None
+
+    def timeout(self, call_type: str) -> float:
+        """Return the seconds one attempt of a ``call_type`` call may take."""
+        return REQUEST_TIMEOUTS[call_type] if self.request_timeout is None else self.request_timeout
 
 
 @contextmanager
 def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> Generator[OpenRouter]:
     """Open the run's one OpenRouter client, shared by every role, and close it on exit.
 
-    Its HTTP client ends each attempt at the request's timeout by the wall clock:
-    README.md#requests-and-recovery. The SDK never closes a client it is given,
-    so this closes the one it builds. Only tests pass ``http_client``, which
-    stays theirs to close.
+    Its HTTP client ends each attempt at the request's timeout by the wall clock, and
+    the SDK retries nothing, so that ``send_within_deadline`` sends every attempt and
+    logs each one that fails: README.md#requests-and-recovery. The SDK never closes a
+    client it is given, so this closes the one it builds. Only tests pass
+    ``http_client``, which stays theirs to close.
     """
     with ExitStack() as opened:
         if http_client is None:
@@ -88,7 +116,7 @@ def open_client(api_key: str, *, http_client: httpx.Client | None = None) -> Gen
                     follow_redirects=True, transport=DeadlineTransport(httpx.HTTPTransport())
                 )
             )
-        client = OpenRouter(api_key=api_key, client=http_client)
+        client = OpenRouter(api_key=api_key, client=http_client, retry_config=None)
         opened.enter_context(client)
         yield client
 
@@ -165,10 +193,14 @@ def resolve_model(value: object, *, role: str) -> str:
     return model.strip()
 
 
-def _seconds(value: object, *, setting: str, default: float) -> float:
+def _seconds(value: object, *, setting: str) -> float | None:
+    """Validate an optional number of seconds; ``None`` when ``value`` sets none."""
+    resolved = resolve_env(value)
+    if not resolved:
+        return None
     message = f"{setting} must be a positive finite number of seconds"
     try:
-        seconds = float(resolve_env(value) or default)
+        seconds = float(resolved)
     except ValueError as exc:
         raise ValueError(message) from exc
     if not math.isfinite(seconds) or seconds <= 0:
@@ -176,31 +208,30 @@ def _seconds(value: object, *, setting: str, default: float) -> float:
     return seconds
 
 
-def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float:
-    """Validate seconds before opening connections or sending requests."""
+def resolve_request_timeout(cfg: Mapping[str, object], *, role: str) -> float | None:
+    """Validate a role's timeout, if it sets one, before opening connections or sending
+    requests."""
     return _seconds(
-        cfg.get("request_timeout", cfg.get("timeout")),
-        setting=f"{role}.request_timeout",
-        default=DEFAULT_REQUEST_TIMEOUT,
+        cfg.get("request_timeout", cfg.get("timeout")), setting=f"{role}.request_timeout"
     )
 
 
 def resolve_audit_timeout(vlm_config: Mapping[str, object]) -> float:
     """Validate the page_detail timeout for whole-graph audits, whose prompts are long."""
-    return _seconds(
+    seconds = _seconds(
         as_object_dict(vlm_config.get("page_detail")).get("audit_request_timeout"),
         setting="page_detail.audit_request_timeout",
-        default=DEFAULT_AUDIT_TIMEOUT,
     )
+    return DEFAULT_AUDIT_TIMEOUT if seconds is None else seconds
 
 
 def resolve_unreachable_limit(config: Mapping[str, object]) -> float:
     """Validate how long exploration waits for a device that stops answering."""
-    return _seconds(
+    seconds = _seconds(
         as_object_dict(config.get("device")).get("unreachable_limit"),
         setting="device.unreachable_limit",
-        default=DEFAULT_UNREACHABLE_LIMIT,
     )
+    return DEFAULT_UNREACHABLE_LIMIT if seconds is None else seconds
 
 
 def resolve_temperature(cfg: Mapping[str, object], *, role: str) -> float | None:
@@ -248,7 +279,7 @@ def _role_settings(
     model = _checked(lambda: resolve_model(cfg.get("model"), role=role), errors)
     temperature = _checked(lambda: resolve_temperature(cfg, role=role), errors)
     timeout = _checked(lambda: resolve_request_timeout(cfg, role=role), errors)
-    if model is None or timeout is None:
+    if model is None:
         return None
     return ModelSettings(model, temperature, timeout)
 

@@ -21,6 +21,8 @@ from rich.console import Console
 
 from android_app_graph.utils import (
     DEFAULT_MATCHING,
+    REQUEST_TIMEOUTS,
+    ROLES,
     MatchingSettings,
     ModelSettings,
     check_config_keys,
@@ -251,10 +253,45 @@ def test_one_client_sends_each_roles_model_temperature_and_timeout(
     assert router_client.sdk_configuration.client is not None
 
 
-def test_settings_default_to_a_sixty_second_timeout_and_no_temperature() -> None:
+def test_settings_set_no_timeout_or_temperature_the_config_leaves_out() -> None:
     assert _settings("action", {"model": "qwen/qwen3.8-flash"}) == ModelSettings(
-        "qwen/qwen3.8-flash", None, 60.0
+        "qwen/qwen3.8-flash", None, None
     )
+
+
+_TIMEOUTS_BY_ROLE: dict[str, dict[str, float]] = {
+    "page_detail": {
+        "page_describe_and_state": 55,
+        "node_verify": 35,
+        "normalize_edge": 180,
+        "exploration_target": 25,
+        "node_merge_audit": 300,
+        "graph_audit": 300,
+    },
+    "embedding": {"embedding": 15},
+    "image_embedding": {"image_embedding": 15},
+    "instruction": {"instruction": 70, "action_description": 70},
+    "action": {"action": 35},
+}
+
+
+def test_each_role_s_settings_give_each_of_its_call_types_its_own_timeout() -> None:
+    """The timeouts README.md#requests-and-recovery states, for every call type."""
+    settings = resolve_model_settings({role: {"model": "m"} for role in ROLES}, roles=ROLES)
+    assert {
+        role: {call_type: settings[role].timeout(call_type) for call_type in timeouts}
+        for role, timeouts in _TIMEOUTS_BY_ROLE.items()
+    } == _TIMEOUTS_BY_ROLE
+    assert {
+        call_type: timeout
+        for timeouts in _TIMEOUTS_BY_ROLE.values()
+        for call_type, timeout in timeouts.items()
+    } == REQUEST_TIMEOUTS
+
+
+def test_a_role_s_configured_timeout_is_the_timeout_of_each_of_its_call_types() -> None:
+    settings = _settings("page_detail", {"model": "m", "timeout": "12"})
+    assert {settings.timeout(call_type) for call_type in _TIMEOUTS_BY_ROLE["page_detail"]} == {12.0}
 
 
 @pytest.mark.parametrize(

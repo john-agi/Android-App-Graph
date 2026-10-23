@@ -5,7 +5,8 @@ utils.vlm_utils' chat completions, page descriptions, text embeddings and
 action responses; this module owns its tests, including which errors are
 re-asked, so the callers cannot drift on it. ``DeadlineTransport`` and
 ``send_within_deadline`` bound how long one request and its retries take, and
-``send_within_deadline`` sends a request answered with HTTP 429 again.
+``send_within_deadline`` sends a request again after a failed attempt and logs
+each one.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ class _Clock:
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
-    """One fake clock for the request's deadline, the SDK's retry time and every sleep."""
+    """One fake clock for the request's deadline, each attempt's duration and every sleep."""
     fake = _Clock()
     monkeypatch.setattr(time, "monotonic", fake)
     monkeypatch.setattr(time, "time", fake)
@@ -482,9 +483,9 @@ def test_the_429_backoff_grows_to_at_most_a_minute_between_tries(clock: _Clock) 
     assert sum(clock.slept) == pytest.approx(600)
 
 
-def test_the_sdk_retries_a_5xx_after_a_429_only_until_the_same_deadline(clock: _Clock) -> None:
+def test_a_5xx_after_a_429_is_sent_again_only_until_the_same_deadline(clock: _Clock) -> None:
     """Each answer takes 50 s. After the 429 and about 1 s of backoff, 69 s are left, so
-    the SDK sends a 503 once more but not a third time, which a fresh 120 s would allow."""
+    a 503 is sent once more but not a third time, which a fresh 120 s would allow."""
     statuses = [429, 503, 503, 503]
 
     def answer(_request: httpx.Request) -> httpx.Response:

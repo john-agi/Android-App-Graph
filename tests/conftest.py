@@ -91,11 +91,10 @@ def model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record sleeps instead of waiting for them.
 
-    The OpenRouter SDK's retry back-off and the explorer's settling pauses call
-    ``time.sleep`` on the shared stdlib module, so patching it here covers them
-    all. A test must never let the SDK keep failing on a real clock: it retries
-    5XX responses and timeouts until twice the request's timeout has passed on
-    ``time.time``, which no patched sleep moves on.
+    The retry backoff and the explorer's settling pauses call ``time.sleep`` on the
+    shared stdlib module, so patching it here covers them all. A test must never let
+    a request keep failing on a real clock: it is sent again until twice its timeout
+    has passed on ``time.monotonic``, which no patched sleep moves on.
     """
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)

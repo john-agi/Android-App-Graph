@@ -40,7 +40,7 @@ from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 ACTION = ModelSettings("qwen/qwen3.8-flash")
-OTHER = ModelSettings("provider/other")
+OTHER = ModelSettings("provider/other", request_timeout=60)
 
 
 @pytest.fixture
@@ -1186,7 +1186,7 @@ def test_a_429_is_sent_again_after_a_short_backoff_and_logged_with_its_call_type
     assert tracked_usage.snapshot()["calls"] == 1
 
 
-def test_the_sdk_retries_a_503_after_a_short_backoff(
+def test_a_503_is_sent_again_after_a_short_backoff(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
@@ -1209,7 +1209,7 @@ def test_the_sdk_retries_a_503_after_a_short_backoff(
 
 
 @pytest.mark.parametrize("failure", ["timeout", "dropped"])
-def test_the_sdk_retries_a_timeout_or_a_dropped_connection_once_it_recovers(
+def test_a_timeout_or_a_dropped_connection_is_sent_again_until_it_recovers(
     failure: str, chat_body: dict[str, object], no_sleep: list[float]
 ) -> None:
     attempts: list[httpx.Request] = []
@@ -2266,7 +2266,7 @@ def test_a_second_unusable_action_reply_falls_back_to_wait(
 
 
 @pytest.mark.parametrize("recover", [False, True])
-def test_action_sdk_retries_and_the_single_re_ask_are_separate(
+def test_action_retries_and_the_single_re_ask_are_separate(
     recover: bool,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
