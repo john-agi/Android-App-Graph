@@ -435,6 +435,7 @@ def _plan_and_act(
             explored_edges=explored_edges,
             app_name=run.target.app_name,
             input_status=input_status,
+            back_leaves_app=run.graph.back_leaves_app(node),
         ),
         settings=run.session.instruction,
     )

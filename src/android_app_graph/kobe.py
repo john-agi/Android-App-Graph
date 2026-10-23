@@ -554,7 +554,7 @@ class Kobe:
             self.save_graph()
             return _Position(position.node, device_state)
 
-        if move.action.get("action") == "back" and self._back_leaves_app(position.node):
+        if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
             continued = self._continue_from_ranked_target(position, tokens_before, max_steps)
             if continued is not None:
                 return continued
@@ -570,23 +570,6 @@ class Kobe:
         if new_node == EXTERNAL_WEB_NODE:
             return self._record_external_web_step(move, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
-
-    def _back_leaves_app(self, node: str) -> bool:
-        """Return whether Back on ``node`` is taken to leave the app, so that a step that
-        plans it there continues from a ranked target instead: on the start node, and on
-        a node from which Back has been recorded leaving the app, an edge by Back to an
-        ``ext_`` node.
-
-        The start node is the screen the app is launched on, the root activity of its
-        task, and Back there returns to the home screen
-        (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
-        An app can also open on another screen, such as the tab used last, where Back
-        then leaves the app too.
-        """
-        return node == self.graph.get_start_node() or any(
-            target.startswith("ext_") and [{"action": "back"}] in data.get("actions", [])
-            for _, target, data in self.graph.graph.out_edges(node, data=True)
-        )
 
     def _continue_from_ranked_target(
         self, position: _Position, tokens_before: dict[str, int], max_steps: int
@@ -651,6 +634,7 @@ class Kobe:
                 app_name=self.app_name,
                 unexplored_elements=unexplored_elements,
                 input_status=input_status,
+                back_leaves_app=self.graph.back_leaves_app(position.node),
             ),
             settings=self.instruction,
         )
