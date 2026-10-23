@@ -364,8 +364,9 @@ Description vectors live beside the graph file, in `<graph file stem>_text_emb.j
 for the audited copy, which starts from the explored graph's. A description depends on
 the other nodes' descriptions in its prompt, so its vector belongs to one graph. An
 in-app screenshot the description model describes keeps the vector of the description
-it ends with: its `describe` output's `page_description`, or the description the step's
-first rejection refined it to (`identify.refinement.new_description`), which also names
+it ends with: its [`describe`](#screen-matching) output's `page_description`, or the
+description the step's first rejection refined it to
+(`identify.refinement.new_description`), which also names
 the node the screen starts when every check rejects it. An exact match copies its
 member's vector without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
@@ -558,9 +559,12 @@ opens on.
 
 ### Step log
 
-Exploration and `app-graph-audit --re-explore` record every screenshot they take
-and every action they send in `graphs/<app_name>/steps/`, which the explored graph
-and its `_audited` copy share. Recording is always on.
+Exploration and `app-graph-audit --re-explore` record every screenshot they take,
+every action they send, every screenshot they ask a node for and every edge they
+give the graph in `graphs/<app_name>/steps/`, which the explored graph and its
+`_audited` copy share. Recording is always on. A record never changes once written:
+what placed a screenshot on its node belongs to one graph and goes to that graph's
+identify file (see [Screen matching](#screen-matching)).
 
 Each step has a zero-padded number. Its record is `<id>.json`, and a screenshot
 also has its image, `<id>.webp`. Every screenshot is encoded once, when it is
@@ -578,15 +582,24 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash` and `black`; `identify` once [screen matching](#screen-matching) has taken it, with `describe` unless it is black |
+| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash` and `black` |
 | `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, and `expected_observation`, a screenshot of the screen the run expects it to show, or `null` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
 
-An action or transition record takes `activity` and `package` from the screenshot
-it was taken from. A replay acts without looking, so a replayed action names the
-last screenshot before it, which can predate the app restart. The planner's
-instruction can differ from the edge's: an action-model `end` is recorded on the
-edge as "Press back".
+An action, match or transition record takes `activity` and `package` from the
+screenshot it was taken from. A replay acts without looking, so a replayed action
+names the last screenshot before it, which can predate the app restart. The
+planner's instruction can differ from the edge's: an action-model `end` is recorded
+on the edge as "Press back".
+
+A screenshot read without being matched, such as one of another app or the one after
+a wait, has no `match` record. `expected_observation` names a screenshot, never a
+node, so any graph built from the log maps it to its own node: the earliest member of
+the node a replay leads to, of the start node after a restart, or of the target of
+the audit's retried edge, and, when Back closes an outside web page or another app,
+the screenshot the run last matched before the step, which shows the screen the step
+started from.
 
 The status bar's clock and icons change on their own, so `pixel_hash` leaves them
 out. It is the SHA-256 of the image's decoded pixels, mode and size below its top
@@ -606,24 +619,6 @@ is hashed, which can miss an exact match but never invents one.
 such as the screens that set a lock-screen pattern, PIN or password in Settings, out
 of screenshots, and `screencap` captures it with every pixel 0.
 
-`describe` holds the screen description model's `page_description`, `state`,
-`elements` and `is_external_web`; an exact match copies them from the member it
-matched and names it in `copied_from`. A black screenshot has no `describe`: its
-description is made from its activity (see [Black screenshots](#screen-matching)).
-`identify` holds what decided the screen's node:
-
-- `stage`: `black`, `exact`, `expected`, `short_list`, `new` or `external_web`;
-- `expected_node`, the node the caller expected, or `null`;
-- `exact_match`, the member an exact match copied;
-- `candidates`: each short-list node with the `sources` that proposed it and their
-  scores, its `closest_member` and that member's image cosine, `image_score`, always
-  a number;
-- `verifications`: each verifier call's `node`, the `member` it was shown, `same`,
-  `answered` (`false` when the verifier gave no answer) and the `reason`;
-- `refinement`: the descriptions the step's first rejection refined, and what the
-  rejected node was renamed to, or `null`;
-- `node`, the node the screen joined, under its ID at that moment.
-
 `source` names the part of the run that took the step: `main_loop`,
 `navigation_replay`, `coverage_checkpoint`, `external_app_recovery`,
 `external_web_recovery`, `re_explore` (the audit's exploration steps) or
@@ -632,8 +627,8 @@ planner, so its transition holds the flagged instruction and a `null` element.
 
 On 139 screenshots of the Settings app from a 1280x2856 emulator, each became a
 669x1493 image of 74 KB on average (176 KB at most) and took about 0.35 s to
-encode. An action or transition record is a few hundred bytes, and an identified
-observation's record about 2 KB; each vector in `image_emb.json` adds about 14 KB.
+encode. A record is a few hundred bytes, and a screenshot's line in an identify file
+about 2 KB; each vector in `image_emb.json` adds about 14 KB.
 The log keeps every value shown on the screen and every text typed, passwords
 included, so treat a graph directory like the app's data. Run one exploration or
 re-exploration of an app at a time: two runs writing one step log reuse each
@@ -678,10 +673,11 @@ reached them as well; neither screen matching nor the audit compares them.
 
 #### Screen matching
 
-Exploration and `app-graph-audit --re-explore` assign every screenshot of the app to
-a node by comparing it with the members of the app's nodes of the same package,
-cheapest evidence first. The screenshot's [`identify`](#step-log) field records
-what each step found.
+Exploration and `app-graph-audit --re-explore` assign every screenshot of the app
+they ask a node for (see [Step log](#step-log)) to a node by comparing it with the
+members of the app's nodes of the same package, cheapest evidence first, under the
+graph's matching settings. The graph's identify file records what each step found;
+both are described below the steps.
 
 1. **Image embedding.** The screenshot is embedded (see
    [Embedding caches](#embedding-caches)).
@@ -693,17 +689,20 @@ what each step found.
 3. **Description.** The description model describes the screen; web content from
    outside the app goes to `ext_web`. The description is embedded (see
    [Embedding caches](#embedding-caches)).
-4. **Expected node.** Where the caller knows where the screen should be, that node is
-   verified first, against its member closest to the screen: the node a replay leads
-   to, the screen a step left when Back closes an outside web page or another app, the
-   start node after a restart, and the target of the audit's retried edge. A
+4. **Expected node.** Where the caller knows where the screen should be, it names a
+   screenshot of that screen, its `expected_observation` (see [Step log](#step-log)),
+   and the node that lists that screenshot now is verified first, against its member
+   closest to the screen: the node a replay leads to, the screen a step left when Back
+   closes an outside web page or another app, the start node after a restart, and the
+   target of the audit's retried edge. A screenshot no node lists names no node. A
    confirmation decides; a rejection leaves the node off the short list.
 5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
-   each node's closest member, proposes 3, and `text`, by the highest description
-   cosine among each node's members, proposes 2. The nodes are taken once each, in the
-   order of their best rank in either source, ties broken by image cosine. The verifier
-   checks them in that order against each one's closest member by image and stops at
-   the first confirmation, after 3 calls at most (4 with an expected node).
+   each node's closest member, proposes `image_candidates`, and `text`, by the highest
+   description cosine among each node's members, proposes `text_candidates`. The nodes
+   are taken once each, in the order of their best rank in either source, ties broken
+   by image cosine. The verifier checks them in that order against each one's closest
+   member by image and stops at the first confirmation, after `verifier_calls` calls at
+   most, one more with an expected node.
 6. **New node.** A screen every check rejects starts a new node, of which it is the
    first member. The step's first rejection refines the descriptions of both the
    screen and the rejected node, which is renamed after its new description; later
@@ -720,12 +719,12 @@ embedding it is matched by its activity instead of steps 2 to 6. It joins the no
 that has a black member of its package and activity, or starts a node described from
 the activity's class name, such as `secure screen: ChooseLockPattern`, with no
 elements. Neither the description model, the text embedding nor the verifier runs:
-its `identify` stage is `black`, and its record holds no `describe` output, so it has
-no description vector. The `text` source ranks a node only by its members that are
-not black, so a node whose members are all black has no `text` score. An exact match
-never copies a black member: a screenshot black only below the status bar is
-described. Each secure screen of an app gets a node per activity, so flows that reach
-different secure screens stay apart. The [merge proposals](#merge-proposals), at each
+its `identify` stage is `black`, and it takes no `describe` output, so it has no
+description vector. The `text` source ranks a node only by its members that are not
+black, so a node whose members are all black has no `text` score. An exact match never
+copies a black member: a screenshot black only below the status bar is described.
+Each secure screen of an app gets a node per activity, so flows that reach different
+secure screens stay apart. The [merge proposals](#merge-proposals), at each
 coverage checkpoint and in `app-graph-audit`, keep them apart too: the verifier would
 see two identical black images, so a pair of nodes whose members are all black, of
 different activities, is skipped without a verifier call, with the reason `black
@@ -735,19 +734,66 @@ A member without an image vector of the screenshot's dimension, or one that is n
 black and has no description vector, stops the command with an error naming it and
 its node.
 
+**Matching settings.** `vlm.matching` in the config
+sets the short list: `verifier_calls`, the verifier calls it makes per screen at most,
+3 by default, and `image_candidates` and `text_candidates`, how many nodes the `image`
+and `text` sources propose, 3 and 2 by default. Each is a whole number of 0 or more,
+and one the config leaves out takes its default:
+
+```yaml
+vlm:
+  matching:
+    verifier_calls: 5
+```
+
+The graph file saves them as `matching`, so each graph names the settings that made
+it; the audit's move checks use them too. Loading a saved graph, to explore it further
+or to audit it, stops with an error naming both when the graph's settings differ from
+the config's.
+
+**Identify file.** Every graph appends one JSON line per
+screenshot it places to `<graph file stem>_identify.jsonl` beside the graph file:
+`<app_name>_identify.jsonl` for the explored graph and `<app_name>_audited_identify.jsonl`
+for the audited copy, which starts as a copy of the explored graph's. A description
+depends on the other nodes' descriptions in its prompt, and a node on the matching
+settings and every earlier decision, so both belong to one graph, while the
+[step log](#step-log) is shared. A last line a crash cut off before its newline is
+ignored, as an image without a record is, and cut off by the next line written. Each
+line holds the screenshot's `observation` ID, its `describe` output unless it is
+black, and `identify`.
+
+`describe` holds the screen description model's `page_description`, `state`,
+`elements` and `is_external_web`; an exact match copies them from the member it
+matched and names it in `copied_from`. `identify` holds what decided the screen's
+node:
+
+- `stage`: `black`, `exact`, `expected`, `short_list`, `new` or `external_web`;
+- `expected_observation`, the screenshot the caller expected the screen to show the
+  screen of, and `expected_node`, the node that listed it, or `null`;
+- `exact_match`, the member an exact match copied;
+- `candidates`: each short-list node with the `sources` that proposed it and their
+  scores, its `closest_member` and that member's image cosine, `image_score`, always
+  a number;
+- `verifications`: each verifier call's `node`, the `member` it was shown, `same`,
+  `answered` (`false` when the verifier gave no answer) and the `reason`;
+- `refinement`: the descriptions the step's first rejection refined, and what the
+  rejected node was renamed to, or `null`;
+- `node`, the node the screen joined, under its ID at that moment.
+
 The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
 still resolves.
 
 Loading a graph fails with an error naming the file and what is wrong: the file
-has no `nodes` or `edges` list, a node lists no observations, a member of any node
-has no image in `steps/`, a node has no integer `replay_misses` count (see
-[Replaying to a node](#replaying-to-a-node)), a member of an in-app node has no
-`pixel_hash` in its record in `steps/`, or no `describe` there and is not
-[`black`](#step-log), or an edge has no actions or per-action lists (see
-[Graph edges](#graph-edges)) that do not hold one entry per action. `app-graph-plot`
-fails the same way, except that it reads neither `replay_misses` nor any record in
-`steps/`. Explore the app again into a new graph directory.
+has no `nodes` or `edges` list or no `matching` settings, a node lists no
+observations, a member of any node has no image in `steps/`, a node has no integer
+`replay_misses` count (see [Replaying to a node](#replaying-to-a-node)), a member of
+an in-app node has no `pixel_hash` in its record in `steps/`, or no `describe` in the
+graph's identify file and is not [`black`](#step-log), or an edge has no actions or
+per-action lists (see [Graph edges](#graph-edges)) that do not hold one entry per
+action. `app-graph-plot` fails the same way, except that it reads neither
+`replay_misses`, `matching`, the identify file nor any record in `steps/`. Explore the
+app again into a new graph directory.
 
 ### Graph edges
 
@@ -1059,11 +1105,15 @@ model usage. Android-App-Graph is a Python package and does not produce an APK.
 
    Also expect:
 
+   - a `match` record in `<app_name>/steps/` for each screenshot a run asked a node
+     for, and a line with its `describe` output and `identify` decision in
+     `<app_name>_identify.jsonl` beside the graph;
    - `<app_name>/steps/image_emb.json` tagged with the embedding model, with a
-     vector for every observation whose record has an `identify` field;
-   - `pixel_hash`, `status_bar_rows`, `describe` and `identify` on those observation
-     records, and a `status_bar_rows` above 0 on an emulator that shows its status
-     bar;
+     vector for every observation a `match` record names;
+   - `pixel_hash` and `status_bar_rows` on every observation record, and a
+     `status_bar_rows` above 0 on an emulator that shows its status bar;
+   - `matching` in the graph file, with the settings of
+     [Screen matching](#screen-matching);
    - an `image_embedding:<model>` row in the usage summary each run logs.
 
 ## Development
