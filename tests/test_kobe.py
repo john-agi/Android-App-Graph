@@ -2928,6 +2928,56 @@ def test_back_is_pressed_where_no_recorded_back_has_left_the_app(
     assert explorer.graph.graph.edges["s1_list", "s0_home"]["actions"] == [[_BACK]]
 
 
+_BACK_LEAVES_THE_APP = (
+    "Back on this screen leaves the app for the home screen, so choose an action on this "
+    "screen instead, even where a rule below says to go back."
+)
+
+
+@pytest.mark.parametrize(
+    ("screen", "source", "action", "told"),
+    [
+        pytest.param("s0_home", "s1_list", _OPEN_LIST, True, id="the start screen"),
+        pytest.param("s1_list", "s1_list", _BACK, True, id="a recorded Back left the app"),
+        pytest.param("s1_list", "s1_list", _OPEN_LIST, False, id="a tap left the app"),
+        pytest.param("s1_list", "s2_detail", _BACK, False, id="another screen's Back left"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_the_planner_is_told_that_back_leaves_the_app_where_it_does(
+    screen: str,
+    source: str,
+    action: dict[str, object],
+    told: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The planner's prompt says that Back leaves the app on the start screen and on a
+    screen with an edge by Back to an ``ext_`` node, the screens where a planned Back
+    continues from a ranked target, and on no other screen."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _edge_to_the_launcher(explorer, source, action)
+    _identifying(explorer, monkeypatch, screen)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(
+        [
+            chat_response(content='{"element":null,"instruction":"Scroll down"}'),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
+
+    explorer.explore(max_steps=1)
+
+    assert _requested_models(router_requests) == ["provider/instruction", "provider/action"]
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    assert (_BACK_LEAVES_THE_APP in prompt) is told
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
     tmp_path: Path,
