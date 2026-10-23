@@ -401,6 +401,8 @@ def _edges(graph: GraphManager) -> dict[tuple[str, str], list[object]]:
 def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions(
     graph_path: Path, models: FakeModels, write_member_graph: Callable[..., None]
 ) -> None:
+    """An action keeps the target observation it recorded wherever it moves: it
+    describes the screen the action reached."""
     write_member_graph(graph_path, SPLIT, edges=SPLIT_EDGES, transitions=SPLIT_TRANSITIONS)
     graph = _load(graph_path)
 
@@ -432,7 +434,7 @@ def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions
         3,
     )
     assert graph.graph[new]["s1_list"]["visit_count"] == 2
-    assert graph.graph["s1_list"][new]["target_observations"] == ["Screen 000003"]
+    assert graph.graph["s1_list"][new]["target_observations"] == ["s0_home after 0"]
     assert graph.graph["s0_home"]["s0_home"]["visit_count"] == 1
     change = check["change"]
     assert (change["new_node"], change["from"], change["to"]) == (True, "s0_home", new)

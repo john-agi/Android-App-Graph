@@ -496,16 +496,15 @@ def _record_step(
     device_state: dict[str, Any],
     step_number: int,
 ) -> tuple[str, dict[str, Any]]:
-    """Record the edge *step* took from *source* to the screen *device_state* shows and
-    save the graph. Returns the node the next step starts from, with the step's result.
+    """Record the edge *step* took from *source* to the screen *device_state* shows, with
+    that screen's description as its target observation, and save the graph. Returns the
+    node the next step starts from, with the step's result.
     """
     instruction, action = step.instruction, step.action
     after = Observation.from_state(device_state)
     new_node = _identify(run, device_state)
     source = run.graph.resolve_node_id(source)
-
-    new_node_data = run.graph.get_node(new_node)
-    target_obs = new_node_data.get("page_description", "") if new_node_data else ""
+    target_obs = run.graph.latest_description(new_node)
 
     run.graph.add_edge(
         source,
@@ -564,7 +563,8 @@ def _explore_steps(
     *,
     arrived: bool,
 ) -> list[dict[str, Any]]:
-    """Run exploration steps from a node with a hint for the planner. ``arrived`` says
+    """Run exploration steps from a node with a hint for the planner, which plans each
+    from the description of the screen the device was last identified on. ``arrived`` says
     the replay before them arrived at the node, so the setup of the first step is known."""
     current_node = start_from
     step_results: list[dict[str, Any]] = []
@@ -573,11 +573,10 @@ def _explore_steps(
 
     for step_i in range(num_steps):
         device_state = run.recorder.get_state()
-        node_data = run.graph.get_node(current_node)
-        if node_data is None:
+        if run.graph.get_node(current_node) is None:
             break
 
-        page_desc = f"{node_data['page_description']}\n[AUDIT HINT: {hint}]"
+        page_desc = f"{run.graph.latest_description(current_node)}\n[AUDIT HINT: {hint}]"
         step = _plan_and_act(run, current_node, device_state, page_desc)
         if step is None:
             continue
@@ -695,15 +694,11 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
         return {"issue": issue, **outcome, "steps": []}
 
     target = run.graph.resolve_node_id(target)
-    target_desc = (
-        run.graph.graph.nodes[target].get("page_description", target)
-        if target in run.graph.graph
-        else target
-    )
+    target_desc = run.graph.node_descriptions(target) if target in run.graph.graph else target
     hint = (
-        f"A previous attempt to reach '{target_desc}' from this screen may have "
+        f"A previous attempt to reach {target_desc} from this screen may have "
         f"gone to the wrong place. Check if any elements on this screen could lead "
-        f"to '{target_desc}'."
+        f"to {target_desc}."
     )
     steps = _explore_steps(
         run, run.graph.resolve_node_id(source), run.session.steps_per_issue, hint=hint, arrived=True

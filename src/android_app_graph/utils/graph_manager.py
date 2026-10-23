@@ -822,7 +822,7 @@ def _drop_templates(edge_data: dict[str, Any]) -> None:
     edge_data.pop("normalized_instructions_hash", None)
 
 
-def _member_observations(node: dict[str, Any]) -> list[str]:
+def _member_observations(node: Mapping[str, Any]) -> list[str]:
     """Return a saved node's member observation IDs, or ``[]`` when it has none or
     they are not a list of strings."""
     observations = node.get("observations")
@@ -830,6 +830,16 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
         return []
     members: list[str] = [o for o in observations if isinstance(o, str)]
     return members if len(members) == len(observations) else []
+
+
+def _saved_in_app_members(nodes: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Return the members of the saved ``nodes`` that are not external, in node order."""
+    return [
+        member
+        for node in nodes
+        if not (node["id"].startswith("ext_") or node.get("is_external"))
+        for member in _member_observations(node)
+    ]
 
 
 def _saved_matching(graph: dict[str, Any]) -> MatchingSettings | None:
@@ -882,27 +892,22 @@ def _stored_screens(
     A member whose record holds no pixel hash, or that has no describe output and is not
     of a black screenshot, raises ``ValueError`` naming ``path`` and every such member.
     """
-    lines = {as_str(line.get("observation"), ""): line for line in read_json_lines(identify_file)}
+    lines = _identify_lines(identify_file)
     stored: dict[str, _StoredScreen] = {}
     undescribed: list[str] = []
-    for node in nodes:
-        if node["id"].startswith("ext_") or node.get("is_external"):
-            continue
-        for member in _member_observations(node):
-            record = read_observation_record(steps_dir, member) or {}
-            black_activity = (
-                as_str(record.get("activity"), "") if record.get("black") is True else None
-            )
-            described = (
-                _Described.from_record(lines.get(member, {}))
-                if black_activity is None
-                else _black_screen_described(black_activity)
-            )
-            pixel_hash = as_str(record.get("pixel_hash"), "")
-            if described is None or not pixel_hash:
-                undescribed.append(member)
-            else:
-                stored[member] = _StoredScreen(pixel_hash, described, black_activity)
+    for member in _saved_in_app_members(nodes):
+        record = read_observation_record(steps_dir, member) or {}
+        black_activity = as_str(record.get("activity"), "") if record.get("black") is True else None
+        described = (
+            _Described.from_record(lines.get(member, {}))
+            if black_activity is None
+            else _black_screen_described(black_activity)
+        )
+        pixel_hash = as_str(record.get("pixel_hash"), "")
+        if described is None or not pixel_hash:
+            undescribed.append(member)
+        else:
+            stored[member] = _StoredScreen(pixel_hash, described, black_activity)
     if undescribed:
         problem = (
             f"member(s) whose record in {steps_dir} holds no pixel hash, or that have no "
@@ -911,6 +916,66 @@ def _stored_screens(
         )
         raise unloadable_graph(path, [problem])
     return stored
+
+
+def _identify_lines(identify_file: Path) -> dict[str, dict[str, object]]:
+    """Return the lines of ``identify_file`` by the observation each names."""
+    return {as_str(line.get("observation"), ""): line for line in read_json_lines(identify_file)}
+
+
+def _line_description(lines: Mapping[str, Mapping[str, object]], observation_id: str) -> str:
+    """Return the description the identify file's line of ``observation_id`` gives, or
+    ``""`` when it gives none."""
+    line = lines.get(observation_id, {})
+    describe = as_object_dict(line.get("describe"))
+    copied_from = describe.get("copied_from")
+    if isinstance(copied_from, str):
+        return _line_description(lines, copied_from)
+    refinement = as_object_dict(as_object_dict(line.get("identify")).get("refinement"))
+    refined = as_str(refinement.get("new_description"), "")
+    return refined or as_str(describe.get("page_description"), "")
+
+
+def read_member_descriptions(
+    graph_path: Path, nodes: Iterable[Mapping[str, Any]]
+) -> dict[str, str]:
+    """Return the description of every member of the saved in-app ``nodes`` of the graph
+    at ``graph_path``, by observation ID, as the graph's identify file records it: the
+    description the step's first rejection refined the screen to
+    (``identify.refinement.new_description``), or else its ``describe`` output's
+    ``page_description``. An exact match's is that of the member it copied
+    (``describe.copied_from``), and a black screenshot's, which its record in the step
+    log marks, the one made from its activity.
+
+    A member without one raises ``ValueError`` naming ``graph_path`` and every such
+    member.
+    """
+    steps_dir = graph_steps_dir(graph_path)
+    identify_file = identify_file_path(graph_path)
+    lines = _identify_lines(identify_file)
+    descriptions: dict[str, str] = {}
+    for member in _saved_in_app_members(nodes):
+        record = read_observation_record(steps_dir, member) or {}
+        descriptions[member] = (
+            _black_screen_described(as_str(record.get("activity"), "")).page_description
+            if record.get("black") is True
+            else _line_description(lines, member)
+        )
+    undescribed = [member for member, description in descriptions.items() if not description]
+    if undescribed:
+        problem = f"member(s) whose line in {identify_file} holds no description: {undescribed}"
+        raise unloadable_graph(graph_path, [problem])
+    return descriptions
+
+
+def distinct_descriptions(descriptions: Iterable[str]) -> str:
+    """Return each distinct one of ``descriptions``, a node's member descriptions in step
+    order, quoted and followed by the number of members that have it, most first, then by
+    earliest member: ``"Chrome app permissions overview" (14), "App permissions settings"
+    (2)``."""
+    return ", ".join(
+        f'"{description}" ({count})' for description, count in Counter(descriptions).most_common()
+    )
 
 
 class GraphManager:
@@ -946,6 +1011,11 @@ class GraphManager:
         # ended with: its describe output's, or the one its step's first rejection
         # refined it to.
         self._text_vectors: dict[str, list[float]] = {}
+        # By observation ID, the description each screen identify_state settles ends with,
+        # the one an exact match copies from its member and a black screen's included. A
+        # loaded graph holds those of its in-app members, as read_member_descriptions
+        # reads them back.
+        self._descriptions: dict[str, str] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
         self.total_steps_completed = 0
 
@@ -1050,6 +1120,38 @@ class GraphManager:
     def text_vector(self, observation_id: str) -> list[float] | None:
         """Return the vector of an observation's description, or ``None`` when it has none."""
         return self._text_vectors.get(observation_id)
+
+    def latest_description(self, node_id: str) -> str:
+        """Return the description of ``node_id``'s latest member, the screen
+        ``identify_state`` last placed in the node: on the node the device was last
+        identified on, the screen the device shows.
+
+        A latest member without a description raises ``ValueError`` naming it.
+        """
+        latest = _member_observations(self.graph.nodes[node_id])[-1]
+        (description,) = self._member_descriptions(node_id, [latest])
+        return description
+
+    def node_descriptions(self, node_id: str) -> str:
+        """Return the distinct descriptions of ``node_id``'s members with their counts, as
+        ``distinct_descriptions`` lists them; an external node is named by its ID.
+
+        A member without a description raises ``ValueError`` naming the node and every
+        such member.
+        """
+        if self._is_external(node_id):
+            return node_id
+        members = _member_observations(self.graph.nodes[node_id])
+        return distinct_descriptions(self._member_descriptions(node_id, members))
+
+    def _member_descriptions(self, node_id: str, members: Sequence[str]) -> list[str]:
+        """Return the descriptions of ``members`` of ``node_id``, in order.
+
+        A member without one raises ``ValueError`` naming the node and every such member.
+        """
+        undescribed = [member for member in members if member not in self._descriptions]
+        _raise_for_members_without("a description", {node_id: undescribed} if undescribed else {})
+        return [self._descriptions[member] for member in members]
 
     def closest_member(self, node_id: str, image_vector: list[float]) -> ClosestMember:
         """Return the member of ``node_id`` whose image vector is most similar to
@@ -1270,6 +1372,7 @@ class GraphManager:
         if described.is_external_web:
             decision.stage = "external_web"
             node_id = self._record_external_web_visit(observation)
+            self._descriptions[observation.observation_id] = described.page_description
         else:
             screen = _ScreenDescription(
                 described.page_description, described.state, described.elements
@@ -1280,6 +1383,7 @@ class GraphManager:
             )
             node_id = self._assign(identification)
             self._text_vectors[observation.observation_id] = identification.text_vector
+            self._descriptions[observation.observation_id] = identification.screen.page_description
             self._stored_screens[observation.observation_id] = _StoredScreen(
                 observation.pixel_hash, described
             )
@@ -1351,9 +1455,11 @@ class GraphManager:
         self, observation: Observation, node_id: str, member: str, decision: _Decision
     ) -> str:
         """Add the screen to ``node_id`` as an exact copy of its ``member``, whose
-        describe output and text vector it takes, and record that in the identify file."""
+        describe output, description and text vector it takes, and record that in the
+        identify file."""
         described = self._stored_screens[member].described
         text_vector = self.member_description_vectors([node_id])[node_id, member]
+        (description,) = self._member_descriptions(node_id, [member])
         logger.info(
             "Exact pixel match with member %s of %s; reusing its description", member, node_id
         )
@@ -1362,6 +1468,7 @@ class GraphManager:
         self._stored_screens[observation.observation_id] = _StoredScreen(
             observation.pixel_hash, described
         )
+        self._descriptions[observation.observation_id] = description
         self._text_vectors[observation.observation_id] = text_vector
         decision.stage, decision.exact_match = "exact", member
         describe = {**described.as_record(), "copied_from": member}
@@ -1399,6 +1506,7 @@ class GraphManager:
         self._stored_screens[observation.observation_id] = _StoredScreen(
             observation.pixel_hash, described, activity
         )
+        self._descriptions[observation.observation_id] = described.page_description
         decision.stage = "black"
         self._record_decision(observation, decision, node_id, None)
         return node_id
@@ -2032,10 +2140,10 @@ class GraphManager:
         """Move action *index* of source→target, with its entry in every per-action list, to
         source→new_target, which is created when absent.
 
-        The moved action's observation becomes *new_target*'s description, the screen it led
-        to. source→target is removed when no action is left on it; otherwise its templates are
-        dropped, since they were generalised from the moved instruction too, and the next
-        normalization rebuilds them.
+        The moved action keeps its target observation, which describes the screen it
+        reached. source→target is removed when no action is left on it; otherwise its
+        templates are dropped, since they were generalised from the moved instruction too,
+        and the next normalization rebuilds them.
 
         Returns False, changing nothing, when *new_target* is missing or *source* is an
         ``ext_`` node, which ``add_edge`` gives no outgoing edge either.
@@ -2050,7 +2158,6 @@ class GraphManager:
         edge_data = self.graph[source][target]
         remaining = _aligned_lists(edge_data)
         moved: dict[str, Any] = {key: [values.pop(index)] for key, values in remaining.items()}
-        moved["target_observations"] = [self.graph.nodes[new_target].get("page_description", "")]
         moved["visit_count"] = 1
         if remaining["actions"]:
             edge_data.update(remaining)
@@ -2292,7 +2399,9 @@ class GraphManager:
         self, matched: Mapping[tuple[str, str, int], list[TransitionRecord]]
     ) -> list[dict[str, object]]:
         """Put each matched action on every edge its transitions now give, take it off
-        its edge when they no longer give that one, and return each action moved."""
+        its edge when they no longer give that one, and return each action moved. An
+        action keeps its target observation on every edge, since it describes the screen
+        the action reached."""
         before = {(s, t): _aligned_lists(self.graph[s][t]) for s, t, _ in matched}
         dropped: dict[tuple[str, str], set[int]] = {}
         departed: Counter[tuple[str, str]] = Counter()
@@ -2305,10 +2414,6 @@ class GraphManager:
                 if (new_source, new_target) == (source, target):
                     continue
                 entry = {key: [values[index]] for key, values in before[source, target].items()}
-                if new_target != target:
-                    entry["target_observations"] = [
-                        self.graph.nodes[new_target].get("page_description", "")
-                    ]
                 self._merge_edge_data(new_source, new_target, {**entry, "visit_count": traversals})
                 departed[source, target] += traversals
             indices = dropped.setdefault((source, target), set())
@@ -2496,16 +2601,17 @@ class GraphManager:
         return normalized_count
 
     def get_all_edges_from_node(self, node_id: str) -> list[dict[str, Any]]:
-        """Return all outgoing edges from a node as a list of dicts."""
+        """Return all outgoing edges from a node as a list of dicts: each edge's actions
+        with their instructions and target observations, one entry per action and ``""``
+        where none was recorded, and its recorded schema deltas."""
         edges = []
         for _, target, data in self.graph.out_edges(node_id, data=True):
             edge_info = {
                 "target": target,
-                "target_description": self.graph.nodes[target].get("page_description", ""),
                 "actions": data.get("actions", []),
-                "instructions": [i for i in data.get("instructions", []) if i],
+                "instructions": list(data.get("instructions", [])),
                 "instruction_templates": data.get("instruction_templates", []),
-                "target_observations": [o for o in data.get("target_observations", []) if o],
+                "target_observations": list(data.get("target_observations", [])),
                 "visit_count": data.get("visit_count", 0),
                 "schema_deltas": [d for d in data.get("schema_deltas", []) if d],
             }
@@ -2758,8 +2864,9 @@ class GraphManager:
 
         This is a lightweight coverage signal for live exploration checkpoints.
         It favors nodes with many unexplored elements, few outgoing edges, and
-        lower visit counts. Each candidate's ``is_start_node`` says whether it is
-        the start node. A node replay has missed ``REPLAY_MISSES_LEFT_OUT`` times in a
+        lower visit counts. Each candidate's ``descriptions`` are its node's
+        ``node_descriptions``, and its ``is_start_node`` says whether it is the start
+        node. A node replay has missed ``REPLAY_MISSES_LEFT_OUT`` times in a
         row is left out, except the start node, which a replay reaches by launching the
         app.
 
@@ -2798,7 +2905,7 @@ class GraphManager:
             candidates.append(
                 {
                     "node_id": node_id,
-                    "page_description": node_data.get("page_description", ""),
+                    "descriptions": self.node_descriptions(node_id),
                     "visit_count": visit_count,
                     "out_degree": out_degree,
                     "total_elements": len(elements),
@@ -2901,18 +3008,20 @@ class GraphManager:
         """Load graph from a JSON file, with its members' text vectors when the manager
         has embedding settings, the step log beside it as the manager's ``steps_dir``,
         its identify file as the manager's ``identify_file``, its image vectors when the
-        manager has image-embedding settings, and its members' stored screens.
+        manager has image-embedding settings, and its members' stored screens and
+        descriptions.
 
         A file that lacks a field the graph needs raises ``ValueError`` naming it and
         each node, member or edge that lacks one: a node must list its member
         observations and have an integer ``replay_misses`` count, every member must have
         an image in the step log, every member of an in-app node must have a record
         there with its pixel hash and, unless it is of a black screenshot, a describe
-        output in the identify file, every edge must hold one entry per action in each
-        per-action list, and the graph must name its matching settings, which must be
-        the manager's. With embedding settings, so does a damaged text-vector file, one
-        from another model, and one, missing or not, without the vector of a member of
-        an in-app node with a describe output.
+        output in the identify file, and a description as ``read_member_descriptions``
+        reads it, every edge must hold one entry per action in each per-action list, and
+        the graph must name its matching settings, which must be the manager's. With
+        embedding settings, so does a damaged text-vector file, one from another model,
+        and one, missing or not, without the vector of a member of an in-app node with a
+        describe output.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2932,6 +3041,7 @@ class GraphManager:
             raise ValueError(msg)
         identify_file = identify_file_path(path)
         stored_screens = _stored_screens(data["nodes"], path, steps_dir, identify_file)
+        descriptions = read_member_descriptions(path, data["nodes"])
         image_vectors = (
             load_image_embeddings(steps_dir, model=self.image_embedding.model)
             if self.image_embedding is not None
@@ -2959,6 +3069,7 @@ class GraphManager:
         self._image_vectors = image_vectors
         self._unit_vectors = {}
         self._text_vectors = text_vectors
+        self._descriptions = descriptions
         self._stored_screens = stored_screens
         self._node_aliases = {
             old: new
@@ -3037,7 +3148,7 @@ class GraphManager:
         return actions
 
     def summary(self) -> dict[str, Any]:
-        """Return a summary of the graph."""
+        """Return a summary of the graph, which names each node by its ``node_descriptions``."""
         return {
             "num_nodes": self.graph.number_of_nodes(),
             "num_edges": self.graph.number_of_edges(),
@@ -3045,7 +3156,7 @@ class GraphManager:
             "nodes": [
                 {
                     "id": n,
-                    "description": d.get("page_description", ""),
+                    "descriptions": self.node_descriptions(_node_id(n)),
                     "schema_keys": list(d.get("state_schema", {}).keys()),
                     "visit_count": d.get("visit_count", 0),
                     "elements_explored": f"{sum(1 for e in d.get('interactable_elements', []) if e.get('explored'))}/{len(d.get('interactable_elements', []))}",
@@ -3055,12 +3166,13 @@ class GraphManager:
         }
 
     def format_for_audit(self) -> str:
-        """Format the graph as human-readable text for LLM audit."""
+        """Format the graph as human-readable text for LLM audit, naming each node by its
+        ``node_descriptions``."""
         lines = []
 
         lines.append(f"## Nodes ({self.graph.number_of_nodes()})")
         for node_id, data in self.graph.nodes(data=True):
-            desc = data.get("page_description", "")
+            descriptions = self.node_descriptions(_node_id(node_id))
             visits = data.get("visit_count", 0)
             out_degree = self.graph.out_degree(node_id)
             in_degree = self.graph.in_degree(node_id)
@@ -3070,7 +3182,7 @@ class GraphManager:
             n_explored = sum(1 for e in elements if e.get("explored", False))
             elem_str = f" | elements: {n_explored}/{len(elements)} explored" if elements else ""
             lines.append(
-                f'  {node_id}: "{desc}" '
+                f"  {node_id}: {descriptions} "
                 f"(visits={visits}, out={out_degree}, in={in_degree}{keys_str}{elem_str})"
             )
 
@@ -3080,10 +3192,12 @@ class GraphManager:
             instructions = data.get("instructions", [])
             observations = data.get("target_observations", [])
             is_self = " [self-loop]" if source == target else ""
-            source_desc = self.graph.nodes[source].get("page_description", "")
-            target_desc = self.graph.nodes[target].get("page_description", "")
+            source_descriptions = self.node_descriptions(_node_id(source))
+            target_descriptions = self.node_descriptions(_node_id(target))
 
-            lines.append(f'  {source} ("{source_desc}") → {target} ("{target_desc}"){is_self}:')
+            lines.append(
+                f"  {source} ({source_descriptions}) → {target} ({target_descriptions}){is_self}:"
+            )
             for instr, obs in zip(instructions, observations, strict=True):
                 if not instr:
                     continue

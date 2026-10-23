@@ -1479,7 +1479,7 @@ def select_exploration_target(
         unexplored_text = ", ".join(d for d in unexplored_desc if d) or "none listed"
         line = (
             f"{i}. node_id={candidate.get('node_id', '')} | "
-            f'description="{candidate.get("page_description", "")}" | '
+            f"descriptions={candidate.get('descriptions', '')} | "
             f"visits={candidate.get('visit_count', 0)} | "
             f"out_edges={candidate.get('out_degree', 0)} | "
             f"unexplored={candidate.get('unexplored_elements', 0)}/"
@@ -1826,7 +1826,8 @@ class PlanRequest:
 
     Attributes:
         explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
-            each with "target_description", "instructions", "actions", "visit_count".
+            each with its "actions" and, one entry per action, their "instructions" and
+            "target_observations".
         unexplored_elements: List of element dicts not yet interacted with.
         input_status: Runtime hint about whether a text field/keyboard is active.
     """
@@ -1837,6 +1838,22 @@ class PlanRequest:
     app_name: str = ""
     unexplored_elements: list[dict[str, Any]] | None = None
     input_status: str = "unknown from screenshot"
+
+
+def _tried_actions(edge: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return each action tried on an explored edge with the target observation it
+    recorded: by its quoted instruction, or, on an edge that recorded no instruction, by
+    the action itself."""
+    observations = [as_str(observation, "") for observation in edge.get("target_observations", [])]
+    named = [
+        (f'"{instruction}"', observation)
+        for instruction, observation in zip(edge.get("instructions", []), observations, strict=True)
+        if instruction
+    ]
+    return named or [
+        (json.dumps(action), observation)
+        for action, observation in zip(edge.get("actions", []), observations, strict=True)
+    ]
 
 
 def plan_next_action(
@@ -1856,17 +1873,11 @@ def plan_next_action(
     """
 
     if request.explored_edges:
-        lines = []
-        for edge in request.explored_edges:
-            target_desc = edge.get("target_description", "unknown")
-            instructions = edge.get("instructions", [])
-            if instructions:
-                lines.extend(f'- "{instr}" → led to: "{target_desc}"' for instr in instructions)
-            else:
-                lines.extend(
-                    f'- {json.dumps(action)} → led to: "{target_desc}"'
-                    for action in edge.get("actions", [])
-                )
+        lines = [
+            f'- {tried} → led to: "{observation}"'
+            for edge in request.explored_edges
+            for tried, observation in _tried_actions(edge)
+        ]
         instructions_str = (
             "\n".join(lines) if lines else "(none — this screen has not been explored yet)"
         )

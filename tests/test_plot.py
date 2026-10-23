@@ -14,6 +14,7 @@ import networkx as nx
 import pytest
 
 from android_app_graph.commands import plot
+from android_app_graph.graph_files import append_json_line, identify_file_path
 
 
 def test_plot_parser_defaults() -> None:
@@ -126,10 +127,10 @@ def test_summarize_actions(actions: list[Any], expected: str) -> None:
 def _paper_graph() -> nx.DiGraph:
     """Two connected nodes, one external node and one disconnected leaf."""
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description="Home")
-    graph.add_node("s1_search", page_description="Search results")
-    graph.add_node("ext_launcher", page_description="Launcher")
-    graph.add_node("s2_orphan", page_description="Orphan")
+    graph.add_node("s0_home", description="Home")
+    graph.add_node("s1_search", description="Search results")
+    graph.add_node("ext_launcher", description="Launcher")
+    graph.add_node("s2_orphan", description="Orphan")
     graph.add_edge("s0_home", "s1_search", label="open search", visit_count=2)
     graph.add_edge("s1_search", "s0_home", label="go back", visit_count=1)
     graph.add_edge("s0_home", "ext_launcher", label="leave app")
@@ -207,7 +208,8 @@ def _saved(edge: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
-    """Write a two-node graph, with its members' images in the step log beside it."""
+    """Write a two-node graph, with its members' images in the step log beside it and
+    their describe outputs in its identify file."""
     graph_path = tmp_path / f"{stem}.json"
     graph_path.write_text(
         json.dumps(
@@ -252,8 +254,13 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
         ),
         encoding="utf-8",
     )
-    for observation_id in ("000000", "000001", "000002"):
+    for observation_id, description in (
+        ("000000", "Home map"),
+        ("000001", "Search results list"),
+        ("000002", "Home map"),
+    ):
         _write_step_image(tmp_path, observation_id, f"member {observation_id}".encode())
+        _describe_member(graph_path, observation_id, description)
     return graph_path
 
 
@@ -263,6 +270,16 @@ def _write_step_image(tmp_path: Path, observation_id: str, image: bytes) -> str:
     steps.mkdir(exist_ok=True)
     (steps / f"{observation_id}.webp").write_bytes(image)
     return f"data:image/webp;base64,{base64.b64encode(image).decode('ascii')}"
+
+
+def _describe_member(
+    graph_path: Path, observation_id: str, description: str, **fields: object
+) -> None:
+    """Give an observation a line in the identify file of the graph at ``graph_path``,
+    with a describe output that describes it as ``description``, and ``fields``."""
+    describe = {"page_description": description, "state": {}, "elements": []}
+    line = {"observation": observation_id, "describe": describe, **fields}
+    append_json_line(identify_file_path(graph_path), line)
 
 
 def test_load_graph_reads_nodes_edges_and_screenshots(tmp_path: Path) -> None:
@@ -330,6 +347,7 @@ def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: 
         encoding="utf-8",
     )
     _write_step_image(tmp_path, "000000", b"image")
+    _describe_member(graph_path, "000000", "Shopping list")
 
     _data, graph = plot.load_graph(str(graph_path))
 
@@ -388,6 +406,7 @@ def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
         encoding="utf-8",
     )
     _write_step_image(tmp_path, "000000", b"image")
+    _describe_member(graph_path, "000000", "Search")
 
     _data, graph = plot.load_graph(str(graph_path))
 
@@ -403,10 +422,13 @@ def test_load_graph_reads_an_audited_graph_from_the_shared_step_log(tmp_path: Pa
 
 
 def _write_member_graph(tmp_path: Path, observations: list[str]) -> Path:
-    """Write a one-node graph whose node lists ``observations``."""
+    """Write a one-node graph whose node lists ``observations``, each described as
+    ``Home``."""
     graph_path = tmp_path / "demo.json"
-    node = {"id": "s0_home", "page_description": "Home", "observations": observations}
+    node = {"id": "s0_home", "page_description": "Home page", "observations": observations}
     graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
+    for observation_id in observations:
+        _describe_member(graph_path, observation_id, "Home")
     return graph_path
 
 
@@ -570,7 +592,7 @@ def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) 
 
     nodes = _vis_nodes(output.read_text(encoding="utf-8"))
     assert nodes["s0_home"]["tooltipRows"] == [
-        ["Description", "Home"],
+        ["Descriptions", '"Home map" (2)'],
         ["Activity", "com.demo.Home"],
         ["Visits", "3"],
         ["State keys", "tab"],
@@ -578,12 +600,124 @@ def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) 
         ["Unexplored", "?"],
     ]
     assert nodes["s1_search"]["tooltipRows"] == [
-        ["Description", "Search results"],
+        ["Descriptions", '"Search results list" (1)'],
         ["Activity", "com.demo.Search"],
         ["Visits", "0"],
         ["State keys", "none"],
         ["Elements", "0/0 explored"],
     ]
+
+
+_CHROME = "ext_com.android.chrome"
+
+
+def _write_described_graph(tmp_path: Path) -> Path:
+    """Write a graph whose home node is described as ``Home`` and whose members say
+    otherwise: the earliest is described as a search results list, the next was refined
+    to a home map, and the last is an exact copy of it. The home node leads to Chrome, and
+    an app chooser is described as opening an external app."""
+    graph_path = tmp_path / "demo.json"
+    nodes = [
+        {
+            "id": "s0_home",
+            "page_description": "Home",
+            "observations": ["000000", "000001", "000002"],
+        },
+        {
+            "id": "s1_chooser",
+            "page_description": "Open with external app",
+            "observations": ["000003"],
+        },
+        {
+            "id": _CHROME,
+            "page_description": "[external app: com.android.chrome]",
+            "observations": ["000004"],
+        },
+    ]
+    edges = [
+        _saved({"source": "s0_home", "target": "s1_chooser", "actions": [{"action": "tap"}]}),
+        _saved({"source": "s0_home", "target": _CHROME, "actions": [{"action": "back"}]}),
+    ]
+    graph_path.write_text(json.dumps({"nodes": nodes, "edges": edges}), encoding="utf-8")
+    for observation_id in ("000000", "000001", "000002", "000003", "000004"):
+        _write_step_image(tmp_path, observation_id, f"member {observation_id}".encode())
+    _describe_member(graph_path, "000000", "Search results list")
+    refined = {"refinement": {"new_description": "Home map"}}
+    _describe_member(graph_path, "000001", "Home screen", identify=refined)
+    copy = {"page_description": "Home screen", "state": {}, "elements": [], "copied_from": "000001"}
+    _describe_member(graph_path, "000002", "Home screen", describe=copy)
+    _describe_member(graph_path, "000003", "App chooser")
+    return graph_path
+
+
+def test_a_node_is_drawn_by_its_earliest_member_s_description_and_hovered_with_all_of_them(
+    tmp_path: Path,
+) -> None:
+    """The canvas shows the earliest member's description, as the thumbnail is the
+    earliest member's image; the tooltip lists every distinct one with its count, most
+    first. An outside node, whose members have no description, is named by its ID."""
+    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
+    output = tmp_path / "graph.html"
+
+    plot.plot_pyvis(graph, str(output))
+
+    nodes = _vis_nodes(output.read_text(encoding="utf-8"))
+    assert nodes["s0_home"]["label"] == "Search results list\n[3 screenshots]"
+    assert nodes["s0_home"]["tooltipRows"][0] == [
+        "Descriptions",
+        '"Home map" (2), "Search results list" (1)',
+    ]
+    assert nodes[_CHROME]["label"] == f"{_CHROME}\n[1 screenshot]"
+    assert nodes[_CHROME]["tooltipRows"][0] == ["Descriptions", _CHROME]
+
+
+def test_a_paper_node_takes_its_label_and_colour_from_its_earliest_member_s_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The earliest member is a search results list, so the node is drawn as a search
+    screen, not as the home its node description names."""
+    output = tmp_path / "paper.svg"
+    monkeypatch.setattr(plot.shutil, "which", lambda _cmd: "/usr/bin/dot")
+    monkeypatch.setattr(plot.subprocess, "run", lambda _argv, **_kwargs: None)
+    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
+
+    plot.plot_paper_graphviz(graph, str(output))
+
+    dot = output.with_suffix(".dot").read_text(encoding="utf-8")
+    (home,) = [line for line in dot.splitlines() if line.startswith('  "s0_home" [')]
+    assert "Search results" in home
+    assert 'fillcolor="#dcfce7"' in home
+
+
+def test_the_paper_view_drops_only_the_ext_nodes_whatever_a_node_is_described_as(
+    tmp_path: Path,
+) -> None:
+    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
+
+    prepared = plot.prepare_paper_graph(
+        graph, keep_disconnected=True, keep_external=False, trim_leaves=0
+    )
+
+    assert set(prepared) == {"s0_home", "s1_chooser"}
+
+
+def test_load_graph_rejects_an_in_app_member_whose_record_gives_no_description(
+    tmp_path: Path,
+) -> None:
+    """The members of an outside node are never read."""
+    graph_path = _write_described_graph(tmp_path)
+    identify_file = identify_file_path(graph_path)
+    lines = identify_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = "".join(line for line in lines if '"000003"' not in line)
+    identify_file.write_text(kept, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="holds no description") as excinfo:
+        plot.load_graph(str(graph_path))
+
+    message = str(excinfo.value)
+    assert "['000003']" in message
+    assert str(graph_path) in message
+    assert "Explore the app again into a new graph directory" in message
 
 
 def test_plot_pyvis_passes_markup_in_a_description_to_the_page_only_as_data(
@@ -593,14 +727,19 @@ def test_plot_pyvis_passes_markup_in_a_description_to_the_page_only_as_data(
     tooltip script sets them with textContent, so no value is ever parsed as HTML."""
     description = '<script>alert("x")</script> & <b>bold</b>'
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description=description, elements=[{"description": description}])
+    graph.add_node(
+        "s0_home",
+        description=description,
+        descriptions=description,
+        elements=[{"description": description}],
+    )
     output = tmp_path / "graph.html"
 
     plot.plot_pyvis(graph, str(output))
 
     html = output.read_text(encoding="utf-8")
     rows = _vis_nodes(html)["s0_home"]["tooltipRows"]
-    assert rows[0] == ["Description", description]
+    assert rows[0] == ["Descriptions", description]
     assert rows[-1] == ["Unexplored", description]
     assert "<script>alert" not in html
     injected = html[html.index("drawGraph();") :]
@@ -620,7 +759,7 @@ def test_plot_pyvis_labels_each_node_with_its_screenshot_count(
     tmp_path: Path, total: int, label: str
 ) -> None:
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description="Home", member_total=total)
+    graph.add_node("s0_home", description="Home", member_total=total)
     output = tmp_path / "graph.html"
 
     plot.plot_pyvis(graph, str(output))
@@ -633,7 +772,7 @@ def test_plot_pyvis_adds_the_tooltips_and_the_member_panel_after_the_graph_is_dr
 ) -> None:
     """Both scripts read the network and nodes that the template's drawGraph() call creates."""
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description="Home")
+    graph.add_node("s0_home", description="Home")
     output = tmp_path / "graph.html"
 
     plot.plot_pyvis(graph, str(output))
