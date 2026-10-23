@@ -43,6 +43,7 @@ from android_app_graph.utils.graph_manager import (
     target_observation,
 )
 from android_app_graph.utils.vlm_utils import (
+    SATURATING_SELF_LOOP_STEPS,
     ActionRequest,
     PlanRequest,
     plan_next_action,
@@ -183,6 +184,7 @@ class Kobe:
             controller, steps_dir, run_kind="explore", source="main_loop"
         )
         self._setup_trail = SetupTrail(self.graph.resolve_node_id)
+        self._self_loops_in_a_row: dict[str, int] = {}
 
     def maybe_continue_from_coverage_checkpoint(
         self,
@@ -618,6 +620,17 @@ class Kobe:
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
         """Take one step from ``position``, record it, and return where the next one starts."""
         tokens_before = token_tracker.snapshot_by_type()
+        if self._saturated(position.node):
+            continued = self._continue_from_ranked_target(
+                position,
+                tokens_before,
+                max_steps,
+                reason=(
+                    f"The last {SATURATING_SELF_LOOP_STEPS} steps on {position.node} stayed on it"
+                ),
+            )
+            if continued is not None:
+                return continued
         move = self._plan_move(position, tokens_before)
         if move is None:
             time.sleep(1)
@@ -629,7 +642,12 @@ class Kobe:
             return _Position(position.node, device_state)
 
         if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
-            continued = self._continue_from_ranked_target(position, tokens_before, max_steps)
+            continued = self._continue_from_ranked_target(
+                position,
+                tokens_before,
+                max_steps,
+                reason=f"Back on {position.node} leaves the app",
+            )
             if continued is not None:
                 return continued
         self.controller.exe_action(move.action)
@@ -645,13 +663,26 @@ class Kobe:
             return self._record_external_web_step(move, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
 
+    def _saturated(self, node: str) -> bool:
+        """Return whether the last ``SATURATING_SELF_LOOP_STEPS`` steps planned on ``node``
+        were all self-loops on it, so that the next step there continues from a ranked
+        target instead of planning: on a screen such as an alarm list, whose actions only
+        change what it shows, the planner can otherwise spend most of a run there.
+
+        A step to another node and a continuation start the count again; a step that
+        waits leaves it as it is. The count lives in memory, so a resumed run starts it
+        at zero.
+        """
+        return self._self_loops_in_a_row.get(node, 0) >= SATURATING_SELF_LOOP_STEPS
+
     def _continue_from_ranked_target(
-        self, position: _Position, tokens_before: dict[str, int], max_steps: int
+        self, position: _Position, tokens_before: dict[str, int], max_steps: int, *, reason: str
     ) -> _Position | None:
-        """Take the step that planned Back on ``position`` by continuing from a ranked
-        target, chosen and reached as at a coverage checkpoint but without its merge audit,
-        and return where the next step starts; ``None``, having done nothing, when no other
-        node is ranked, so that the caller presses Back.
+        """Take the step on ``position`` by continuing from a ranked target, chosen and
+        reached as at a coverage checkpoint but without its merge audit, and return where
+        the next step starts; ``None``, having done nothing, when no other node is ranked,
+        so that the caller takes the step on ``position``. ``reason`` says in the log why
+        the step does not act on ``position``.
 
         Its ``Step N/M`` line shows ``continue`` as the action and the node the next step
         starts from as the target. A navigation that fails before the app restart leaves
@@ -660,16 +691,10 @@ class Kobe:
         with self.controller.source("coverage_checkpoint"):
             target = self._choose_continuation_target(position.node)
             if target is None:
-                self.logger.info(
-                    "  Back on %s leaves the app, but no other node is ranked; pressing it.",
-                    position.node,
-                )
+                self.logger.info("  %s, but no other node is ranked.", reason)
                 return None
-            self.logger.info(
-                "  Back on %s leaves the app; continuing from ranked target %s instead.",
-                position.node,
-                target,
-            )
+            self.logger.info("  %s; continuing from ranked target %s instead.", reason, target)
+            self._self_loops_in_a_row.pop(position.node, None)
             reached = self._navigate_to_continuation(target, position.node)
             next_position = position
             if reached is not None:
@@ -704,6 +729,7 @@ class Kobe:
             request=PlanRequest(
                 screenshot_b64=screenshot,
                 page_description=self.graph.latest_description(position.node),
+                node=position.node,
                 explored_edges=explored_edges,
                 app_name=self.app_name,
                 unexplored_elements=unexplored_elements,
@@ -752,7 +778,10 @@ class Kobe:
         self, move: _Move, target: str, after: dict[str, Any], details: EdgeDetails
     ) -> None:
         """Add the edge ``move`` took to ``target``, with the move's setup, and its
-        transition to the step log."""
+        transition to the step log, and count whether it stayed on its node."""
+        self._self_loops_in_a_row[move.source] = (
+            self._self_loops_in_a_row.get(move.source, 0) + 1 if target == move.source else 0
+        )
         setup = self._setup_trail.setup(move.source)
         self.graph.add_edge(
             move.source, target, action=move.action_sequence, details=replace(details, setup=setup)
