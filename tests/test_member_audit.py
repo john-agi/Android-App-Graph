@@ -1412,17 +1412,19 @@ def _member_checks(graph: GraphManager, path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("nodes", "ask", "questions"),
+    ("nodes", "texts", "ask", "questions"),
     [
-        (CLOSE_PAIR, _checkpoint_merge, 1),
-        (CLOSE_PAIR, _audit_merge, 1),
-        (SPLIT, _member_checks, 1),
-        (MOVE, _member_checks, 3),
+        (CLOSE_PAIR, None, _checkpoint_merge, 1),
+        (CLOSE_PAIR, None, _audit_merge, 1),
+        (CLOSE_DESCRIPTIONS, CLOSE_DESCRIPTION_TEXTS, _audit_merge, 1),
+        (SPLIT, None, _member_checks, 1),
+        (MOVE, None, _member_checks, 3),
     ],
-    ids=["coverage-checkpoint-merge", "audit-merge", "split", "move"],
+    ids=["coverage-checkpoint-merge", "image-merge", "text-merge", "split", "move"],
 )
 def test_every_merge_and_member_check_asks_the_verifier_to_tell_navigation_destinations_apart(
     nodes: dict[str, list[tuple[str, list[float]]]],
+    texts: dict[str, list[float]] | None,
     ask: Callable[[GraphManager, Path], None],
     questions: int,
     graph_path: Path,
@@ -1447,7 +1449,7 @@ def test_every_merge_and_member_check_asks_the_verifier_to_tell_navigation_desti
         chat_response(content='{"same":false,"reason":"another destination"}')
         for _ in range(questions)
     )
-    write_member_graph(graph_path, nodes)
+    write_member_graph(graph_path, nodes, texts=texts)
     graph = _load(graph_path, client=router_client)
 
     ask(graph, graph_path)
