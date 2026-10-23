@@ -25,7 +25,7 @@ from openrouter.components.costdetails import CostDetails
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
-from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str
+from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
 from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
@@ -293,8 +293,9 @@ You are helping build a reusable navigation graph for a mobile app. Your job is 
 normalize action instructions and their resulting observations into TEMPLATES by \
 replacing specific values with named placeholders.
 
-Given one or more concrete action instructions (and optionally their target observations), \
-produce a single normalized template that captures the common pattern.
+Given one or more concrete action instructions recorded on one edge of the graph (and \
+optionally their target observations), produce a single normalized template that captures \
+the common pattern, or answer that they are different actions.
 
 Rules:
 - Replace specific user-provided values (search queries, names, addresses, numbers, dates, \
@@ -306,9 +307,16 @@ Rules:
 - For target observations, normalize the same way — replace specific result content with placeholders.
 - If the instruction has NO specific values to replace (e.g. "Tap the settings icon", \
   "Press back"), return it unchanged with is_template: false.
+- A template is ONE instruction. When the instructions are different actions that no one \
+  instruction with placeholders describes (e.g. a toggle, a scroll and a menu on one screen), \
+  set different_actions to true and leave every other field empty. Never join several actions \
+  into one template, by line breaks, numbering, "|", "OR" or "or", and never answer with a \
+  template made of placeholders alone or of a verb and placeholders, such as \
+  "{{action}} {{target_element}}" or "Tap {{target}}".
 
 Return a JSON object:
 {{
+  "different_actions": true/false (true when the instructions are different actions),
   "instruction_template": "the normalized instruction template",
   "observation_template": "the normalized observation template (or empty string if none)",
   "is_template": true/false (true if any placeholders were inserted),
@@ -321,13 +329,16 @@ Return a JSON object:
 
 Examples:
 - Input: ["Search for egg", "Search for milk"]
-  Output: {{"instruction_template": "Search for {{query}}", "observation_template": "search results for {{query}}", "is_template": true, "param_names": ["query"], "examples": [{{"instruction": "Search for egg", "params": {{"query": "egg"}}}}, {{"instruction": "Search for milk", "params": {{"query": "milk"}}}}]}}
+  Output: {{"different_actions": false, "instruction_template": "Search for {{query}}", "observation_template": "search results for {{query}}", "is_template": true, "param_names": ["query"], "examples": [{{"instruction": "Search for egg", "params": {{"query": "egg"}}}}, {{"instruction": "Search for milk", "params": {{"query": "milk"}}}}]}}
 
 - Input: ["Tap the Settings icon"]
-  Output: {{"instruction_template": "Tap the Settings icon", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}
+  Output: {{"different_actions": false, "instruction_template": "Tap the Settings icon", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}
 
 - Input: ["Type 'Waterloo' in the start location field", "Type '221B Baker Street' in the start location field"]
-  Output: {{"instruction_template": "Type '{{location}}' in the start location field", "observation_template": "start location field shows {{location}}", "is_template": true, "param_names": ["location"], "examples": [{{"instruction": "Type 'Waterloo' in the start location field", "params": {{"location": "Waterloo"}}}}, {{"instruction": "Type '221B Baker Street' in the start location field", "params": {{"location": "221B Baker Street"}}}}]}}"""
+  Output: {{"different_actions": false, "instruction_template": "Type '{{location}}' in the start location field", "observation_template": "start location field shows {{location}}", "is_template": true, "param_names": ["location"], "examples": [{{"instruction": "Type 'Waterloo' in the start location field", "params": {{"location": "Waterloo"}}}}, {{"instruction": "Type '221B Baker Street' in the start location field", "params": {{"location": "221B Baker Street"}}}}]}}
+
+- Input: ["Tap the three-dot overflow menu in the top-right corner", "Swipe upward on the alarm list", "Tap the switch of the 7:00 AM alarm"]
+  Output: {{"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}"""
 
 PAGE_DESCRIBE_AND_STATE_PROMPT = """\
 You are an expert at analyzing mobile app screenshots. You are helping build a navigation \
@@ -475,6 +486,11 @@ _SEVERITY: dict[str, Any] = {
 _EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "different_actions": {
+            "type": "boolean",
+            "description": "Whether the instructions are different actions that no one "
+            "instruction with placeholders describes; every other field is then empty.",
+        },
         "instruction_template": {
             "type": "string",
             "description": "The instruction with each user-provided value replaced by a "
@@ -512,6 +528,7 @@ _EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": [
+        "different_actions",
         "instruction_template",
         "observation_template",
         "is_template",
@@ -1118,6 +1135,40 @@ def verify_same_node(
     return result
 
 
+_MAX_INSTRUCTIONS_SENT = 20
+
+_PLACEHOLDER = re.compile(r"\{+[^{}]*\}+")
+_ACTION_LIST = re.compile(r"[\n\r|]|\bOR\b|^\d+[.)]\s")
+
+
+def _is_one_instruction(template: str) -> bool:
+    """Whether ``template`` has a word outside its placeholders, and no line break, "|",
+    "OR" or leading number that lists several actions."""
+    text = template.strip()
+    return any(c.isalpha() for c in _PLACEHOLDER.sub("", text)) and not _ACTION_LIST.search(text)
+
+
+def _different_actions() -> dict[str, Any]:
+    return {
+        "different_actions": True,
+        "instruction_template": "",
+        "observation_template": "",
+        "is_template": False,
+        "param_names": [],
+        "examples": [],
+    }
+
+
+def _latest_distinct(recorded: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Each distinct instruction of ``recorded`` with the observation it led to last, in the
+    order of their last recordings."""
+    latest: dict[str, str] = {}
+    for instruction, observation in recorded:
+        latest.pop(instruction, None)
+        latest[instruction] = observation
+    return list(latest.items())
+
+
 def normalize_edge(
     client: OpenRouter,
     instructions: list[str],
@@ -1128,14 +1179,19 @@ def normalize_edge(
     """Normalize edge instructions into a reusable template.
 
     Takes one or more concrete instructions (e.g. "search for egg", "search for milk")
-    and produces a template with placeholders (e.g. "search for {query}").
+    and produces a template with placeholders (e.g. "search for {query}"). It sends the
+    20 most recent distinct instructions, each with the observation it led to last, and the
+    count of the older ones.
 
     Args:
-        instructions: List of concrete instruction strings to normalize, at
-            least one of them non-empty.
+        instructions: List of concrete instruction strings to normalize, in the order
+            they were recorded, at least one of them non-empty.
         target_observations: Optional list of corresponding target observations.
 
     Returns a dict with keys:
+        - different_actions: bool — whether the instructions are different actions, which
+          share no template; a reply whose template is placeholders alone or lists several
+          actions counts as different actions, and every other field is then empty
         - instruction_template: str — the normalized template
         - observation_template: str — normalized observation (may be empty)
         - is_template: bool — whether any placeholders were inserted
@@ -1143,20 +1199,30 @@ def normalize_edge(
         - examples: list[dict] — original instructions with extracted param values
     """
     observations = target_observations or []
-    recorded = [
-        (inst, observations[i] if i < len(observations) else "")
-        for i, inst in enumerate(instructions)
-        if inst
-    ]
-    input_text = "Instructions to normalize:\n"
-    for inst, obs in recorded:
+    distinct = _latest_distinct(
+        [
+            (inst, observations[i] if i < len(observations) else "")
+            for i, inst in enumerate(instructions)
+            if inst
+        ]
+    )
+    sent = distinct[-_MAX_INSTRUCTIONS_SENT:]
+    older = len(distinct) - len(sent)
+    input_text = (
+        f"Instructions to normalize (the {len(sent)} most recent; "
+        f"{older} older ones are not shown):\n"
+        if older
+        else "Instructions to normalize:\n"
+    )
+    for inst, obs in sent:
         input_text += f'- Instruction: "{inst}"'
         if obs:
             input_text += f' → Observation: "{obs}"'
         input_text += "\n"
 
-    first_instruction, first_observation = recorded[0]
+    first_instruction, first_observation = sent[0]
     unchanged = {
+        "different_actions": False,
         "instruction_template": first_instruction,
         "observation_template": first_observation,
         "is_template": False,
@@ -1183,12 +1249,15 @@ def normalize_edge(
         return unchanged
     raw = strip_json_fences(message_text(resp))
     try:
-        result = json.loads(raw)
+        result = as_str_dict(json.loads(raw))
     except json.JSONDecodeError:
         logger.warning("Failed to parse normalize JSON. Raw:\n%s", raw)
         return unchanged
 
     logger.debug("Normalize edge: %s", result)
+    template = as_str(result.get("instruction_template"), "")
+    if result.get("different_actions") is True or not _is_one_instruction(template):
+        return _different_actions()
     return result
 
 

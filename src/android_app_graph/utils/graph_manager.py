@@ -2536,6 +2536,8 @@ class GraphManager:
             )
         else:
             edge_data["instruction_templates"] = []
+            if result.get("different_actions"):
+                logger.info("  Edge %s→%s: different actions", edge.source, edge.target)
 
     def _normalize_edges(self, edges: Iterable[tuple[str, str]]) -> int:
         """Normalize *edges* into templates, sending their calls concurrently.

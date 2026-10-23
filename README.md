@@ -895,14 +895,23 @@ An action recorded again keeps the shorter of its known setups.
 
 Edge normalization asks the page-detail model to generalize an edge's
 instructions into `instruction_templates`, in the passes listed under
-[Requests and recovery](#requests-and-recovery). Each time it asks
-about an edge, it stores a SHA-256 of the instructions it sent in
-`normalized_instructions_hash`, whatever the answer: a template, no template, or
-the fallback for a reply that was cut off or timed out. A later pass skips an
-edge whose instructions still match that hash, so an edge is asked again only
-after it gains, loses or changes an instruction; an edge without the hash is
-asked on the next pass. A pass also skips an edge with a single instruction of
-at most six words and no quote or digit, which keeps no template.
+[Requests and recovery](#requests-and-recovery). It sends the 20 most recent
+distinct instructions of the edge, each with the target observation it led to
+last, and the count of the older ones. A template is one instruction with its
+values replaced by named placeholders. The model may instead answer that the
+instructions are different actions, such as a toggle, a scroll and a menu on one
+screen's self-loop. A reply whose template is placeholders alone, or lists
+several actions by line breaks, numbering, `|` or `OR`, counts as that answer
+too. Such an edge keeps no template, and the log says
+`Edge <source>→<target>: different actions`. Each time it asks about an edge,
+it stores a SHA-256 of the edge's instructions in
+`normalized_instructions_hash`, whatever the answer: a template, no template,
+different actions, or the fallback for a reply that was cut off or timed out. A
+later pass skips an edge whose instructions still match that hash, so an edge is
+asked again only after it gains, loses or changes an instruction; an edge
+without the hash is asked on the next pass. A pass also skips an edge with a
+single instruction of at most six words and no quote or digit, which keeps no
+template.
 
 ## Build a Graph from a Step Log
 
