@@ -477,8 +477,8 @@ def write_member_graph() -> Callable[..., None]:
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order;
     the vector is the member's image vector and its text vector, unless ``texts`` gives
-    the member a text vector of its own. Node ``n`` is described as ``Node n`` and member
-    ``m`` as ``Screen m``, or as ``described`` gives.
+    the member a text vector of its own. Member ``m`` is described as ``Screen m``, or as
+    ``described`` gives.
     ``refined`` maps a member to the description its step's first rejection refined it
     to, and ``copied`` maps a member to the member an exact match copied its describe
     output from. ``black`` maps each member whose screenshot is black to its activity;
@@ -564,7 +564,6 @@ def write_member_graph() -> Callable[..., None]:
                     "id": node_id,
                     "package": "com.demo",
                     "activity": "com.demo.Main",
-                    "page_description": f"Node {node_id}",
                     "visit_count": len(members),
                     "replay_misses": 0,
                     "observations": [observation_id for observation_id, _ in members],
@@ -576,6 +575,22 @@ def write_member_graph() -> Callable[..., None]:
         path.write_text(json.dumps(document), encoding="utf-8")
 
     return write
+
+
+@pytest.fixture
+def shown_descriptions() -> Callable[[httpx.Request], list[str]]:
+    """Read the text before each screenshot of a verifier request, which names the
+    screenshot and gives its description."""
+
+    def read(request: httpx.Request) -> list[str]:
+        content = json.loads(request.content)["messages"][0]["content"]
+        return [
+            content[index - 1]["text"]
+            for index, part in enumerate(content)
+            if part["type"] == "image_url"
+        ]
+
+    return read
 
 
 @pytest.fixture

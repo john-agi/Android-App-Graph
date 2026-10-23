@@ -2,10 +2,13 @@
 
 A node represents a unique app state defined by:
   - Level 1: App package (as the device reports it)
-  - Level 2: High-level page description (from VLM)
+  - Level 2: Its members, the screenshots placed in it, each with the description
+    the VLM gave its screen
   - Level 3: State schema — a dict of parameter keys, each mapped to the set of
     observed values across all visits.  E.g. {"sort_order": ["price_low_to_high",
     "rating"], "search_query": ["keyboard", null]}
+
+A node's ID is ``s<n>``, numbered in the order nodes are made, and never changes.
 
 An edge represents a device action that transitions between states.
 
@@ -94,6 +97,7 @@ from android_app_graph.utils import (
     ModelSettings,
 )
 from android_app_graph.utils.vlm_utils import (
+    DescribedScreenshot,
     audit_graph,
     audit_merge_nodes,
     call_concurrently,
@@ -122,11 +126,10 @@ REPLAY_MISSES_LEFT_OUT = 2
 
 
 class _SamePackageNodes(NamedTuple):
-    """A package's in-app nodes that have members to compare with, and the descriptions
-    and state keys of all its nodes."""
+    """A package's in-app nodes that have members to compare with, and the state keys of
+    all its nodes."""
 
     node_ids: list[str]
-    descriptions: list[str]
     keys: list[str]
 
 
@@ -233,8 +236,8 @@ class SetupTrail:
     since the trail arrived there, the actions in between are left out, such as a row of
     a list opened and left by Back, a menu opened and closed again, or a field typed and
     cleared. States compare key by key, as a self-loop's schema delta does. Node IDs are
-    compared through ``resolve_node_id``, so a node renamed or merged while the trail
-    holds it still matches.
+    compared through ``resolve_node_id``, so a node merged while the trail holds it still
+    matches.
     """
 
     def __init__(self, resolve_node_id: Callable[[str], str]) -> None:
@@ -294,7 +297,7 @@ class SetupTrail:
 
 @dataclass(frozen=True)
 class _ScreenDescription:
-    page_description: str
+    description: str
     detail_snapshot: dict[str, object]
     elements: list[dict[str, str]]
 
@@ -475,12 +478,10 @@ type MemberVerdicts = dict[frozenset[str], MemberVerdict]
 
 
 class MemberQuestion(NamedTuple):
-    """Whether member observation ``existing``, of the node ``description`` describes,
-    and member observation ``new`` show one screen."""
+    """Whether member observations ``existing`` and ``new`` show one screen."""
 
     existing: str
     new: str
-    description: str
 
 
 class ShownMembers(NamedTuple):
@@ -722,12 +723,15 @@ def _add_member(node_data: dict[str, Any], observation_id: str) -> None:
     node_data.setdefault("observations", []).append(observation_id)
 
 
+def _node_number(node_id: str) -> int | None:
+    """Return the ``n`` of a node ID ``s<n>``, or ``None`` for any other ID."""
+    number = node_id.removeprefix("s")
+    return int(number) if number != node_id and number.isdecimal() else None
+
+
 def _merge_node_attributes(keep_data: dict[str, Any], remove_data: dict[str, Any]) -> None:
     """Fold a removed node's visits, members, activities, state schema and elements into
-    the kept one.
-
-    The kept node's description stays as it is.
-    """
+    the kept one."""
     keep_data["visit_count"] = keep_data.get("visit_count", 0) + remove_data.get("visit_count", 0)
     members = {*keep_data.get("observations", []), *remove_data.get("observations", [])}
     keep_data["observations"] = sorted(members, key=step_order)
@@ -1115,8 +1119,8 @@ class GraphManager:
         )
 
     def earliest_member(self, node_id: str | None) -> str | None:
-        """Return the earliest member of ``node_id``, followed through its renames and
-        merges, or ``None`` when no node is named, it is gone or it has no members."""
+        """Return the earliest member of ``node_id``, followed through merges, or
+        ``None`` when no node is named, it is gone or it has no members."""
         if node_id is None:
             return None
         node_id = self.resolve_node_id(node_id)
@@ -1155,6 +1159,11 @@ class GraphManager:
     def text_vector(self, observation_id: str) -> list[float] | None:
         """Return the vector of an observation's description, or ``None`` when it has none."""
         return self._text_vectors.get(observation_id)
+
+    def description(self, observation_id: str) -> str | None:
+        """Return the description an observation's screen ended with, or ``None`` when it
+        has none."""
+        return self._descriptions.get(observation_id)
 
     def latest_description(self, node_id: str) -> str:
         """Return the description of ``node_id``'s latest member, the screen
@@ -1397,9 +1406,11 @@ class GraphManager:
         4. The short list's candidates are verified in order against their closest
            members, up to the ``verifier_calls`` of the matching settings.
 
-        The first confirmation decides, and a check the verifier gives no answer on
-        counts as a rejection. A screen every check rejects starts a new node, and the
-        step's first rejection refines the two descriptions.
+        The describe call is given every distinct description of the members of the
+        package's in-app nodes, and the verifier each screenshot with its own
+        description. The first confirmation decides, and a check the verifier gives no
+        answer on counts as a rejection. A screen every check rejects starts a new node,
+        and the step's first rejection refines the screen's description.
 
         A ``black`` screen, all a secure window captures, is matched by its activity
         instead of steps 1 to 4: it joins the node with a black member of its activity,
@@ -1427,7 +1438,7 @@ class GraphManager:
             *describe_page_and_state(
                 client,
                 observation.screenshot_b64,
-                existing_nodes=same_package.descriptions or None,
+                known_descriptions=self._package_descriptions(same_package.node_ids) or None,
                 existing_keys=same_package.keys or None,
                 settings=page_detail,
             )
@@ -1452,7 +1463,7 @@ class GraphManager:
             )
             node_id = self._assign(identification)
             self._text_vectors[observation.observation_id] = identification.text_vector
-            self._descriptions[observation.observation_id] = identification.screen.page_description
+            self._descriptions[observation.observation_id] = identification.screen.description
             self._stored_screens[observation.observation_id] = _StoredScreen(
                 observation.pixel_hash, described
             )
@@ -1475,10 +1486,9 @@ class GraphManager:
         return node_id
 
     def _same_package_nodes(self, package: str) -> _SamePackageNodes:
-        """Collect *package*'s in-app nodes that have members, and the descriptions and
-        state keys of all its nodes."""
+        """Collect *package*'s in-app nodes that have members, and the state keys of all
+        its nodes."""
         node_ids: list[str] = []
-        descriptions: list[str] = []
         keys: list[str] = []
         for raw_id, data in self.graph.nodes(data=True):
             node_id = _node_id(raw_id)
@@ -1486,13 +1496,24 @@ class GraphManager:
                 continue
             if _member_observations(data):
                 node_ids.append(node_id)
-            desc = data.get("page_description", "")
-            if desc and desc not in descriptions:
-                descriptions.append(desc)
             for k in data.get("state_schema", {}):
                 if k not in keys:
                     keys.append(k)
-        return _SamePackageNodes(node_ids, descriptions, keys)
+        return _SamePackageNodes(node_ids, keys)
+
+    def _package_descriptions(self, node_ids: Iterable[str]) -> list[str]:
+        """Return every distinct description of the members of ``node_ids``, in the step
+        order of the first member described so.
+
+        A member without a description raises ``ValueError`` naming its node and every
+        such member.
+        """
+        described: list[tuple[str, str]] = []
+        for node_id in node_ids:
+            members = _member_observations(self.graph.nodes[node_id])
+            described += zip(members, self._member_descriptions(node_id, members), strict=True)
+        described.sort(key=lambda member_description: step_order(member_description[0]))
+        return list(dict.fromkeys(description for _, description in described))
 
     def _exact_match(self, pixel_hash: str, node_ids: Sequence[str]) -> tuple[str, str] | None:
         """Return the node and member with a describe output whose stored screen has
@@ -1590,9 +1611,7 @@ class GraphManager:
         return None
 
     def _record_external_web_visit(self, observation: Observation) -> str:
-        self.graph.add_node(
-            EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0
-        )
+        self.graph.add_node(EXTERNAL_WEB_NODE, replay_misses=0)
         node_data = self.graph.nodes[EXTERNAL_WEB_NODE]
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         _add_member(node_data, observation.observation_id)
@@ -1608,7 +1627,6 @@ class GraphManager:
             self.graph.add_node(
                 node_id,
                 activity=observation.activity,
-                page_description=f"[external app: {package}]",
                 state_schema={},
                 visit_count=0,
                 replay_misses=0,
@@ -1699,9 +1717,8 @@ class GraphManager:
     def _verify(self, identification: _Identification, node_id: str, member: str) -> str | None:
         """Ask the verifier whether the identified screen is ``node_id``'s ``member``, and
         return ``node_id`` when it says so; no answer counts as a rejection, and the first
-        rejection refines both descriptions."""
-        description = self.graph.nodes[node_id].get("page_description", "")
-        verdict = self._verifier_reply(identification, member, description)
+        rejection refines the screen's description."""
+        verdict = self._verifier_reply(identification, node_id, member)
         same = verdict.get("same") is True
         answered = verdict.get("answered") is not False
         reason = as_str(verdict.get("reason"), "")
@@ -1716,10 +1733,9 @@ class GraphManager:
         )
         if same:
             logger.info(
-                "Verifier confirmed node %s against member %s: %s | reason: %s",
+                "Verifier confirmed node %s against member %s | reason: %s",
                 node_id,
                 member,
-                description,
                 reason,
             )
             return node_id
@@ -1741,42 +1757,40 @@ class GraphManager:
         return None
 
     def _verifier_reply(
-        self, identification: _Identification, member: str, description: str
+        self, identification: _Identification, node_id: str, member: str
     ) -> dict[str, Any]:
         verdicts = identification.verdicts
         if verdicts is not None:
             known = self.verify_members(
-                member,
-                identification.observation.observation_id,
-                description=description,
-                verdicts=verdicts,
+                member, identification.observation.observation_id, verdicts=verdicts
             )
             return {"same": known.same, "answered": known.answered, "reason": known.reason}
         client, page_detail = self._require_page_detail()
+        (description,) = self._member_descriptions(node_id, [member])
         return verify_same_node(
             client,
-            screenshot_new_b64=identification.observation.screenshot_b64,
-            screenshot_existing_b64=observation_image_b64(self._require_steps_dir(), member),
-            existing_description=description,
+            existing=DescribedScreenshot(
+                observation_image_b64(self._require_steps_dir(), member), description
+            ),
+            new=DescribedScreenshot(
+                identification.observation.screenshot_b64, identification.screen.description
+            ),
             settings=page_detail,
         )
 
-    def verify_members(
-        self, existing: str, new: str, *, description: str, verdicts: MemberVerdicts
-    ) -> MemberVerdict:
-        """Ask the verifier whether member observations ``existing``, of the node
-        ``description`` describes, and ``new`` show one screen, and keep the answer in
-        ``verdicts``; a pair ``verdicts`` already holds is answered from there."""
-        (verdict,) = self.verify_member_pairs(
-            [MemberQuestion(existing, new, description)], verdicts
-        )
+    def verify_members(self, existing: str, new: str, *, verdicts: MemberVerdicts) -> MemberVerdict:
+        """Ask the verifier whether member observations ``existing`` and ``new`` show one
+        screen, and keep the answer in ``verdicts``; a pair ``verdicts`` already holds is
+        answered from there."""
+        (verdict,) = self.verify_member_pairs([MemberQuestion(existing, new)], verdicts)
         return verdict
 
     def verify_member_pairs(
         self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts
     ) -> list[MemberVerdict]:
         """Ask the verifier ``questions`` at once, up to ``MAX_REQUESTS_IN_FLIGHT`` at a
-        time, keep each answer in ``verdicts``, and return the answers in order.
+        time, each member shown with its own description, keep each answer in
+        ``verdicts``, and return the answers in order.
 
         A pair ``verdicts`` already holds, or an earlier question names too, is answered
         from there and marked ``reused``. No answer is not kept: it says nothing about the
@@ -1812,17 +1826,38 @@ class GraphManager:
         self, questions: Sequence[MemberQuestion], verdicts: MemberVerdicts
     ) -> dict[frozenset[str], MemberVerdict]:
         """Ask ``questions`` concurrently and return the verdict on each pair, keeping
-        each answered one in ``verdicts``."""
+        each answered one in ``verdicts``.
+
+        A member without a description raises ``ValueError`` naming every such member
+        before any question is asked.
+        """
         client, page_detail = self._require_page_detail()
         steps_dir = self._require_steps_dir()
+        descriptions: dict[str, str] = {}
+        undescribed: list[str] = []
+        for question in questions:
+            for member in (question.existing, question.new):
+                description = self.description(member)
+                if description is None:
+                    undescribed.append(member)
+                else:
+                    descriptions[member] = description
+        if undescribed:
+            named = ", ".join(dict.fromkeys(undescribed))
+            msg = f"Members without a description to show the verifier: {named}"
+            raise ValueError(msg)
         replies: dict[frozenset[str], MemberVerdict] = {}
+
+        def described(member: str) -> DescribedScreenshot:
+            return DescribedScreenshot(
+                observation_image_b64(steps_dir, member), descriptions[member]
+            )
 
         def ask(question: MemberQuestion) -> MemberVerdict:
             reply = verify_same_node(
                 client,
-                screenshot_new_b64=observation_image_b64(steps_dir, question.new),
-                screenshot_existing_b64=observation_image_b64(steps_dir, question.existing),
-                existing_description=question.description,
+                existing=described(question.existing),
+                new=described(question.new),
                 settings=page_detail,
             )
             return MemberVerdict(
@@ -1843,26 +1878,15 @@ class GraphManager:
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
     ) -> None:
-        """Give the rejected node and the screen the verifier's refined descriptions,
-        embedding the screen's; the node is renamed to match its new description."""
-        refined_existing = as_str(verdict.get("existing_description"), "")
-        refined_new = as_str(verdict.get("new_description"), "")
-        renamed = node_id
-        if refined_existing and refined_existing != self.graph.nodes[node_id].get(
-            "page_description"
-        ):
-            renamed = self.rename_node(node_id, refined_existing)
-        if refined_new:
-            identification.screen = replace(identification.screen, page_description=refined_new)
-            identification.text_vector = self._embed(refined_new)
-        if renamed != node_id or refined_new:
-            identification.decision.refinement = {
-                "node": node_id,
-                "renamed_to": renamed,
-                "existing_description": refined_existing,
-                "new_description": refined_new,
-            }
-            logger.info("Refined descriptions: %s -> %s | new: %s", node_id, renamed, refined_new)
+        """Give the screen the verifier's refined description, embedding it; the rejected
+        node is left as it was."""
+        refined = as_str(verdict.get("new_description"), "")
+        if not refined:
+            return
+        identification.screen = replace(identification.screen, description=refined)
+        identification.text_vector = self._embed(refined)
+        identification.decision.refinement = {"node": node_id, "new_description": refined}
+        logger.info("Refined the screen's description on rejecting %s: %s", node_id, refined)
 
     def _add_activity(self, node_id: str, activity: str) -> None:
         node_data = self.graph.nodes[node_id]
@@ -1873,7 +1897,7 @@ class GraphManager:
         node_data["activities"] = activities
 
     def _add_screen_node(self, screen: _ScreenDescription, package: str, activity: str) -> str:
-        node_id = self._make_node_id(screen.page_description)
+        node_id = self._make_node_id()
         init_elements = [
             {
                 "description": e.get("description", ""),
@@ -1887,7 +1911,6 @@ class GraphManager:
             package=package,
             activity=activity,
             activities=[activity],
-            page_description=screen.page_description,
             state_schema={},
             interactable_elements=init_elements,
             last_normalized_visit_milestone=0,
@@ -1897,7 +1920,7 @@ class GraphManager:
         logger.info(
             "Created new node %s: %s (%d elements)",
             node_id,
-            screen.page_description,
+            screen.description,
             len(init_elements),
         )
         return node_id
@@ -1927,70 +1950,15 @@ class GraphManager:
             node_data["visit_count"],
         )
 
-    def _make_node_id(self, page_description: str) -> str:
-        """Generate a unique, human-readable node ID."""
-        nid = self._next_id
+    def _make_node_id(self) -> str:
+        """Return the next node ID, ``s<n>``."""
+        node_id = f"s{self._next_id}"
         self._next_id += 1
-        sanitized = page_description.lower().replace(" ", "_").replace("/", "_")[:40]
-        return f"s{nid}_{sanitized}"
-
-    @staticmethod
-    def _sanitize_description_for_node_id(page_description: str) -> str:
-        """Convert a page description into the human-readable node ID suffix."""
-        sanitized = page_description.lower().replace(" ", "_").replace("/", "_")[:40]
-        return sanitized or "unknown_screen"
-
-    def _renamed_node_id(self, node_id: str, page_description: str) -> str:
-        """Build a unique node ID that keeps the original numeric prefix."""
-        prefix = node_id.split("_", 1)[0] if "_" in node_id else node_id
-        base = f"{prefix}_{self._sanitize_description_for_node_id(page_description)}"
-        if base == node_id or base not in self.graph:
-            return base
-
-        suffix = 2
-        while f"{base}_{suffix}" in self.graph:
-            suffix += 1
-        return f"{base}_{suffix}"
-
-    def rename_node(self, node_id: str, page_description: str) -> str:
-        """Rename a node ID and page description together.
-
-        The graph uses node IDs as stable edge endpoints, so a rename must
-        relabel the NetworkX node rather than only editing page_description.
-        """
-        if node_id not in self.graph:
-            logger.warning("rename_node: missing node %s", node_id)
-            return node_id
-
-        node_data = self.graph.nodes[node_id]
-        old_description = node_data.get("page_description", "")
-        new_node_id = self._renamed_node_id(node_id, page_description)
-
-        node_data["page_description"] = page_description
-
-        if new_node_id != node_id:
-            nx.relabel_nodes(self.graph, {node_id: new_node_id}, copy=False)
-            self._record_alias(node_id, new_node_id)
-
-        logger.info(
-            "Renamed node %s → %s: '%s' → '%s'",
-            node_id,
-            new_node_id,
-            old_description,
-            page_description,
-        )
-        return new_node_id
-
-    def _record_alias(self, old_id: str, new_id: str) -> None:
-        # new_id can be an ID that was renamed away earlier; its stale alias would
-        # close a cycle that resolve_node_id never leaves.
-        self._node_aliases.pop(new_id, None)
-        self._node_aliases[old_id] = new_id
+        return node_id
 
     def resolve_node_id(self, node_id: str) -> str:
-        """``identify_state`` can rename any node and a merge can remove one, including
-        one a caller still holds, so a caller that keeps a node ID across either passes
-        it through here.
+        """A merge can remove any node, including one a caller still holds, so a caller
+        that keeps a node ID across one passes it through here.
         ``add_edge`` deliberately does not, so a stale endpoint is still reported.
         """
         while node_id in self._node_aliases:
@@ -2038,7 +2006,6 @@ class GraphManager:
         - Outgoing edges from *remove_id* are rewired from *keep_id*.
         - State schemas are merged (union of keys and values).
         - Visit counts are summed, and member observations are united in step order.
-        - The kept node retains its description.
         - The removed node is deleted from the graph, and its ID resolves to *keep_id*.
 
         Returns True if the merge was performed, False if either node is missing
@@ -2056,7 +2023,7 @@ class GraphManager:
         _merge_node_attributes(self.graph.nodes[keep_id], self.graph.nodes[remove_id])
         self._rewire_edges(keep_id, remove_id)
         self.graph.remove_node(remove_id)
-        self._record_alias(remove_id, keep_id)
+        self._node_aliases[remove_id] = keep_id
 
         logger.info(
             "Merged node %s into %s (now %d nodes, %d edges)",
@@ -2369,8 +2336,8 @@ class GraphManager:
         return as_str(record.get("activity"), "")
 
     def _node_from_stored(self, node_id: str, members: Sequence[str]) -> str:
-        """Add a node for ``members`` of ``node_id`` from the stored description of the
-        earliest of them: its description and its elements."""
+        """Add a node for ``members`` of ``node_id`` with the elements of the earliest of
+        them, from its stored describe output."""
         earliest = min(members, key=step_order)
         described = self._stored_screens[earliest].described
         screen = _ScreenDescription(described.page_description, described.state, described.elements)
@@ -2868,22 +2835,11 @@ class GraphManager:
     def get_start_node(self) -> str | None:
         """Return the initial node (the app's entry point).
 
-        Heuristic: the node with the lowest numeric ID suffix (s0_...).
+        Heuristic: the in-app node of the lowest number ``n`` among the IDs ``s<n>``, or
+        else the first in-app ID in sorted order.
         """
-        candidates: list[tuple[int, str]] = []
-        for node_id in self.graph:
-            if self._is_external(node_id):
-                continue
-            if node_id.startswith("s") and "_" in node_id:
-                num_part = node_id.split("_", 1)[0][1:]
-                if num_part.isdigit():
-                    candidates.append((int(num_part), _node_id(node_id)))
-
-        if candidates:
-            return min(candidates)[1]
-
-        nodes = sorted(_node_id(n) for n in self.graph if not self._is_external(n))
-        return nodes[0] if nodes else None
+        in_app = (_node_id(n) for n in self.graph if not self._is_external(n))
+        return min(in_app, key=self._node_numeric_order, default=None)
 
     def nodes_without_path_to_start(self) -> PathToStart:
         """Return every node from which no recorded edge path leads to the start node.
@@ -3027,7 +2983,6 @@ class GraphManager:
                 "package": attrs.get("package", ""),
                 "activity": activities[0] if activities else "",
                 "activities": activities,
-                "page_description": attrs.get("page_description", ""),
                 "state_schema": attrs.get("state_schema", {}),
                 "last_detail_snapshot": attrs.get("last_detail_snapshot", {}),
                 "interactable_elements": attrs.get("interactable_elements", []),
@@ -3154,7 +3109,6 @@ class GraphManager:
                 package=as_str(node_data.get("package"), ""),
                 activity=activities[0] if activities else "",
                 activities=activities,
-                page_description=node_data.get("page_description", ""),
                 state_schema=node_data.get("state_schema", {}),
                 last_detail_snapshot=node_data.get("last_detail_snapshot", {}),
                 interactable_elements=node_data.get("interactable_elements", []),
@@ -3368,11 +3322,8 @@ class GraphManager:
 
     @staticmethod
     def _node_numeric_order(node_id: str) -> tuple[int, str]:
-        if node_id.startswith("s") and "_" in node_id:
-            num = node_id.split("_", 1)[0][1:]
-            if num.isdigit():
-                return int(num), node_id
-        return 10**9, node_id
+        number = _node_number(node_id)
+        return (10**9 if number is None else number), node_id
 
     def merge_proposals(
         self,
@@ -3409,8 +3360,8 @@ class GraphManager:
         lowest-numbered node, and report each pair; README.md#merge-proposals.
 
         A pair's nodes are followed through merges made before this call. A question
-        shows the verifier the closest members of the pair's two nodes: the member of
-        the more-visited node, with that node's description, and the member of the
+        shows the verifier the closest members of the pair's two nodes, each with its own
+        description: the member of the more-visited node first, then the member of the
         other. The pairs whose members are most alike come first.
         """
         results: list[dict[str, object]] = []
@@ -3452,8 +3403,7 @@ class GraphManager:
         )
         shown = self.closest_members(existing, new)
         result.update(members={existing: shown.existing, new: shown.new}, image_score=shown.score)
-        description = self.graph.nodes[existing].get("page_description", "")
-        question = MemberQuestion(shown.existing, shown.new, description)
+        question = MemberQuestion(shown.existing, shown.new)
         return _MergeCheck((node_a, node_b), question, shown.score, result)
 
     def _ask_merge_rounds(

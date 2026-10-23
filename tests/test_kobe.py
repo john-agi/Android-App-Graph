@@ -572,9 +572,7 @@ def test_a_replay_opens_a_menu_on_a_form_filled_through_a_dialog_before_choosing
     enterprise = {"security": "WPA/WPA2-Enterprise", "open_menu": None}
     menu_open = {**enterprise, "open_menu": "CA certificate dropdown"}
     for node in ("s0_home", form, dialog, installer):
-        replaying_kobe.graph.graph.add_node(
-            node, page_description=node, package="com.demo", replay_misses=0
-        )
+        replaying_kobe.graph.graph.add_node(node, package="com.demo", replay_misses=0)
     _identifying(
         replaying_kobe,
         monkeypatch,
@@ -704,39 +702,6 @@ def test_a_resumed_exploration_knows_the_setup_only_on_the_node_its_replay_reach
     replaying_kobe.explore(max_steps=1, resume_from="s1_list")
 
     assert _setups(replaying_kobe)[(reached, reached)] == [setup]
-
-
-@pytest.mark.usefixtures("no_sleep", "device_log")
-def test_a_replay_to_the_start_node_renamed_on_the_screen_the_app_opened_on_reaches_it(
-    replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Expecting the start node on the screen the app opened on, identification can reject
-    and rename it. A replay that then reaches it under its new ID has reached its node, so
-    the setup of the next action there is known."""
-    scroll = {"action": "swipe", "x1": 50, "y1": 180, "x2": 50, "y2": 40}
-    graph = replaying_kobe.graph
-    _list_reached_from_home(replaying_kobe)
-    graph.add_edge("s0_home", "s1_list", action=[{"action": "tap", "x": 1, "y": 2}])
-    graph.add_edge("s1_list", "s0_home", action=[{"action": "back"}])
-    monkeypatch.setattr(
-        "android_app_graph.utils.graph_manager.get_embedding", lambda *_args, **_kw: [1.0]
-    )
-    answers = iter(["s1_list", "s0_home_feed", "s0_home_feed"])
-
-    def identify(_observation: Observation, *, expected_observation: str | None = None) -> str:
-        if graph.node_of(expected_observation) == "s0_home":
-            graph.rename_node("s0_home", "Home feed")
-        return next(answers)
-
-    monkeypatch.setattr(graph, "identify_state", identify)
-    _describing_by_node_id(replaying_kobe, monkeypatch)
-    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Scroll", []))
-    monkeypatch.setattr("android_app_graph.kobe.predict_next_action", lambda **_kw: (scroll, ""))
-    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
-
-    replaying_kobe.explore(max_steps=1, resume_from="s0_home")
-
-    assert _setups(replaying_kobe)[("s0_home_feed", "s0_home_feed")] == [[]]
 
 
 _SCROLL_CLOCKS = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 60}
@@ -941,9 +906,7 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     explorer.explore(max_steps=1)
 
     assert [action["action"] for action in device.actions] == ["tap"]
-    assert list(explorer.graph.graph.edges) == [
-        ("s0_home", "s1_about_page_with_privacy_policy_link")
-    ]
+    assert list(explorer.graph.graph.edges) == [("s0", "s1")]
 
 
 _ORTHOGONAL = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
@@ -1021,14 +984,14 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     }
     assert (records[5]["action"], records[5]["from_node"], records[5]["to_node"]) == (
         tap,
-        "s0_home",
-        "s1_about",
+        "s0",
+        "s1",
     )
-    assert explorer.graph.graph.nodes["s1_about"]["observations"] == ["000003"]
+    assert explorer.graph.graph.nodes["s1"]["observations"] == ["000003"]
     lines = _identify_lines(explorer)
     assert [(line["observation"], line["identify"]["node"]) for line in lines] == [
-        ("000000", "s0_home"),
-        ("000003", "s1_about"),
+        ("000000", "s0"),
+        ("000003", "s1"),
     ]
     assert [line["describe"]["page_description"] for line in lines] == ["home", "about"]
 
@@ -1081,7 +1044,7 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     assert explorer.graph.graph.nodes[EXTERNAL_WEB_NODE]["observations"] == ["000003"]
     assert (records[8]["observation"], records[8]["expected_observation"]) == ("000007", "000000")
     (*_, back) = _identify_lines(explorer)
-    assert (back["identify"]["stage"], back["identify"]["expected_node"]) == ("exact", "s0_home")
+    assert (back["identify"]["stage"], back["identify"]["expected_node"]) == ("exact", "s0")
 
 
 @pytest.mark.parametrize(
@@ -1123,9 +1086,9 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
 
     explorer.explore(max_steps=1)
 
-    assert set(explorer.graph.graph) == {"s0_home", EXTERNAL_WEB_NODE}
-    assert list(explorer.graph.graph.edges) == [("s0_home", EXTERNAL_WEB_NODE)]
-    edge = explorer.graph.graph.edges["s0_home", EXTERNAL_WEB_NODE]
+    assert set(explorer.graph.graph) == {"s0", EXTERNAL_WEB_NODE}
+    assert list(explorer.graph.graph.edges) == [("s0", EXTERNAL_WEB_NODE)]
+    edge = explorer.graph.graph.edges["s0", EXTERNAL_WEB_NODE]
     assert (edge["instructions"], edge["target_observations"]) == ([recorded], ["news article"])
     assert [action["action"] for action in device.actions] == [executed, "back"]
 
@@ -1188,10 +1151,7 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
 
     explorer.explore(max_steps=2)
 
-    assert set(explorer.graph.graph.edges) == {
-        ("s0_home", EXTERNAL_WEB_NODE),
-        ("s0_home", "s1_settings"),
-    }
+    assert set(explorer.graph.graph.edges) == {("s0", EXTERNAL_WEB_NODE), ("s0", "s1")}
     tap = {"action": "tap", "x": 50, "y": 100}
     assert device_log == [tap, *leaving, tap]
 
@@ -1214,14 +1174,13 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     """A tap on the FAB never marks the dark mode toggle, whose "on" is inside "button"."""
     kobe.graph.graph.add_node(
         "s0_home",
-        page_description="home",
         interactable_elements=[
             {"description": "Turn on dark mode toggle", "position": "top", "explored": False},
             {"description": "Compose FAB", "position": "bottom right", "explored": False},
         ],
         replay_misses=0,
     )
-    kobe.graph.graph.add_node("s1_compose", page_description="compose", replay_misses=0)
+    kobe.graph.graph.add_node("s1_compose", replay_misses=0)
     screens = iter(["s0_home", "s1_compose"])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     _describing_by_node_id(kobe, monkeypatch)
@@ -1253,9 +1212,7 @@ def test_a_crash_mid_exploration_is_logged_with_its_traceback(
     def _crash(**_kwargs: object) -> NoReturn:
         raise failure
 
-    kobe.graph.graph.add_node(
-        "s0_home", page_description="home", interactable_elements=[], replay_misses=0
-    )
+    kobe.graph.graph.add_node("s0_home", interactable_elements=[], replay_misses=0)
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     _describing_by_node_id(kobe, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
@@ -1450,7 +1407,7 @@ def test_a_step_that_leaves_the_app_records_its_screen_on_the_app_s_node(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
+def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_rejected(
     tmp_path: Path,
     two_screen_device: DeviceController,
     router_client: OpenRouter,
@@ -1460,8 +1417,9 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The explorer acts from the node's new ID after identify_state renames it, so the
-    step's edge is recorded and its element marked explored."""
+    """The verifier rejects the node the step left and refines only the new screen's
+    description, so the step's edge goes from that node, under the ID it had, and its
+    element is marked explored."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     agent = Kobe(
         two_screen_device,
@@ -1481,7 +1439,6 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     verdict = {
         "same": False,
         "reason": "a query has been entered",
-        "existing_description": "Chat search page with recent searches",
         "new_description": "Chat search results page",
     }
     router_responses.extend(
@@ -1502,9 +1459,8 @@ def test_a_step_is_recorded_on_the_node_identify_state_renamed_while_leaving_it(
     with caplog.at_level(logging.WARNING, logger="android_app_graph"):
         agent.explore(max_steps=1)
 
-    renamed, results = "s0_chat_search_page_with_recent_searches", "s1_chat_search_results_page"
-    assert agent.graph.graph.has_edge(renamed, results)
-    assert agent.graph.graph.nodes[renamed]["interactable_elements"] == [
+    assert agent.graph.graph.has_edge("s0", "s1")
+    assert agent.graph.graph.nodes["s0"]["interactable_elements"] == [
         {"description": "Search button", "position": "top", "explored": True}
     ]
     assert "add_edge: missing node(s)" not in caplog.text
@@ -1541,7 +1497,7 @@ def test_the_planner_and_a_new_edge_take_the_screen_s_own_description(
     planned_from: list[object] = []
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", planned_from))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
-    same = '{"same":true,"reason":"one screen","existing_description":null,"new_description":null}'
+    same = '{"same":true,"reason":"one screen","new_description":null}'
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
@@ -1560,7 +1516,7 @@ def test_the_planner_and_a_new_edge_take_the_screen_s_own_description(
 
     explorer.explore(max_steps=2)
 
-    node = "s0_chat_search_page"
+    node = "s0"
     assert list(explorer.graph.graph) == [node]
     assert planned_from == ["Chat search page", "Chat search results"]
     assert explorer.graph.graph[node][node]["target_observations"] == ["Chat search results"]
@@ -1574,8 +1530,8 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A replay that arrives at another node continues from where it arrived."""
-    kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
-    kobe.graph.graph.add_node("s1_settings", page_description="settings", replay_misses=0)
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
+    kobe.graph.graph.add_node("s1_settings", replay_misses=0)
     replayed: list[str] = []
 
     def replay(node_id: str) -> str:
@@ -1603,7 +1559,7 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
     planned_from: list[object] = []
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     _describing_by_node_id(kobe, monkeypatch)
@@ -1625,7 +1581,7 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A step that raises is not counted, so a re-run repeats it."""
-    kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
     kobe.graph.total_steps_completed = 3
 
     def stop_planning(**_kwargs: object) -> tuple[str, int | None]:
@@ -1653,9 +1609,7 @@ def test_a_run_resumed_from_a_node_logs_the_step_it_starts_from_before_the_repla
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    kobe.graph.graph.add_node(
-        "s0_home", page_description="home", package="com.demo", replay_misses=0
-    )
+    kobe.graph.graph.add_node("s0_home", package="com.demo", replay_misses=0)
     kobe.graph.total_steps_completed = 3
     logged_before_the_replay: list[str] = []
 
@@ -1694,9 +1648,7 @@ def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
     out those with no value."""
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     graph = explorer.graph.graph
-    graph.add_node(
-        "s0_home", page_description="home", last_detail_snapshot={"sort": "name"}, replay_misses=0
-    )
+    graph.add_node("s0_home", last_detail_snapshot={"sort": "name"}, replay_misses=0)
     details = iter([{"sort": "name"}, detail_after])
 
     def identify(*_args: object, **_kwargs: object) -> str:
@@ -1728,7 +1680,7 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     """No step is followed by a merge audit or a choice of where to continue."""
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     explorer.coverage_checkpoint_steps = 0
-    explorer.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
+    explorer.graph.graph.add_node("s0_home", replay_misses=0)
     monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     _describing_by_node_id(explorer, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
@@ -1868,11 +1820,11 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     one it removed, so the next step acts from a node still in the graph."""
     graph = replaying_kobe.graph
     for node_id in ("s0_list", "s1_list_dup"):
-        graph.graph.add_node(node_id, page_description="Item list", replay_misses=0)
+        graph.graph.add_node(node_id, replay_misses=0)
         add_member(graph, node_id)
         router_responses.append(httpx.Response(200, json=embedding_body))
     graph.embed_missing_members()
-    graph.graph.add_node("s2_detail", page_description="Item detail", replay_misses=0)
+    graph.graph.add_node("s2_detail", replay_misses=0)
     screens = iter(["s1_list_dup", "s1_list_dup", "s2_detail"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(screens))
     _describing_by_node_id(replaying_kobe, monkeypatch)
@@ -1911,7 +1863,7 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     """The checkpoint leaves the node the device is on out of its candidates, so it never
     replays the device to the screen it is already on."""
     for node_id in ("s1_list", "s2_list_dup"):
-        kobe.graph.graph.add_node(node_id, page_description="Item list", replay_misses=0)
+        kobe.graph.graph.add_node(node_id, replay_misses=0)
         add_member(kobe.graph, node_id)
         router_responses.append(httpx.Response(200, json=embedding_body))
     kobe.graph.embed_missing_members()
@@ -2016,9 +1968,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         "com.demo.Settings": "s3_settings",
         "com.demo.Sort": "s4_sort_menu",
     }
-    graph.graph.add_nodes_from(
-        [*nodes.values(), "s2_detail"], page_description="a screen", replay_misses=0
-    )
+    graph.graph.add_nodes_from([*nodes.values(), "s2_detail"], replay_misses=0)
     graph.add_edge("s0_home", "s1_list", action=[open_list])
     graph.add_edge("s1_list", "s2_detail", action=[open_item])
     monkeypatch.setattr(
@@ -2245,7 +2195,7 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
     assert set(nodes) == {"com.demo.Home", _DIALOG_ACTIVITY}
     dialog_node = graph.nodes[nodes[_DIALOG_ACTIVITY]]
-    assert dialog_node["page_description"] == "camera permission dialog"
+    assert kobe.graph.latest_description(nodes[_DIALOG_ACTIVITY]) == "camera permission dialog"
     assert "is_external" not in dialog_node
     edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
     assert edge["actions"] == [[tap]]
@@ -2368,7 +2318,7 @@ def test_a_step_into_another_app_returns_to_the_app_before_the_next_step(
     home_webp = base64.b64encode(encode_screenshot(str(HOME_SCREEN["screenshot"])))
     home_image = f"data:image/webp;base64,{home_webp.decode('ascii')}"
     assert home_image in router_requests[-1].content.decode()
-    assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
+    assert _node_packages(explorer) == {"s0": "com.demo", f"ext_{_SEARCH}": None}
 
 
 @pytest.mark.parametrize(
@@ -2424,8 +2374,8 @@ def test_a_step_that_leaves_the_app_marks_the_element_the_planner_names(
 
     explorer.explore(max_steps=1)
 
-    assert list(explorer.graph.graph.edges) == [("s0_home", reached)]
-    elements = explorer.graph.graph.nodes["s0_home"]["interactable_elements"]
+    assert list(explorer.graph.graph.edges) == [("s0", reached)]
+    elements = explorer.graph.graph.nodes["s0"]["interactable_elements"]
     assert [e["description"] for e in elements if e["explored"]] == ["Search button"]
 
 
@@ -2458,9 +2408,9 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
 
     assert device_log == [_TAP, _BACK]
     assert _node_packages(explorer) == {
-        "s0_home": "com.demo",
+        "s0": "com.demo",
         f"ext_{_SEARCH}": None,
-        "s1_home_with_the_keyboard_shown": _KEYBOARD,
+        "s1": _KEYBOARD,
     }
 
 
@@ -2483,7 +2433,7 @@ def test_another_app_still_in_front_after_the_restart_stops_exploration_naming_i
         )
 
     assert device_log == [_TAP, _BACK, *_FIRST_RESTART]
-    assert _node_packages(explorer) == {"s0_home": "com.demo", f"ext_{_SEARCH}": None}
+    assert _node_packages(explorer) == {"s0": "com.demo", f"ext_{_SEARCH}": None}
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -2511,10 +2461,12 @@ type _Visit = str | tuple[str, Mapping[str, object]]
 
 
 def _describing_by_node_id(explorer: Kobe, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Describe each node, and the screen last identified as it, by the node's ID, as a
-    fake identify_state or a node added by hand gives no member a description."""
+    """Describe each node, and the screen last identified as it, by the node's ID, and
+    each member by its observation ID, as a fake identify_state or a node added by hand
+    gives no member a description."""
     monkeypatch.setattr(explorer.graph, "latest_description", lambda node_id: node_id)
     monkeypatch.setattr(explorer.graph, "node_descriptions", lambda node_id: node_id)
+    monkeypatch.setattr(explorer.graph, "description", lambda observation_id: observation_id)
 
 
 def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visit) -> list[object]:
@@ -2545,7 +2497,6 @@ def _list_reached_from_home(explorer: Kobe, *extra_nodes: str) -> None:
     for node in ("s0_home", "s1_list", *extra_nodes):
         explorer.graph.graph.add_node(
             node,
-            page_description=node,
             package="com.demo",
             replay_misses=0,
             observations=[f"{node}-observation"],

@@ -390,13 +390,19 @@ _STRUCTURED: dict[str, tuple[str, bool]] = {
     "describe": ("action_description", True),
 }
 
+
+def _verify_itself(client: OpenRouter, screenshot: str, description: str) -> dict[str, Any]:
+    """Ask the verifier whether ``screenshot`` and a copy of it show one screen, both
+    described as ``description``."""
+    shown = vlm.DescribedScreenshot(screenshot, description)
+    return vlm.verify_same_node(client, existing=shown, new=shown, settings=PAGE_DETAIL)
+
+
 _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
     "page": lambda client, screenshot: vlm.describe_page_and_state(
         client, screenshot, settings=PAGE_DETAIL
     ),
-    "verify": lambda client, screenshot: vlm.verify_same_node(
-        client, screenshot, screenshot, "home", settings=PAGE_DETAIL
-    ),
+    "verify": lambda client, screenshot: _verify_itself(client, screenshot, "home"),
     "normalize": lambda client, _screenshot: vlm.normalize_edge(
         client, ["search milk"], settings=PAGE_DETAIL
     ),
@@ -646,9 +652,7 @@ def _sent_schemas(
         )
     )
     vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-    vlm.verify_same_node(
-        router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-    )
+    _verify_itself(router_client, png_screenshot, "home")
     vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     vlm.audit_graph(router_client, "home", settings=PAGE_DETAIL)
@@ -685,10 +689,10 @@ def test_strict_schemas_close_every_object_and_free_form_ones_keep_their_format(
     for name, schema in strict.items():
         assert _strict_violations(schema["schema"]) == [], name
     assert schemas["exploration_target"]["schema"]["properties"]["node_id"]["enum"] == ["a", "b"]
-    assert schemas["node_verification"]["schema"]["properties"]["new_description"]["type"] == [
-        "string",
-        "null",
-    ]
+    verification = schemas["node_verification"]["schema"]
+    assert sorted(verification["properties"]) == ["new_description", "reason", "same"]
+    assert sorted(verification["required"]) == ["new_description", "reason", "same"]
+    assert verification["properties"]["new_description"]["type"] == ["string", "null"]
     state = schemas["page_description"]["schema"]["properties"]["state"]
     assert state["additionalProperties"] == {"type": ["string", "number", "boolean", "null"]}
     examples = schemas["edge_template"]["schema"]["properties"]["examples"]
@@ -723,12 +727,15 @@ def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    for existing_nodes in (None, ["Add Wi-Fi network dialog"]):
+    for known_descriptions in (None, ["Add Wi-Fi network dialog"]):
         router_responses.append(
             chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
         )
         vlm.describe_page_and_state(
-            router_client, png_screenshot, existing_nodes=existing_nodes, settings=PAGE_DETAIL
+            router_client,
+            png_screenshot,
+            known_descriptions=known_descriptions,
+            settings=PAGE_DETAIL,
         )
     for request in router_requests:
         prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
@@ -747,13 +754,7 @@ def test_the_verifier_treats_keyboard_focus_and_scroll_as_the_same_screen(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.append(chat_response(content='{"same":true,"reason":"keyboard only"}'))
-    vlm.verify_same_node(
-        router_client,
-        png_screenshot,
-        png_screenshot,
-        "Add Wi-Fi network dialog",
-        settings=PAGE_DETAIL,
-    )
+    _verify_itself(router_client, png_screenshot, "Add Wi-Fi network dialog")
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     assert "differ only in whether the on-screen keyboard is shown" in prompt
     assert "Which input field is active" not in prompt
@@ -769,12 +770,15 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
     """A menu open over a page and its expanded sections are recorded as the state keys
     ``open_menu`` and ``expanded_sections``, never in the page's description, while a
     dialog or full-screen picker with its own purpose is described as a screen."""
-    for existing_nodes in (None, ["Add Wi-Fi network dialog"]):
+    for known_descriptions in (None, ["Add Wi-Fi network dialog"]):
         router_responses.append(
             chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
         )
         vlm.describe_page_and_state(
-            router_client, png_screenshot, existing_nodes=existing_nodes, settings=PAGE_DETAIL
+            router_client,
+            png_screenshot,
+            known_descriptions=known_descriptions,
+            settings=PAGE_DETAIL,
         )
     for request in router_requests:
         prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
@@ -798,9 +802,7 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     screen, the DIFFERENT cases name no menu, and a dialog with its own purpose is
     DIFFERENT from the page beneath it."""
     router_responses.append(chat_response(content='{"same":true,"reason":"menu only"}'))
-    vlm.verify_same_node(
-        router_client, png_screenshot, png_screenshot, "Wi-Fi settings", settings=PAGE_DETAIL
-    )
+    _verify_itself(router_client, png_screenshot, "Wi-Fi settings")
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     same_cases, different_cases = prompt.split("Two screenshots are DIFFERENT screens", 1)
     same_cases = same_cases[same_cases.index("Two screenshots are the SAME screen") :]
@@ -818,17 +820,48 @@ def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    """The descriptions the verifier writes for two different screens, which rename the
-    rejected node, leave out what "page_description" leaves out, so a node whose closest
-    member has a menu open is named after its page's purpose."""
+    """The description the verifier writes for the new screen when the two differ leaves
+    out what "page_description" leaves out, so a screen with a menu open is named after
+    its page's purpose."""
     router_responses.append(chat_response(content='{"same":true,"reason":"same page"}'))
-    vlm.verify_same_node(
-        router_client, png_screenshot, png_screenshot, "Wi-Fi Direct", settings=PAGE_DETAIL
-    )
+    _verify_itself(router_client, png_screenshot, "Wi-Fi Direct")
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     refinement = prompt[prompt.index("If they are DIFFERENT screens") :]
     for kind in ("keyboard", "focus", "scrolled", "menu", "dropdown", "picker", "expanded"):
         assert kind in refinement, kind
+
+
+def test_the_verifier_is_shown_each_screenshot_with_its_own_description(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    shown_descriptions: Callable[[httpx.Request], list[str]],
+) -> None:
+    """The existing screenshot comes first, and when the two differ the verifier refines
+    only the new screen's description."""
+    router_responses.append(chat_response(content='{"same":true,"reason":"one screen"}'))
+    other = base64.b64encode(b"another screenshot").decode("ascii")
+
+    vlm.verify_same_node(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Wi-Fi settings"),
+        new=vlm.DescribedScreenshot(other, "Network settings"),
+        settings=PAGE_DETAIL,
+    )
+
+    (request,) = router_requests
+    assert shown_descriptions(request) == [
+        'First screenshot (existing node), described as "Wi-Fi settings":',
+        'Second screenshot (new screen), described as "Network settings":',
+    ]
+    content = json.loads(request.content)["messages"][0]["content"]
+    images = [part["image_url"]["url"] for part in content if part["type"] == "image_url"]
+    assert [image.rpartition(",")[2] for image in images] == [png_screenshot, other]
+    refinement = content[0]["text"][content[0]["text"].index("If they are DIFFERENT screens") :]
+    assert "description of the second screenshot" in refinement
+    assert refinement.count("_description") == 1
 
 
 def test_the_merge_audit_may_report_a_page_with_its_menu_open(
@@ -1193,9 +1226,7 @@ def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
         ]
     )
     vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
-    vlm.verify_same_node(
-        router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-    )
+    _verify_itself(router_client, png_screenshot, "home")
     vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
     vlm.audit_merge_nodes(router_client, "home", settings=audit)
     vlm.select_exploration_target(router_client, "demo", [{"node_id": "x"}], settings=PAGE_DETAIL)
@@ -1394,9 +1425,7 @@ def test_a_failed_generation_is_re_asked_once_and_never_becomes_a_fallback(
 
     def request() -> object:
         if operation == "verify":
-            return vlm.verify_same_node(
-                router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-            )["same"]
+            return _verify_itself(router_client, png_screenshot, "home")["same"]
         return _request(operation, router_client, png_screenshot)
 
     if recover:
@@ -1412,9 +1441,7 @@ def test_a_failed_generation_is_re_asked_once_and_never_becomes_a_fallback(
 def _final_fallback(operation: str, client: OpenRouter, png_screenshot: str) -> object:
     match operation:
         case "verify":
-            result: object = vlm.verify_same_node(
-                client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-            )
+            result: object = _verify_itself(client, png_screenshot, "home")
         case "normalize":
             normalized = vlm.normalize_edge(client, ["search milk"], settings=PAGE_DETAIL)
             result = {key: normalized[key] for key in ("instruction_template", "is_template")}
@@ -1566,9 +1593,7 @@ def test_node_verification_that_times_out_is_asked_once_more_then_has_no_answer(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level("WARNING"):
-        verdict = vlm.verify_same_node(
-            timing_out_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-        )
+        verdict = _verify_itself(timing_out_client, png_screenshot, "home")
     assert verdict == {"same": False, "answered": False, "reason": "timed out"}
     assert caplog.text.count("node_verify: timed out after retries") == 2
     assert "node_verify: asking once more" in caplog.text
@@ -1599,9 +1624,7 @@ def test_node_verification_takes_the_answer_to_its_second_ask(
         httpx.Client(transport=httpx.MockTransport(answer_late)) as http_client,
         open_client("test-key", http_client=http_client) as client,
     ):
-        verdict = vlm.verify_same_node(
-            client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-        )
+        verdict = _verify_itself(client, png_screenshot, "home")
     assert verdict == {"same": True, "reason": "same list"}
     assert len(attempts) == 3
 
@@ -1637,9 +1660,7 @@ def test_each_node_verification_ask_sends_a_429_again_within_a_deadline_of_its_o
         httpx.Client(transport=httpx.MockTransport(rate_limit_then_time_out)) as http_client,
         open_client("test-key", http_client=http_client) as client,
     ):
-        verdict = vlm.verify_same_node(
-            client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-        )
+        verdict = _verify_itself(client, png_screenshot, "home")
     assert verdict == {"same": False, "answered": False, "reason": "timed out"}
     assert len(attempts) == 4
     assert caplog.text.count("node_verify: rate limited (HTTP 429); sending again in 120.0 s") == 2
@@ -1657,9 +1678,7 @@ def test_node_verification_with_an_unparseable_reply_has_no_answer(
 ) -> None:
     router_responses.append(chat_response(content="The screens look the same."))
     with caplog.at_level("WARNING"):
-        verdict = vlm.verify_same_node(
-            router_client, png_screenshot, png_screenshot, "home", settings=PAGE_DETAIL
-        )
+        verdict = _verify_itself(router_client, png_screenshot, "home")
     assert verdict == {"same": False, "answered": False, "reason": "parse error"}
     assert "node_verify: no answer (parse error)" in caplog.text
     assert len(router_requests) == 1

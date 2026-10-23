@@ -425,9 +425,7 @@ def test_require_known_edge_endpoints_raises_for_a_node_without_an_id(tmp_path: 
     """
     path = tmp_path / "demo.json"
     with pytest.raises(ValueError, match="node id must be a string") as excinfo:
-        graph_files.require_known_edge_endpoints(
-            {"nodes": [{"page_description": "x"}], "edges": []}, path
-        )
+        graph_files.require_known_edge_endpoints({"nodes": [{"activity": "x"}], "edges": []}, path)
     assert str(path) in str(excinfo.value)
 
 
@@ -474,7 +472,7 @@ def test_require_graph_shape_rejects_a_non_string_node_id(tmp_path: Path) -> Non
 def test_require_graph_shape_rejects_a_node_without_an_id(tmp_path: Path) -> None:
     path = tmp_path / "demo.json"
     with pytest.raises(ValueError, match="node id must be a string") as excinfo:
-        graph_files.require_graph_shape({"nodes": [{"page_description": "x"}], "edges": []}, path)
+        graph_files.require_graph_shape({"nodes": [{"activity": "x"}], "edges": []}, path)
     assert str(path) in str(excinfo.value)
 
 

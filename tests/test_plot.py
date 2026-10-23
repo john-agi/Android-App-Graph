@@ -217,7 +217,6 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
                 "nodes": [
                     {
                         "id": "s0_home",
-                        "page_description": "Home",
                         "activity": "com.demo.Home",
                         "visit_count": 3,
                         "state_schema": {"tab": ["map"]},
@@ -226,7 +225,6 @@ def _write_graph(tmp_path: Path, *, stem: str = "demo") -> Path:
                     },
                     {
                         "id": "s1_search",
-                        "page_description": "Search results",
                         "activity": "com.demo.Search",
                         "observations": ["000001"],
                     },
@@ -313,8 +311,8 @@ def test_load_graph_labels_skip_the_placeholders_of_unrecorded_values(tmp_path: 
         json.dumps(
             {
                 "nodes": [
-                    {"id": "s0_list", "page_description": "Shopping list", **_MEMBER},
-                    {"id": "s1_info", "page_description": "Item info", **_MEMBER},
+                    {"id": "s0_list", **_MEMBER},
+                    {"id": "s1_info", **_MEMBER},
                 ],
                 "edges": [
                     _saved(
@@ -389,8 +387,8 @@ def test_load_graph_labels_prefer_the_template_and_omit_empty_deltas(
         json.dumps(
             {
                 "nodes": [
-                    {"id": "s0_search", "page_description": "Search", **_MEMBER},
-                    {"id": "s1_results", "page_description": "Results", **_MEMBER},
+                    {"id": "s0_search", **_MEMBER},
+                    {"id": "s1_results", **_MEMBER},
                 ],
                 "edges": [
                     _saved(
@@ -431,7 +429,7 @@ def _write_described_members(tmp_path: Path, members: dict[str, str]) -> Path:
     """Write a one-node graph whose node lists the observations of ``members`` in order,
     each described as ``members`` says."""
     graph_path = tmp_path / "demo.json"
-    node = {"id": "s0_home", "page_description": "Home page", "observations": list(members)}
+    node = {"id": "s0_home", "observations": list(members)}
     graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
     for observation_id, description in members.items():
         _describe_member(graph_path, observation_id, description)
@@ -488,7 +486,7 @@ def test_load_graph_rejects_an_edge_without_actions_or_one_entry_per_action(
     tmp_path: Path, edge: dict[str, object], problem: str
 ) -> None:
     graph_path = tmp_path / "demo.json"
-    nodes = [{"id": "s0_home", "page_description": "Home", **_MEMBER}]
+    nodes = [{"id": "s0_home", **_MEMBER}]
     edges = [{"source": "s0_home", "target": "s0_home", **edge}]
     graph_path.write_text(json.dumps({"nodes": nodes, "edges": edges}), encoding="utf-8")
     _write_step_image(tmp_path, "000000", b"image")
@@ -504,7 +502,7 @@ def test_load_graph_rejects_an_edge_without_actions_or_one_entry_per_action(
 
 def test_load_graph_rejects_a_file_without_an_edges_list(tmp_path: Path) -> None:
     graph_path = tmp_path / "demo.json"
-    nodes = [{"id": "s0_home", "page_description": "Home", **_MEMBER}]
+    nodes = [{"id": "s0_home", **_MEMBER}]
     graph_path.write_text(json.dumps({"nodes": nodes}), encoding="utf-8")
     _write_step_image(tmp_path, "000000", b"image")
 
@@ -525,8 +523,8 @@ def test_load_graph_rejects_a_node_that_does_not_list_its_members(
 ) -> None:
     graph_path = tmp_path / "demo.json"
     nodes = [
-        {"id": "s0_home", "page_description": "Home", **_MEMBER},
-        {"id": "s1_search", "page_description": "Search", **membership},
+        {"id": "s0_home", **_MEMBER},
+        {"id": "s1_search", **membership},
     ]
     graph_path.write_text(json.dumps({"nodes": nodes, "edges": []}), encoding="utf-8")
 
@@ -678,25 +676,21 @@ _CHROME = "ext_com.android.chrome"
 
 
 def _write_described_graph(tmp_path: Path) -> Path:
-    """Write a graph whose home node is described as ``Home`` and whose members say
-    otherwise: the earliest is described as a search results list, the next was refined
-    to a home map, and the last is an exact copy of it. The home node leads to Chrome, and
-    an app chooser is described as opening an external app."""
+    """Write a graph whose home node's members are described differently: the earliest
+    as a search results list, the next as a home screen refined to a home map, and the
+    last is an exact copy of it. The home node leads to Chrome and to an app chooser."""
     graph_path = tmp_path / "demo.json"
     nodes = [
         {
             "id": "s0_home",
-            "page_description": "Home",
             "observations": ["000000", "000001", "000002"],
         },
         {
             "id": "s1_chooser",
-            "page_description": "Open with external app",
             "observations": ["000003"],
         },
         {
             "id": _CHROME,
-            "page_description": "[external app: com.android.chrome]",
             "observations": ["000004"],
         },
     ]

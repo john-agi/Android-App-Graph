@@ -368,13 +368,12 @@ empty after one warning.
 Description vectors live beside the graph file, in `<graph file stem>_text_emb.json`:
 `<app_name>_text_emb.json` for the explored graph and `<app_name>_audited_text_emb.json`
 for the audited copy, which starts from the explored graph's. A description depends on
-the other nodes' descriptions in its prompt, so its vector belongs to one graph. An
+the other screens' descriptions in its prompt, so its vector belongs to one graph. An
 in-app screenshot the description model describes keeps the vector of the description
 it ends with: its [`describe`](#screen-matching) output's `page_description`, or the
 description the step's first rejection refined it to
-(`identify.refinement.new_description`), which also names
-the node the screen starts when every check rejects it. An exact match copies its
-member's vector without a request. The file is written with the graph, just before it.
+(`identify.refinement.new_description`). An exact match copies its member's vector
+without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
 member of an in-app node but a [black](#step-log) one, which is never described and
 which every reader of these vectors leaves out: a missing file, one tagged with
@@ -496,7 +495,7 @@ list, the tap that opened the menu an option is on, or the choice in a dialog
 that filled in a form. What exploration did on the screen and undid before the
 action, such as opening a row and pressing Back, is not part of the setup, so
 the replay does not send it. Exploration's log names each setup action, as in
-`Replay 2/3: setup 1/1 on s30_apps via swipe`.
+`Replay 2/3: setup 1/1 on s30 via swipe`.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking favours nodes with many unexplored
@@ -659,6 +658,10 @@ the option. A dialog, bottom sheet or full-screen picker that has its own purpos
 such as a data usage warning dialog, is a node of its own, and a menu open over it
 is that node's state.
 
+A node's ID is `s<n>`, numbered in the order nodes are made, such as `s30`, and it
+never changes; `ext_web` and `ext_<package>` name the nodes of
+[outside web content and other apps](#external-apps-and-web-pages).
+
 Each node lists the observations assigned to it in `observations`, in step
 order: a screen joins the list of the node it is matched to or starts, a merge unites
 both lists, and the audit's member checks move members from one list to another (see
@@ -672,19 +675,25 @@ own rule:
 - `app-graph-plot` shows the earliest member with the node's most common member
   description as its thumbnail, so the picture shows the screen the label names.
 
-Each member also keeps the description its screen ended with: its `describe` output's
-`page_description`, or the description its step's first rejection refined it to
-(`identify.refinement.new_description`). An exact match takes the description of the
-member it copied, and a [black](#screen-matching) member the one made from its
-activity. Screen matching keeps each description as it places the screen, and loading
-a graph reads them back from its identify file (see [Screen matching](#screen-matching)).
-Each use of a description takes it by what it is about:
+A node has no description of its own. Each member keeps the description its screen
+ended with: its `describe` output's `page_description`, or the description its step's
+first rejection refined it to (`identify.refinement.new_description`). An exact match
+takes the description of the member it copied, and a [black](#screen-matching) member
+the one made from its activity. Screen matching keeps each description as it places
+the screen, and loading a graph reads them back from its identify file (see
+[Screen matching](#screen-matching)). Each use of a description takes it by what it is
+about:
 
-- one screen takes its own: the planner is given the description of the screen the
-  device was last identified on, and told where each action tried from there led by
-  that action's target observation; a new edge action records the description of the
-  screen it reached as its target observation, which it keeps when the audit moves it
-  to another edge;
+- one screen takes its own: the verifier is shown each screenshot with its own
+  description, in screen matching, in the audit's merge checks and in its member
+  checks; the planner is given the description of the screen the device was last
+  identified on, and told where each action tried from there led by that action's
+  target observation; a new edge action records the description of the screen it
+  reached as its target observation, which it keeps when the audit moves it to
+  another edge;
+- the description model is given every distinct description of the members of the
+  in-app nodes of the screen's package, in the step order of the first member
+  described so;
 - a whole node lists every distinct description of its members with the number of
   members that have it, most first, then by earliest member, such as
   `"Chrome app permissions overview" (14), "App permissions settings" (2)`: the
@@ -717,15 +726,18 @@ both are described below the steps.
    copies that member's description, state, elements and description vector, so
    neither the description model nor the verifier runs. Members of two nodes with the
    same hash decide nothing.
-3. **Description.** The description model describes the screen; web content from
-   outside the app goes to `ext_web`. The description is embedded (see
-   [Embedding caches](#embedding-caches)).
+3. **Description.** The description model describes the screen, given every
+   distinct description of the members of the package's in-app nodes, in the step
+   order of the first member described so: a screen of a listed type takes that
+   description word for word. Web content from outside the app goes to `ext_web`. The
+   description is embedded (see [Embedding caches](#embedding-caches)).
 4. **Expected node.** Where the caller knows where the screen should be, it names a
    screenshot of that screen, its `expected_observation` (see [Step log](#step-log)),
    and the node that lists that screenshot now is verified first, against its member
    closest to the screen: the node a replay leads to, the screen a step left when Back
    closes an outside web page or another app, the start node after a restart, and the
-   target of the audit's retried edge. A screenshot no node lists names no node. A
+   target of the audit's retried edge. A screenshot no node lists names no node. The
+   verifier is shown that member and the screen, each with its own description. A
    confirmation decides; a rejection leaves the node off the short list.
 5. **Short list.** Two sources rank the other nodes: `image`, by the image cosine of
    each node's closest member, proposes `image_candidates`, and `text`, by the highest
@@ -735,10 +747,11 @@ both are described below the steps.
    member by image and stops at the first confirmation, after `verifier_calls` calls at
    most, one more with an expected node.
 6. **New node.** A screen every check rejects starts a new node, of which it is the
-   first member. The step's first rejection refines the descriptions of both the
-   screen and the rejected node, which is renamed after its new description; later
-   rejections refine nothing. Refined descriptions, like every description, leave out
-   the state listed in [Graph nodes](#graph-nodes), such as an open menu.
+   first member. The step's first rejection refines the screen's description: the
+   verifier gives the screen a more specific description, which it keeps with that
+   description's vector. The rejected node and its members stay as they were, and
+   later rejections refine nothing. Refined descriptions, like every description,
+   leave out the state listed in [Graph nodes](#graph-nodes), such as an open menu.
 
 A verifier call that gives no answer (see
 [Requests and recovery](#requests-and-recovery)) is logged as such and counts as a
@@ -786,7 +799,7 @@ the config's.
 screenshot it places to `<graph file stem>_identify.jsonl` beside the graph file:
 `<app_name>_identify.jsonl` for the explored graph and `<app_name>_audited_identify.jsonl`
 for the audited copy, which starts as a copy of the explored graph's. A description
-depends on the other nodes' descriptions in its prompt, and a node on the matching
+depends on the other screens' descriptions in its prompt, and a node on the matching
 settings and every earlier decision, so both belong to one graph, while the
 [step log](#step-log) is shared. A last line a crash cut off before its newline is
 ignored, as an image without a record is, and cut off by the next line written. Each
@@ -807,12 +820,12 @@ node:
   a number;
 - `verifications`: each verifier call's `node`, the `member` it was shown, `same`,
   `answered` (`false` when the verifier gave no answer) and the `reason`;
-- `refinement`: the descriptions the step's first rejection refined, and what the
-  rejected node was renamed to, or `null`;
+- `refinement`: the `node` whose rejection refined the screen's description and that
+  `new_description`, or `null`;
 - `node`, the node the screen joined, under its ID at that moment.
 
-The graph file's `node_aliases` maps each node ID a rename or merge retired to
-the ID that replaced it, so a node ID recorded in the step log by an earlier run
+The graph file's `node_aliases` maps each node ID a merge retired to the ID of the
+node it was merged into, so a node ID recorded in the step log by an earlier run
 still resolves.
 
 Loading a graph fails with an error naming the file and what is wrong: the file
@@ -997,8 +1010,8 @@ separates more members.
 A near-identical image or description proves nothing on its own: a start search and
 a destination search look alike and are different screens. A pair is verified on the
 two members whose screenshots are closest, whichever source proposed it: the verifier
-sees the member of the more-visited node, with that node's description, beside the
-member of the other.
+sees the member of the more-visited node beside the member of the other, each with its
+own description.
 
 Two answers can decide a third: A = B and B = C give A = C, and A = B and B ≠ C give
 A ≠ C. So the pairs are ordered by the image cosine of their closest members, most
@@ -1052,7 +1065,7 @@ member.
 
 - Every other group is checked against home, larger groups first, on the pair whose
   screenshots are closest across them, the strongest evidence that the two are one
-  screen:
+  screen, each member shown to the verifier with its own description:
   - a group of two or more members is a split check. When the verifier tells the
     pair apart, the group becomes a new node.
   - a lone member is a move check. When the verifier tells it apart from its closest
@@ -1063,9 +1076,8 @@ member.
     moves to the first node the verifier confirms, or to a new node. A
     [black](#screen-matching) member, which has neither, moves by its activity
     instead, as screen matching places it, with no verifier call: to the node with a
-    black member of its activity, or to a new node described from its activity. The
-    short list would rank every black node first by image, and the verifier would see
-    two identical black images.
+    black member of its activity, or to a new node. The short list would rank every
+    black node first by image, and the verifier would see two identical black images.
   - a split or move check the verifier gives no answer on (see
     [Requests and recovery](#requests-and-recovery)) leaves the node whole: every
     change rests on a verifier answer.
@@ -1084,12 +1096,12 @@ member.
   is the pair the merge was verified on, so it reuses that answer and the node stays
   whole.
 
-A node a split or a move makes takes its description and elements from the stored
-describe output of its earliest member, or from its activity when that member is
-black, and its state schema from all its members' states. Members carry their visits,
-states, activities and description vectors, so no embedding is requested. The node
-they leave keeps its description, state schema and elements. No node ID changes, so
-no alias is recorded: a node's `observations` say where each observation belongs.
+A node a split or a move makes takes its elements from the stored describe output of
+its earliest member, none when that member is black, and its state schema from all its
+members' states. Members carry their visits, states, activities, descriptions and
+description vectors, so no embedding is requested. The node they leave keeps its state
+schema and elements. No node ID changes, so no alias is recorded: a node's
+`observations` say where each observation belongs.
 
 Edge actions follow the members. An action on an edge of the node is matched to each
 exploration transition (see [Step log](#step-log)) with the same action whose
@@ -1129,9 +1141,8 @@ merges. When the graph has no start node, `start_node` is `null` and both lists
 are empty.
 
 With `--re-explore`, the audit then works through the other issues on the
-device, following the node IDs each issue names through those merges and through
-renames made while it re-explores. For each `retry_edge` issue, an edge whose
-instruction looks wrong for where it leads, it:
+device, following the node IDs each issue names through those merges. For each
+`retry_edge` issue, an edge whose instruction looks wrong for where it leads, it:
 
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action

@@ -32,6 +32,7 @@ from android_app_graph.utils import DEFAULT_REQUEST_TIMEOUT, ModelSettings
 
 if TYPE_CHECKING:
     from openrouter.components.chatcontentimage import ChatContentImageTypedDict
+    from openrouter.components.chatcontentitems import ChatContentItemsTypedDict
     from openrouter.components.chatmessages import ChatMessagesTypedDict
     from openrouter.components.chatrequest import ResponseFormatTypedDict
     from openrouter.operations.createembeddings import (
@@ -332,7 +333,7 @@ PAGE_DESCRIBE_AND_STATE_PROMPT = """\
 You are an expert at analyzing mobile app screenshots. You are helping build a navigation \
 graph of an app where each node is a distinct SCREEN TYPE (template).
 
-{existing_nodes_section}
+{known_descriptions_section}
 
 {existing_keys_section}
 
@@ -422,7 +423,7 @@ Example:
 NODE_VERIFY_PROMPT = """\
 You are comparing two mobile app screenshots to decide if they are the SAME screen or DIFFERENT screens.
 
-Both screens were given this description: "{existing_description}"
+Each screenshot is shown with the description its screen was given.
 
 Two screenshots are the SAME screen if they serve the same purpose and a user would consider \
 them the same page — even if the content (list items, search results, text in fields) differs. \
@@ -444,18 +445,17 @@ even if they look visually similar. Pay close attention to:
 Answer with ONLY a JSON object:
 
 If they are the SAME screen:
-{{"same": true, "reason": "brief explanation"}}
+{"same": true, "reason": "brief explanation"}
 
-If they are DIFFERENT screens, you must also provide slightly more specific descriptions that \
-distinguish them from each other. Usually adding one or two extra distinguishing words is enough. \
-Keep the descriptions concise (under 10 words each) and clearly differentiate the two screens. \
-Name each screen by its purpose, never by its current state: leave out the on-screen keyboard, \
+If they are DIFFERENT screens, you must also provide a slightly more specific description of the \
+second screenshot that distinguishes it from the first. Usually adding one or two extra \
+distinguishing words is enough. Keep the description concise (under 10 words). \
+Name the screen by its purpose, never by its current state: leave out the on-screen keyboard, \
 which input field has focus, how far a list is scrolled, any overflow menu, dropdown, picker, \
-popup or context menu open over it, and which of its sections are expanded, even when a \
+popup or context menu open over it, and which of its sections are expanded, even when the \
 screenshot shows them:
-{{"same": false, "reason": "brief explanation", \
-"existing_description": "more specific description for the first screenshot", \
-"new_description": "more specific description for the second screenshot"}}"""
+{"same": false, "reason": "brief explanation", \
+"new_description": "more specific description for the second screenshot"}"""
 
 _SEVERITY: dict[str, Any] = {
     "type": "string",
@@ -562,18 +562,13 @@ _NODE_VERIFICATION_SCHEMA: dict[str, Any] = {
             "description": "Whether the two screenshots show the same screen.",
         },
         "reason": {"type": "string", "description": "A brief explanation."},
-        "existing_description": {
-            "type": ["string", "null"],
-            "description": "When the screens differ, a more specific description of the first "
-            "screenshot; null when they are the same.",
-        },
         "new_description": {
             "type": ["string", "null"],
             "description": "When the screens differ, a more specific description of the second "
-            "screenshot; null when they are the same.",
+            "screenshot that tells it apart from the first; null when they are the same.",
         },
     },
-    "required": ["same", "reason", "existing_description", "new_description"],
+    "required": ["same", "reason", "new_description"],
     "additionalProperties": False,
 }
 
@@ -931,19 +926,21 @@ def _parse_page_description(
 def describe_page_and_state(
     client: OpenRouter,
     screenshot_b64: str,
-    existing_nodes: list[str] | None = None,
+    known_descriptions: list[str] | None = None,
     existing_keys: list[str] | None = None,
     *,
     settings: ModelSettings,
 ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
-    The model always writes its own description based on what it sees. Existing
-    node descriptions are provided as context so the model can disambiguate
-    similar-looking screens (e.g. "start location search" vs "end location search").
+    The model always writes its own description based on what it sees. The
+    descriptions of the screens already seen are provided as context so the model
+    can disambiguate similar-looking screens (e.g. "start location search" vs "end
+    location search").
 
     Args:
-        existing_nodes: Descriptions of nodes already in the graph (same package).
+        known_descriptions: The distinct descriptions of the screens already seen in
+            the same package.
         existing_keys: State keys already seen across same-package nodes.
 
     Returns:
@@ -951,10 +948,10 @@ def describe_page_and_state(
         where elements_list is a list of {"description": str, "position": str} dicts
         and is_external_web is true only for web content from outside the app.
     """
-    if existing_nodes:
-        nodes_list = "\n".join(f'  - "{d}"' for d in existing_nodes)
-        existing_nodes_section = (
-            f"The following screens have already been discovered in this app:\n{nodes_list}"
+    if known_descriptions:
+        listed = "\n".join(f'  - "{d}"' for d in known_descriptions)
+        known_descriptions_section = (
+            f"The following screens have already been discovered in this app:\n{listed}"
         )
         description_hint = (
             "If this screen is clearly the same type as one in the list, output the same "
@@ -964,7 +961,7 @@ def describe_page_and_state(
             "flow this is."
         )
     else:
-        existing_nodes_section = "No screens have been discovered yet in this app."
+        known_descriptions_section = "No screens have been discovered yet in this app."
         description_hint = "Focus on the screen's purpose. Use precise words."
 
     if existing_keys:
@@ -982,7 +979,7 @@ def describe_page_and_state(
         )
 
     prompt = PAGE_DESCRIBE_AND_STATE_PROMPT.format(
-        existing_nodes_section=existing_nodes_section,
+        known_descriptions_section=known_descriptions_section,
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
     )
@@ -1028,19 +1025,33 @@ def _no_verifier_answer(reason: str) -> dict[str, Any]:
     return {"same": False, "answered": False, "reason": reason}
 
 
+@dataclass(frozen=True, slots=True)
+class DescribedScreenshot:
+    """A screenshot the verifier is shown, and the description its screen was given."""
+
+    screenshot_b64: str
+    description: str
+
+
+def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItemsTypedDict]:
+    return [
+        {"type": "text", "text": f'{label}, described as "{screenshot.description}":'},
+        build_image_message(screenshot.screenshot_b64),
+    ]
+
+
 def verify_same_node(
     client: OpenRouter,
-    screenshot_new_b64: str,
-    screenshot_existing_b64: str,
-    existing_description: str,
     *,
+    existing: DescribedScreenshot,
+    new: DescribedScreenshot,
     settings: ModelSettings,
 ) -> dict[str, Any]:
-    """Compare two screenshots to decide if they are the same screen.
+    """Compare two screenshots, each shown with its own description, to decide if they
+    are the same screen.
 
-    If they are different, the verifier also provides more specific descriptions
-    for both the existing node and the new screen, so vague descriptions like
-    "location search page" get refined to "start location search page" and
+    If they are different, the verifier also provides a more specific description of
+    the new screen, so a vague description like "location search page" gets refined to
     "end location search page".
 
     A request that still times out at its deadline is asked once more, with a
@@ -1049,12 +1060,10 @@ def verify_same_node(
     Returns a dict with keys:
         - "same": bool
         - "reason": str
-        - "existing_description": str (only when same=False) — refined name for existing node
-        - "new_description": str (only when same=False) — refined name for new screen
+        - "new_description": str (only when same=False) — refined name for the new screen
         - "answered": False (only when the verifier gave no answer: the request timed out
           twice, the reply was truncated or it could not be parsed) — "same" is then False
     """
-    prompt = NODE_VERIFY_PROMPT.format(existing_description=existing_description)
 
     def ask() -> ChatResult:
         return send_chat(
@@ -1065,11 +1074,9 @@ def verify_same_node(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "text", "text": "First screenshot (existing node):"},
-                        build_image_message(screenshot_existing_b64),
-                        {"type": "text", "text": "Second screenshot (new screen):"},
-                        build_image_message(screenshot_new_b64),
+                        {"type": "text", "text": NODE_VERIFY_PROMPT},
+                        *_shown("First screenshot (existing node)", existing),
+                        *_shown("Second screenshot (new screen)", new),
                     ],
                 }
             ],

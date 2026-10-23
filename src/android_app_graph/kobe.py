@@ -115,7 +115,7 @@ class Kobe:
 
     Each node is a unique app state identified by:
       - Activity name (from Android)
-      - Page description (from VLM)
+      - The description of each screen placed in it (from VLM)
       - Detailed screen contents JSON (from VLM)
 
     Each edge is a device action that transitions between states.
