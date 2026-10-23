@@ -442,6 +442,15 @@ even if they look visually similar. Pay close attention to:
 "Data usage warning" dialog, is a DIFFERENT screen from the page beneath it.
 - A search page and a search result list page is considered different usually, though sometimes the search page also provide some suggestions.
 
+A destination the app names in its own navigation, such as a tab, a bottom navigation bar \
+item or a navigation drawer entry, is a screen of its own. Two screenshots that show \
+different destinations are DIFFERENT screens, even when they share a layout and serve the \
+same purpose: Downloads, Recent and Internal storage in a file manager are three screens, \
+and so are Alarm and Timer in a clock. Content inside one destination is the SAME screen as \
+that destination: a subfolder opened inside it, a different search query or a different list. \
+The selected tab or navigation item, or the first entry of a breadcrumb trail, shows which \
+destination a screenshot is in.
+
 Answer with ONLY a JSON object:
 
 If they are the SAME screen:

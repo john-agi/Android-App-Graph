@@ -33,7 +33,7 @@ from android_app_graph.member_groups import (
     TEXT_GROUPING_FLOOR,
 )
 from android_app_graph.step_log import read_exploration_transitions
-from android_app_graph.utils import ModelSettings, graph_manager
+from android_app_graph.utils import ModelSettings, graph_manager, vlm_utils
 from android_app_graph.utils.graph_manager import (
     GraphManager,
     MemberQuestion,
@@ -166,9 +166,9 @@ def graph_path(tmp_path: Path) -> Path:
     return tmp_path / "graphs" / "demo" / "demo.json"
 
 
-def _load(path: Path) -> GraphManager:
+def _load(path: Path, client: OpenRouter = FAKE_CLIENT) -> GraphManager:
     graph = GraphManager(
-        client=FAKE_CLIENT, page_detail=PAGE_DETAIL, embedding=EMBEDDING, image_embedding=EMBEDDING
+        client=client, page_detail=PAGE_DETAIL, embedding=EMBEDDING, image_embedding=EMBEDDING
     )
     graph.load_graph(path)
     return graph
@@ -1397,3 +1397,66 @@ def test_a_member_moves_to_the_node_a_split_made(
         new,
     )
     assert graph.graph.nodes[new]["observations"] == ["000003", "000004", "000022"]
+
+
+def _checkpoint_merge(graph: GraphManager, _path: Path) -> None:
+    graph.run_node_merge_audit()
+
+
+def _audit_merge(graph: GraphManager, _path: Path) -> None:
+    graph.verify_merge_proposals(graph.merge_proposals([]), {})
+
+
+def _member_checks(graph: GraphManager, path: Path) -> None:
+    _check_members(graph, path, {})
+
+
+@pytest.mark.parametrize(
+    ("nodes", "texts", "ask", "questions"),
+    [
+        (CLOSE_PAIR, None, _checkpoint_merge, 1),
+        (CLOSE_PAIR, None, _audit_merge, 1),
+        (CLOSE_DESCRIPTIONS, CLOSE_DESCRIPTION_TEXTS, _audit_merge, 1),
+        (SPLIT, None, _member_checks, 1),
+        (MOVE, None, _member_checks, 3),
+    ],
+    ids=["coverage-checkpoint-merge", "image-merge", "text-merge", "split", "move"],
+)
+def test_every_merge_and_member_check_asks_the_verifier_to_tell_navigation_destinations_apart(
+    nodes: dict[str, list[tuple[str, list[float]]]],
+    texts: dict[str, list[float]] | None,
+    ask: Callable[[GraphManager, Path], None],
+    questions: int,
+    graph_path: Path,
+    models: FakeModels,
+    monkeypatch: pytest.MonkeyPatch,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    verifier_prompts: Callable[[], list[str]],
+    write_member_graph: Callable[..., None],
+) -> None:
+    """Each question, answered "different" here, counts different navigation
+    destinations as different screens and content inside one destination as that
+    destination; a member the move check rejects is asked about on its short list too."""
+    monkeypatch.setattr(graph_manager, "verify_same_node", vlm_utils.verify_same_node)
+    monkeypatch.setattr(
+        graph_manager,
+        "audit_merge_nodes",
+        lambda *_args, **_kwargs: {"issues": [{"node_a": "s0_home", "node_b": "s1_home"}]},
+    )
+    router_responses.extend(
+        chat_response(content='{"same":false,"reason":"another destination"}')
+        for _ in range(questions)
+    )
+    write_member_graph(graph_path, nodes, texts=texts)
+    graph = _load(graph_path, client=router_client)
+
+    ask(graph, graph_path)
+
+    prompts = verifier_prompts()
+    assert len(prompts) == questions
+    for prompt in prompts:
+        assert "different destinations are DIFFERENT screens" in prompt
+        assert "Content inside one destination is the SAME screen" in prompt
+    assert models.shown == []

@@ -660,6 +660,15 @@ the option. A dialog, bottom sheet or full-screen picker that has its own purpos
 such as a data usage warning dialog, is a node of its own, and a menu open over it
 is that node's state.
 
+A destination the app names in its own navigation, such as a tab, a bottom
+navigation bar item or a navigation drawer entry, is a node of its own too, even when
+it shares its layout and purpose with another: Files' Downloads, Recent and Internal
+storage are three nodes. Content inside one destination, such as a subfolder opened
+inside Internal storage, another search query or another list, is that destination's
+node. Every verifier question states this rule: in
+[screen matching](#screen-matching), in the [merge proposals](#merge-proposals) of the
+coverage checkpoint and the audit, and in the audit's [member checks](#member-checks).
+
 A node's ID is `s<n>`, numbered in the order nodes are made, such as `s30`, and it
 never changes; `ext_web` and `ext_<package>` name the nodes of
 [outside web content and other apps](#external-apps-and-web-pages).

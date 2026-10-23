@@ -201,6 +201,22 @@ def router_client(router_http: httpx.Client) -> Iterator[OpenRouter]:
 
 
 @pytest.fixture
+def verifier_prompts(router_requests: list[httpx.Request]) -> Callable[[], list[str]]:
+    """Return the prompt of each verifier question sent over the mock transport so far."""
+
+    def prompts() -> list[str]:
+        bodies = [json.loads(request.content) for request in router_requests]
+        return [
+            body["messages"][0]["content"][0]["text"]
+            for body in bodies
+            if body.get("response_format", {}).get("json_schema", {}).get("name")
+            == "node_verification"
+        ]
+
+    return prompts
+
+
+@pytest.fixture
 def opened_clients(router_http: httpx.Client, monkeypatch: pytest.MonkeyPatch) -> list[OpenRouter]:
     """Every client a command opens, each over the mock transport."""
     opened: list[OpenRouter] = []
