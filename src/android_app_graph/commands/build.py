@@ -255,15 +255,14 @@ class _Replay:
         source, start_screenshot = start
         node = self.graph.node_of(after) if after in self._states else None
         if node == EXTERNAL_WEB_NODE:
-            description = self.graph.graph.nodes[node].get("page_description", "")
+            description = self.graph.latest_description(node)
             return node, EdgeDetails(instruction=instruction, target_observation=description)
         if node is not None:
             state = self._states[after]
             delta = schema_delta(self._states[start_screenshot], state) if node == source else None
-            description = self.graph.graph.nodes[node].get("page_description", "")
             return node, EdgeDetails(
                 instruction=instruction,
-                target_observation=target_observation(description, state),
+                target_observation=target_observation(self.graph.latest_description(node), state),
                 schema_delta=delta,
                 num_steps=num_steps,
             )

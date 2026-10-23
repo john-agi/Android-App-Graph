@@ -16,7 +16,7 @@ import pytest
 from openrouter import OpenRouter
 from PIL import Image
 
-from android_app_graph.commands import build
+from android_app_graph.commands import build, plot
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.payloads import as_object_dict
 from android_app_graph.step_log import (
@@ -365,6 +365,8 @@ def test_a_build_writes_its_graph_into_a_new_directory_linked_to_the_step_log(
     ]
     assert [line["observation"] for line in lines] == matches
     assert vlm.merge_audits == 0
+    _data, plotted = plot.load_graph(str(out / "demo.json"))
+    assert plotted.number_of_nodes() == len(_load(out, MatchingSettings()).graph)
 
 
 @pytest.mark.usefixtures("vlm")
@@ -392,7 +394,7 @@ def test_a_build_places_screens_and_steps_as_exploration_did(
     assert graph.graph.has_edge(node("s7"), node("after_planned"))
     assert graph.graph[node("s0")][node("after_replay")]["setups"] == [[]]
     web = graph.graph[node("after_replay")][EXTERNAL_WEB_NODE]
-    assert web["target_observations"] == ["[external web page]"]
+    assert web["target_observations"] == [WEB.description]
     assert node("off_web") == node("after_replay")
     assert graph.node_of(seen["audit"].observation_id) is None
     (back,) = [
