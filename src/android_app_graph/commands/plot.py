@@ -75,14 +75,23 @@ def _image_uri(steps_dir: Path, observation_id: str) -> str:
     return f"data:{MEDIA_TYPE};base64,{observation_image_b64(steps_dir, observation_id)}"
 
 
+def _displayed_member(descriptions: list[str]) -> int:
+    """Return the index of the member a node is displayed by, given its members'
+    ``descriptions`` in step order: the earliest member with the description most of them
+    have, a tie going to the description of the earliest member."""
+    ((most_common, _count),) = Counter(descriptions).most_common(1)
+    return descriptions.index(most_common)
+
+
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph).
 
-    Each node's ``description``, which its canvas label and colour show, is its earliest
-    member's description, as its thumbnail is its earliest member's image, and its
-    ``descriptions``, which its tooltip shows, are every distinct description of its
-    members with their counts. Both are read from the step log as
-    ``read_member_descriptions`` reads them; an ``ext_`` node is named by its ID in both.
+    Each node's ``description``, which its canvas label and colour show, and its
+    ``thumbnail_uri`` are the description and image of the member ``_displayed_member``
+    chooses, and its ``descriptions``, which its tooltip shows, are every distinct
+    description of its members with their counts. Descriptions are read from the step log
+    as ``read_member_descriptions`` reads them; an ``ext_`` node is named by its ID in
+    both and shown by its earliest member.
 
     A file that ``require_graph_shape`` rejects, a node that does not list its member
     observations, a member whose image is missing from the step log, an edge without
@@ -106,14 +115,15 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
         if node["id"].startswith("ext_"):
-            described = [node["id"]]
+            described = [node["id"]] * len(observations)
             listed = node["id"]
         else:
             described = [descriptions[observation] for observation in observations]
             listed = distinct_descriptions(described)
+        displayed = _displayed_member(described)
         graph.add_node(
             node["id"],
-            description=described[0],
+            description=described[displayed],
             descriptions=listed,
             activity=node.get("activity", ""),
             visit_count=node.get("visit_count", 0),
@@ -127,6 +137,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
                 for observation in observations[:_PANEL_MEMBER_LIMIT]
             ],
             member_total=len(observations),
+            thumbnail_uri=_image_uri(steps_dir, observations[displayed]),
         )
 
     for edge in data["edges"]:
@@ -617,8 +628,9 @@ _NODE_TOOLTIPS = """
     });
     var image = document.createElement("img");
     image.className = "node-tooltip-image";
-    image.alt = "Earliest screenshot";
-    image.src = node.memberImages[0];
+    image.alt = "Thumbnail screenshot";
+    image.src = node.thumbnailMember === null
+      ? node.thumbnailImage : node.memberImages[node.thumbnailMember];
     tooltip.appendChild(image);
     return tooltip;
   }
@@ -788,6 +800,10 @@ def plot_pyvis(
         short_desc = shorten_words(data.get("description", node_id), style.max_node_words, 40)
         member_images = data.get("member_image_uris", [])
         member_total = data.get("member_total", 0)
+        thumbnail = data.get("thumbnail_uri")
+        # The tooltip shows the panel's copy of the thumbnail when the panel holds it, so
+        # the page embeds each image once.
+        thumbnail_member = member_images.index(thumbnail) if thumbnail in member_images else None
         bg = palette[idx % len(palette)]
 
         net.add_node(
@@ -796,6 +812,8 @@ def plot_pyvis(
             tooltipRows=_tooltip_rows(data, data.get("descriptions", node_id)),
             memberImages=member_images,
             memberTotal=member_total,
+            thumbnailMember=thumbnail_member,
+            thumbnailImage=thumbnail if thumbnail_member is None else None,
             color={
                 "background": bg,
                 "border": "#5c6bc0",

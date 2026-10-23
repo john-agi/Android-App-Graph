@@ -669,8 +669,8 @@ own rule:
   and the audit's merge checks verify a pair of nodes on their two closest members;
 - the audit's member checks take the largest group of alike members as the node's
   home;
-- `app-graph-plot` shows the earliest member as the node's thumbnail, so a node shows
-  the same image on every render.
+- `app-graph-plot` shows the earliest member with the node's most common member
+  description as its thumbnail, so the picture shows the screen the label names.
 
 Each member also keeps the description its screen ended with: its `describe` output's
 `page_description`, or the description its step's first rejection refined it to
@@ -690,8 +690,9 @@ Each use of a description takes it by what it is about:
   `"Chrome app permissions overview" (14), "App permissions settings" (2)`: the
   audit's text dump of the graph, the coverage checkpoint's candidates and the hint
   of the audit's steps after a retried edge;
-- `app-graph-plot` draws a node by its earliest member's description, as it shows the
-  earliest member's image, and lists every distinct one when a node is hovered.
+- `app-graph-plot` draws a node by its most common member description, the first of
+  that list, and shows the image of the earliest member that has it; hovering a node
+  lists every distinct one.
 
 An `ext_web` or `ext_<package>` node is named by its ID wherever a node's
 descriptions are listed.
@@ -936,25 +937,27 @@ uv sync --extra viz
 uv run --extra viz app-graph-plot graphs/<app_name>/<app_name>.json
 ```
 
-In the HTML view, each node's label is its earliest member's description, ending with
-the number of screenshots the node holds, such as `[12 screenshots]`, and the static
-renderers label and colour a node by that description too (see
-[Graph nodes](#graph-nodes)); an `ext_` node is labelled by its ID. Clicking a node
-opens a panel with its member screenshots, oldest first and at most ten, with Previous
-and Next buttons and the position, such as `3 / 10`. Clicking the background or an
-edge closes the panel.
+In the HTML view, each node's label is the description most of its members have, a tie
+going to the description of the earliest member, ending with the number of screenshots
+the node holds, such as `[12 screenshots]`, and the static renderers label and colour a
+node by that description too (see [Graph nodes](#graph-nodes)); an `ext_` node is
+labelled by its ID. The node's thumbnail is the screenshot of the earliest member with
+that description, so the label and the picture show one screen. Clicking a node opens
+a panel with its member screenshots, oldest first and at most ten, with Previous and
+Next buttons and the position, such as `3 / 10`. Clicking the background or an edge
+closes the panel.
 
 Hovering a node shows its ID, every distinct description of its members with their
 counts, activity, visits, state keys, explored element count and first ten unexplored
-elements, then its earliest screenshot. Every value from the graph is shown as text,
-never read as HTML.
+elements, then its thumbnail. Every value from the graph is shown as text, never read
+as HTML.
 
 The images are embedded in the HTML as data URIs, so the file opens anywhere
 without its step log. Base64 adds a third to each WebP: every member shown adds
 about 100 KB for the Settings screenshots measured in [Step log](#step-log), 235 KB
-at most. The tooltip shows the panel's copy of the earliest screenshot, so the page
-embeds each image once. A Settings graph of 82 nodes holding 232 screenshots plots to
-a 22 MB file.
+at most. The tooltip shows the panel's copy of the thumbnail when the panel holds it,
+so the page embeds each image once. A Settings graph of 82 nodes holding 232
+screenshots plots to a 22 MB file.
 
 Run the graph audit utility:
 
