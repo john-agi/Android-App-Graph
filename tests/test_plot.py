@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import networkx as nx
 import pytest
@@ -424,11 +424,17 @@ def test_load_graph_reads_an_audited_graph_from_the_shared_step_log(tmp_path: Pa
 def _write_member_graph(tmp_path: Path, observations: list[str]) -> Path:
     """Write a one-node graph whose node lists ``observations``, each described as
     ``Home``."""
+    return _write_described_members(tmp_path, dict.fromkeys(observations, "Home"))
+
+
+def _write_described_members(tmp_path: Path, members: dict[str, str]) -> Path:
+    """Write a one-node graph whose node lists the observations of ``members`` in order,
+    each described as ``members`` says."""
     graph_path = tmp_path / "demo.json"
-    node = {"id": "s0_home", "page_description": "Home page", "observations": observations}
+    node = {"id": "s0_home", "page_description": "Home page", "observations": list(members)}
     graph_path.write_text(json.dumps({"nodes": [node], "edges": []}), encoding="utf-8")
-    for observation_id in observations:
-        _describe_member(graph_path, observation_id, "Home")
+    for observation_id, description in members.items():
+        _describe_member(graph_path, observation_id, description)
     return graph_path
 
 
@@ -540,13 +546,32 @@ def _vis_nodes(html: str) -> dict[str, dict[str, Any]]:
     return {item["id"]: item for item in items}
 
 
-def _plot_member_graph(tmp_path: Path, observations: list[str]) -> str:
-    """Plot the graph ``_write_member_graph`` writes; return the view's HTML."""
-    graph_path = _write_member_graph(tmp_path, observations)
+def _plot_view(graph_path: Path) -> str:
+    """Plot the graph at ``graph_path`` with pyvis; return the view's HTML."""
     _data, graph = plot.load_graph(str(graph_path))
-    output = tmp_path / "graph.html"
+    output = graph_path.with_name("graph.html")
     plot.plot_pyvis(graph, str(output))
     return output.read_text(encoding="utf-8")
+
+
+def _plot_member_graph(tmp_path: Path, observations: list[str]) -> str:
+    """Plot the graph ``_write_member_graph`` writes; return the view's HTML."""
+    return _plot_view(_write_member_graph(tmp_path, observations))
+
+
+_TOOLTIP_IMAGE = (
+    "image.src = node.thumbnailMember === null"
+    " ? node.thumbnailImage : node.memberImages[node.thumbnailMember];"
+)
+
+
+def _thumbnail(node: dict[str, Any]) -> str:
+    """Return the image the tooltip script shows for a node of the view: the panel's copy
+    at ``thumbnailMember``, or ``thumbnailImage`` when the panel does not hold it."""
+    member = node["thumbnailMember"]
+    image = node["thumbnailImage"] if member is None else node["memberImages"][member]
+    assert isinstance(image, str)
+    return image
 
 
 def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
@@ -564,24 +589,65 @@ def test_plot_pyvis_embeds_the_ten_oldest_member_images_and_states_the_total(
     assert [html.count(uri) for uri in uris] == [1] * 10 + [0, 0]
 
 
-def test_plot_pyvis_tooltip_shows_the_earliest_member_from_the_panel_s_copy_of_its_image(
+def test_plot_pyvis_tooltip_shows_the_panel_s_copy_of_a_thumbnail_the_panel_holds(
     tmp_path: Path,
 ) -> None:
-    """The thumbnail is the earliest member on every render, the first of the panel's
-    images, so the page embeds it once."""
-    observations = ["000003", "000005", "000008"]
-    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in observations]
+    """The thumbnail, the earliest member with the most common description, is the
+    panel's second image, so the page embeds it once."""
+    members = {"000003": "Search results", "000005": "Home", "000008": "Home"}
+    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in members]
 
-    html = _plot_member_graph(tmp_path, observations)
+    html = _plot_view(_write_described_members(tmp_path, members))
 
     node = _vis_nodes(html)["s0_home"]
     assert "title" not in node
     assert node["memberImages"] == uris
+    assert node["thumbnailMember"] == 1
+    assert node["thumbnailImage"] is None
     tooltip = html.index("function tooltipOf(node)")
-    assert (
-        "image.src = node.memberImages[0];" in html[tooltip : html.index("nodes.update(", tooltip)]
-    )
+    script = html[tooltip : html.index("nodes.update(", tooltip)]
+    assert _TOOLTIP_IMAGE in " ".join(script.split())
     assert [html.count(uri) for uri in uris] == [1, 1, 1]
+
+
+def test_plot_pyvis_embeds_a_thumbnail_the_panel_does_not_hold_once_on_its_own(
+    tmp_path: Path,
+) -> None:
+    """The earliest member with the most common description is the eleventh, past the
+    panel's ten oldest, so the tooltip shows its own copy and the page embeds every image
+    once."""
+    steps = _steps(12)
+    members = {step: f"Screen {step}" for step in steps[:10]} | dict.fromkeys(steps[10:], "Home")
+    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in members]
+
+    html = _plot_view(_write_described_members(tmp_path, members))
+
+    node = _vis_nodes(html)["s0_home"]
+    assert node["label"] == "Home\n[12 screenshots]"
+    assert node["memberImages"] == uris[:10]
+    assert node["thumbnailMember"] is None
+    assert _thumbnail(node) == uris[10]
+    assert [html.count(uri) for uri in uris] == [1] * 11 + [0]
+
+
+def test_a_tie_between_member_descriptions_goes_to_the_earliest_member(tmp_path: Path) -> None:
+    """Settings and Home each describe two members, and a Settings member comes first,
+    so Settings labels the node and its first member is the thumbnail. The tooltip lists
+    the tie in the same order."""
+    members = {
+        "000000": "Search",
+        "000001": "Settings",
+        "000002": "Home",
+        "000003": "Settings",
+        "000004": "Home",
+    }
+    uris = [_write_step_image(tmp_path, step, f"member {step}".encode()) for step in members]
+
+    node = _vis_nodes(_plot_view(_write_described_members(tmp_path, members)))["s0_home"]
+
+    assert node["label"] == "Settings\n[5 screenshots]"
+    assert _thumbnail(node) == uris[1]
+    assert node["tooltipRows"][0] == ["Descriptions", '"Settings" (2), "Home" (2), "Search" (1)']
 
 
 def test_plot_pyvis_gives_each_node_its_tooltip_as_rows_of_text(tmp_path: Path) -> None:
@@ -650,32 +716,36 @@ def _write_described_graph(tmp_path: Path) -> Path:
     return graph_path
 
 
-def test_a_node_is_drawn_by_its_earliest_member_s_description_and_hovered_with_all_of_them(
+def test_a_node_is_drawn_by_its_most_common_member_description_and_hovered_with_all_of_them(
     tmp_path: Path,
 ) -> None:
-    """The canvas shows the earliest member's description, as the thumbnail is the
-    earliest member's image; the tooltip lists every distinct one with its count, most
-    first. An outside node, whose members have no description, is named by its ID."""
-    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
-    output = tmp_path / "graph.html"
+    """The earliest member is a search results list and the two later ones a home map:
+    the canvas shows the description most members have and the thumbnail is the earliest
+    member with it; the tooltip lists every distinct one with its count, most first. An
+    outside node, whose members have no description, is named by its ID and shown by its
+    earliest member."""
+    graph_path = _write_described_graph(tmp_path)
+    home_map_uri = _write_step_image(tmp_path, "000001", b"home map")
+    chrome_uri = _write_step_image(tmp_path, "000004", b"chrome")
 
-    plot.plot_pyvis(graph, str(output))
+    nodes = _vis_nodes(_plot_view(graph_path))
 
-    nodes = _vis_nodes(output.read_text(encoding="utf-8"))
-    assert nodes["s0_home"]["label"] == "Search results list\n[3 screenshots]"
+    assert nodes["s0_home"]["label"] == "Home map\n[3 screenshots]"
+    assert _thumbnail(nodes["s0_home"]) == home_map_uri
     assert nodes["s0_home"]["tooltipRows"][0] == [
         "Descriptions",
         '"Home map" (2), "Search results list" (1)',
     ]
     assert nodes[_CHROME]["label"] == f"{_CHROME}\n[1 screenshot]"
+    assert _thumbnail(nodes[_CHROME]) == chrome_uri
     assert nodes[_CHROME]["tooltipRows"][0] == ["Descriptions", _CHROME]
 
 
-def test_a_paper_node_takes_its_label_and_colour_from_its_earliest_member_s_description(
+def test_a_paper_node_takes_its_label_and_colour_from_its_most_common_member_description(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The earliest member is a search results list, so the node is drawn as a search
-    screen, not as the home its node description names."""
+    """Two members are a home map and the earliest a search results list, so the node is
+    drawn as a home screen."""
     output = tmp_path / "paper.svg"
     monkeypatch.setattr(plot.shutil, "which", lambda _cmd: "/usr/bin/dot")
     monkeypatch.setattr(plot.subprocess, "run", lambda _argv, **_kwargs: None)
@@ -685,8 +755,118 @@ def test_a_paper_node_takes_its_label_and_colour_from_its_earliest_member_s_desc
 
     dot = output.with_suffix(".dot").read_text(encoding="utf-8")
     (home,) = [line for line in dot.splitlines() if line.startswith('  "s0_home" [')]
-    assert "Search results" in home
-    assert 'fillcolor="#dcfce7"' in home
+    assert "Home map" in home
+    assert 'fillcolor="#d9f0ff"' in home
+
+
+def _drawn(monkeypatch: pytest.MonkeyPatch, name: str) -> list[dict[str, object]]:
+    """Record the keyword arguments of each call of the networkx drawing function
+    ``name``, which still draws."""
+    calls: list[dict[str, object]] = []
+    draw = getattr(nx, name)
+
+    def record(*args: object, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return draw(*args, **kwargs)
+
+    monkeypatch.setattr(nx, name, record)
+    return calls
+
+
+def test_a_paper_matplotlib_node_takes_its_label_and_colour_from_its_most_common_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib as mpl
+
+    mpl.use("agg")
+    labelled = _drawn(monkeypatch, "draw_networkx_labels")
+    coloured = _drawn(monkeypatch, "draw_networkx_nodes")
+    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
+
+    plot.plot_paper_matplotlib(graph, str(tmp_path / "paper.png"))
+
+    assert [(call["nodelist"], call["node_color"]) for call in coloured] == [
+        (["s0_home"], "#d9f0ff"),
+        (["s1_chooser", _CHROME], "#eef2ff"),
+    ]
+    assert [call["labels"] for call in labelled] == [
+        {
+            "s0_home": "s0_home\nHome map",
+            "s1_chooser": "s1_chooser\nApp chooser",
+            _CHROME: f"{_CHROME}\n{_CHROME}",
+        }
+    ]
+
+
+def test_plot_matplotlib_labels_a_node_with_its_most_common_member_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib as mpl
+
+    mpl.use("agg")
+    labelled = _drawn(monkeypatch, "draw_networkx_labels")
+    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
+
+    plot.plot_matplotlib(graph, str(tmp_path / "graph.png"))
+
+    assert [call["labels"] for call in labelled] == [
+        {
+            "s0_home": "Home map\n(0 visits)",
+            "s1_chooser": "App chooser\n(0 visits)",
+            _CHROME: f"{_CHROME}\n(0 visits)",
+        }
+    ]
+
+
+class _AgraphNode(NamedTuple):
+    name: str
+    attr: dict[str, str]
+
+
+class _AgraphEdge(NamedTuple):
+    source: str
+    target: str
+    attr: dict[str, str]
+
+
+class _Agraph:
+    """Stands in for the pygraphviz graph ``to_agraph`` makes, which needs Graphviz: it
+    holds the graph's nodes and edges and records where it is drawn."""
+
+    def __init__(self, graph: nx.DiGraph) -> None:
+        self.graph_attr: dict[str, str] = {}
+        self.node_attr: dict[str, str] = {}
+        self.edge_attr: dict[str, str] = {}
+        self.node_list = [_AgraphNode(node, {}) for node in graph]
+        self.edge_list = [_AgraphEdge(source, target, {}) for source, target in graph.edges()]
+        self.drawn: list[tuple[str, str]] = []
+
+    def nodes(self) -> list[_AgraphNode]:
+        return self.node_list
+
+    def edges(self) -> list[_AgraphEdge]:
+        return self.edge_list
+
+    def draw(self, path: str, prog: str) -> None:
+        self.drawn.append((path, prog))
+
+
+def test_plot_graphviz_labels_a_node_with_its_most_common_member_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _data, graph = plot.load_graph(str(_write_described_graph(tmp_path)))
+    agraph = _Agraph(graph)
+    monkeypatch.setattr(nx.nx_agraph, "to_agraph", lambda _graph: agraph)
+    output = tmp_path / "graph.png"
+
+    plot.plot_graphviz(graph, str(output))
+
+    assert {node.name: node.attr["label"] for node in agraph.node_list} == {
+        "s0_home": "Home map\\n(0 visits)",
+        "s1_chooser": "App chooser\\n(0 visits)",
+        _CHROME: f"{_CHROME}\\n(0 visits)",
+    }
+    assert agraph.drawn == [(str(output), "dot")]
 
 
 def test_the_paper_view_drops_only_the_ext_nodes_whatever_a_node_is_described_as(
