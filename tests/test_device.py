@@ -956,16 +956,19 @@ def test_an_unknown_action_raises_value_error_naming_it(
     assert adb.events == []
 
 
-def _recent_apps(name: str) -> bytes:
-    """Return ``uiautomator dump`` output of the recent apps screen, trailer included."""
-    return (Path(__file__).parent / "data" / f"uiautomator_recents_{name}.xml").read_bytes()
+def _ui_dump(name: str) -> bytes:
+    """Return ``uiautomator dump`` output saved in ``tests/data``, trailer included."""
+    return (Path(__file__).parent / "data" / f"uiautomator_{name}.xml").read_bytes()
 
 
 # Captured on a Redroid container, Android 16, 720x1280, with Launcher3: the list
 # scrolled to its end, Clear all at [72,512][264,608] beside the oldest app's card;
-# and the list on open, the newest app's card in the middle and no Clear all.
-_CLEAR_ALL_SHOWN = _recent_apps("api36_redroid_clear_all")
-_CARDS_ONLY = _recent_apps("api36_redroid_cards")
+# the list on open, the newest app's card in the middle and no Clear all; the
+# recent apps screen with no app, "No recent items"; and the home screen.
+_CLEAR_ALL_SHOWN = _ui_dump("recents_api36_redroid_clear_all")
+_CARDS_ONLY = _ui_dump("recents_api36_redroid_cards")
+_NO_RECENT_APPS = _ui_dump("recents_api36_redroid_empty")
+_HOME_SCREEN = _ui_dump("home_api36_redroid")
 _OPEN_RECENT_APPS = [*_INPUT, "keyevent", "KEYCODE_APP_SWITCH"]
 _LOOK = ["adb", *_UI_DUMP]
 _LOOK_AND_SWIPE = [_LOOK, [*_INPUT, "swipe", "108", "1200", "972", "1200", "300"], 1]
@@ -1014,10 +1017,32 @@ def test_terminate_all_apps_swipes_toward_clear_all_until_it_appears(
     ]
 
 
-def test_terminate_all_apps_presses_home_and_warns_when_clear_all_never_appears(
+def test_terminate_all_apps_presses_home_without_a_warning_when_no_app_is_in_recent_apps(
     controller: device.AdbController, adb: _FakeAdb, caplog: pytest.LogCaptureFixture
 ) -> None:
-    adb.replies[_UI_DUMP] = (0, _CARDS_ONLY)
+    """The recent apps screen shows no app card, so there is nothing to clear."""
+    adb.replies[_UI_DUMP] = (0, _NO_RECENT_APPS)
+    with caplog.at_level(logging.WARNING, logger="test"):
+        controller.terminate_all_apps()
+    assert adb.events == [_OPEN_RECENT_APPS, 1, _LOOK, [*_INPUT, "keyevent", "KEYCODE_HOME"], 1]
+    assert caplog.messages == []
+
+
+@pytest.mark.parametrize(
+    "dump",
+    [
+        pytest.param(_CARDS_ONLY, id="app cards"),
+        # Only the recent apps screen tells that no app is in it, not a screen without it.
+        pytest.param(_HOME_SCREEN, id="home screen"),
+    ],
+)
+def test_terminate_all_apps_presses_home_and_warns_when_clear_all_never_appears(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    caplog: pytest.LogCaptureFixture,
+    dump: bytes,
+) -> None:
+    adb.replies[_UI_DUMP] = (0, dump)
     with caplog.at_level(logging.WARNING, logger="test"):
         controller.terminate_all_apps()
     assert adb.events == [
