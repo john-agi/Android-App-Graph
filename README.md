@@ -13,6 +13,9 @@ fork of [UI-KOBE](https://github.com/YuxiangChai/UI-KOBE) by Yuxiang Chai.
 3. **Audit and plot the graph.** `app-graph-audit` finds duplicate nodes and
    mislabelled edges and can correct them on the device; `app-graph-plot` draws
    the graph.
+4. **Build again from the log.** `app-graph-build` builds a new graph from the
+   recorded screenshots and actions, without a device, under other matching
+   settings.
 
 ## Repository Layout
 
@@ -21,7 +24,7 @@ Android-App-Graph/
 ├── src/
 │   └── android_app_graph/             # The installable package; the only directory in the wheel
 │       ├── cli.py                     # app-graph command
-│       ├── commands/                  # app-graph-audit, app-graph-plot
+│       ├── commands/                  # app-graph-audit, app-graph-build, app-graph-plot
 │       ├── kobe.py                    # Core app explorer
 │       ├── screen_image.py            # The WebP encoding every screenshot gets when taken
 │       ├── step_log.py                # Records every screenshot and action in steps/
@@ -37,7 +40,7 @@ that contains the `android_app_graph` import package and nothing else.
 
 `scripts/` and `configs/` deliberately stay at the repository root and are not
 part of the wheel. `scripts/` holds only `run_explore.sh`, a shell wrapper
-around the `app-graph` console script; the `app-graph-audit` and
+around the `app-graph` console script; the `app-graph-audit`, `app-graph-build` and
 `app-graph-plot` commands live in `src/android_app_graph/commands/` and ship
 with the wheel. `configs/` holds example configuration.
 
@@ -74,6 +77,7 @@ graph TD;
     gm --> groups;
     gm --> rounds["android_app_graph.merge_rounds"];
     gm --> pay["android_app_graph.payloads"];
+    cmd --> pay;
     gm --> steps;
     gm --> vlm;
     gf --> pay;
@@ -152,9 +156,9 @@ set +a
 `.env` is ignored by git. Keep all four model selections from
 [`.env.example`](.env.example), or replace them with exact OpenRouter model IDs.
 The application has no built-in model defaults. Each operation requires explicit,
-nonempty model settings. Before any device setup or API request, `app-graph` and
-`app-graph-audit` reject every config key that neither command uses, naming each
-by its path, such as `vlm.action.max_tokens` or `apps[0].activity`, and
+nonempty model settings. Before any device setup or API request, `app-graph`,
+`app-graph-audit` and `app-graph-build` reject every config key that no command
+uses, naming each by its path, such as `vlm.action.max_tokens` or `apps[0].activity`, and
 validate every setting the operation uses (models, temperatures, timeouts and
 `OPENROUTER_API_KEY`); they report the problems in a one-line usage error.
 `CONFIG_KEYS` in `src/android_app_graph/utils/__init__.py` lists the accepted
@@ -182,7 +186,9 @@ To compare models, edit `.env`, export it again and restart the command.
 
 Exploration requires every role: `page_detail`, `embedding`, `image_embedding`,
 `instruction` and `action`. A basic audit requires `page_detail`, `embedding` and
-`image_embedding`; `--re-explore` also requires `instruction` and `action`.
+`image_embedding`; `--re-explore` also requires `instruction` and `action`. A
+[build](#build-a-graph-from-a-step-log) requires `page_detail`, `embedding` and
+`image_embedding`, whose model only names the log's vectors it reads.
 `image_embedding` embeds screenshots and takes the `embedding` model when its block
 sets none (see [Requests and recovery](#requests-and-recovery)),
 so the four variables above cover every role. Help and plotting existing graphs need
@@ -297,7 +303,7 @@ Chat responses must include every field the SDK requires, including
 `system_fingerprint`, which may be `null` but not omitted. A broken endpoint
 response cannot become an action's fallback wait.
 
-Exploration and `app-graph-audit` log a usage summary when they finish, per call
+Exploration, `app-graph-audit` and `app-graph-build` log a usage summary when they finish, per call
 type and model: calls, prompt tokens and the cached share of them, completion
 tokens and the reasoning share of them, total tokens, and cost in USD, as reported
 by OpenRouter's [usage accounting](https://openrouter.ai/docs/guides/administration/usage-accounting).
@@ -872,6 +878,52 @@ edge whose instructions still match that hash, so an edge is asked again only
 after it gains, loses or changes an instruction; an edge without the hash is
 asked on the next pass. A pass also skips an edge with a single instruction of
 at most six words and no quote or digit, which keeps no template.
+
+## Build a Graph from a Step Log
+
+`app-graph-build` builds a new graph from a recorded [step log](#step-log), without a
+device, under the config's matching settings (see [Screen matching](#screen-matching)).
+The log is input only, so one log yields any number of graphs to compare, such as one
+built with five verifier calls per screen and one with three:
+
+```bash
+set -a && source .env && set +a
+uv run app-graph-build -c configs/explore.yaml --app <app_name> \
+  --steps graphs/<app_name>/steps --out graphs/<app_name>_5_calls
+```
+
+The config names the app in `apps`, the `page_detail`, `embedding` and
+`image_embedding` models, `vlm.matching` and `experiment.coverage_checkpoint_steps`. The
+build:
+
+- replays the `match` and `transition` records of the log's exploration runs, and with
+  `--audit-runs` those of the audit's re-exploration runs too, in the order of the
+  screenshots and steps they name;
+- places the screenshot of each `match` record by screen matching, expecting the node
+  that lists its `expected_observation` in the new graph;
+- adds each transition as an edge from the node of the screenshot the run last matched at
+  or before its `before` screenshot, which shows the screen the step started on, to the
+  node of its `after` screenshot, or to the `ext_<package>` node of a screen of another
+  app, with the planner's instruction, the [setup](#graph-edges) exploration would have
+  recorded and, on a self-loop, the state it changed; a transition that starts before
+  any match, or ends on a screen of the app that was not matched, is skipped with a
+  warning;
+- runs the coverage checkpoint's merge audit after every
+  `experiment.coverage_checkpoint_steps` exploration steps, counted in transitions, so
+  waits do not count, and edge normalization once at the end;
+- writes `<app_name>.json`, its identify file and its description vectors into the
+  directory `--out`, which must not exist yet and whose `steps` is a symbolic link to the
+  log, so `app-graph-plot` and `app-graph-audit` read the same images.
+
+The build embeds no screenshot: it takes each matched screenshot's vector from the log's
+`image_emb.json`, tagged with the `image_embedding` model, and stops before any request,
+naming how many matched screenshots have none. It writes nothing into the log. Running
+exploration or `app-graph-audit --re-explore` on a built graph records the new steps in
+the log through the link. Model answers vary between calls, so a build with the explored
+graph's settings does not reproduce that graph exactly: compare builds with builds. A
+build logs, as it ends, its in-app nodes and edges, its decisions by
+[`stage`](#screen-matching) and its verifier calls in screen matching, then the usage
+summary.
 
 ## Visualize or Audit a Graph
 
