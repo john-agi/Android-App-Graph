@@ -48,15 +48,19 @@ from openrouter import OpenRouter
 
 from android_app_graph.graph_files import (
     PER_ACTION_LISTS,
+    append_json_line,
     edge_problems,
     graph_steps_dir,
+    identify_file_path,
     load_embeddings,
     member_problems,
     observation_image_b64,
+    read_json_lines,
     require_known_edge_endpoints,
     save_embeddings,
     text_embeddings_path,
     unloadable_graph,
+    write_bytes_atomically,
     write_json_atomically,
 )
 from android_app_graph.member_groups import (
@@ -78,12 +82,16 @@ from android_app_graph.payloads import (
 from android_app_graph.step_log import (
     Observation,
     TransitionRecord,
-    annotate_observation,
     load_image_embeddings,
     read_observation_record,
     save_image_embeddings,
 )
-from android_app_graph.utils import DEFAULT_AUDIT_TIMEOUT, ModelSettings
+from android_app_graph.utils import (
+    DEFAULT_AUDIT_TIMEOUT,
+    DEFAULT_MATCHING,
+    MatchingSettings,
+    ModelSettings,
+)
 from android_app_graph.utils.vlm_utils import (
     audit_graph,
     audit_merge_nodes,
@@ -101,8 +109,6 @@ from android_app_graph.utils.vlm_utils import (
 logger = logging.getLogger(__name__)
 
 NORMALIZE_EVERY_N_VISITS = 10
-# The verifier calls the short list may make for one screen; a checked expected node adds one.
-SHORT_LIST_VERIFICATIONS = 3
 _FIXED_INSTRUCTION_MAX_WORDS = 6
 # The ext_ prefix keeps it out of start-node and exploration-target selection, like ext_<package>.
 EXTERNAL_WEB_NODE = "ext_web"
@@ -305,7 +311,8 @@ class _EdgeToNormalize:
 
 
 class _Described(NamedTuple):
-    """What the describe call said about a screen, as an observation's record keeps it."""
+    """What the describe call said about a screen, as its line in the graph's identify
+    file keeps it."""
 
     page_description: str
     state: dict[str, object]
@@ -321,9 +328,9 @@ class _Described(NamedTuple):
         }
 
     @classmethod
-    def from_record(cls, record: dict[str, object]) -> _Described | None:
-        """Return the ``describe`` field of an observation's record, or ``None`` when it
-        has none or it is malformed."""
+    def from_record(cls, record: Mapping[str, object]) -> _Described | None:
+        """Return the ``describe`` field of a screenshot's line in the identify file, or
+        ``None`` when it has none or it is malformed."""
         describe = as_object_dict(record.get("describe"))
         description = describe.get("page_description")
         state = describe.get("state")
@@ -439,10 +446,13 @@ def _text_scores(
     return list(best.items())
 
 
-SHORT_LIST_SOURCES = (
-    ShortListSource("image", 3, _image_scores),
-    ShortListSource("text", 2, _text_scores),
-)
+def short_list_sources(matching: MatchingSettings) -> tuple[ShortListSource, ...]:
+    """Return the short list's sources, each proposing as many nodes as ``matching``
+    gives it."""
+    return (
+        ShortListSource("image", matching.image_candidates, _image_scores),
+        ShortListSource("text", matching.text_candidates, _text_scores),
+    )
 
 
 def _short_list_order(candidate: Candidate) -> tuple[int, float]:
@@ -567,8 +577,11 @@ def _most_alike_first(check: _MergeCheck) -> float:
 
 @dataclass(slots=True)
 class _Decision:
-    """What decided a screen's node, as the ``identify`` field of its record keeps it."""
+    """What decided a screen's node, as the ``identify`` field of its line in the graph's
+    identify file keeps it: the screenshot the caller expected the screen to show the
+    screen of, and the node that screenshot belonged to then."""
 
+    expected_observation: str | None
     expected_node: str | None
     stage: Literal["black", "exact", "expected", "short_list", "new", "external_web"] = "new"
     exact_match: str | None = None
@@ -579,6 +592,7 @@ class _Decision:
     def as_record(self, node_id: str) -> dict[str, object]:
         return {
             "stage": self.stage,
+            "expected_observation": self.expected_observation,
             "expected_node": self.expected_node,
             "exact_match": self.exact_match,
             "candidates": self.candidates,
@@ -818,11 +832,20 @@ def _member_observations(node: dict[str, Any]) -> list[str]:
     return members if len(members) == len(observations) else []
 
 
+def _saved_matching(graph: dict[str, Any]) -> MatchingSettings | None:
+    """Return the matching settings a saved graph names, or ``None`` when it names none or
+    one of them is not a whole number."""
+    saved = as_object_dict(graph.get("matching"))
+    values = [saved.get(setting) for setting in MatchingSettings._fields]
+    counts = [value for value in values if isinstance(value, int) and not isinstance(value, bool)]
+    return MatchingSettings(*counts) if len(counts) == len(values) else None
+
+
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
     member observations or that has no integer ``replay_misses`` count, every member
-    without an image in ``steps_dir``, and every edge without actions or whose per-action
-    lists do not hold one entry per action.
+    without an image in ``steps_dir``, every edge without actions or whose per-action
+    lists do not hold one entry per action, and a graph that names no matching settings.
     """
     problems = member_problems(graph["nodes"], steps_dir)
     without_replay_misses = [
@@ -831,6 +854,9 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
     if without_replay_misses:
         problems.append(f"node(s) without a replay_misses count: {without_replay_misses}")
     problems.extend(edge_problems(graph["edges"]))
+    if _saved_matching(graph) is None:
+        settings = ", ".join(MatchingSettings._fields)
+        problems.append(f"no matching settings, a whole number for each of {settings}")
     if problems:
         raise unloadable_graph(path, problems)
 
@@ -847,15 +873,16 @@ def _raise_for_members_without(vector: str, without: Mapping[str, Sequence[str]]
 
 
 def _stored_screens(
-    nodes: list[dict[str, Any]], path: Path, steps_dir: Path
+    nodes: list[dict[str, Any]], path: Path, steps_dir: Path, identify_file: Path
 ) -> dict[str, _StoredScreen]:
-    """Read the pixel hash and description of every member of the saved in-app
-    ``nodes`` from its record in ``steps_dir``: its describe output, or, for a black
-    screenshot, the description made from its activity.
+    """Read the pixel hash of every member of the saved in-app ``nodes`` from its record
+    in ``steps_dir``, and its description from its line in ``identify_file``: its describe
+    output, or, for a black screenshot, the description made from its activity.
 
-    A member whose record holds no pixel hash, or no describe output and is not of a
-    black screenshot, raises ``ValueError`` naming ``path`` and every such member.
+    A member whose record holds no pixel hash, or that has no describe output and is not
+    of a black screenshot, raises ``ValueError`` naming ``path`` and every such member.
     """
+    lines = {as_str(line.get("observation"), ""): line for line in read_json_lines(identify_file)}
     stored: dict[str, _StoredScreen] = {}
     undescribed: list[str] = []
     for node in nodes:
@@ -867,7 +894,7 @@ def _stored_screens(
                 as_str(record.get("activity"), "") if record.get("black") is True else None
             )
             described = (
-                _Described.from_record(record)
+                _Described.from_record(lines.get(member, {}))
                 if black_activity is None
                 else _black_screen_described(black_activity)
             )
@@ -878,8 +905,9 @@ def _stored_screens(
                 stored[member] = _StoredScreen(pixel_hash, described, black_activity)
     if undescribed:
         problem = (
-            f"member(s) whose record in {steps_dir} holds no pixel hash, or no describe "
-            f"output and is not of a black screenshot: {undescribed}"
+            f"member(s) whose record in {steps_dir} holds no pixel hash, or that have no "
+            f"describe output in {identify_file} and are not of a black screenshot: "
+            f"{undescribed}"
         )
         raise unloadable_graph(path, [problem])
     return stored
@@ -902,9 +930,14 @@ class GraphManager:
         self.embedding = embedding
         self.image_embedding = image_embedding
         self.audit_timeout = audit_timeout
-        # The step log the nodes' observations are in: load_graph sets the one beside
-        # the file it loads, and the owner of a new graph sets it before identify_state.
+        # The settings screen matching places screenshots by: a new graph takes its owner's,
+        # and load_graph requires the file's to equal them.
+        self.matching = DEFAULT_MATCHING
+        # The step log the nodes' observations are in, and the file each decision that
+        # placed one is appended to: load_graph sets the ones beside the file it loads, and
+        # the owner of a new graph sets both before identify_state.
         self.steps_dir: Path | None = None
+        self.identify_file: Path | None = None
         self._next_id = 0
         self._node_aliases: dict[str, str] = {}
         self._image_vectors: dict[str, list[float]] = {}
@@ -942,9 +975,55 @@ class GraphManager:
 
     def _require_steps_dir(self) -> Path:
         if self.steps_dir is None:
-            msg = "GraphManager needs a steps_dir to read and annotate observations"
+            msg = "GraphManager needs a steps_dir to read observations"
             raise RuntimeError(msg)
         return self.steps_dir
+
+    def _require_identify_file(self) -> Path:
+        if self.identify_file is None:
+            msg = "GraphManager needs an identify_file to record what places each screenshot"
+            raise RuntimeError(msg)
+        return self.identify_file
+
+    def _record_decision(
+        self,
+        observation: Observation,
+        decision: _Decision,
+        node_id: str,
+        describe: Mapping[str, object] | None,
+    ) -> None:
+        """Append to the identify file what placed ``observation`` on ``node_id``: the
+        describe output it took, when it took one, and the decision."""
+        line: dict[str, object] = {"observation": observation.observation_id}
+        if describe is not None:
+            line["describe"] = dict(describe)
+        line["identify"] = decision.as_record(node_id)
+        append_json_line(self._require_identify_file(), line)
+
+    def node_of(self, observation_id: str | None) -> str | None:
+        """Return the node that lists ``observation_id`` among its members, or ``None``
+        when none does or no observation is named."""
+        if observation_id is None:
+            return None
+        return next(
+            (
+                _node_id(node_id)
+                for node_id, data in self.graph.nodes(data=True)
+                if observation_id in _member_observations(data)
+            ),
+            None,
+        )
+
+    def earliest_member(self, node_id: str | None) -> str | None:
+        """Return the earliest member of ``node_id``, followed through its renames and
+        merges, or ``None`` when no node is named, it is gone or it has no members."""
+        if node_id is None:
+            return None
+        node_id = self.resolve_node_id(node_id)
+        if node_id not in self.graph:
+            return None
+        members = _member_observations(self.graph.nodes[node_id])
+        return members[0] if members else None
 
     def _embed(self, text: str) -> list[float]:
         client, embedding = self._require_embedding()
@@ -1128,10 +1207,12 @@ class GraphManager:
         logger.info("Embedded %d member image(s) for $%.6f", len(missing), cost)
         return len(missing)
 
-    def identify_state(self, observation: Observation, *, expected_node: str | None = None) -> str:
+    def identify_state(
+        self, observation: Observation, *, expected_observation: str | None = None
+    ) -> str:
         """Return the node the screen in ``observation`` belongs to, creating one when
-        none does, add ``observation`` to its members, and add what decided it to the
-        observation's record.
+        none does, add ``observation`` to its members, and append what decided it to the
+        identify file.
 
         The screen is embedded by image, then compared with the members of the in-app
         nodes of its ``package``, cheapest evidence first:
@@ -1141,10 +1222,11 @@ class GraphManager:
            output, so neither the describe call nor the verifier runs.
         2. The describe call describes the screen; web content from outside the app
            goes to ``EXTERNAL_WEB_NODE``.
-        3. ``expected_node``, the node the caller expects the screen to be, is verified
-           against its member closest to the screen.
+        3. The expected node, the node that lists ``expected_observation``, a screenshot
+           the caller expects the screen to show the screen of, is verified against its
+           member closest to the screen. A screenshot no node lists names no node.
         4. The short list's candidates are verified in order against their closest
-           members, up to ``SHORT_LIST_VERIFICATIONS``.
+           members, up to the ``verifier_calls`` of the matching settings.
 
         The first confirmation decides, and a check the verifier gives no answer on
         counts as a rejection. A screen every check rejects starts a new node, and the
@@ -1152,23 +1234,23 @@ class GraphManager:
 
         A ``black`` screen, all a secure window captures, is matched by its activity
         instead of steps 1 to 4: it joins the node with a black member of its activity,
-        or starts a node described from the activity's class name, with no elements. Its
-        record takes no describe output and it has no description vector, so the
-        ``text`` source never ranks a node by it.
+        or starts a node described from the activity's class name, with no elements. It
+        takes no describe output and has no description vector, so the ``text`` source
+        never ranks a node by it.
         """
         client, page_detail = self._require_page_detail()
         self._require_embedding()
-        steps_dir = self._require_steps_dir()
+        self._require_steps_dir()
+        self._require_identify_file()
+        decision = _Decision(expected_observation, self.node_of(expected_observation))
         same_package = self._same_package_nodes(observation.package)
         image_vector = self._embed_image(observation.screenshot_b64)
         self._image_vectors[observation.observation_id] = image_vector
         if observation.black:
-            return self._record_black_screen(
-                observation, same_package.node_ids, expected_node=expected_node
-            )
+            return self._record_black_screen(observation, same_package.node_ids, decision)
         exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
         if exact is not None:
-            return self._record_exact_match(observation, *exact, expected_node=expected_node)
+            return self._record_exact_match(observation, *exact, decision)
 
         described = _Described(
             *describe_page_and_state(
@@ -1185,7 +1267,6 @@ class GraphManager:
             list(described.state.keys()) if described.state else "[]",
             len(described.elements),
         )
-        decision = _Decision(expected_node)
         if described.is_external_web:
             decision.stage = "external_web"
             node_id = self._record_external_web_visit(observation)
@@ -1202,11 +1283,7 @@ class GraphManager:
             self._stored_screens[observation.observation_id] = _StoredScreen(
                 observation.pixel_hash, described
             )
-        annotate_observation(
-            steps_dir,
-            observation.observation_id,
-            {"describe": described.as_record(), "identify": decision.as_record(node_id)},
-        )
+        self._record_decision(observation, decision, node_id, described.as_record())
         return node_id
 
     def _assign(self, identification: _Identification) -> str:
@@ -1271,10 +1348,10 @@ class GraphManager:
         return next(iter(matches.items()))
 
     def _record_exact_match(
-        self, observation: Observation, node_id: str, member: str, *, expected_node: str | None
+        self, observation: Observation, node_id: str, member: str, decision: _Decision
     ) -> str:
         """Add the screen to ``node_id`` as an exact copy of its ``member``, whose
-        describe output and text vector it takes, and record that on the screen's record."""
+        describe output and text vector it takes, and record that in the identify file."""
         described = self._stored_screens[member].described
         text_vector = self.member_description_vectors([node_id])[node_id, member]
         logger.info(
@@ -1286,24 +1363,18 @@ class GraphManager:
             observation.pixel_hash, described
         )
         self._text_vectors[observation.observation_id] = text_vector
-        decision = _Decision(expected_node, "exact", exact_match=member)
-        annotate_observation(
-            self._require_steps_dir(),
-            observation.observation_id,
-            {
-                "describe": {**described.as_record(), "copied_from": member},
-                "identify": decision.as_record(node_id),
-            },
-        )
+        decision.stage, decision.exact_match = "exact", member
+        describe = {**described.as_record(), "copied_from": member}
+        self._record_decision(observation, decision, node_id, describe)
         return node_id
 
     def _record_black_screen(
-        self, observation: Observation, node_ids: Sequence[str], *, expected_node: str | None
+        self, observation: Observation, node_ids: Sequence[str], decision: _Decision
     ) -> str:
         """Add the black screen in ``observation`` to the node of ``node_ids`` with a black
         member of its activity, or to a new node described from the activity's class
-        name, and record that on the screen's record. The record takes no describe
-        output, so the screen has no description vector."""
+        name, and record that in the identify file. The screen takes no describe output,
+        so it has no description vector."""
         activity = observation.activity
         described = _black_screen_described(activity)
         node_id = self._black_node(activity, node_ids)
@@ -1328,11 +1399,8 @@ class GraphManager:
         self._stored_screens[observation.observation_id] = _StoredScreen(
             observation.pixel_hash, described, activity
         )
-        annotate_observation(
-            self._require_steps_dir(),
-            observation.observation_id,
-            {"identify": _Decision(expected_node, "black").as_record(node_id)},
-        )
+        decision.stage = "black"
+        self._record_decision(observation, decision, node_id, None)
         return node_id
 
     def _black_node(self, activity: str, node_ids: Sequence[str]) -> str | None:
@@ -1423,7 +1491,7 @@ class GraphManager:
             )
             or "empty",
         )
-        for candidate in candidates[:SHORT_LIST_VERIFICATIONS]:
+        for candidate in candidates[: self.matching.verifier_calls]:
             node_id = self.resolve_node_id(candidate.node_id)
             confirmed = self._verify(
                 identification, node_id, candidate.closest_member.observation_id
@@ -1434,11 +1502,11 @@ class GraphManager:
         return None
 
     def short_list(self, query: ScreenQuery, node_ids: Sequence[str]) -> list[Candidate]:
-        """Return the nodes of ``node_ids`` that a source in ``SHORT_LIST_SOURCES`` ranks
-        among its best, once each, ordered by their best rank in any source and then
-        by the image score of their closest member."""
+        """Return the nodes of ``node_ids`` that a source of ``short_list_sources`` ranks
+        among its best under the matching settings, once each, ordered by their best rank
+        in any source and then by the image score of their closest member."""
         candidates: dict[str, Candidate] = {}
-        for source in SHORT_LIST_SOURCES:
+        for source in short_list_sources(self.matching):
             ranked = sorted(
                 source.scores(self, query, node_ids), key=lambda kv: kv[1], reverse=True
             )
@@ -2117,7 +2185,7 @@ class GraphManager:
             self._image_vectors[member],
             screen,
             self.member_description_vectors([node_id])[node_id, member],
-            _Decision(expected_node=None),
+            _Decision(expected_observation=None, expected_node=None),
             verdicts=verdicts,
         )
 
@@ -2762,14 +2830,16 @@ class GraphManager:
         return ranked
 
     def save_graph(self, path: str | Path) -> None:
-        """Save graph to a JSON file, with its members' text vectors in the file
-        ``text_embeddings_path`` names and the image vectors in the step log beside it."""
+        """Save graph to a JSON file, with the matching settings that made it, its
+        members' text vectors in the file ``text_embeddings_path`` names and the image
+        vectors in the step log beside it."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
             "next_id": self._next_id,
             "total_steps_completed": self.total_steps_completed,
+            "matching": self.matching._asdict(),
             "node_aliases": dict(self._node_aliases),
             "nodes": [],
             "edges": [],
@@ -2830,18 +2900,19 @@ class GraphManager:
     def load_graph(self, path: str | Path) -> None:
         """Load graph from a JSON file, with its members' text vectors when the manager
         has embedding settings, the step log beside it as the manager's ``steps_dir``,
-        its image vectors when the manager has image-embedding settings, and its
-        members' stored screens.
+        its identify file as the manager's ``identify_file``, its image vectors when the
+        manager has image-embedding settings, and its members' stored screens.
 
         A file that lacks a field the graph needs raises ``ValueError`` naming it and
         each node, member or edge that lacks one: a node must list its member
         observations and have an integer ``replay_misses`` count, every member must have
         an image in the step log, every member of an in-app node must have a record
-        there with its pixel hash and, unless it is of a black screenshot, its describe
-        output, and every edge must hold one entry per action in each per-action list.
-        With embedding settings, so does a damaged text-vector file, one from another
-        model, and one, missing or not, without the vector of a member of an in-app
-        node whose record holds a describe output.
+        there with its pixel hash and, unless it is of a black screenshot, a describe
+        output in the identify file, every edge must hold one entry per action in each
+        per-action list, and the graph must name its matching settings, which must be
+        the manager's. With embedding settings, so does a damaged text-vector file, one
+        from another model, and one, missing or not, without the vector of a member of
+        an in-app node with a describe output.
         """
         path = Path(path)
         with path.open(encoding="utf-8") as f:
@@ -2852,7 +2923,15 @@ class GraphManager:
         data = require_known_edge_endpoints(raw, path)
         steps_dir = graph_steps_dir(path)
         _require_saved_fields(data, path, steps_dir)
-        stored_screens = _stored_screens(data["nodes"], path, steps_dir)
+        saved_matching = _saved_matching(data)
+        if saved_matching != self.matching:
+            msg = (
+                f"{path} was built with the matching settings {saved_matching}, not the "
+                f"configured {self.matching}. Set vlm.matching to the graph's settings."
+            )
+            raise ValueError(msg)
+        identify_file = identify_file_path(path)
+        stored_screens = _stored_screens(data["nodes"], path, steps_dir, identify_file)
         image_vectors = (
             load_image_embeddings(steps_dir, model=self.image_embedding.model)
             if self.image_embedding is not None
@@ -2876,6 +2955,7 @@ class GraphManager:
         self._next_id = data.get("next_id", 0)
         self.total_steps_completed = data.get("total_steps_completed", 0)
         self.steps_dir = steps_dir
+        self.identify_file = identify_file
         self._image_vectors = image_vectors
         self._unit_vectors = {}
         self._text_vectors = text_vectors
@@ -2926,6 +3006,14 @@ class GraphManager:
             self.graph.number_of_nodes(),
             self.graph.number_of_edges(),
         )
+
+    def copy_identify_file(self, path: Path) -> None:
+        """Start the identify file of the copy of the graph saved at ``path`` from this
+        graph's, and append every later decision there."""
+        source = self._require_identify_file()
+        target = identify_file_path(path)
+        write_bytes_atomically(target, source.read_bytes() if source.exists() else b"")
+        self.identify_file = target
 
     def shortest_path(self, source: str, target: str) -> list[str] | None:
         """Find shortest weighted path between two nodes. Returns list of node IDs or None."""

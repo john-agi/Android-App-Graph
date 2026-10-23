@@ -19,9 +19,11 @@ from openrouter.errors import OpenRouterError
 from PIL import Image
 
 from android_app_graph.device import DeviceController, StillOutsideAppError
+from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
+from android_app_graph.utils import MatchingSettings
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 from android_app_graph.utils.vlm_utils import PlanRequest
 
@@ -114,6 +116,13 @@ class _ReplayDevice(_Device):
         self._log.append(action)
 
 
+def _identify_lines(explorer: Kobe) -> list[dict[str, Any]]:
+    """The lines of the explorer's identify file, beside its graph file, in order."""
+    path = identify_file_path(explorer.graph_path)
+    assert explorer.graph.identify_file == path
+    return [dict(line) for line in read_json_lines(path)]
+
+
 def _explorer(
     device: DeviceController,
     tmp_path: Path,
@@ -183,6 +192,27 @@ def test_exploration_resolves_all_role_models_before_device_access(
     assert agent.graph.image_embedding == agent.graph.embedding
     assert agent.graph.page_detail == agent.page_detail
     assert agent.client is agent.graph.client is router_client
+
+
+def test_exploration_matches_screens_under_the_configured_settings(
+    tmp_path: Path, router_client: OpenRouter, write_graph_file: Callable[..., None]
+) -> None:
+    """A new graph takes the config's matching settings; a saved graph must have been built
+    with them."""
+    vlm_config: dict[str, object] = {role: {"model": f"provider/{role}"} for role in _ROLES}
+    vlm_config["matching"] = {"verifier_calls": 5}
+    config = ExplorerConfig(
+        app_name="demo", package_name="com.demo", graph_dir=tmp_path, vlm_config=vlm_config
+    )
+    device = _Device(AssertionError("loading must not read the device"))
+    explorer = Kobe(device, config, client=router_client, logger=logging.getLogger("test"))
+    assert explorer.graph.matching == MatchingSettings(verifier_calls=5)
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir(exist_ok=True)
+    write_graph_file(graph_path, {"nodes": [{"id": "s0_home"}], "edges": []}, "provider/embedding")
+
+    with pytest.raises(ValueError, match="was built with the matching settings"):
+        Kobe(device, config, client=router_client, logger=logging.getLogger("test"))
 
 
 @pytest.mark.usefixtures("model_environment")
@@ -370,15 +400,23 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
             httpx.Response(200, json=embedding_body),
         ]
     )
-    node = replaying_kobe.graph.identify_state(
-        Observation.from_state(replaying_kobe.controller.get_state())
-    )
+    home = Observation.from_state(replaying_kobe.controller.get_state())
+    node = replaying_kobe.graph.identify_state(home)
     assert replaying_kobe.navigate_to_node(node) == node
     assert len(router_requests) == 4
     assert device_log == _FIRST_RESTART
-    (*_, replayed) = step_records(replaying_kobe.controller.steps)
-    assert (replayed["source"], replayed["identify"]["stage"]) == ("navigation_replay", "exact")
-    assert replayed["identify"]["expected_node"] == node
+    (*_, replayed, match) = step_records(replaying_kobe.controller.steps)
+    assert (match["kind"], match["source"]) == ("match", "navigation_replay")
+    assert (match["observation"], match["expected_observation"]) == (
+        replayed["id"],
+        home.observation_id,
+    )
+    (*_, decision) = _identify_lines(replaying_kobe)
+    assert decision["observation"] == replayed["id"]
+    assert (decision["identify"]["stage"], decision["identify"]["expected_node"]) == (
+        "exact",
+        node,
+    )
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -685,8 +723,8 @@ def test_a_replay_to_the_start_node_renamed_on_the_screen_the_app_opened_on_reac
     )
     answers = iter(["s1_list", "s0_home_feed", "s0_home_feed"])
 
-    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
-        if expected_node == "s0_home":
+    def identify(_observation: Observation, *, expected_observation: str | None = None) -> str:
+        if graph.node_of(expected_observation) == "s0_home":
             graph.rename_node("s0_home", "Home feed")
         return next(answers)
 
@@ -709,10 +747,11 @@ _CLOCK_NODES = ("s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new")
 
 def _clock_graph(explorer: Kobe) -> None:
     """Give the graph Clock's alarms tab, its start node, reached from the clock tab, an
-    alarm reached from the alarms tab, and a What's new screen no path leads from; each
-    action has a setup."""
+    alarm reached from the alarms tab, and a What's new screen no path leads from, each
+    with a member; each action has a setup."""
     graph = explorer.graph
-    graph.graph.add_nodes_from(_CLOCK_NODES, replay_misses=0)
+    for node in _CLOCK_NODES:
+        graph.graph.add_node(node, replay_misses=0, observations=[f"{node}-observation"])
     graph.add_edge(
         "s1_clock", "s0_alarms", action=[_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
     )
@@ -920,9 +959,12 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    """Each screen read is a WebP image and an observation record, an action names the
-    observation before it, and the step's edge is a transition naming both screens, the
-    planner's instruction and element, the action and the nodes the screens became."""
+    """Each screen read is a WebP image and an observation record, each screen matched has
+    a match record, an action names the observation before it, and the step's edge is a
+    transition naming both screens, the planner's instruction and element, the action and
+    the nodes the screens became. What placed each screen on its node, its describe
+    output and decision, goes to the identify file beside the graph, not to the step
+    log."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     explorer = _explorer(
         _Screens(HOME_SCREEN, _screen("com.demo.SettingsActivity", "gray")),
@@ -950,29 +992,44 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
     records = step_records(steps_dir)
     assert [(record["id"], record["kind"]) for record in records] == [
         ("000000", "observation"),
-        ("000001", "action"),
-        ("000002", "observation"),
-        ("000003", "transition"),
+        ("000001", "match"),
+        ("000002", "action"),
+        ("000003", "observation"),
+        ("000004", "match"),
+        ("000005", "transition"),
     ]
     assert {(record["run_kind"], record["source"]) for record in records} == {
         ("explore", "main_loop")
     }
-    assert sorted(path.name for path in steps_dir.glob("*.webp")) == ["000000.webp", "000002.webp"]
+    assert not any("describe" in record or "identify" in record for record in records)
+    assert sorted(path.name for path in steps_dir.glob("*.webp")) == ["000000.webp", "000003.webp"]
+    assert [
+        (r["observation"], r["expected_observation"]) for r in records if r["kind"] == "match"
+    ] == [
+        ("000000", None),
+        ("000003", None),
+    ]
     tap = {"action": "tap", "x": 50, "y": 100}
-    assert (records[1]["observation"], records[1]["action"]) == ("000000", tap)
-    transition = {key: records[3][key] for key in ("before", "after", "instruction", "element")}
+    assert (records[2]["observation"], records[2]["action"]) == ("000000", tap)
+    transition = {key: records[5][key] for key in ("before", "after", "instruction", "element")}
     assert transition == {
         "before": "000000",
-        "after": "000002",
+        "after": "000003",
         "instruction": "Tap the About row",
         "element": 1,
     }
-    assert (records[3]["action"], records[3]["from_node"], records[3]["to_node"]) == (
+    assert (records[5]["action"], records[5]["from_node"], records[5]["to_node"]) == (
         tap,
         "s0_home",
         "s1_about",
     )
-    assert explorer.graph.graph.nodes["s1_about"]["observations"] == ["000002"]
+    assert explorer.graph.graph.nodes["s1_about"]["observations"] == ["000003"]
+    lines = _identify_lines(explorer)
+    assert [(line["observation"], line["identify"]["node"]) for line in lines] == [
+        ("000000", "s0_home"),
+        ("000003", "s1_about"),
+    ]
+    assert [line["describe"]["page_description"] for line in lines] == ["home", "about"]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -986,7 +1043,8 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     """The page's screen becomes a member of ext_web, the transition leads there, and the
-    back press off the page and the screen read after it are external-web recovery."""
+    back press off the page and the screen read and matched after it are external-web
+    recovery. That match expects the screenshot the step started from."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     browser = _screen("com.demo.ArticleActivity", "blue")
     explorer = _explorer(_Screens(HOME_SCREEN, browser, HOME_SCREEN), tmp_path, router_client)
@@ -1009,14 +1067,20 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     records = step_records(explorer.controller.steps)
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "main_loop"),
+        ("match", "main_loop"),
         ("action", "main_loop"),
         ("observation", "main_loop"),
+        ("match", "main_loop"),
         ("transition", "main_loop"),
         ("action", "external_web_recovery"),
         ("observation", "external_web_recovery"),
+        ("match", "external_web_recovery"),
     ]
-    assert (records[3]["after"], records[3]["to_node"]) == ("000002", EXTERNAL_WEB_NODE)
-    assert explorer.graph.graph.nodes[EXTERNAL_WEB_NODE]["observations"] == ["000002"]
+    assert (records[5]["after"], records[5]["to_node"]) == ("000003", EXTERNAL_WEB_NODE)
+    assert explorer.graph.graph.nodes[EXTERNAL_WEB_NODE]["observations"] == ["000003"]
+    assert (records[8]["observation"], records[8]["expected_observation"]) == ("000007", "000000")
+    (*_, back) = _identify_lines(explorer)
+    assert (back["identify"]["stage"], back["identify"]["expected_node"]) == ("exact", "s0_home")
 
 
 @pytest.mark.parametrize(
@@ -1334,9 +1398,10 @@ def test_a_step_that_leaves_the_app_records_its_screen_on_the_app_s_node(
     monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    """The other app's node takes the screen the step reached as its member, the transition
-    leads to that node, and the back press home and the screens read after it, before or
-    after a restart, are external-app recovery."""
+    """The other app's node takes the screen the step reached as its member, unmatched, the
+    transition leads to that node, and the back press home and the screens read after it,
+    before or after a restart, are external-app recovery. The screen the app is back on is
+    matched expecting the screenshot the step started from."""
     home: dict[str, object] = {
         "activity": "com.demo.Home",
         "screenshot": png_screenshot,
@@ -1360,15 +1425,21 @@ def test_a_step_that_leaves_the_app_records_its_screen_on_the_app_s_node(
     records = step_records(kobe.controller.steps)
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "main_loop"),
+        ("match", "main_loop"),
         ("action", "main_loop"),
         ("observation", "main_loop"),
         ("transition", "main_loop"),
         ("action", "external_app_recovery"),
         ("observation", "external_app_recovery"),
         *([("observation", "external_app_recovery")] if relaunched else []),
+        ("match", "main_loop"),
     ]
-    assert (records[3]["after"], records[3]["to_node"]) == ("000002", "ext_com.android.launcher3")
-    assert kobe.graph.graph.nodes["ext_com.android.launcher3"]["observations"] == ["000002"]
+    assert (records[4]["after"], records[4]["to_node"]) == ("000003", "ext_com.android.launcher3")
+    assert kobe.graph.graph.nodes["ext_com.android.launcher3"]["observations"] == ["000003"]
+    assert (records[-1]["observation"], records[-1]["expected_observation"]) == (
+        records[-2]["id"],
+        "000000",
+    )
     restart = _FIRST_RESTART if relaunched else []
     assert device_log == [_BACK, _BACK, *restart]
 
@@ -1918,14 +1989,22 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     assert all(list_image in request.content.decode() for request in router_requests[-2:])
     tap = {"action": "tap", "x": 50, "y": 100}
     assert device_log == [tap, *_FIRST_RESTART, open_list, open_item, tap]
-    step = [("action", "main_loop"), ("observation", "main_loop"), ("transition", "main_loop")]
+    step = [
+        ("action", "main_loop"),
+        ("observation", "main_loop"),
+        ("match", "main_loop"),
+        ("transition", "main_loop"),
+    ]
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
+        ("match", "main_loop"),
         *step,
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("action", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "coverage_checkpoint"),
+        ("match", "coverage_checkpoint"),
         ("observation", "coverage_checkpoint"),
         *step,
     ]
@@ -2363,7 +2442,7 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
     after_the_replay = [_SEARCH_SCREEN, _SEARCH_SCREEN, HOME_SCREEN]
     device = screens_by_log(*[HOME_SCREEN] * 4, *after_the_replay)
     explorer = _explorer(device, tmp_path, router_client)
-    explorer.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
+    _list_reached_from_home(explorer, "s1_detail")
     explorer.graph.add_edge("s0_home", "s1_detail", action=[open_detail])
     expected = _identifying(explorer, monkeypatch, "s0_home", "s0_home")
 
@@ -2377,18 +2456,21 @@ type _Visit = str | tuple[str, Mapping[str, object]]
 
 def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visit) -> list[object]:
     """Make the explorer's identify_state answer ``visits`` in turn, each a node, or a node
-    with the state the visit records as the node's latest; return the list the expected
-    node of each call is appended to."""
+    with the state the visit records as the node's latest; return the list the node of
+    each call's expected screenshot is appended to: the node answered for it, or the node
+    that lists it."""
     expected: list[object] = []
     answers = iter(visits)
+    answered: dict[str, str] = {}
 
-    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
-        expected.append(expected_node)
+    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+        known = answered.get(expected_observation or "")
+        expected.append(known or explorer.graph.node_of(expected_observation))
         visit = next(answers)
-        if isinstance(visit, str):
-            return visit
-        node, state = visit
-        explorer.graph.graph.nodes[node]["last_detail_snapshot"] = dict(state)
+        node, state = (visit, None) if isinstance(visit, str) else visit
+        if state is not None:
+            explorer.graph.graph.nodes[node]["last_detail_snapshot"] = dict(state)
+        answered[observation.observation_id] = node
         return node
 
     monkeypatch.setattr(explorer.graph, "identify_state", identify)
@@ -2398,7 +2480,11 @@ def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visi
 def _list_reached_from_home(explorer: Kobe, *extra_nodes: str) -> None:
     for node in ("s0_home", "s1_list", *extra_nodes):
         explorer.graph.graph.add_node(
-            node, page_description=node, package="com.demo", replay_misses=0
+            node,
+            page_description=node,
+            package="com.demo",
+            replay_misses=0,
+            observations=[f"{node}-observation"],
         )
 
 
@@ -2594,9 +2680,12 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     ]
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
+        ("match", "main_loop"),
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("observation", "coverage_checkpoint"),
         ("observation", "main_loop"),
     ]
@@ -2920,7 +3009,7 @@ def test_a_damaged_vector_file_stops_exploration_before_any_model_request(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_every_screen_identify_state_takes_is_embedded_and_annotated(
+def test_every_screen_identify_state_takes_is_embedded_and_its_decision_recorded(
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -2929,8 +3018,9 @@ def test_every_screen_identify_state_takes_is_embedded_and_annotated(
     monkeypatch: pytest.MonkeyPatch,
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    """The home screen is described, the step's screen matched exactly, and the vectors of
-    both are saved with the graph, under the image-embedding model."""
+    """The home screen is described, the step's screen matched exactly, both decisions are
+    in the identify file, and the vectors of both are saved with the graph, under the
+    image-embedding model."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
     router_responses.extend(
@@ -2949,8 +3039,10 @@ def test_every_screen_identify_state_takes_is_embedded_and_annotated(
     observations = [
         r for r in step_records(explorer.controller.steps) if r["kind"] == "observation"
     ]
-    assert [r["identify"]["stage"] for r in observations] == ["new", "exact"]
-    assert [r["describe"]["page_description"] for r in observations] == ["home", "home"]
+    lines = _identify_lines(explorer)
+    assert [line["observation"] for line in lines] == [r["id"] for r in observations]
+    assert [line["identify"]["stage"] for line in lines] == ["new", "exact"]
+    assert [line["describe"]["page_description"] for line in lines] == ["home", "home"]
     assert all(len(r["pixel_hash"]) == 64 and r["status_bar_rows"] == 0 for r in observations)
     stored = json.loads((explorer.controller.steps / "image_emb.json").read_text("utf-8"))
     assert stored["model"] == "provider/embedding"

@@ -1,11 +1,13 @@
-"""The step log: every screenshot exploration and the audit take, and every action
-they send, kept in an app's ``steps/`` directory.
+"""The step log: every screenshot exploration and the audit take, every action they
+send, every screenshot they ask a node for and every edge they record, kept in an app's
+``steps/`` directory.
 
 Each step has a zero-padded number. Its record is ``<id>.json``; an observation's
 image, the screenshot as ``screen_image`` encodes it, is ``<id>.webp`` beside it.
 The image is published before its record, so every record names an image that
 exists, and an image a crash left without a record is ignored and its number
-reused. ``image_emb.json`` beside them holds the observations' image vectors.
+reused. Once written, a record never changes. ``image_emb.json`` beside them holds
+the observations' image vectors.
 """
 
 from __future__ import annotations
@@ -156,18 +158,6 @@ def read_observation_record(steps: Path, observation_id: str) -> dict[str, objec
     return as_object_dict(json.loads(text))
 
 
-def annotate_observation(steps: Path, observation_id: str, fields: Mapping[str, object]) -> None:
-    """Add ``fields`` to the record of observation ``observation_id`` in the step log
-    ``steps``, replacing the record atomically.
-
-    A missing record raises ``FileNotFoundError``: ``StepRecorder.get_state`` writes one
-    for every observation, so a missing one means the step log was changed by hand.
-    """
-    path = step_record_path(steps, observation_id)
-    record = as_object_dict(json.loads(path.read_text(encoding="utf-8")))
-    write_json_atomically(path, {**record, **fields}, ensure_ascii=False)
-
-
 def load_image_embeddings(steps: Path, *, model: str) -> dict[str, list[float]]:
     """Return the image vectors of the step log ``steps`` by observation ID, when
     ``model`` computed them, by the rules of ``load_embeddings``."""
@@ -207,7 +197,8 @@ class StepRecorder:
 
     One recorder is one run: its records share a ``run_id`` and its ``run_kind``.
     Each record also names its ``source``, the part of the run that took it, which
-    callers set with ``with recorder.source(...)``.
+    callers set with ``with recorder.source(...)``. ``last_match`` is the observation
+    of the run's latest match record, ``None`` before the first.
     """
 
     def __init__(
@@ -227,6 +218,7 @@ class StepRecorder:
         self._run_kind = run_kind
         self._source = source
         self._last_observation: Observation | None = None
+        self.last_match: str | None = None
         steps.mkdir(parents=True, exist_ok=True)
         self._next_number = _first_free_number(steps)
 
@@ -303,6 +295,20 @@ class StepRecorder:
         )
         self._controller.exe_action(action)
 
+    def record_match(self, observation: Observation, expected_observation: str | None) -> None:
+        """Record that the run asks for the node of ``observation``, expecting the node
+        ``expected_observation`` belongs to when it names one."""
+        self._write_record(
+            self._take_step_id(),
+            "match",
+            observation,
+            {
+                "observation": observation.observation_id,
+                "expected_observation": expected_observation,
+            },
+        )
+        self.last_match = observation.observation_id
+
     def record_transition(self, transition: Transition) -> None:
         """Record ``transition``, an edge the graph was given."""
         self._write_record(
@@ -328,7 +334,7 @@ class StepRecorder:
     def _write_record(
         self,
         step_id: str,
-        kind: Literal["observation", "action", "transition"],
+        kind: Literal["observation", "action", "match", "transition"],
         screen: Observation | None,
         fields: Mapping[str, object],
     ) -> None:

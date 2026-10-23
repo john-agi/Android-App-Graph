@@ -22,9 +22,13 @@ from android_app_graph.device import (
     return_to_app,
     soft_keyboard_hint,
 )
-from android_app_graph.graph_files import app_graph_path, graph_steps_dir
+from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
 from android_app_graph.step_log import Observation, StepRecorder, Transition
-from android_app_graph.utils import resolve_audit_timeout, resolve_model_settings
+from android_app_graph.utils import (
+    resolve_audit_timeout,
+    resolve_matching_settings,
+    resolve_model_settings,
+)
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
     EXTERNAL_WEB_NODE,
@@ -98,10 +102,13 @@ class _Move:
     """One planned action, and what the step read before it that recording it needs.
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
-    wrote, which differs when an ``end`` is recorded as a back press.
+    wrote, which differs when an ``end`` is recorded as a back press. ``start`` is the
+    screenshot the run last matched before the step, which shows the screen the step
+    starts from.
     """
 
     source: str
+    start: str | None
     before: Observation
     action: dict[str, Any]
     instruction: str
@@ -182,7 +189,9 @@ class Kobe:
             image_embedding=settings["image_embedding"],
             audit_timeout=resolve_audit_timeout(vlm_config),
         )
+        self.graph.matching = resolve_matching_settings(vlm_config)
         self.graph.steps_dir = steps_dir
+        self.graph.identify_file = identify_file_path(self.graph_path)
 
         if self.graph_path.exists():
             self.graph.load_graph(self.graph_path)
@@ -313,7 +322,7 @@ class Kobe:
         """
         node, _ = self._identify(self.controller.get_state())
         if node == EXTERNAL_WEB_NODE:
-            node, _ = self._leave_external_web(expected_node=None)
+            node, _ = self._leave_external_web(expected_observation=None)
         self._setup_trail.begin(node, None)
         return node
 
@@ -382,7 +391,10 @@ class Kobe:
             raise NoPathError(msg)
 
         restart_app(self.controller, self.app_launch, self.logger)
-        opened_on, _ = self._identify(self.controller.get_state(), expected_node=start_node)
+        opened_on, _ = self._identify(
+            self.controller.get_state(),
+            expected_observation=self.graph.earliest_member(start_node),
+        )
         start_node = self.graph.resolve_node_id(start_node)
         target_node = self.graph.resolve_node_id(target_node)
         if opened_on != start_node:
@@ -429,7 +441,10 @@ class Kobe:
                 self.controller.exe_action(action)
             time.sleep(1)  # brief pause for the UI to settle
 
-        actual_node, _ = self._identify(self.controller.get_state(), expected_node=target_node)
+        actual_node, _ = self._identify(
+            self.controller.get_state(),
+            expected_observation=self.graph.earliest_member(target_node),
+        )
         return self._report_arrival(actual_node, target_node)
 
     def _report_arrival(self, actual_node: str, target_node: str) -> str:
@@ -689,6 +704,7 @@ class Kobe:
             return None
         return _Move(
             source=position.node,
+            start=self.controller.last_match,
             before=Observation.from_state(position.device_state),
             action=action,
             instruction=recorded_instruction,
@@ -726,7 +742,7 @@ class Kobe:
         self._count_step(move.source, move.action_sequence, ext_node, move.tokens_before, max_steps)
         self.graph.maybe_normalize_node_edges(move.source)
         self.save_graph()
-        node, device_state = self._identify(device_state, expected_node=move.source)
+        node, device_state = self._identify(device_state, expected_observation=move.start)
         self._setup_trail.begin(node, None)
         return self._continue_after(node, device_state, max_steps)
 
@@ -755,7 +771,7 @@ class Kobe:
             move.source, move.action_sequence, EXTERNAL_WEB_NODE, move.tokens_before, max_steps
         )
         self.save_graph()
-        node, device_state = self._leave_external_web(expected_node=move.source)
+        node, device_state = self._leave_external_web(expected_observation=move.start)
         self._setup_trail.begin(node, None)
         return self._continue_after(node, device_state, max_steps)
 
@@ -835,10 +851,11 @@ class Kobe:
         )
 
     def _identify(
-        self, device_state: dict[str, Any], *, expected_node: str | None = None
+        self, device_state: dict[str, Any], *, expected_observation: str | None = None
     ) -> tuple[str, dict[str, Any]]:
-        """Return the node of the screen in ``device_state``, which the caller expects
-        to be ``expected_node`` when it names one, and that state.
+        """Record a match of the screen in ``device_state``, which the caller expects to
+        show the screen of ``expected_observation`` when it names one, and return its
+        node and that state.
 
         Another app's screen gets no node: with another app in front, the app is
         restarted first, and the node and state returned are those of the screen the
@@ -851,10 +868,10 @@ class Kobe:
             )
             with self.controller.source("external_app_recovery"):
                 device_state = restart_into_app(self.controller, self.app_launch, self.logger)
-            expected_node = self.graph.get_start_node()
-        node = self.graph.identify_state(
-            Observation.from_state(device_state), expected_node=expected_node
-        )
+            expected_observation = self.graph.earliest_member(self.graph.get_start_node())
+        observation = Observation.from_state(device_state)
+        self.controller.record_match(observation, expected_observation)
+        node = self.graph.identify_state(observation, expected_observation=expected_observation)
         return node, device_state
 
     def _continue_after(self, node: str, device_state: dict[str, Any], max_steps: int) -> _Position:
@@ -866,24 +883,28 @@ class Kobe:
         )
         return _Position(node, device_state)
 
-    def _leave_external_web(self, *, expected_node: str | None) -> tuple[str, dict[str, Any]]:
+    def _leave_external_web(
+        self, *, expected_observation: str | None
+    ) -> tuple[str, dict[str, Any]]:
         """Press back until the screen is no longer an outside web page, restarting the
         app if a few presses do not leave it, and return the screen's node and state.
 
-        A back press is expected to return to ``expected_node``, the screen that opened
-        the page, when the caller knows it, and a restart to the start node. A step from
-        the shared ``ext_web`` node would act on a page outside the app, and
-        ``add_edge`` would refuse its edge.
+        A back press is expected to return to the screen of ``expected_observation``, the
+        screenshot of the screen that opened the page, when the caller knows it, and a
+        restart to the start node. A step from the shared ``ext_web`` node would act on a
+        page outside the app, and ``add_edge`` would refuse its edge.
         """
         with self.controller.source("external_web_recovery"):
-            return self._press_back_off_external_web(expected_node)
+            return self._press_back_off_external_web(expected_observation)
 
-    def _press_back_off_external_web(self, expected_node: str | None) -> tuple[str, dict[str, Any]]:
+    def _press_back_off_external_web(
+        self, expected_observation: str | None
+    ) -> tuple[str, dict[str, Any]]:
         for _ in range(EXTERNAL_WEB_BACK_PRESSES):
             self.controller.exe_action({"action": "back"})
             time.sleep(1)
             node, device_state = self._identify(
-                self.controller.get_state(), expected_node=expected_node
+                self.controller.get_state(), expected_observation=expected_observation
             )
             if node != EXTERNAL_WEB_NODE:
                 return node, device_state
@@ -894,7 +915,8 @@ class Kobe:
         )
         restart_app(self.controller, self.app_launch, self.logger)
         return self._identify(
-            self.controller.get_state(), expected_node=self.graph.get_start_node()
+            self.controller.get_state(),
+            expected_observation=self.graph.earliest_member(self.graph.get_start_node()),
         )
 
     def _handle_external_app(

@@ -20,6 +20,19 @@ from android_app_graph.retrying import DeadlineTransport
 
 ROLES = ("page_detail", "embedding", "image_embedding", "instruction", "action")
 _CHAT_ROLES = ("page_detail", "instruction", "action")
+
+
+class MatchingSettings(NamedTuple):
+    """How screen matching places a screenshot: how many nodes each short-list source
+    proposes, and how many of them the verifier checks; README.md#screen-matching."""
+
+    verifier_calls: int = 3
+    image_candidates: int = 3
+    text_candidates: int = 2
+
+
+DEFAULT_MATCHING = MatchingSettings()
+
 # Every key app-graph or app-graph-audit uses and no other, by path; "[]" stands for each
 # entry of a list. Both commands accept all of them, since they share one config file.
 CONFIG_KEYS = frozenset(
@@ -37,6 +50,7 @@ CONFIG_KEYS = frozenset(
         "vlm.page_detail.audit_request_timeout",
         *(f"vlm.{role}.{key}" for role in ROLES for key in ("model", "request_timeout", "timeout")),
         *(f"vlm.{role}.temperature" for role in _CHAT_ROLES),
+        *(f"vlm.matching.{setting}" for setting in MatchingSettings._fields),
     }
 )
 _SECTIONS = frozenset(
@@ -244,3 +258,20 @@ def resolve_model_settings(
             "Invalid vlm configuration: " + "; ".join(error.rstrip(".") for error in errors)
         )
     return settings
+
+
+def resolve_matching_settings(vlm_config: Mapping[str, object]) -> MatchingSettings:
+    """Validate ``vlm.matching`` all at once: each setting a whole number of 0 or more,
+    and one it leaves out taking its value in ``DEFAULT_MATCHING``."""
+    matching = as_object_dict(vlm_config.get("matching"))
+    counts: dict[str, int] = {}
+    errors: list[str] = []
+    for setting, default in DEFAULT_MATCHING._asdict().items():
+        value = matching.get(setting, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            errors.append(f"vlm.matching.{setting} must be a whole number of 0 or more")
+        else:
+            counts[setting] = value
+    if errors:
+        raise ValueError("Invalid vlm configuration: " + "; ".join(errors))
+    return MatchingSettings(**counts)

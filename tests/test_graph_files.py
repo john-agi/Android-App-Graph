@@ -271,6 +271,74 @@ def test_an_explored_graph_and_its_audited_copy_keep_their_own_text_vectors(
     )
 
 
+def test_an_explored_graph_and_its_audited_copy_keep_their_own_identify_files(
+    tmp_path: Path,
+) -> None:
+    assert graph_files.identify_file_path(tmp_path / "demo.json") == (
+        tmp_path / "demo_identify.jsonl"
+    )
+    assert graph_files.identify_file_path(tmp_path / "demo_audited.json") == (
+        tmp_path / "demo_audited_identify.jsonl"
+    )
+
+
+def test_json_lines_are_appended_and_read_back_in_order(tmp_path: Path) -> None:
+    path = tmp_path / "demo_identify.jsonl"
+    assert graph_files.read_json_lines(path) == []
+
+    graph_files.append_json_line(path, {"observation": "000001", "text": "Réglages"})
+    graph_files.append_json_line(path, {"observation": "000003"})
+
+    assert path.read_text(encoding="utf-8") == (
+        '{"observation": "000001", "text": "Réglages"}\n{"observation": "000003"}\n'
+    )
+    assert graph_files.read_json_lines(path) == [
+        {"observation": "000001", "text": "Réglages"},
+        {"observation": "000003"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "torn", ['{"observation": "000003", "ide', '{"observation": "000003"}'], ids=["cut", "whole"]
+)
+def test_a_last_line_without_its_newline_is_left_out_and_cut_off_by_the_next_append(
+    torn: str, tmp_path: Path
+) -> None:
+    path = tmp_path / "demo_identify.jsonl"
+    path.write_text('{"observation": "000001"}\n' + torn, encoding="utf-8")
+
+    assert graph_files.read_json_lines(path) == [{"observation": "000001"}]
+
+    graph_files.append_json_line(path, {"observation": "000005"})
+
+    assert graph_files.read_json_lines(path) == [
+        {"observation": "000001"},
+        {"observation": "000005"},
+    ]
+
+
+def test_an_append_after_a_torn_first_line_starts_the_file_again(tmp_path: Path) -> None:
+    path = tmp_path / "demo_identify.jsonl"
+    path.write_text('{"observ', encoding="utf-8")
+
+    graph_files.append_json_line(path, {"observation": "000005"})
+
+    assert path.read_text(encoding="utf-8") == '{"observation": "000005"}\n'
+
+
+@pytest.mark.parametrize("line", ['{"observ', "[1, 2]", ""], ids=["not json", "a list", "empty"])
+def test_a_damaged_line_before_the_last_raises_naming_the_file_and_the_line(
+    line: str, tmp_path: Path
+) -> None:
+    path = tmp_path / "demo_identify.jsonl"
+    path.write_text(f'{{"observation": "000001"}}\n{line}\n{{}}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="line 2 is not a JSON object") as raised:
+        graph_files.read_json_lines(path)
+
+    assert str(raised.value).startswith(str(path))
+
+
 TEXT_MODEL = "provider/embedding"
 
 

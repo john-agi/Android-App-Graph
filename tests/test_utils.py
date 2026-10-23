@@ -20,12 +20,15 @@ from openrouter.components.security import Security
 from rich.console import Console
 
 from android_app_graph.utils import (
+    DEFAULT_MATCHING,
+    MatchingSettings,
     ModelSettings,
     check_config_keys,
     open_client,
     resolve_api_key,
     resolve_audit_timeout,
     resolve_env,
+    resolve_matching_settings,
     resolve_model_settings,
     vlm_utils,
 )
@@ -127,6 +130,7 @@ _EVERY_ACCEPTED_KEY: dict[str, object] = {
         "image_embedding": {"model": "m", "request_timeout": 30, "timeout": 30},
         "instruction": {"model": "m", "temperature": 0, "request_timeout": 30, "timeout": 30},
         "action": {"model": "m", "temperature": 0, "request_timeout": 30, "timeout": 30},
+        "matching": {"verifier_calls": 5, "image_candidates": 3, "text_candidates": 2},
     },
 }
 
@@ -384,6 +388,29 @@ def test_every_invalid_setting_is_reported_on_one_line() -> None:
         "action.request_timeout",
     ):
         assert problem in message
+
+
+def test_matching_settings_the_config_leaves_out_take_their_defaults() -> None:
+    assert resolve_matching_settings({}) == DEFAULT_MATCHING == MatchingSettings(3, 3, 2)
+    assert resolve_matching_settings({"matching": None}) == DEFAULT_MATCHING
+
+
+def test_the_matching_settings_take_what_the_config_sets() -> None:
+    assert resolve_matching_settings({"matching": {"verifier_calls": 5, "text_candidates": 0}}) == (
+        MatchingSettings(verifier_calls=5, image_candidates=3, text_candidates=0)
+    )
+
+
+def test_every_invalid_matching_setting_is_reported_on_one_line() -> None:
+    matching = {"verifier_calls": -1, "image_candidates": 2.5, "text_candidates": True}
+    with pytest.raises(ValueError, match=r"^Invalid vlm configuration: ") as caught:
+        resolve_matching_settings({"matching": matching})
+    assert str(caught.value) == (
+        "Invalid vlm configuration: "
+        "vlm.matching.verifier_calls must be a whole number of 0 or more; "
+        "vlm.matching.image_candidates must be a whole number of 0 or more; "
+        "vlm.matching.text_candidates must be a whole number of 0 or more"
+    )
 
 
 @pytest.fixture

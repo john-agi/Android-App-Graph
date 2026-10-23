@@ -19,14 +19,16 @@ from PIL import Image
 from android_app_graph.commands import audit
 from android_app_graph.device import DeviceController
 from android_app_graph.graph_files import (
+    append_json_line,
     graph_steps_dir,
+    identify_file_path,
     observation_image_path,
     save_embeddings,
     text_embeddings_path,
 )
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
-from android_app_graph.utils import ModelSettings, graph_manager, open_client
+from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -63,11 +65,13 @@ def _write_config(tmp_path: Path, graph_dir: str = "graphs") -> Path:
 
 
 def _graph_with_nodes(*nodes: tuple[str, dict[str, Any]]) -> GraphManager:
-    """Return a GraphManager holding the given nodes, each with a ``replay_misses`` of 0,
-    and no VLM clients."""
+    """Return a GraphManager holding the given nodes, each with a ``replay_misses`` of 0
+    and, unless its attributes list its members, one member observation, and no VLM
+    clients."""
     graph = GraphManager()
     for node_id, attrs in nodes:
-        graph.graph.add_node(node_id, replay_misses=0, **attrs)
+        member = {"observations": [f"{node_id}-observation"]}
+        graph.graph.add_node(node_id, replay_misses=0, **(member | attrs))
     return graph
 
 
@@ -226,6 +230,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
         json.dumps(
             {
                 "next_id": 2,
+                "matching": DEFAULT_MATCHING._asdict(),
                 "nodes": [
                     {
                         "id": "s0_home",
@@ -272,18 +277,21 @@ def _identifying(
     graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *visits: _Visit
 ) -> list[str | None]:
     """Make identify_state answer ``visits`` in turn, each a node, or a node with the state
-    the visit records as the node's latest; return the list the expected node of each call
-    is appended to."""
+    the visit records as the node's latest; return the list the node of each call's
+    expected screenshot is appended to: the node answered for it, or the node that lists
+    it."""
     expected: list[str | None] = []
     answers = iter(visits)
+    answered: dict[str, str] = {}
 
-    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
-        expected.append(expected_node)
+    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+        known = answered.get(expected_observation or "")
+        expected.append(known or graph.node_of(expected_observation))
         visit = next(answers)
-        if isinstance(visit, str):
-            return visit
-        node, state = visit
-        graph.graph.nodes[node]["last_detail_snapshot"] = dict(state)
+        node, state = (visit, None) if isinstance(visit, str) else visit
+        if state is not None:
+            graph.graph.nodes[node]["last_detail_snapshot"] = dict(state)
+        answered[observation.observation_id] = node
         return node
 
     monkeypatch.setattr(graph, "identify_state", identify)
@@ -291,19 +299,18 @@ def _identifying(
 
 
 def _write_member(graph_path: Path, node_id: str) -> None:
-    """Put the member a node of ``graph_path`` lists in its step log: its image, and its
-    record with a pixel hash and a describe output."""
+    """Put the member a node of ``graph_path`` lists in its step log, its image and its
+    record with a pixel hash, and its describe output in the graph's identify file."""
     steps_dir = graph_steps_dir(graph_path)
     steps_dir.mkdir(exist_ok=True)
     observation_id = f"{node_id}-observation"
     observation_image_path(steps_dir, observation_id).write_bytes(encode_screenshot(_png(0)))
-    record = {
-        "id": observation_id,
-        "kind": "observation",
-        "pixel_hash": f"hash-{observation_id}",
-        "describe": {"page_description": "", "state": {}, "elements": [], "is_external_web": False},
-    }
+    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"hash-{observation_id}"}
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), encoding="utf-8")
+    describe = {"page_description": "", "state": {}, "elements": [], "is_external_web": False}
+    append_json_line(
+        identify_file_path(graph_path), {"observation": observation_id, "describe": describe}
+    )
 
 
 @pytest.fixture
@@ -432,8 +439,10 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
     device_log: list[object],
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
-    """The replay to the node is recorded as a navigation replay; the step from it is an
-    audit transition from the screen it planned on to the screen it reached."""
+    """The replay to the node is recorded as a navigation replay, its start expecting the
+    start node's earliest member and its end the node's; the step from it is an audit
+    transition from the screen it planned on to the screen it reached, matched with no
+    expectation."""
     graph, graph_path = _two_node_graph(tmp_path)
     reached = iter(["s0_home", "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
@@ -453,18 +462,27 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
     records = step_records(graph_path.parent / "steps")
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("observation", "re_explore"),
         ("action", "re_explore"),
         ("observation", "re_explore"),
+        ("match", "re_explore"),
         ("transition", "re_explore"),
     ]
     assert {record["run_kind"] for record in records} == {"audit"}
-    assert records[1]["observation"] == records[0]["id"]
-    assert {key: records[6][key] for key in _STEP_FIELDS} == {
-        "before": "000003",
-        "after": "000005",
+    assert records[2]["observation"] == records[0]["id"]
+    matches = [record for record in records if record["kind"] == "match"]
+    assert [(r["observation"], r["expected_observation"]) for r in matches] == [
+        ("000000", "s0_home-observation"),
+        ("000003", "s1_detail-observation"),
+        ("000007", None),
+    ]
+    assert {key: records[9][key] for key in _STEP_FIELDS} == {
+        "before": "000005",
+        "after": "000007",
         "instruction": "tap the first button",
         "element": None,
         "action": tap,
@@ -638,6 +656,7 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     )
     # The re-exploration below records its screens in the same step log.
     graph.steps_dir = tmp_path / "steps"
+    graph.identify_file = identify_file_path(tmp_path / "demo_audited.json")
     recorder = StepRecorder(
         two_screen_device, graph.steps_dir, run_kind="audit", source="re_explore"
     )
@@ -922,7 +941,8 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
     step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     """The flagged action and the screens before and after it are an edge retry, whose
-    transition carries the edge's instruction and the node the action reached; the replays
+    transition carries the edge's instruction and the node the action reached, the screen
+    after it matched expecting the earliest member of the edge's target; the replays
     around it are navigation replays."""
     graph = _flagged_graph()
     reached = iter(["s0_home", "s2_settings", "s0_home"])
@@ -933,15 +953,22 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
     records = step_records(tmp_path / "steps")
     assert [(record["kind"], record["source"]) for record in records] == [
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("observation", "edge_retry"),
         ("action", "edge_retry"),
         ("observation", "edge_retry"),
+        ("match", "edge_retry"),
         ("transition", "edge_retry"),
         ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
     ]
-    assert {key: records[4][key] for key in _STEP_FIELDS} == {
-        "before": "000001",
-        "after": "000003",
+    assert (records[5]["observation"], records[5]["expected_observation"]) == (
+        "000004",
+        "s1_detail-observation",
+    )
+    assert {key: records[6][key] for key in _STEP_FIELDS} == {
+        "before": "000002",
+        "after": "000004",
         "instruction": _FLAGGED,
         "element": None,
         "action": [_DETAIL_TAP],
@@ -1397,8 +1424,8 @@ def test_re_explore_to_the_start_node_renamed_on_the_screen_the_app_opened_on_re
     monkeypatch.setattr(graph_manager, "get_embedding", lambda *_args, **_kwargs: [1.0])
     answers = iter(["s1_detail", "s0_start", "s0_start"])
 
-    def identify(_observation: Observation, *, expected_node: str | None = None) -> str:
-        if expected_node == "s0_home":
+    def identify(_observation: Observation, *, expected_observation: str | None = None) -> str:
+        if graph.node_of(expected_observation) == "s0_home":
             graph.rename_node("s0_home", "Start")
         return next(answers)
 
@@ -1514,8 +1541,12 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
     nodes = {"com.demo.Home": "s0_home", "com.demo.Detail": "s1_detail"}
     expected: list[str | None] = []
 
-    def identify(observation: Observation, *, expected_node: str | None = None) -> str:
-        expected.append(expected_node)
+    answered: dict[str, str] = {}
+
+    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+        known = answered.get(expected_observation or "")
+        expected.append(known or graph.node_of(expected_observation))
+        answered[observation.observation_id] = nodes[observation.activity]
         return nodes[observation.activity]
 
     monkeypatch.setattr(graph, "identify_state", identify)
@@ -1624,14 +1655,23 @@ def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     issues = [_retry(), _retry("open settings", target="s2_settings")]
     monkeypatch.setattr(audit, "run_audit", lambda *_args: {"issues": issues})
     reached = iter(["s0_home", "s2_settings", "s0_home"] * 2)
-    monkeypatch.setattr(
-        GraphManager, "identify_state", lambda _self, *_args, **_kwargs: next(reached)
-    )
+    identify_files: list[Path | None] = []
+
+    def identify(self: GraphManager, *_args: object, **_kwargs: object) -> str:
+        identify_files.append(self.identify_file)
+        return next(reached)
+
+    monkeypatch.setattr(GraphManager, "identify_state", identify)
     monkeypatch.setattr(GraphManager, "normalize_all_edges", lambda _self: 0)
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap the gear icon")
+    explored_decisions = (app_dir / "demo_identify.jsonl").read_bytes()
 
     assert audit.main(["--config", str(config), "--re-explore", "--steps-per-issue", "0"]) == 0
 
+    # The audited copy's decisions start from the explored graph's, and its own go there.
+    assert set(identify_files) == {app_dir / "demo_audited_identify.jsonl"}
+    assert (app_dir / "demo_audited_identify.jsonl").read_bytes() == explored_decisions
+    assert (app_dir / "demo_identify.jsonl").read_bytes() == explored_decisions
     outcomes = json.loads((app_dir / "demo_re_explore.json").read_text(encoding="utf-8"))
     assert [(o["issue"], o["status"]) for o in outcomes] == [
         (issues[0], "moved"),
@@ -1642,6 +1682,21 @@ def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     assert (edge["source"], edge["target"]) == ("s0_home", "s2_settings")
     assert edge["actions"] == [[_GEAR_TAP], [_DETAIL_TAP]]
     assert edge["instructions"] == ["Tap the gear icon", _FLAGGED]
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_rejects_invalid_matching_settings_before_reading_a_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\nvlm:\n  matching:\n    verifier_calls: -1\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    with pytest.raises(SystemExit) as caught:
+        audit.main(["--config", str(config)])
+
+    assert caught.value.code == 2
+    assert "vlm.matching.verifier_calls must be a whole number" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("re_explore", [False, True])
@@ -1683,7 +1738,8 @@ def test_audit_cli_opens_one_client_and_closes_it_on_exit(
     graph_dir = tmp_path / "graphs"
     app_dir = graph_dir / "demo"
     app_dir.mkdir(parents=True)
-    (app_dir / "demo.json").write_text('{"nodes":[],"edges":[]}')
+    document = {"matching": DEFAULT_MATCHING._asdict(), "nodes": [], "edges": []}
+    (app_dir / "demo.json").write_text(json.dumps(document))
     config = _write_config(tmp_path, str(graph_dir))
 
     def audit_graph(graph: GraphManager, _app: str, _path: Path) -> dict[str, object]:
@@ -1847,9 +1903,10 @@ def _save_with_members(
     write_image_vectors: Callable[..., None],
 ) -> None:
     """Save *graph* to *path* with a member for every node, its image and image vector in
-    the step log beside it and its text vector in the file beside the graph, so the audit
-    can load it without embedding any."""
+    the step log beside it and its describe output and text vector in the files beside
+    the graph, so the audit can load it without embedding any."""
     graph.steps_dir = graph_steps_dir(path)
+    graph.identify_file = identify_file_path(path)
     for node_id in list(graph.graph):
         add_member(graph, node_id)
     graph.save_graph(path)
@@ -2024,7 +2081,8 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     graph_dir = tmp_path / "graphs"
     (graph_dir / "demo").mkdir(parents=True)
-    (graph_dir / "demo" / "demo.json").write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
+    document = {"matching": DEFAULT_MATCHING._asdict(), "nodes": [], "edges": []}
+    (graph_dir / "demo" / "demo.json").write_text(json.dumps(document), encoding="utf-8")
     config = tmp_path / "audit.yaml"
     config.write_text(
         json.dumps(

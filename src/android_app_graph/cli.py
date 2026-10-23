@@ -20,6 +20,7 @@ from android_app_graph.utils import (
     check_config_keys,
     open_client,
     resolve_api_key,
+    resolve_matching_settings,
     resolve_model_settings,
 )
 from android_app_graph.utils.logging import setup_logging
@@ -87,6 +88,7 @@ def main() -> None:
     try:
         check_config_keys(config)
         resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
+        resolve_matching_settings(vlm_config)
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
