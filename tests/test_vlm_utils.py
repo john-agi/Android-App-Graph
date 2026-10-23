@@ -1528,6 +1528,44 @@ def test_normalize_edge_pairs_each_instruction_with_its_own_observation(
     assert normalized["observation_template"] == "milk results"
 
 
+def test_normalize_edge_sends_the_20_most_recent_distinct_instructions_and_counts_the_rest(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """An instruction recorded again is recent, with the observation it led to last."""
+    router_responses.append(_truncated_reply(chat_response))
+
+    vlm.normalize_edge(
+        router_client,
+        [f"open row {n}" for n in range(25)] + ["open row 3"],
+        target_observations=[f"row {n}" for n in range(25)] + ["row 3 again"],
+        settings=PAGE_DETAIL,
+    )
+
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"]
+    assert prompt.endswith(
+        "Instructions to normalize (the 20 most recent; 5 older ones are not shown):\n"
+        + "".join(f'- Instruction: "open row {n}" → Observation: "row {n}"\n' for n in range(6, 25))
+        + '- Instruction: "open row 3" → Observation: "row 3 again"\n'
+    )
+
+
+def test_the_edge_template_schema_asks_whether_the_instructions_are_different_actions(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    schema = _sent_schemas(
+        router_client, router_requests, router_responses, png_screenshot, chat_response
+    )["edge_template"]["schema"]
+    assert schema["properties"]["different_actions"]["type"] == "boolean"
+    assert "different_actions" in schema["required"]
+
+
 @pytest.mark.parametrize("operation", ["description", "planner"])
 def test_a_truncated_reply_without_a_fallback_raises_at_once(
     operation: str,

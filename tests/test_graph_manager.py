@@ -3234,6 +3234,86 @@ def test_normalize_all_edges_clears_templates_when_the_result_is_not_a_template(
     assert len(normalizer.calls) == 1
 
 
+def _search_edge_templates(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    reply: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The templates the search edge keeps once the model answers ``reply``."""
+    router_responses.append(chat_response(content=json.dumps(reply)))
+    gm = make_manager(client=router_client)
+    _search_graph(gm)
+    gm.normalize_all_edges()
+    templates: list[dict[str, Any]] = gm.graph["s0_home"]["s1_results"]["instruction_templates"]
+    return templates
+
+
+def test_an_edge_answered_as_different_actions_keeps_no_template(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Whatever template the reply fills in beside the answer."""
+    reply = {**TEMPLATE_RESULT, "different_actions": True}
+
+    with caplog.at_level(logging.INFO):
+        templates = _search_edge_templates(router_client, router_responses, chat_response, reply)
+
+    assert templates == []
+    assert "Edge s0_home→s1_results: different actions" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{{instruction}}",
+        "{{action}} {{target_element}} {{interaction_details}}",
+        'Search for "{{query}}"\nTap the "{{filter}}" chip',
+        '1. Search for "{{query}}" 2. Tap the "{{filter}}" chip',
+        'Search for "{{query}}" | Tap the "{{filter}}" chip',
+        'Search for "{{query}}" OR Tap the "{{filter}}" chip',
+    ],
+    ids=["placeholder", "placeholders", "lines", "numbered", "bar", "OR"],
+)
+def test_a_template_of_only_placeholders_or_of_several_actions_counts_as_different_actions(
+    template: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reply = {**TEMPLATE_RESULT, "different_actions": False, "instruction_template": template}
+
+    with caplog.at_level(logging.INFO):
+        templates = _search_edge_templates(router_client, router_responses, chat_response, reply)
+
+    assert templates == []
+    assert "Edge s0_home→s1_results: different actions" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "Type '{{location}}' in the start location field",
+        'Tap "{{order}}" in the "SORT BY" sheet',
+        "search for {query}",
+    ],
+)
+def test_a_template_that_is_one_instruction_is_kept(
+    template: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    reply = {**TEMPLATE_RESULT, "different_actions": False, "instruction_template": template}
+
+    templates = _search_edge_templates(router_client, router_responses, chat_response, reply)
+
+    assert [kept["template"] for kept in templates] == [template]
+
+
 def test_normalize_all_edges_skips_an_edge_without_instructions(
     normalizer: FakeNormalizer,
 ) -> None:
