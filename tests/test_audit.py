@@ -256,6 +256,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "num_steps": [1],
                         "schema_deltas": [None],
                         "setups": [None],
+                        "open_menus": [None],
                     }
                 ],
             }
@@ -869,6 +870,7 @@ def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_wit
                 "num_steps": [1],
                 "schema_deltas": [None],
                 "setups": [None],
+                "open_menus": [None],
                 "visit_count": 1,
             },
         ),
@@ -1605,6 +1607,49 @@ def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup
     assert (result["status"], result["moved_to"]) == ("moved", "s2_settings")
     assert graph.graph["s0_home"]["s2_settings"]["setups"] == [None, [_SWIPE]]
     assert device_log == [*_FIRST_RESTART, _SWIPE, _DETAIL_TAP, *_RESTART]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_leaves_a_flagged_action_unverified_when_no_recorded_action_opens_its_menu(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    """The flagged tap was sent in a menu with an unknown setup, so the retry could not
+    send it in that menu: it sends nothing and leaves the graph as it was."""
+    graph = _flagged_graph()
+    graph.graph["s0_home"]["s1_detail"]["open_menus"] = ["overflow menu"]
+    edges = _edges(graph)
+    _identifying(graph, monkeypatch, "s0_home")
+
+    (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
+
+    assert result == {"issue": _retry(), "status": "unverified", "reached": "s0_home"}
+    assert device_log == _FIRST_RESTART
+    assert _edges(graph) == edges
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_explore_records_the_menu_open_over_the_screen_a_step_is_sent_on(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    row_tap = {"action": "tap", "x": 540, "y": 1700}
+    graph = _flagged_graph()
+    drawer = {"open_menu": "navigation drawer"}
+    _identifying(graph, monkeypatch, "s0_home", ("s1_detail", drawer), "s2_settings")
+    _describing_by_node_id(graph, monkeypatch)
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (row_tap, ""))
+    issue = {"type": "explore_node", "node": "s1_detail", "expected_pages": []}
+
+    _re_explore(
+        graph,
+        [issue],
+        _LoggingController("com.demo", device_log),
+        client,
+        tmp_path,
+        steps_per_issue=1,
+    )
+
+    assert graph.graph["s1_detail"]["s2_settings"]["open_menus"] == ["navigation drawer"]
 
 
 @pytest.mark.parametrize(

@@ -203,6 +203,7 @@ def _saved(edge: dict[str, Any]) -> dict[str, Any]:
         "target_observations": [""] * count,
         "schema_deltas": [None] * count,
         "setups": [None] * count,
+        "open_menus": [None] * count,
     }
     return {**recorded, **edge}
 

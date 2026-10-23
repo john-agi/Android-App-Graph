@@ -371,7 +371,14 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
     return graph
 
 
-PER_ACTION_LISTS = ("num_steps", "instructions", "target_observations", "schema_deltas", "setups")
+PER_ACTION_LISTS = (
+    "num_steps",
+    "instructions",
+    "target_observations",
+    "schema_deltas",
+    "setups",
+    "open_menus",
+)
 
 
 def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:

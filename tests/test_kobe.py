@@ -1759,7 +1759,7 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kobe.graph.graph.add_nodes_from(["s0_home", "s1_settings"], replay_misses=0)
-    kobe.graph.graph.add_edge("s0_home", "s1_settings")
+    kobe.graph.add_edge("s0_home", "s1_settings", {"action": "tap"})
     router_responses.extend(
         [
             chat_response(content='{"issues":[],"summary":"no duplicates"}'),
@@ -1801,7 +1801,7 @@ def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
             ],
             replay_misses=0,
         )
-        graph.add_edge("s0_home", node_id)
+        kobe.graph.add_edge("s0_home", node_id, {"action": "tap"})
     kobe.coverage_checkpoint_top_k = 2
     router_responses.extend(
         [
@@ -1881,7 +1881,7 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     _describing_by_node_id(replaying_kobe, monkeypatch)
     replaying_kobe.coverage_checkpoint_steps = 1
     if navigation_fails:
-        graph.graph.add_edge("s1_list_dup", "s2_detail")
+        graph.add_edge("s1_list_dup", "s2_detail", {"action": "tap"})
         monkeypatch.setattr(replaying_kobe, "navigate_to_node", _fail_navigation)
     duplicate = {"type": "merge_nodes", "node_a": "s0_list", "node_b": "s1_list_dup"}
     target = '{"node_id":"s2_detail","reason":"unexplored"}'
@@ -1900,7 +1900,7 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
 
     replaying_kobe.explore(max_steps=2)
 
-    assert graph.graph["s0_list"]["s2_detail"]["instructions"] == ["Open the first item"]
+    assert graph.graph["s0_list"]["s2_detail"]["instructions"][-1] == "Open the first item"
 
 
 def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candidates(
@@ -1919,7 +1919,7 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
         router_responses.append(httpx.Response(200, json=embedding_body))
     kobe.graph.embed_missing_members()
     kobe.graph.graph.add_node("s0_home", replay_misses=0)
-    kobe.graph.graph.add_edge("s0_home", "s1_list")
+    kobe.graph.add_edge("s0_home", "s1_list", {"action": "tap"})
     duplicate = {"type": "merge_nodes", "node_a": "s1_list", "node_b": "s2_list_dup"}
     router_responses.extend(
         [

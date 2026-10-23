@@ -66,7 +66,10 @@ class _Page:
         return [math.cos(angle), math.sin(angle)]
 
 
-PAGES = [_Page(page, shade=20 + 20 * page) for page in range(9)]
+SHARE_MENU: dict[str, object] = {"open_menu": "share menu"}
+PAGES = [
+    _Page(page, shade=20 + 20 * page, state=SHARE_MENU if page == 7 else {}) for page in range(9)
+]
 SCROLLED = _Page(6, shade=230, state={"first_visible_item": "row 5"})
 OTHER = _Page(99, shade=250, package=OTHER_APP)
 WEB = _Page(98, shade=10, external_web=True)
@@ -144,7 +147,8 @@ class _Log:
 
 def _record_log(steps: Path) -> _Log:
     """Record an exploration run through seven new screens, a scroll and a tap after it, a
-    step into another app and back, a step planned on a screenshot read after the match, a
+    step into another app from the share menu open on the screen it reaches and back, a
+    step planned on a screenshot read after the match, a
     replay that reaches the start screen, a step from it and one onto an outside web page
     and back; then an audit run with one step."""
     device = _Device()
@@ -390,8 +394,10 @@ def test_a_build_places_screens_and_steps_as_exploration_did(
     loop = graph.graph[node("s6")][node("s6")]
     assert loop["schema_deltas"] == [{"first_visible_item": {"before": None, "after": "row 5"}}]
     assert graph.graph[node("s6")][node("s7")]["setups"] == [[SCROLL]]
+    assert graph.graph[node("s6")][node("s7")]["open_menus"] == [None]
     ext = graph.graph[node("s7")][f"ext_{OTHER_APP}"]
     assert ext["target_observations"] == [f"[left app to {OTHER_APP}]"]
+    assert ext["open_menus"] == ["share menu"]
     assert graph.graph.has_edge(node("s7"), node("after_planned"))
     assert graph.graph[node("s0")][node("after_replay")]["setups"] == [[]]
     web = graph.graph[node("after_replay")][EXTERNAL_WEB_NODE]
