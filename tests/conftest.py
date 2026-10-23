@@ -476,8 +476,9 @@ def write_member_graph() -> Callable[..., None]:
     exploration transitions ``(before, after, action, from_node, to_node)``.
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order;
-    the vector is the member's image vector and its text vector. Node ``n`` is described
-    as ``Node n`` and member ``m`` as ``Screen m``, or as ``described`` gives.
+    the vector is the member's image vector and its text vector, unless ``texts`` gives
+    the member a text vector of its own. Node ``n`` is described as ``Node n`` and member
+    ``m`` as ``Screen m``, or as ``described`` gives.
     ``refined`` maps a member to the description its step's first rejection refined it
     to, and ``copied`` maps a member to the member an exact match copied its describe
     output from. ``black`` maps each member whose screenshot is black to its activity;
@@ -497,8 +498,10 @@ def write_member_graph() -> Callable[..., None]:
         described: Mapping[str, str] | None = None,
         refined: Mapping[str, str] | None = None,
         copied: Mapping[str, str] | None = None,
+        texts: Mapping[str, list[float]] | None = None,
     ) -> None:
         black_members = dict(black or {})
+        text_of = dict(texts or {})
         descriptions = dict(described or {})
         refinements = dict(refined or {})
         copies = dict(copied or {})
@@ -537,7 +540,7 @@ def write_member_graph() -> Callable[..., None]:
                         refinement = {"new_description": refinements[observation_id]}
                         line["identify"] = {"stage": "new", "refinement": refinement}
                     append_json_line(identify_file_path(path), line)
-                    text_vectors[observation_id] = vector
+                    text_vectors[observation_id] = text_of.get(observation_id, vector)
                 (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
         for number, (before, after, action, from_node, to_node) in enumerate(transitions):
             record = {
