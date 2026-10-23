@@ -78,7 +78,7 @@ def _compute_schema_delta(
     return delta or None
 
 
-def _target_observation(page_description: str, detail_snapshot: dict[str, Any]) -> str:
+def _target_observation(description: str, detail_snapshot: dict[str, Any]) -> str:
     """Return ``"<description> (key=value, ...)"`` for the details that have a value, or
     the bare description when none has."""
     details = (
@@ -86,7 +86,7 @@ def _target_observation(page_description: str, detail_snapshot: dict[str, Any]) 
         if detail_snapshot
         else ""
     )
-    return f"{page_description} ({details})" if details else page_description
+    return f"{description} ({details})" if details else description
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,9 +594,8 @@ class Kobe:
 
         new_node, device_state = self._identify(device_state)
         move = replace(move, source=self.graph.resolve_node_id(move.source))
-        new_node_data = self._require_node(new_node)
         if new_node == EXTERNAL_WEB_NODE:
-            return self._record_external_web_step(move, new_node_data, device_state, max_steps)
+            return self._record_external_web_step(move, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
 
     def _back_leaves_app(self, node: str) -> bool:
@@ -653,7 +652,11 @@ class Kobe:
 
     def _plan_move(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
         """Plan an action from ``position`` for the caller to execute; ``None`` when the action
-        model asks to wait, which executes nothing."""
+        model asks to wait, which executes nothing.
+
+        The planner is given the description of the screen the device was last identified
+        on, the node's latest member.
+        """
         screenshot = position.device_state["screenshot"]
         node_data = self._require_node(position.node)
 
@@ -670,7 +673,7 @@ class Kobe:
             client=self.client,
             request=PlanRequest(
                 screenshot_b64=screenshot,
-                page_description=node_data["page_description"],
+                page_description=self.graph.latest_description(position.node),
                 explored_edges=explored_edges,
                 app_name=self.app_name,
                 unexplored_elements=unexplored_elements,
@@ -747,11 +750,7 @@ class Kobe:
         return self._continue_after(node, device_state, max_steps)
 
     def _record_external_web_step(
-        self,
-        move: _Move,
-        web_node_data: dict[str, Any],
-        device_state: dict[str, Any],
-        max_steps: int,
+        self, move: _Move, device_state: dict[str, Any], max_steps: int
     ) -> _Position:
         self.logger.warning(
             "External web page opened from %s. Recording the edge and pressing back.",
@@ -763,7 +762,7 @@ class Kobe:
             device_state,
             EdgeDetails(
                 instruction=move.instruction,
-                target_observation=web_node_data.get("page_description", ""),
+                target_observation=self.graph.latest_description(EXTERNAL_WEB_NODE),
             ),
         )
         self.graph.mark_element_explored(move.source, move.planned_element)
@@ -793,7 +792,7 @@ class Kobe:
             EdgeDetails(
                 instruction=move.instruction,
                 target_observation=_target_observation(
-                    new_node_data.get("page_description", ""), detail_after
+                    self.graph.latest_description(new_node), detail_after
                 ),
                 schema_delta=schema_delta,
                 num_steps=len(move.action_sequence),

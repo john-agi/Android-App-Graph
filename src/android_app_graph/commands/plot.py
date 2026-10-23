@@ -32,6 +32,7 @@ from android_app_graph.graph_files import (
     unloadable_graph,
 )
 from android_app_graph.screen_image import MEDIA_TYPE
+from android_app_graph.utils.graph_manager import distinct_descriptions, read_member_descriptions
 from android_app_graph.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -77,10 +78,17 @@ def _image_uri(steps_dir: Path, observation_id: str) -> str:
 def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     """Load an Android-App-Graph JSON graph and return (raw_data, nx.DiGraph).
 
+    Each node's ``description``, which its canvas label and colour show, is its earliest
+    member's description, as its thumbnail is its earliest member's image, and its
+    ``descriptions``, which its tooltip shows, are every distinct description of its
+    members with their counts. Both are read from the step log as
+    ``read_member_descriptions`` reads them; an ``ext_`` node is named by its ID in both.
+
     A file that ``require_graph_shape`` rejects, a node that does not list its member
-    observations, a member whose image is missing from the step log, and an edge
-    without actions or whose per-action lists do not hold one entry per action raise
-    ``ValueError`` naming the file and each of them.
+    observations, a member whose image is missing from the step log, an edge without
+    actions or whose per-action lists do not hold one entry per action, and a member of
+    an in-app node whose record gives no description raise ``ValueError`` naming the
+    file and each of them.
     """
     path = Path(graph_path)
     with path.open("r", encoding="utf-8") as f:
@@ -89,6 +97,7 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
     problems = [*member_problems(data["nodes"], steps_dir), *edge_problems(data["edges"])]
     if problems:
         raise unloadable_graph(path, problems)
+    descriptions = read_member_descriptions(path, data["nodes"])
 
     graph = nx.DiGraph()
 
@@ -96,9 +105,16 @@ def load_graph(graph_path: str) -> tuple[dict[str, Any], nx.DiGraph]:
         observations = node["observations"]
         elements = node.get("interactable_elements", [])
         n_explored = sum(1 for e in elements if e.get("explored", False))
+        if node["id"].startswith("ext_"):
+            described = [node["id"]]
+            listed = node["id"]
+        else:
+            described = [descriptions[observation] for observation in observations]
+            listed = distinct_descriptions(described)
         graph.add_node(
             node["id"],
-            page_description=node["page_description"],
+            description=described[0],
+            descriptions=listed,
             activity=node.get("activity", ""),
             visit_count=node.get("visit_count", 0),
             num_keys=len(node.get("state_schema", {})),
@@ -239,13 +255,9 @@ def largest_weak_component(graph: nx.DiGraph) -> nx.DiGraph:
 
 
 def drop_external_nodes(graph: nx.DiGraph) -> nx.DiGraph:
-    """Remove launcher/permission/external-app nodes that stretch paper layouts."""
-    keep = []
-    for node, data in graph.nodes(data=True):
-        text = f"{node} {data.get('page_description', '')}".lower()
-        if node.startswith("ext_") or "external app" in text:
-            continue
-        keep.append(node)
+    """Remove the ``ext_`` nodes, the screens of other apps and the web, that stretch
+    paper layouts."""
+    keep = [node for node in graph.nodes() if not node.startswith("ext_")]
     return as_digraph(graph.subgraph(keep).copy())
 
 
@@ -357,7 +369,7 @@ def plot_paper_graphviz(
     ]
 
     for node_id, data in graph.nodes(data=True):
-        desc = data.get("page_description", node_id)
+        desc = data.get("description", node_id)
         category = node_category(desc)
         fill, border = palette[category]
         visits = data.get("visit_count", 0)
@@ -449,8 +461,7 @@ def plot_paper_matplotlib(
         "other": "#4f46e5",
     }
     categories = {
-        node: node_category(data.get("page_description", node))
-        for node, data in graph.nodes(data=True)
+        node: node_category(data.get("description", node)) for node, data in graph.nodes(data=True)
     }
 
     for category, node_color in palette.items():
@@ -499,7 +510,7 @@ def plot_paper_matplotlib(
         )
 
     node_labels = {
-        node: f"{node}\n{shorten_words(data.get('page_description', node), style.max_node_words, 34)}"
+        node: f"{node}\n{shorten_words(data.get('description', node), style.max_node_words, 34)}"
         for node, data in graph.nodes(data=True)
     }
     nx.draw_networkx_labels(
@@ -555,11 +566,11 @@ def plot_paper_matplotlib(
 _TOOLTIP_UNEXPLORED_LIMIT = 10
 
 
-def _tooltip_rows(data: dict[str, Any], description: str) -> list[tuple[str, str]]:
+def _tooltip_rows(data: dict[str, Any], descriptions: str) -> list[tuple[str, str]]:
     """Return the label and text of each line under a node's ID in its hover tooltip."""
     state_keys = data.get("state_keys", [])
     rows: list[tuple[str, str]] = [
-        ("Description", description),
+        ("Descriptions", descriptions),
         ("Activity", data.get("activity", "?")),
         ("Visits", f"{data.get('visit_count', 0)}"),
         ("State keys", ", ".join(state_keys) if state_keys else "none"),
@@ -774,8 +785,7 @@ def plot_pyvis(
     ]
 
     for idx, (node_id, data) in enumerate(graph.nodes(data=True)):
-        desc = data.get("page_description", node_id)
-        short_desc = shorten_words(desc, style.max_node_words, 40)
+        short_desc = shorten_words(data.get("description", node_id), style.max_node_words, 40)
         member_images = data.get("member_image_uris", [])
         member_total = data.get("member_total", 0)
         bg = palette[idx % len(palette)]
@@ -783,7 +793,7 @@ def plot_pyvis(
         net.add_node(
             node_id,
             label=f"{short_desc}\n[{member_total} screenshot{'s' if member_total != 1 else ''}]",
-            tooltipRows=_tooltip_rows(data, desc),
+            tooltipRows=_tooltip_rows(data, data.get("descriptions", node_id)),
             memberImages=member_images,
             memberTotal=member_total,
             color={
@@ -858,7 +868,7 @@ def plot_graphviz(graph: nx.DiGraph, output_path: str) -> None:
 
     for node in agraph.nodes():
         data = graph.nodes[node.name]
-        desc = data.get("page_description", node.name)
+        desc = data.get("description", node.name)
         visits = data.get("visit_count", 0)
         node.attr["label"] = f"{desc}\\n({visits} visits)"
 
@@ -885,7 +895,7 @@ def plot_matplotlib(graph: nx.DiGraph, output_path: str) -> None:
     pos = nx.spring_layout(graph, k=2.5, iterations=50, seed=42)
 
     labels = {
-        n: f"{d.get('page_description', n)}\n({d.get('visit_count', 0)} visits)"
+        n: f"{d.get('description', n)}\n({d.get('visit_count', 0)} visits)"
         for n, d in graph.nodes(data=True)
     }
     visits = [graph.nodes[n].get("visit_count", 1) for n in graph.nodes()]

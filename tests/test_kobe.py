@@ -729,6 +729,7 @@ def test_a_replay_to_the_start_node_renamed_on_the_screen_the_app_opened_on_reac
         return next(answers)
 
     monkeypatch.setattr(graph, "identify_state", identify)
+    _describing_by_node_id(replaying_kobe, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Scroll", []))
     monkeypatch.setattr("android_app_graph.kobe.predict_next_action", lambda **_kw: (scroll, ""))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
@@ -1223,6 +1224,7 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     kobe.graph.graph.add_node("s1_compose", page_description="compose", replay_misses=0)
     screens = iter(["s0_home", "s1_compose"])
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: next(screens))
+    _describing_by_node_id(kobe, monkeypatch)
     monkeypatch.setattr(kobe.controller, "exe_action", lambda _action: None)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     instruction = "Tap the floating action button in the bottom right"
@@ -1255,6 +1257,7 @@ def test_a_crash_mid_exploration_is_logged_with_its_traceback(
         "s0_home", page_description="home", interactable_elements=[], replay_misses=0
     )
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(kobe, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _crash)
 
@@ -1581,6 +1584,7 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
 
     planned_from: list[object] = []
     monkeypatch.setattr(kobe, "navigate_to_node", replay)
+    _describing_by_node_id(kobe, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
@@ -1588,7 +1592,7 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
     kobe.explore(max_steps=1, resume_from="s1_settings")
 
     assert replayed == ["s1_settings"]
-    assert planned_from == ["home"]
+    assert planned_from == ["s0_home"]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1602,6 +1606,7 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
     kobe.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
     planned_from: list[object] = []
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(kobe, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_WAIT_REPLY))
@@ -1609,7 +1614,7 @@ def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_scr
     kobe.explore(max_steps=1, resume_from="s9_removed")
 
     assert "Node s9_removed not found in graph. Starting from current screen." in caplog.text
-    assert planned_from == ["home"]
+    assert planned_from == ["s0_home"]
 
 
 @pytest.mark.parametrize("interruption", [RuntimeError, KeyboardInterrupt])
@@ -1628,6 +1633,7 @@ def test_a_resumed_exploration_that_stops_saves_and_logs_the_steps_it_completed(
         raise interruption(msg)
 
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(kobe, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", stop_planning)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     caplog.set_level(logging.INFO, logger="test")
@@ -1669,8 +1675,8 @@ def test_a_run_resumed_from_a_node_logs_the_step_it_starts_from_before_the_repla
 @pytest.mark.parametrize(
     ("detail_after", "delta", "observation"),
     [
-        ({"sort": "price"}, {"sort": {"before": "name", "after": "price"}}, "home (sort=price)"),
-        ({"sort": None}, {"sort": {"before": "name", "after": None}}, "home"),
+        ({"sort": "price"}, {"sort": {"before": "name", "after": "price"}}, "s0_home (sort=price)"),
+        ({"sort": None}, {"sort": {"before": "name", "after": None}}, "s0_home"),
     ],
 )
 @pytest.mark.usefixtures("no_sleep")
@@ -1698,6 +1704,7 @@ def test_a_step_that_stays_on_its_screen_records_the_details_it_changed(
         return "s0_home"
 
     monkeypatch.setattr(explorer.graph, "identify_state", identify)
+    _describing_by_node_id(explorer, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Sort by price", []))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.append(chat_response(content=_TAP_REPLY))
@@ -1723,6 +1730,7 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     explorer.coverage_checkpoint_steps = 0
     explorer.graph.graph.add_node("s0_home", page_description="home", replay_misses=0)
     monkeypatch.setattr(explorer.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(explorer, monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     for _ in range(2):
         router_responses.extend(
@@ -1867,6 +1875,7 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     graph.graph.add_node("s2_detail", page_description="Item detail", replay_misses=0)
     screens = iter(["s1_list_dup", "s1_list_dup", "s2_detail"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(screens))
+    _describing_by_node_id(replaying_kobe, monkeypatch)
     replaying_kobe.coverage_checkpoint_steps = 1
     if navigation_fails:
         graph.graph.add_edge("s1_list_dup", "s2_detail")
@@ -1917,6 +1926,7 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
         ]
     )
     monkeypatch.setattr(kobe, "navigate_to_node", lambda node: node)
+    _describing_by_node_id(kobe, monkeypatch)
     assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s2_list_dup") == "s0_home"
 
 
@@ -2014,6 +2024,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     monkeypatch.setattr(
         graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
     )
+    _describing_by_node_id(explorer, monkeypatch)
     router_responses.extend(
         [
             chat_response(content='{"element":null,"instruction":"Open settings"}'),
@@ -2499,11 +2510,18 @@ def test_a_replay_that_ends_in_another_app_restarts_the_app_instead_of_identifyi
 type _Visit = str | tuple[str, Mapping[str, object]]
 
 
+def _describing_by_node_id(explorer: Kobe, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Describe each node, and the screen last identified as it, by the node's ID, as a
+    fake identify_state or a node added by hand gives no member a description."""
+    monkeypatch.setattr(explorer.graph, "latest_description", lambda node_id: node_id)
+    monkeypatch.setattr(explorer.graph, "node_descriptions", lambda node_id: node_id)
+
+
 def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visit) -> list[object]:
     """Make the explorer's identify_state answer ``visits`` in turn, each a node, or a node
-    with the state the visit records as the node's latest; return the list the node of
-    each call's expected screenshot is appended to: the node answered for it, or the node
-    that lists it."""
+    with the state the visit records as the node's latest, each screen described by its
+    node's ID; return the list the node of each call's expected screenshot is appended
+    to: the node answered for it, or the node that lists it."""
     expected: list[object] = []
     answers = iter(visits)
     answered: dict[str, str] = {}
@@ -2519,6 +2537,7 @@ def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visi
         return node
 
     monkeypatch.setattr(explorer.graph, "identify_state", identify)
+    _describing_by_node_id(explorer, monkeypatch)
     return expected
 
 

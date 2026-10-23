@@ -274,6 +274,13 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
 type _Visit = str | tuple[str, Mapping[str, object]]
 
 
+def _describing_by_node_id(graph: GraphManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Describe each node, and the screen last identified as it, by the node's ID, as a
+    fake identify_state or a node added by hand gives no member a description."""
+    monkeypatch.setattr(graph, "latest_description", lambda node_id: node_id)
+    monkeypatch.setattr(graph, "node_descriptions", lambda node_id: node_id)
+
+
 def _identifying(
     graph: GraphManager, monkeypatch: pytest.MonkeyPatch, *visits: _Visit
 ) -> list[str | None]:
@@ -540,6 +547,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
     graph.graph.add_node(EXTERNAL_WEB_NODE, replay_misses=0)
     identified = iter(["s0_home", "s1_detail", EXTERNAL_WEB_NODE, "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(identified))
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(
         audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 1, "y": 2}, "")
     )
@@ -598,6 +606,7 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
     expected = _identifying(
         graph, monkeypatch, "s0_home", "s1_detail", *on_the_page, "s1_detail", "s0_home"
     )
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -943,6 +952,7 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
     )
     reached = iter(["s0_home", "s1_detail", "s2_camera_permission"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
@@ -1068,6 +1078,7 @@ def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reache
     it and is removed once empty; the action keeps the target observation it recorded."""
     graph = _flagged_graph()
     expected = _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home", "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
 
     (result,) = _re_explore(
@@ -1102,6 +1113,7 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
     graph = _flagged_graph()
     reached = iter(["s0_home", "s2_settings", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: next(reached))
+    _describing_by_node_id(graph, monkeypatch)
 
     _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
 
@@ -1157,6 +1169,7 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
     )
     reached = iter(["s0_home", "s1_detail", "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
+    _describing_by_node_id(graph, monkeypatch)
     described: list[dict[str, object]] = []
 
     def describe(**kwargs: object) -> str | None:
@@ -1222,6 +1235,7 @@ def test_re_explore_explores_from_the_source_when_the_flagged_instruction_is_not
     graph = _flagged_graph()
     graph.add_edge("s0_home", "s1_detail", [_SWIPE])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     before = _edges(graph)
 
@@ -1278,6 +1292,7 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
         "s0_home", "ext_com.browser", [_GEAR_TAP], details=EdgeDetails(instruction="open help")
     )
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap Help")
 
     (result,) = _re_explore(
@@ -1310,6 +1325,7 @@ def test_re_explore_identifies_the_screen_a_flagged_action_reaches_by_the_device
         return next(reached)
 
     monkeypatch.setattr(graph, "identify_state", identify)
+    _describing_by_node_id(graph, monkeypatch)
     dialog = "com.google.android.permissioncontroller"
 
     (result,) = _re_explore(
@@ -1333,6 +1349,7 @@ def test_re_explore_moves_a_flagged_action_that_opens_an_outside_web_page_to_the
     graph.graph.add_node(EXTERNAL_WEB_NODE, page_description="[external web page]", replay_misses=0)
     reached = iter(["s0_home", EXTERNAL_WEB_NODE, "s0_home"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
+    _describing_by_node_id(graph, monkeypatch)
 
     (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
 
@@ -1406,6 +1423,7 @@ def test_re_explore_resolves_each_issue_s_nodes_when_it_reaches_that_issue(
         return next(reached)
 
     monkeypatch.setattr(graph, "identify_state", identify)
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Tap the card")
 
     results = _re_explore(
@@ -1510,6 +1528,7 @@ def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup
     graph = _flagged_graph()
     graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
     _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
 
     (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
 
@@ -1544,6 +1563,7 @@ def test_re_explore_records_each_step_s_setup_known_only_on_the_node_its_replay_
     graph = _flagged_graph()
     scrolled = {"first_visible_item": "Storage"}
     _identifying(graph, monkeypatch, *after_restart, (reached, scrolled), "s2_settings")
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     sent = iter([_SWIPE, row_tap])
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (next(sent), ""))
@@ -1585,6 +1605,7 @@ def test_re_explore_to_the_start_node_renamed_on_the_screen_the_app_opened_on_re
         return next(answers)
 
     monkeypatch.setattr(graph, "identify_state", identify)
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (_SWIPE, ""))
     issue = {"type": "explore_node", "node": "s0_home", "expected_pages": []}
@@ -1748,6 +1769,7 @@ def test_re_explore_records_the_setup_of_the_step_after_one_that_leaves_the_app_
     monkeypatch.setattr(
         graph, "identify_state", lambda observation, **_kwargs: nodes[observation.activity]
     )
+    _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))

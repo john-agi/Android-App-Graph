@@ -127,10 +127,10 @@ def test_summarize_actions(actions: list[Any], expected: str) -> None:
 def _paper_graph() -> nx.DiGraph:
     """Two connected nodes, one external node and one disconnected leaf."""
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description="Home")
-    graph.add_node("s1_search", page_description="Search results")
-    graph.add_node("ext_launcher", page_description="Launcher")
-    graph.add_node("s2_orphan", page_description="Orphan")
+    graph.add_node("s0_home", description="Home")
+    graph.add_node("s1_search", description="Search results")
+    graph.add_node("ext_launcher", description="Launcher")
+    graph.add_node("s2_orphan", description="Orphan")
     graph.add_edge("s0_home", "s1_search", label="open search", visit_count=2)
     graph.add_edge("s1_search", "s0_home", label="go back", visit_count=1)
     graph.add_edge("s0_home", "ext_launcher", label="leave app")
@@ -727,14 +727,19 @@ def test_plot_pyvis_passes_markup_in_a_description_to_the_page_only_as_data(
     tooltip script sets them with textContent, so no value is ever parsed as HTML."""
     description = '<script>alert("x")</script> & <b>bold</b>'
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description=description, elements=[{"description": description}])
+    graph.add_node(
+        "s0_home",
+        description=description,
+        descriptions=description,
+        elements=[{"description": description}],
+    )
     output = tmp_path / "graph.html"
 
     plot.plot_pyvis(graph, str(output))
 
     html = output.read_text(encoding="utf-8")
     rows = _vis_nodes(html)["s0_home"]["tooltipRows"]
-    assert rows[0] == ["Description", description]
+    assert rows[0] == ["Descriptions", description]
     assert rows[-1] == ["Unexplored", description]
     assert "<script>alert" not in html
     injected = html[html.index("drawGraph();") :]
@@ -754,7 +759,7 @@ def test_plot_pyvis_labels_each_node_with_its_screenshot_count(
     tmp_path: Path, total: int, label: str
 ) -> None:
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description="Home", member_total=total)
+    graph.add_node("s0_home", description="Home", member_total=total)
     output = tmp_path / "graph.html"
 
     plot.plot_pyvis(graph, str(output))
@@ -767,7 +772,7 @@ def test_plot_pyvis_adds_the_tooltips_and_the_member_panel_after_the_graph_is_dr
 ) -> None:
     """Both scripts read the network and nodes that the template's drawGraph() call creates."""
     graph = nx.DiGraph()
-    graph.add_node("s0_home", page_description="Home")
+    graph.add_node("s0_home", description="Home")
     output = tmp_path / "graph.html"
 
     plot.plot_pyvis(graph, str(output))

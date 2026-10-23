@@ -905,6 +905,27 @@ def test_the_exploration_target_request_marks_only_the_start_screen(
     assert "marked start screen" in prompt
 
 
+def test_the_exploration_target_request_names_each_candidate_by_its_member_descriptions(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"node_id":"s1_form","reason":"fields"}'))
+    descriptions = '"APN form" (2), "Access point editor" (1)'
+
+    vlm.select_exploration_target(
+        router_client,
+        "demo",
+        [{"node_id": "s1_form", "descriptions": descriptions}],
+        settings=PAGE_DETAIL,
+    )
+
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
+    (line,) = [line for line in prompt.splitlines() if "node_id=" in line]
+    assert line.split(" | ")[:2] == ["1. node_id=s1_form", f"descriptions={descriptions}"]
+
+
 @pytest.mark.parametrize(
     "content",
     [None, "omitted", [{"type": "text", "text": "  hello "}, {"type": "text", "text": "world "}]],

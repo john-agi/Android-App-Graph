@@ -5244,6 +5244,7 @@ def test_run_node_merge_audit_skips_a_node_without_members(
     gm = make_manager(steps_dir=tmp_path / "steps")
     add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
     add_screen(gm, "s1_home_two", "Home screen again", **members(tmp_path / "steps"))
+    gm = with_text_vectors(gm, tmp_path / "steps")
     gm.graph.nodes[without_members]["observations"] = []
 
     result = gm.run_node_merge_audit()
@@ -5264,6 +5265,7 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
     gm = make_manager(steps_dir=tmp_path / "steps")
     for node_id in pair.values():
         add_screen(gm, node_id, "Home screen", **members(tmp_path / "steps"))
+    gm = with_text_vectors(gm, tmp_path / "steps")
 
     result = gm.run_node_merge_audit()
 
@@ -5291,6 +5293,7 @@ def test_run_node_merge_audit_merges_a_confirmed_duplicate(
         visit_count=5,
         **members(steps_dir, b"home-two-image"),
     )
+    gm = with_text_vectors(gm, steps_dir)
     removed_members = gm.graph.nodes["s2_home_two"]["observations"]
     gm.embed_missing_members()
     vlm.calls.clear()
@@ -5319,6 +5322,7 @@ def test_run_node_merge_audit_orders_non_numeric_ids_last(
     gm = make_manager(steps_dir=tmp_path / "steps")
     add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
     add_screen(gm, other, "Search results", **members(tmp_path / "steps"))
+    gm = with_text_vectors(gm, tmp_path / "steps")
     gm.embed_missing_members()
 
     result = gm.run_node_merge_audit()
@@ -5335,6 +5339,7 @@ def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     gm = make_manager(steps_dir=tmp_path / "steps")
     add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
     add_screen(gm, "s1_home_two", "Home screen again", **members(tmp_path / "steps"))
+    gm = with_text_vectors(gm, tmp_path / "steps")
     gm.embed_missing_members()
 
     result = gm.run_node_merge_audit()
