@@ -150,14 +150,21 @@ class Membership(TypedDict):
 def write_member_record(steps_dir: Path, observation_id: str) -> None:
     """Write what exploration leaves for a member observation: its record with its pixel
     hash in ``steps_dir``, and its describe output in the identify file of
-    ``graph_beside(steps_dir)``."""
+    ``graph_beside(steps_dir)``, which describes it as ``Screen <observation_id>``."""
     steps_dir.mkdir(parents=True, exist_ok=True)
     record = {"id": observation_id, "kind": "observation", "pixel_hash": f"member-{observation_id}"}
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-    write_describe(steps_dir, observation_id, DESCRIBED_BLANK)
+    write_describe(steps_dir, observation_id, described_as_screen(observation_id))
 
 
-DESCRIBED_BLANK = {"page_description": "", "state": {}, "elements": [], "is_external_web": False}
+def described_as_screen(observation_id: str) -> dict[str, object]:
+    """A describe output that describes ``observation_id`` as ``Screen <observation_id>``."""
+    return {
+        "page_description": f"Screen {observation_id}",
+        "state": {},
+        "elements": [],
+        "is_external_web": False,
+    }
 
 
 def write_describe(steps_dir: Path, observation_id: str, describe: object) -> None:
@@ -2286,7 +2293,7 @@ def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:
 
     assert len(edges) == 1
     assert edges[0]["target"] == "s1_settings"
-    assert edges[0]["target_description"] == "Settings page"
+    assert "target_description" not in edges[0]
     assert edges[0]["actions"] == [{"action": "tap"}]
     assert edges[0]["instructions"] == ["open settings"]
     assert edges[0]["target_observations"] == ["the settings page"]
@@ -2295,7 +2302,10 @@ def test_get_all_edges_from_node_reports_one_dict_per_outgoing_edge() -> None:
     assert edges[0]["schema_deltas"] == []
 
 
-def test_get_all_edges_from_node_skips_the_placeholders_of_unrecorded_values() -> None:
+def test_get_all_edges_from_node_keeps_each_instruction_and_observation_with_its_action() -> None:
+    """The planner pairs each action with the instruction and the observation it recorded,
+    so their lists keep the placeholders of unrecorded values; the schema deltas skip
+    them."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     gm.add_edge("s0_home", "s0_home", {"action": "tap"})
@@ -2313,8 +2323,8 @@ def test_get_all_edges_from_node_skips_the_placeholders_of_unrecorded_values() -
     edges = gm.get_all_edges_from_node("s0_home")
 
     assert edges[0]["actions"] == [{"action": "tap"}, {"action": "swipe"}]
-    assert edges[0]["instructions"] == ["scroll the feed"]
-    assert edges[0]["target_observations"] == ["more posts"]
+    assert edges[0]["instructions"] == ["", "scroll the feed"]
+    assert edges[0]["target_observations"] == ["", "more posts"]
     assert edges[0]["schema_deltas"] == [{"first_post": {"before": "a", "after": "b"}}]
 
 
@@ -2883,6 +2893,8 @@ def edge_rows(gm: GraphManager, source: str, target: str) -> list[tuple[Any, ...
 
 
 def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_other_edge() -> None:
+    """The moved action keeps the target observation it recorded, which describes the
+    screen the action reached, whatever the description of the node it moves to."""
     gm = make_manager()
     for node_id, description in (
         ("s0_home", "Home screen"),
@@ -2929,7 +2941,7 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
             search,
             2,
             "search for milk",
-            "Search results",
+            "Settings page",
             {"query": {"after": "milk"}},
             [_SCROLL],
         ),
@@ -2953,7 +2965,7 @@ def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_ne
 
     assert not gm.graph.has_edge("s0_home", "s1_settings")
     assert edge_rows(gm, "s0_home", "s0_home") == [
-        ({"action": "tap"}, 1, "open settings", "Home screen", None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None)
     ]
     assert gm.graph["s0_home"]["s0_home"]["visit_count"] == 1
 
@@ -3002,7 +3014,7 @@ def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
         assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
 
     assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
-        ({"action": "tap"}, 1, "open settings", "Outside page", None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None)
     ]
     assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
     assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
@@ -4682,7 +4694,7 @@ def describe_members(path: Path, membership: Membership) -> None:
     """Give each member of ``membership`` a describe output in the identify file of the
     graph at ``path``."""
     for member in membership["observations"]:
-        line = {"observation": member, "describe": DESCRIBED_BLANK}
+        line = {"observation": member, "describe": described_as_screen(member)}
         append_json_line(identify_file_path(path), line)
 
 
@@ -4986,6 +4998,154 @@ def test_format_for_audit_pairs_each_instruction_with_its_own_observation() -> N
     edge_lines = gm.format_for_audit().split("## Edges (1)\n", 1)[1].splitlines()
 
     assert edge_lines[1:] == ['    - "swipe to settings"']
+
+
+def _graph_edge(source: str, target: str, instruction: str, observation: str) -> dict[str, object]:
+    """A saved edge of one tap recorded with ``instruction`` and ``observation``."""
+    return {
+        "source": source,
+        "target": target,
+        "actions": [[{"action": "tap"}]],
+        "instructions": [instruction],
+        "target_observations": [observation],
+        "num_steps": [1],
+        "schema_deltas": [None],
+        "setups": [None],
+        "visit_count": 1,
+    }
+
+
+PERMISSIONS = '"Chrome app permissions overview" (3), "App permissions settings" (1)'
+NETWORK = '"Wi-Fi details" (1), "Network details" (1)'
+
+
+def _load_described_members(path: Path, write_member_graph: Callable[..., None]) -> GraphManager:
+    """Load a graph whose nodes are described as ``Node <id>`` and whose members say
+    otherwise.
+
+    Of the permissions node's members, the earliest is described apart, one is refined to
+    the description another has, and the last is an exact copy of the refined one. The
+    network node's two members are described apart, and an outside web page ends the
+    path.
+    """
+    write_member_graph(
+        path,
+        {
+            "s0_permissions": [(f"00000{n}", [1.0, 0.0]) for n in range(1, 5)],
+            "s1_network": [("000005", [0.0, 1.0]), ("000006", [0.0, 1.0])],
+            EXTERNAL_WEB_NODE: [("000007", [1.0, 1.0])],
+        },
+        edges=(
+            _graph_edge("s0_permissions", "s1_network", "open Wi-Fi", "Wi-Fi details"),
+            _graph_edge("s1_network", EXTERNAL_WEB_NODE, "open help", "help article"),
+        ),
+        described={
+            "000001": "App permissions settings",
+            "000002": "Chrome permissions",
+            "000003": "Chrome app permissions overview",
+            "000005": "Wi-Fi details",
+            "000006": "Network details",
+        },
+        refined={"000002": "Chrome app permissions overview"},
+        copied={"000004": "000002"},
+    )
+    gm = GraphManager()
+    gm.load_graph(path)
+    return gm
+
+
+def test_the_audit_text_and_the_summary_list_each_node_s_member_descriptions_with_counts(
+    tmp_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    """Each distinct description of a node's members comes with the number of members
+    that have it, most first, then by earliest member; an outside node is named by its
+    ID."""
+    gm = _load_described_members(tmp_path / "graph.json", write_member_graph)
+
+    nodes, edges = gm.format_for_audit().split("\n\n", 1)
+
+    assert nodes.splitlines()[1:] == [
+        f"  s0_permissions: {PERMISSIONS} (visits=4, out=1, in=0)",
+        f"  s1_network: {NETWORK} (visits=2, out=1, in=1)",
+        f"  {EXTERNAL_WEB_NODE}: {EXTERNAL_WEB_NODE} (visits=1, out=0, in=1)",
+    ]
+    assert edges.splitlines()[1:] == [
+        f"  s0_permissions ({PERMISSIONS}) → s1_network ({NETWORK}):",
+        '    - "open Wi-Fi" → Wi-Fi details',
+        f"  s1_network ({NETWORK}) → {EXTERNAL_WEB_NODE} ({EXTERNAL_WEB_NODE}):",
+        '    - "open help" → help article',
+    ]
+    assert [(node["id"], node["descriptions"]) for node in gm.summary()["nodes"]] == [
+        ("s0_permissions", PERMISSIONS),
+        ("s1_network", NETWORK),
+        (EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE),
+    ]
+
+
+def test_the_coverage_checkpoint_offers_each_node_with_its_member_descriptions(
+    tmp_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    gm = _load_described_members(tmp_path / "graph.json", write_member_graph)
+
+    candidates = gm.get_exploration_target_candidates()
+
+    assert {c["node_id"]: c["descriptions"] for c in candidates} == {
+        "s0_permissions": PERMISSIONS,
+        "s1_network": NETWORK,
+    }
+    assert all("page_description" not in candidate for candidate in candidates)
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param({"described": {"000002": ""}}, id="empty-description"),
+        pytest.param({"copied": {"000002": "000009"}}, id="copy-of-an-unrecorded-member"),
+    ],
+)
+def test_loading_a_graph_rejects_an_in_app_member_whose_record_gives_no_description(
+    recorded: dict[str, dict[str, str]], tmp_path: Path, write_member_graph: Callable[..., None]
+) -> None:
+    """An exact copy's description is its member's, so a copy whose member has no record
+    has none."""
+    path = tmp_path / "graph.json"
+    write_member_graph(
+        path, {"s0_home": [("000001", [1.0, 0.0]), ("000002", [1.0, 0.0])]}, **recorded
+    )
+
+    with pytest.raises(ValueError, match="holds no description") as excinfo:
+        GraphManager().load_graph(path)
+
+    assert "['000002']" in str(excinfo.value)
+
+
+def test_each_screen_keeps_the_description_it_ends_with_and_a_loaded_graph_reads_it_back(
+    vlm: FakeVlm, screen: Screens, tmp_path: Path
+) -> None:
+    """The rejected node is renamed, but its member keeps the description it was given;
+    the overlay keeps the one its rejection refined it to, not its describe output, and an
+    exact copy of the overlay takes it too."""
+    vlm.descriptions.extend([("Home screen", {}, []), ("Home screen with banner", {}, [])])
+    vlm.verdicts.append(
+        {
+            "same": False,
+            "reason": "overlay",
+            "existing_description": "Home feed",
+            "new_description": "Promo overlay",
+        }
+    )
+    gm = make_manager(screen.steps_dir)
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
+    gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
+    path = tmp_path / "graph.json"
+    gm.save_graph(path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+
+    expected = [("s0_home_feed", '"Home screen" (1)'), ("s1_promo_overlay", '"Promo overlay" (2)')]
+    assert [(node["id"], node["descriptions"]) for node in gm.summary()["nodes"]] == expected
+    assert [(node["id"], node["descriptions"]) for node in loaded.summary()["nodes"]] == expected
 
 
 def test_run_audit_without_a_client_reports_no_issues() -> None:

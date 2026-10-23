@@ -30,6 +30,7 @@ from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
+from android_app_graph.utils.vlm_utils import PlanRequest
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _RESOLVE_LAUNCHER = [
@@ -300,14 +301,20 @@ def _identifying(
 
 def _write_member(graph_path: Path, node_id: str) -> None:
     """Put the member a node of ``graph_path`` lists in its step log, its image and its
-    record with a pixel hash, and its describe output in the graph's identify file."""
+    record with a pixel hash, and its describe output in the graph's identify file, which
+    describes it as ``<node_id> screen``."""
     steps_dir = graph_steps_dir(graph_path)
     steps_dir.mkdir(exist_ok=True)
     observation_id = f"{node_id}-observation"
     observation_image_path(steps_dir, observation_id).write_bytes(encode_screenshot(_png(0)))
     record = {"id": observation_id, "kind": "observation", "pixel_hash": f"hash-{observation_id}"}
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), encoding="utf-8")
-    describe = {"page_description": "", "state": {}, "elements": [], "is_external_web": False}
+    describe = {
+        "page_description": f"{node_id} screen",
+        "state": {},
+        "elements": [],
+        "is_external_web": False,
+    }
     append_json_line(
         identify_file_path(graph_path), {"observation": observation_id, "describe": describe}
     )
@@ -702,6 +709,154 @@ def test_re_explore_records_the_edge_from_a_node_identify_state_renamed(
     assert "add_edge: missing node(s)" not in caplog.text
 
 
+def _recording_planner(planned_from: list[str]) -> Callable[..., tuple[str, None]]:
+    """A ``plan_next_action`` that records the page description of each screen it plans
+    from, hint included."""
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+        planned_from.append(request.page_description)
+        return "Tap the Search button", None
+
+    return plan
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The results screen joins the search page's node on the verifier's word: the edge
+    it ends records the results screen's description, and the next step plans from it,
+    not from the node's."""
+    planned_from: list[str] = []
+    monkeypatch.setattr(audit, "plan_next_action", _recording_planner(planned_from))
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    search = {"activity": "com.demo.Search", "screenshot": _png(255), "package": "com.demo"}
+    # The restart before the replay sends three adb commands, and the first tap after it
+    # shows the results.
+    device = screens_by_log(*[search] * 4, {**search, "screenshot": _png(128)})
+    graph = GraphManager(
+        client=router_client,
+        page_detail=ModelSettings("provider/page_detail"),
+        embedding=ModelSettings("provider/embedding"),
+        image_embedding=ModelSettings("provider/embedding"),
+    )
+    graph.steps_dir = tmp_path / "steps"
+    graph.identify_file = identify_file_path(tmp_path / "demo_audited.json")
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"Chat search page"}'),
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+    recorder = StepRecorder(device, graph.steps_dir, run_kind="audit", source="re_explore")
+    start = graph.identify_state(Observation.from_state(recorder.get_state()))
+    same = '{"same":true,"reason":"one screen","existing_description":null,"new_description":null}'
+    router_responses.extend(
+        [
+            # The replay ends on the search page: an exact match.
+            httpx.Response(200, json=embedding_body),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"Chat search results"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=same),
+            # The results show again: an exact match.
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    audit.re_explore_issues(
+        graph,
+        [{"type": "explore_node", "node": start, "expected_pages": ["Search results"]}],
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=tmp_path / "demo_audited.json"
+        ),
+        session=audit.ReExploreSession(
+            device,
+            ModelSettings("provider/instruction"),
+            ModelSettings("provider/action"),
+            steps_per_issue=2,
+        ),
+        client=router_client,
+    )
+
+    hint = (
+        "\n[AUDIT HINT: This screen might be able to lead to pages like 'Search results'. "
+        "Check if any elements on this screen should be interacted with.]"
+    )
+    assert planned_from == [f"Chat search page{hint}", f"Chat search results{hint}"]
+    assert graph.graph[start][start]["target_observations"] == ["Chat search results"]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_with_counts(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_member_graph: Callable[..., None],
+) -> None:
+    """The steps after a retried edge plan from the source screen's own description, with
+    a hint that names the edge's target by every distinct description of its members."""
+    graph_path = tmp_path / "demo" / "demo.json"
+    write_member_graph(
+        graph_path,
+        {
+            "s0_home": [("000001", [1.0, 0.0]), ("000002", [1.0, 0.0]), ("000003", [1.0, 0.0])],
+            "s1_detail": [("000004", [0.0, 1.0])],
+        },
+        edges=(
+            {
+                "source": "s0_home",
+                "target": "s1_detail",
+                "actions": [[{"action": "tap", "x": 10, "y": 20}]],
+                "instructions": [_FLAGGED],
+                "target_observations": ["Detail page"],
+                "num_steps": [1],
+                "schema_deltas": [None],
+                "setups": [None],
+                "visit_count": 1,
+            },
+        ),
+        described={
+            "000001": "Home",
+            "000002": "Home feed",
+            "000003": "Home feed",
+            "000004": "Detail page",
+        },
+    )
+    graph = GraphManager()
+    graph.load_graph(graph_path)
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail", "s1_detail")
+    planned_from: list[str] = []
+    monkeypatch.setattr(audit, "plan_next_action", _recording_planner(planned_from))
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+
+    (result,) = _re_explore(
+        graph,
+        [_retry("open the home page", "s1_detail", "s0_home")],
+        FakeController("com.demo"),
+        client,
+        graph_path.parent,
+        steps_per_issue=1,
+    )
+
+    target = '"Home feed" (2), "Home" (1)'
+    hint = (
+        f"A previous attempt to reach {target} from this screen may have gone to the wrong "
+        f"place. Check if any elements on this screen could lead to {target}."
+    )
+    assert result["status"] == "instruction_not_found"
+    assert planned_from == [f"Detail page\n[AUDIT HINT: {hint}]"]
+
+
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_returns_early_for_an_empty_graph(
     client: OpenRouter, tmp_path: Path
@@ -910,7 +1065,7 @@ def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reache
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     """A flagged edge whose action reaches another node moves that action to the edge toward
-    it and is removed once empty."""
+    it and is removed once empty; the action keeps the target observation it recorded."""
     graph = _flagged_graph()
     expected = _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home", "s0_home")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
@@ -927,7 +1082,7 @@ def test_re_explore_moves_a_flagged_action_to_the_edge_toward_the_node_it_reache
     edge = graph.graph["s0_home"]["s2_settings"]
     assert edge["actions"] == [[_GEAR_TAP], [_DETAIL_TAP]]
     assert edge["instructions"] == ["open settings", _FLAGGED]
-    assert edge["target_observations"] == ["Settings", "Settings"]
+    assert edge["target_observations"] == ["Settings", "Detail"]
     assert [(step["from"], step["to"]) for step in result["steps"]] == [("s0_home", "s0_home")]
     assert device_log == [*_FIRST_RESTART, _DETAIL_TAP, *_RESTART, _BACK]
 

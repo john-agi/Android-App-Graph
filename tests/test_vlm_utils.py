@@ -1700,6 +1700,49 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
     assert "1. Turn on dark mode toggle (top)\n2. Compose FAB (bottom right)\n" in prompt
 
 
+def test_the_planner_says_where_each_tried_action_led_by_its_own_target_observation(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """An edge with instructions lists the actions that have one, and an edge without
+    lists every action, each with the observation it recorded."""
+    router_responses.append(chat_response(content='{"element":null,"instruction":"Go back"}'))
+    explored_edges: list[dict[str, Any]] = [
+        {
+            "target": "s1_network",
+            "actions": [{"action": "tap"}, {"action": "swipe"}],
+            "instructions": ["Tap Wi-Fi", ""],
+            "target_observations": ["Wi-Fi details (ssid=home)", "Network list"],
+        },
+        {
+            "target": "s2_about",
+            "actions": [{"action": "back"}],
+            "instructions": [""],
+            "target_observations": ["About phone"],
+        },
+    ]
+
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot,
+            page_description="Settings",
+            explored_edges=explored_edges,
+        ),
+        settings=PAGE_DETAIL,
+    )
+
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    tried = prompt.split("where they led:\n", 1)[1].split("\n\n", 1)[0]
+    assert tried.splitlines() == [
+        '- "Tap Wi-Fi" → led to: "Wi-Fi details (ssid=home)"',
+        '- {"action": "back"} → led to: "About phone"',
+    ]
+
+
 @pytest.mark.parametrize(
     ("reply", "instruction"),
     [

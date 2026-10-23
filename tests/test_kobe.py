@@ -1102,6 +1102,7 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The edge's target observation is the page's own description."""
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     browser = _screen("com.demo.ArticleActivity", "blue")
     device = _Screens(HOME_SCREEN, browser, HOME_SCREEN)
@@ -1123,7 +1124,8 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
 
     assert set(explorer.graph.graph) == {"s0_home", EXTERNAL_WEB_NODE}
     assert list(explorer.graph.graph.edges) == [("s0_home", EXTERNAL_WEB_NODE)]
-    assert explorer.graph.graph.edges["s0_home", EXTERNAL_WEB_NODE]["instructions"] == [recorded]
+    edge = explorer.graph.graph.edges["s0_home", EXTERNAL_WEB_NODE]
+    assert (edge["instructions"], edge["target_observations"]) == ([recorded], ["news article"])
     assert [action["action"] for action in device.actions] == [executed, "back"]
 
 
@@ -1516,6 +1518,49 @@ def _planner(instruction: str, planned_from: list[object]) -> Callable[..., tupl
         return instruction, None
 
     return plan
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_the_planner_and_a_new_edge_take_the_screen_s_own_description(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The results screen joins the search page's node on the verifier's word: the edge
+    it ends records the results screen's description, and the next step plans from it,
+    not from the node's."""
+    search = _screen("com.demo.Search", "white")
+    results = _screen("com.demo.Search", "gray")
+    explorer = _explorer(_Screens(search, results), tmp_path, router_client)
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Search", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    same = '{"same":true,"reason":"one screen","existing_description":null,"new_description":null}'
+    router_responses.extend(
+        [
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"Chat search page"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=_TAP_REPLY),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content='{"page_description":"Chat search results"}'),
+            httpx.Response(200, json=embedding_body),
+            chat_response(content=same),
+            chat_response(content=_TAP_REPLY),
+            # The results show again: an exact match.
+            httpx.Response(200, json=embedding_body),
+        ]
+    )
+
+    explorer.explore(max_steps=2)
+
+    node = "s0_chat_search_page"
+    assert list(explorer.graph.graph) == [node]
+    assert planned_from == ["Chat search page", "Chat search results"]
+    assert explorer.graph.graph[node][node]["target_observations"] == ["Chat search results"]
 
 
 @pytest.mark.usefixtures("no_sleep")

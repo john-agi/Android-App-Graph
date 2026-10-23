@@ -401,11 +401,13 @@ def add_member(png_screenshot: str) -> Callable[..., None]:
 
 def _write_member_record(steps_dir: Path, identify_file: Path, observation_id: str) -> None:
     """Write what exploration leaves for a member observation: its record with its pixel
-    hash in ``steps_dir``, and its describe output in ``identify_file``."""
+    hash in ``steps_dir``, and its describe output in ``identify_file``, which describes it
+    as ``Screen <observation_id>``."""
     record = {"id": observation_id, "kind": "observation", "pixel_hash": f"hash-{observation_id}"}
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
-    describe = {"page_description": "", "state": {}, "elements": [], "is_external_web": False}
-    append_json_line(identify_file, {"observation": observation_id, "describe": describe})
+    describe = {"page_description": f"Screen {observation_id}", "state": {}, "elements": []}
+    line = {"observation": observation_id, "describe": {**describe, "is_external_web": False}}
+    append_json_line(identify_file, line)
 
 
 def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
@@ -475,11 +477,13 @@ def write_member_graph() -> Callable[..., None]:
 
     ``nodes`` maps each node to its members, ``(observation_id, vector)`` in step order;
     the vector is the member's image vector and its text vector. Node ``n`` is described
-    as ``Node n`` and member ``m`` as ``Screen m``.
-    ``black`` maps each member whose screenshot is black to its activity; as screen
-    matching records a black screenshot, its record holds no describe output and it has
-    no text vector. Each image holds its observation ID, so a fake verifier can tell
-    which members it was shown. The vectors are tagged with the model
+    as ``Node n`` and member ``m`` as ``Screen m``, or as ``described`` gives.
+    ``refined`` maps a member to the description its step's first rejection refined it
+    to, and ``copied`` maps a member to the member an exact match copied its describe
+    output from. ``black`` maps each member whose screenshot is black to its activity;
+    as screen matching records a black screenshot, its record holds no describe output
+    and it has no text vector. Each image holds its observation ID, so a fake verifier
+    can tell which members it was shown. The vectors are tagged with the model
     ``model_environment`` names.
     """
 
@@ -490,8 +494,14 @@ def write_member_graph() -> Callable[..., None]:
         edges: tuple[dict[str, object], ...] = (),
         transitions: tuple[tuple[str, str, object, str, str], ...] = (),
         black: Mapping[str, str] | None = None,
+        described: Mapping[str, str] | None = None,
+        refined: Mapping[str, str] | None = None,
+        copied: Mapping[str, str] | None = None,
     ) -> None:
         black_members = dict(black or {})
+        descriptions = dict(described or {})
+        refinements = dict(refined or {})
+        copies = dict(copied or {})
         steps_dir = graph_steps_dir(path)
         steps_dir.mkdir(parents=True, exist_ok=True)
         image_vectors: dict[str, list[float]] = {}
@@ -513,13 +523,19 @@ def write_member_graph() -> Callable[..., None]:
                     "black": black_activity is not None,
                 }
                 if black_activity is None:
-                    describe = {
-                        "page_description": f"Screen {observation_id}",
+                    source = copies.get(observation_id, observation_id)
+                    describe: dict[str, object] = {
+                        "page_description": descriptions.get(source, f"Screen {source}"),
                         "state": {"seen_in": observation_id},
                         "elements": [{"description": f"Button {observation_id}"}],
                         "is_external_web": False,
                     }
-                    line = {"observation": observation_id, "describe": describe}
+                    if observation_id in copies:
+                        describe["copied_from"] = source
+                    line: dict[str, object] = {"observation": observation_id, "describe": describe}
+                    if observation_id in refinements:
+                        refinement = {"new_description": refinements[observation_id]}
+                        line["identify"] = {"stage": "new", "refinement": refinement}
                     append_json_line(identify_file_path(path), line)
                     text_vectors[observation_id] = vector
                 (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
