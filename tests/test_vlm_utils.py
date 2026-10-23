@@ -305,9 +305,11 @@ class OpenOnMessage(logging.Handler):
 def test_call_concurrently_cancels_the_calls_not_yet_started_once_a_call_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Item 0 fails at once and every other started call waits for the cancellation, so no
-    item past the first one the freed worker may take ever starts."""
+    """Item 0 fails once item 1 has started, and every other started call waits for the
+    cancellation, so item 1 is running when the cancellation comes and no item past the
+    first one the freed worker may take ever starts."""
     in_flight = vlm.MAX_REQUESTS_IN_FLIGHT
+    item_1_started = threading.Event()
     cancelled = threading.Event()
     started: list[int] = []
     applied: list[tuple[int, int]] = []
@@ -315,7 +317,10 @@ def test_call_concurrently_cancels_the_calls_not_yet_started_once_a_call_fails(
     def call(item: int) -> int:
         started.append(item)
         if item == 0:
+            assert item_1_started.wait(RELEASE_TIMEOUT)
             raise CallFailedError(item)
+        if item == 1:
+            item_1_started.set()
         assert cancelled.wait(RELEASE_TIMEOUT)
         if item == 1:
             raise CallFailedError(item)
