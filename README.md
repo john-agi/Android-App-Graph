@@ -506,9 +506,11 @@ those places when it ranks below them.
 
 Back on the start screen leaves the app for the home screen, as does Back on the
 screen an app opens on instead, and exploration then restarts the app onto the same
-screen. So when an exploration step plans Back on the start screen or on a screen with
-an edge by Back to an `ext_` node, where Back has already left the app, or its action
-model answers `end` there, which exploration records as Back, Back is not pressed.
+screen. So on the start screen and on a screen with an edge by Back to an `ext_` node,
+where Back has already left the app, the planner's prompt says that Back there leaves
+the app and asks for an action on the screen; `app-graph-audit --re-explore` plans with
+the same prompt. When an exploration step still plans Back there, or its action model
+answers `end` there, which exploration records as Back, Back is not pressed.
 The explorer chooses a node as a checkpoint does, among the ranked nodes other than
 the step's screen but without the checkpoint's merge audit, replays to it and
 continues from it. The step counts toward `max_steps`, and its log line names the

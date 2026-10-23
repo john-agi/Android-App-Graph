@@ -579,7 +579,7 @@ the app to discover as many DISTINCT screens and functionalities as possible.
 App name: {app_name}
 Current screen description: "{page_description}"
 Current input status: {input_status}
-
+{back_leaves_app_line}
 Instructions already tried from this screen and where they led:
 {explored_instructions}
 
@@ -710,6 +710,11 @@ Example instructions:
 
 Example reply:
 {{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}"""
+
+BACK_LEAVES_APP_LINE = (
+    "Back on this screen leaves the app for the home screen, so choose an action on this "
+    "screen instead, even where a rule below says to go back.\n"
+)
 
 NEXT_ACTION_SYSTEM_PROMPT = """\
 
@@ -1837,6 +1842,8 @@ class PlanRequest:
             "target_observations".
         unexplored_elements: List of element dicts not yet interacted with.
         input_status: Runtime hint about whether a text field/keyboard is active.
+        back_leaves_app: Whether Back on this screen leaves the app, which the prompt
+            then says.
     """
 
     screenshot_b64: str
@@ -1845,6 +1852,7 @@ class PlanRequest:
     app_name: str = ""
     unexplored_elements: list[dict[str, Any]] | None = None
     input_status: str = "unknown from screenshot"
+    back_leaves_app: bool = False
 
 
 def _tried_actions(edge: dict[str, Any]) -> list[tuple[str, str]]:
@@ -1909,6 +1917,7 @@ def plan_next_action(
         app_name=request.app_name,
         page_description=request.page_description,
         input_status=request.input_status,
+        back_leaves_app_line=BACK_LEAVES_APP_LINE if request.back_leaves_app else "",
         explored_instructions=instructions_str,
         unexplored_elements_section=unexplored_section,
     )

@@ -862,6 +862,58 @@ def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_wit
     assert planned_from == [f"Detail page\n[AUDIT HINT: {hint}]"]
 
 
+_LAUNCHER = "ext_com.android.launcher3"
+_BACK_LEAVES_THE_APP = (
+    "Back on this screen leaves the app for the home screen, so choose an action on this "
+    "screen instead, even where a rule below says to go back."
+)
+
+
+@pytest.mark.parametrize(
+    ("node", "left_by", "told"),
+    [
+        pytest.param("s0_home", {"action": "tap", "x": 1, "y": 2}, True, id="the start screen"),
+        pytest.param("s1_detail", {"action": "back"}, True, id="a recorded Back left the app"),
+        pytest.param("s1_detail", {"action": "tap", "x": 1, "y": 2}, False, id="a tap left"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_re_exploration_tells_the_planner_that_back_leaves_the_app_where_it_does(
+    node: str,
+    left_by: dict[str, object],
+    told: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-exploration step plans with exploration's prompt, which says that Back leaves
+    the app on the start screen and on a screen with an edge by Back to an ``ext_`` node,
+    and on no other screen."""
+    graph, graph_path = _two_node_graph(tmp_path)
+    graph.graph.add_node(_LAUNCHER, is_external=True, replay_misses=0)
+    graph.add_edge("s1_detail", _LAUNCHER, action=[left_by])
+    monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: node)
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "wait"}, ""))
+    router_responses.append(chat_response(content='{"element":null,"instruction":"Scroll down"}'))
+
+    _re_explore(
+        graph,
+        [{"type": "explore_node", "node": node, "expected_pages": []}],
+        FakeController("com.demo"),
+        router_client,
+        graph_path.parent,
+        steps_per_issue=1,
+    )
+
+    (plan,) = [json.loads(request.content) for request in router_requests]
+    assert plan["model"] == "instruction-model"
+    assert (_BACK_LEAVES_THE_APP in plan["messages"][-1]["content"][0]["text"]) is told
+
+
 @pytest.mark.usefixtures("_fake_device")
 def test_re_explore_issues_returns_early_for_an_empty_graph(
     client: OpenRouter, tmp_path: Path

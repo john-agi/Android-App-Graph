@@ -2841,6 +2841,22 @@ class GraphManager:
         in_app = (_node_id(n) for n in self.graph if not self._is_external(n))
         return min(in_app, key=self._node_numeric_order, default=None)
 
+    def back_leaves_app(self, node: str) -> bool:
+        """Return whether Back on ``node`` leaves the app: on the start node, and on a node
+        from which Back has been recorded leaving the app, an edge by Back to an ``ext_``
+        node.
+
+        The start node is the screen the app is launched on, the root activity of its
+        task, and Back there returns to the home screen
+        (https://developer.android.com/guide/components/activities/tasks-and-back-stack).
+        An app can also open on another screen, such as the tab used last, where Back
+        then leaves the app too.
+        """
+        return node == self.get_start_node() or any(
+            target.startswith("ext_") and [{"action": "back"}] in data.get("actions", [])
+            for _, target, data in self.graph.out_edges(node, data=True)
+        )
+
     def nodes_without_path_to_start(self) -> PathToStart:
         """Return every node from which no recorded edge path leads to the start node.
 
