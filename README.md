@@ -461,7 +461,8 @@ finds Clear all in the switcher's UI dump by Launcher3's resource id
 `com.android.launcher3:id/clear_all` or by its text, "Clear all" in any case, and taps
 it. Until Clear all appears it swipes the list from left to right, one app per swipe,
 at most 10 times; then it logs a warning, presses Home and explores with the recent
-apps left.
+apps left. When the switcher shows no app, its overview panel without an app card, the
+explorer presses Home at once.
 
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
 every permission it requests with `adb shell pm grant`, so no permission prompt
