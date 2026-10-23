@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -12,7 +13,7 @@ import httpx
 import pytest
 from openrouter import OpenRouter
 
-from android_app_graph import cli
+from android_app_graph import cli, device
 from android_app_graph.cli import build_parser, main
 from android_app_graph.kobe import ExplorerConfig
 
@@ -213,8 +214,8 @@ class _NoRunningAvd:
     def __init__(self) -> None:
         self.duplicated: list[str] = []
 
-    def get_running_avd_list(self) -> None:
-        return None
+    def get_running_avd_list(self) -> list[dict[str, object]]:
+        return []
 
     def duplicate_avd(self, avd_name: str) -> None:
         self.duplicated.append(avd_name)
@@ -249,3 +250,60 @@ def test_check_avd_raises_file_not_found_naming_the_emulator_when_it_is_not_on_p
     monkeypatch.setattr(cli.subprocess, "Popen", must_not_start)
     with pytest.raises(FileNotFoundError, match=r"^emulator was not found on PATH$"):
         cli.check_avd(_NoRunningAvd(), {"device": {"avd_name": "Pixel"}}, logging.getLogger("test"))
+
+
+@pytest.mark.parametrize(
+    ("unreachable", "cause"),
+    [
+        pytest.param(
+            subprocess.CompletedProcess(
+                ["adb", "devices"],
+                1,
+                stdout="",
+                stderr="* cannot start server on remote host\n"
+                "adb: failed to check server version: cannot connect to daemon at "
+                "tcp:100.64.0.7:5037: Connection refused\n",
+            ),
+            "* cannot start server on remote host adb: failed to check server version: "
+            "cannot connect to daemon at tcp:100.64.0.7:5037: Connection refused",
+            id="refused",
+        ),
+        pytest.param(None, "adb devices timed out after 30 s", id="timed out"),
+    ],
+)
+@pytest.mark.usefixtures("adb_on_path")
+def test_check_avd_names_an_adb_server_it_cannot_reach_and_copies_and_starts_nothing(
+    unreachable: subprocess.CompletedProcess[str] | None,
+    cause: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A device list adb cannot read says nothing about which devices run, so no AVD is
+    copied or started on this machine."""
+    monkeypatch.setenv("ADB_SERVER_SOCKET", "tcp:100.64.0.7:5037")
+    commands: list[list[str]] = []
+
+    def run(
+        command: list[str], *, timeout: float | None = None, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if unreachable is None:
+            raise subprocess.TimeoutExpired(command, timeout or 0)
+        return unreachable
+
+    def must_not_start(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "an emulator started although adb cannot reach its server"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(cli.subprocess, "Popen", must_not_start)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".android" / "avd").mkdir(parents=True)
+    logger = logging.getLogger("test")
+
+    with pytest.raises(ConnectionError) as raised:
+        cli.check_avd(device.EmulatorManager(logger), {"device": {"avd_name": "Pixel"}}, logger)
+
+    assert str(raised.value) == f"adb cannot reach its server at tcp:100.64.0.7:5037: {cause}"
+    assert commands == [["adb", "devices"]]
+    assert list((tmp_path / ".android" / "avd").iterdir()) == []

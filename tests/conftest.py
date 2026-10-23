@@ -126,12 +126,17 @@ def device_log(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> list[objec
     """Fake controllers append their actions here too, so a test sees adb commands
     and device actions in the order the device would have received them.
 
-    Every adb command succeeds; the app's launcher activity is its ``.Home``.
+    Every adb command succeeds; the app's launcher activity is its ``.Home``. Every
+    command must name a timeout, as a command without one blocks for as long as the
+    device does not answer.
     """
     del adb_on_path  # requested for its side effect on device.adb_executable
     log: list[object] = []
 
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run(
+        command: list[str], *, timeout: float | None = None, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert timeout is not None, f"adb call without a timeout: {command}"
         log.append(command)
         return subprocess.CompletedProcess(command, 0, stdout=_fake_adb_stdout(command), stderr="")
 
