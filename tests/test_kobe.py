@@ -296,7 +296,7 @@ def test_resume_from_auto_replays_to_the_top_ranked_exploration_target(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_resume_from_auto_passes_over_a_node_two_replays_in_a_row_missed(
+def test_resume_from_auto_passes_over_a_node_whose_last_replay_missed(
     tmp_path: Path,
     router_client: OpenRouter,
     device_log: list[object],
@@ -304,15 +304,12 @@ def test_resume_from_auto_passes_over_a_node_two_replays_in_a_row_missed(
     write_graph_file: Callable[..., None],
     write_image_vectors: Callable[..., None],
 ) -> None:
-    """Both replays to the form land on the home screen. After the second, the checkpoint
-    offers the dialog and the start screen, and a run on the saved graph resumes at the
-    dialog."""
+    """The replay to the form lands on the home screen. The checkpoint then offers the
+    dialog and the start screen, and a run on the saved graph resumes at the dialog."""
     _write_form_and_dialog_graph(tmp_path, write_graph_file, write_image_vectors)
     explorer = _explorer(_ReplayDevice(HOME_SCREEN, device_log), tmp_path, router_client)
-    _identifying(explorer, monkeypatch, "s0_home", "s0_home", "s0_home", "s0_home")
+    _identifying(explorer, monkeypatch, "s0_home", "s0_home")
 
-    assert explorer.navigate_to_node("s1_form") == "s0_home"
-    assert explorer.graph.get_resume_target(package_name="com.demo") == "s1_form"
     assert explorer.navigate_to_node("s1_form") == "s0_home"
     offered = explorer.graph.get_exploration_target_candidates(
         package_name="com.demo", always_offer_start=True
@@ -596,6 +593,56 @@ def test_a_replay_opens_a_menu_on_a_form_filled_through_a_dialog_before_choosing
         *_FIRST_RESTART,
         *(open_form, open_security, choose_enterprise, open_certificates, install_certificates),
     ]
+
+
+_OPEN_DRAWER = {"action": "tap", "x": 5, "y": 10}
+_OPEN_RECENT = {"action": "tap", "x": 30, "y": 40}
+_DRAWER_CLOSED = {"open_menu": None}
+_DRAWER_OPEN = {"open_menu": "navigation drawer"}
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_replay_opens_the_drawer_before_tapping_a_drawer_row_whose_setup_is_unknown(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """How the device came to be on the home screen is unknown, so is the setup of every
+    action sent there. The tap on a row of the drawer, which is part of the home screen's
+    state, is replayed after the recorded tap that opened the drawer."""
+    _list_reached_from_home(replaying_kobe, "s2_recent")
+    _identifying(
+        replaying_kobe,
+        monkeypatch,
+        *(("s0_home", _DRAWER_CLOSED), ("s0_home", _DRAWER_OPEN), "s2_recent"),
+        *("s0_home", "s2_recent"),
+    )
+    _explore_sending(replaying_kobe, monkeypatch, _OPEN_DRAWER, _OPEN_RECENT)
+    device_log.clear()
+
+    assert replaying_kobe.navigate_to_node("s2_recent") == "s2_recent"
+    assert device_log == [*_FIRST_RESTART, _OPEN_DRAWER, _OPEN_RECENT]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_drawer_row_tapped_in_a_drawer_no_recorded_action_opened_is_in_no_path(
+    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drawer was open on the screen exploration began on, so no recorded action
+    opens it: a replay cannot tap its row, and the checkpoint does not offer the screen
+    only that tap reaches."""
+    _list_reached_from_home(replaying_kobe, "s2_recent")
+    _identifying(
+        replaying_kobe,
+        monkeypatch,
+        *(("s0_home", _DRAWER_OPEN), "s2_recent", "s0_home", "s2_recent"),
+    )
+    _explore_sending(replaying_kobe, monkeypatch, _OPEN_RECENT)
+    device_log.clear()
+
+    with pytest.raises(NoPathError, match="No path from s0_home to s2_recent"):
+        replaying_kobe.navigate_to_node("s2_recent")
+    assert device_log == []
+    offered = replaying_kobe.graph.get_exploration_target_candidates(package_name="com.demo")
+    assert [candidate["node_id"] for candidate in offered] == ["s0_home"]
 
 
 def _setups(explorer: Kobe) -> dict[tuple[str, str], list[object]]:
@@ -2931,7 +2978,7 @@ def test_the_planner_is_told_that_back_leaves_the_app_where_it_does(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
+def test_back_on_the_start_screen_passes_over_a_target_whose_last_replay_missed(
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -2941,39 +2988,33 @@ def test_back_on_the_start_screen_passes_over_a_target_its_replays_missed_twice(
     screens_by_log: Callable[..., DeviceController],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both replays to the list that Back on the start screen continues with land on the
-    start screen, and each counts a miss on the list. With the list out of the ranking,
-    the third Back on the start screen is pressed without a model call to choose a
-    target."""
+    """The replay to the list that Back on the start screen continues with lands on the
+    start screen and counts a miss on the list. With the list out of the ranking, the
+    second Back on the start screen is pressed without a model call to choose a target."""
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
-    expected = _identifying(explorer, monkeypatch, *["s0_home"] * 6)
+    expected = _identifying(explorer, monkeypatch, *["s0_home"] * 4)
     planned_from = _planning_back(monkeypatch)
-    choose_list = '{"node_id":"s1_list","reason":"unexplored"}'
     router_responses.extend(
         [
             chat_response(content=_BACK_REPLY),
-            chat_response(content=choose_list),
-            chat_response(content=_BACK_REPLY),
-            chat_response(content=choose_list),
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
             chat_response(content=_BACK_REPLY),
         ]
     )
 
-    explorer.explore(max_steps=3)
+    explorer.explore(max_steps=2)
 
-    assert device_log == [*_FIRST_RESTART, _OPEN_LIST, *_RESTART, _OPEN_LIST, _BACK]
-    assert expected == [None, "s0_home", "s1_list", "s0_home", "s1_list", None]
-    assert planned_from == ["s0_home"] * 3
+    assert device_log == [*_FIRST_RESTART, _OPEN_LIST, _BACK]
+    assert expected == [None, "s0_home", "s1_list", None]
+    assert planned_from == ["s0_home"] * 2
     assert _requested_models(router_requests) == [
         "provider/action",
         "provider/page_detail",
         "provider/action",
-        "provider/page_detail",
-        "provider/action",
     ]
-    assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 2
+    assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 1
 
 
 _SCROLL_DOWN_PLAN = '{"element":null,"instruction":"Scroll down"}'

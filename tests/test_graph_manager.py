@@ -4234,7 +4234,7 @@ def _candidate_ids(gm: GraphManager) -> list[str]:
 
 def _form_replay_missed(times: int) -> GraphManager:
     """A start screen and a form that outranks it, which replay has missed ``times``
-    times in a row."""
+    times since the edge to it was recorded."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", interactable_elements=_unexplored("Display"))
     add_screen(gm, "s1_form", "Form", interactable_elements=_unexplored("Name", "Port"))
@@ -4244,17 +4244,25 @@ def _form_replay_missed(times: int) -> GraphManager:
     return gm
 
 
-def test_a_node_replay_missed_once_stays_the_top_candidate() -> None:
+def test_a_node_whose_last_replay_missed_leaves_the_ranking() -> None:
     gm = _form_replay_missed(1)
 
-    assert gm.get_resume_target() == "s1_form"
+    assert gm.get_resume_target() == "s0_home"
+    assert _candidate_ids(gm) == ["s0_home"]
+
+
+def test_a_new_action_into_a_node_whose_replay_missed_brings_it_back_to_the_ranking() -> None:
+    """The action the replay missed with, recorded again, gives the replay no other way,
+    and one more miss after the new action takes the node out again."""
+    gm = _form_replay_missed(1)
+
+    gm.add_edge("s0_home", "s1_form", {"action": "a"})
+    assert _candidate_ids(gm) == ["s0_home"]
+
+    gm.add_edge("s0_home", "s1_form", {"action": "b"})
     assert _candidate_ids(gm) == ["s1_form", "s0_home"]
 
-
-def test_a_node_replay_missed_twice_in_a_row_leaves_the_ranking() -> None:
-    gm = _form_replay_missed(2)
-
-    assert gm.get_resume_target() == "s0_home"
+    gm.record_replay_miss("s1_form")
     assert _candidate_ids(gm) == ["s0_home"]
 
 
@@ -4268,7 +4276,7 @@ def test_replay_misses_never_take_the_start_node_out_of_the_candidates() -> None
 
 def test_a_replay_miss_counts_on_the_node_its_target_was_merged_into() -> None:
     """A coverage checkpoint can merge away the node a replay was sent to."""
-    gm = _form_replay_missed(1)
+    gm = _form_replay_missed(0)
     add_screen(gm, "s2_form", "Form")
     assert gm.merge_nodes("s1_form", "s2_form") is True
 
@@ -4277,10 +4285,10 @@ def test_a_replay_miss_counts_on_the_node_its_target_was_merged_into() -> None:
     assert _candidate_ids(gm) == ["s0_home"]
 
 
-def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager:
+def _settings_replay_missed(vlm: FakeVlm, screen: Screens) -> GraphManager:
     """A home screen and a settings page reached from it, each identified from one
-    screenshot, which look unlike each other; replay has missed the settings page twice
-    in a row."""
+    screenshot, which look unlike each other; the last replay to the settings page
+    missed it."""
     vlm.images.update({SHOT_A: FAR, SHOT_B: NEAR, SHOT_C: NEAR})
     vlm.descriptions.extend([("Home screen", {}, []), ("Settings page", {}, [])])
     vlm.verdicts.append({"same": False, "reason": "another page"})
@@ -4289,8 +4297,7 @@ def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager
     settings = gm.identify_state(screen(SETTINGS, SHOT_B, PACKAGE))
     assert (home, settings) == ("s0", "s1")
     gm.add_edge(home, settings, {"action": "open settings"})
-    for _ in range(2):
-        gm.record_replay_miss(settings)
+    gm.record_replay_miss(settings)
     return gm
 
 
@@ -4302,11 +4309,11 @@ def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager
         pytest.param(SHOT_C, None, "short_list", id="short-list"),
     ],
 )
-def test_a_screen_identified_as_a_node_replay_missed_clears_its_misses(
+def test_a_screen_identified_as_a_node_whose_replay_missed_leaves_it_out_of_the_ranking(
     screenshot: str, expected_node: str | None, stage: str, vlm: FakeVlm, screen: Screens
 ) -> None:
-    """The node is a candidate again, and one more miss leaves it one."""
-    gm = _settings_replay_missed_twice(vlm, screen)
+    """Reaching the node gives the replay no new way to it."""
+    gm = _settings_replay_missed(vlm, screen)
     assert "s1" not in _candidate_ids(gm)
     vlm.descriptions.append(("Settings page", {}, []))
     vlm.verdicts.append({"same": True, "reason": "the settings page"})
@@ -4317,9 +4324,7 @@ def test_a_screen_identified_as_a_node_replay_missed_clears_its_misses(
     assert gm.identify_state(observation, expected_observation=expected) == "s1"
 
     assert screen.decision(observation)["identify"]["stage"] == stage
-    assert "s1" in _candidate_ids(gm)
-    gm.record_replay_miss("s1")
-    assert "s1" in _candidate_ids(gm)
+    assert "s1" not in _candidate_ids(gm)
 
 
 def _app_with_a_gmail_screen(package: str, activity: str, other_activity: str) -> GraphManager:
