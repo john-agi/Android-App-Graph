@@ -41,6 +41,7 @@ from android_app_graph.utils.graph_manager import (
     MemberVerdicts,
     Merge,
 )
+from android_app_graph.utils.vlm_utils import DescribedScreenshot
 
 FAKE_CLIENT = cast("OpenRouter", object())  # never used: every consumer is patched
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
@@ -86,8 +87,8 @@ MEET_TIMEOUT = 10.0
 class FakeModels:
     """A verifier that confirms the member pairs in ``same``, gives no answer once for
     each entry of ``unanswered``, and records each pair it is shown as
-    ``(existing, new)``, a text embedding that records each text, and an edge normalizer
-    whose every template is ``template``.
+    ``(existing, new)`` and their descriptions, a text embedding that records each text,
+    and an edge normalizer whose every template is ``template``.
 
     A pair in ``meetings`` is answered only once every question its barrier counts has
     been asked, so a round asked one question at a time breaks the barrier. A pair in
@@ -97,7 +98,7 @@ class FakeModels:
     same: set[frozenset[str]] = field(default_factory=set)
     unanswered: list[frozenset[str]] = field(default_factory=list)
     shown: list[tuple[str, str]] = field(default_factory=list)
-    descriptions: list[str] = field(default_factory=list)
+    descriptions: list[tuple[str, str]] = field(default_factory=list)
     embedded: list[str] = field(default_factory=list)
     template: str = "before"
     meetings: dict[frozenset[str], threading.Barrier] = field(default_factory=dict)
@@ -117,12 +118,11 @@ class FakeModels:
         self,
         _client: object,
         *,
-        screenshot_new_b64: str,
-        screenshot_existing_b64: str,
-        existing_description: str,
+        existing: DescribedScreenshot,
+        new: DescribedScreenshot,
         **_settings: object,
     ) -> dict[str, Any]:
-        pair = (_member(screenshot_existing_b64), _member(screenshot_new_b64))
+        pair = (_member(existing.screenshot_b64), _member(new.screenshot_b64))
         if frozenset(pair) in self.refused:
             msg = f"the verifier refused {pair}"
             raise RuntimeError(msg)
@@ -130,7 +130,7 @@ class FakeModels:
         if meeting is not None:
             meeting.wait()
         self.shown.append(pair)
-        self.descriptions.append(existing_description)
+        self.descriptions.append((existing.description, new.description))
         if frozenset(pair) in self.unanswered:
             self.unanswered.remove(frozenset(pair))
             return {"same": False, "answered": False, "reason": "timed out"}
@@ -197,8 +197,8 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
     models: FakeModels,
     write_member_graph: Callable[..., None],
 ) -> None:
-    """The more-visited node's member is the existing screen, with that node's
-    description; the lower-numbered node is kept. The two nodes' descriptions are
+    """The more-visited node's member is the existing screen, each member shown with its
+    own description; the lower-numbered node is kept. The two nodes' descriptions are
     nothing alike, so only the images propose the pair."""
     write_member_graph(graph_path, CLOSE_PAIR, texts={"000002": X, "000004": Z})
     graph = _load(graph_path)
@@ -213,7 +213,8 @@ def test_a_close_pair_of_nodes_is_merged_only_when_the_verifier_confirms_their_c
     assert proposal.findings == [
         {"source": "image", "members": ["000002", "000004"], "score": pytest.approx(PROPOSED)}
     ]
-    assert (models.shown, models.descriptions) == ([("000004", "000002")], ["Node s1_home"])
+    assert models.shown == [("000004", "000002")]
+    assert models.descriptions == [("Screen 000004", "Screen 000002")]
     assert result["members"] == {"s0_home": "000002", "s1_home": "000004"}
     if same:
         assert (result["status"], result["kept"]) == ("merged", "s0_home")
@@ -536,7 +537,7 @@ def test_a_node_with_two_groups_is_split_and_each_action_follows_its_transitions
 
     (check,) = _checks(_check_members(graph, graph_path, {}))
 
-    new = "s2_screen_000003"
+    new = "s2"
     assert (check["kind"], check["group"], check["members"]) == (
         "split",
         ["000003", "000004"],
@@ -580,8 +581,7 @@ def test_a_node_built_by_a_split_takes_its_earliest_member_s_stored_describe_out
 
     _check_members(graph, graph_path, {})
 
-    node = graph.graph.nodes["s2_screen_000003"]
-    assert node["page_description"] == "Screen 000003"
+    node = graph.graph.nodes["s2"]
     assert node["interactable_elements"] == [
         {"description": "Button 000003", "position": "", "explored": False}
     ]
@@ -691,7 +691,7 @@ MOVE_TRANSITIONS = (("000003", "000005", TAP_A, "s0_home", "s2_menu"),)
         (("000004", "000003"), "s1_list", [("000002", "000003"), ("000004", "000003")]),
         (
             None,
-            "s3_screen_000003",
+            "s3",
             [("000002", "000003"), ("000004", "000003"), ("000005", "000003")],
         ),
     ],
@@ -783,7 +783,7 @@ def test_a_split_has_only_the_edges_whose_actions_it_changes_normalized_again(
 
     templates = _templates_around_member_checks(graph, graph_path, models)
 
-    new = "s2_screen_000003"
+    new = "s2"
     assert templates == {
         ("s0_home", "s1_list"): ["after"],
         (new, "s1_list"): ["after"],
@@ -847,7 +847,7 @@ def test_a_moving_member_without_an_answer_on_a_candidate_goes_on_to_the_next(
     assert "Verifier gave no answer on node s1_list against member 000004 (timed out); " in (
         caplog.text
     )
-    assert check["change"]["to"] == "s3_screen_000003"
+    assert check["change"]["to"] == "s3"
     assert models.shown == [("000002", "000003"), ("000004", "000003"), ("000005", "000003")]
 
 
@@ -908,7 +908,7 @@ def test_a_black_member_moves_by_its_activity_not_by_the_verifier(
 
     (check,) = _checks(_check_members(graph, graph_path, {}))
 
-    destination = "s2_pin" if pin_node else "s2_secure_screen:_chooselockpassword"
+    destination = "s2_pin" if pin_node else "s2"
     assert models.shown == [("000001", "000003")]
     assert models.embedded == []
     change = check["change"]
@@ -920,10 +920,7 @@ def test_a_black_member_moves_by_its_activity_not_by_the_verifier(
     assert "000003" in graph.graph.nodes[destination]["observations"]
     assert graph.graph.nodes["s1_pattern"]["observations"] == ["000004"]
     assert graph.text_vector("000003") is None
-    if not pin_node:
-        assert graph.graph.nodes[destination]["page_description"] == (
-            "secure screen: ChooseLockPassword"
-        )
+    assert graph.latest_description(destination) == "secure screen: ChooseLockPassword"
 
 
 SCROLLED, SCROLLED_TWICE = [SCROLL], [SCROLL, SCROLL]
@@ -961,17 +958,17 @@ def _actions_and_setups(graph: GraphManager) -> dict[tuple[str, str], list[tuple
                     ([TAP_C], None),
                     ([TAP_D], SCROLLED_TWICE),
                 ],
-                ("s2_screen_000003", "s1_list"): [([TAP_A], SCROLLED), ([TAP_B], [])],
-                ("s2_screen_000003", "s2_screen_000003"): [([SCROLL], [])],
+                ("s2", "s1_list"): [([TAP_A], SCROLLED), ([TAP_B], [])],
+                ("s2", "s2"): [([SCROLL], [])],
                 ("s0_home", "s0_home"): [([SCROLL], [])],
-                ("s1_list", "s2_screen_000003"): [([BACK], SCROLLED)],
+                ("s1_list", "s2"): [([BACK], SCROLLED)],
             },
         ),
         (
             MOVE,
             (_edge("s0_home", "s2_menu", TAP_A, setups=[SCROLLED]),),
             MOVE_TRANSITIONS,
-            {("s3_screen_000003", "s2_menu"): [([TAP_A], SCROLLED)]},
+            {("s3", "s2_menu"): [([TAP_A], SCROLLED)]},
         ),
     ],
     ids=["split", "move"],
@@ -1129,7 +1126,7 @@ def test_the_audit_reports_every_member_check_and_saves_the_graph_it_changed(
     )
     assert [check["kind"] for check in report["checks"]] == ["split"]
     audited = json.loads((app_dir / "demo_audited.json").read_text(encoding="utf-8"))
-    assert [node["id"] for node in audited["nodes"]] == ["s0_home", "s1_list", "s2_screen_000003"]
+    assert [node["id"] for node in audited["nodes"]] == ["s0_home", "s1_list", "s2"]
     assert not (app_dir / "demo_merge.json").exists()
     assert models.shown == [("000002", "000003")]
     assert models.embedded == []
@@ -1254,8 +1251,8 @@ def test_a_refused_question_raises_once_the_answers_before_it_are_kept(
     models.refused.add(frozenset(("000001", "000003")))
     verdicts: MemberVerdicts = {}
     questions = [
-        MemberQuestion("000001", "000002", "Node s0_screen"),
-        MemberQuestion("000001", "000003", "Node s0_screen"),
+        MemberQuestion("000001", "000002"),
+        MemberQuestion("000001", "000003"),
     ]
 
     with pytest.raises(RuntimeError, match="refused"):
@@ -1392,7 +1389,7 @@ def test_a_member_moves_to_the_node_a_split_made(
 
     split, move = _checks(_check_members(graph, graph_path, {}))
 
-    new = "s2_screen_000003"
+    new = "s2"
     assert (split["kind"], split["change"]["to"]) == ("split", new)
     assert (move["kind"], move["members"], move["change"]["to"]) == (
         "move",

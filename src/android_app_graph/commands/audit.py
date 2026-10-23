@@ -208,18 +208,11 @@ def _check_member_groups(
     verdicts: MemberVerdicts,
     transitions: Sequence[TransitionRecord],
 ) -> list[dict[str, object]]:
-    """Ask the verifier about every check's closest pair at once, then, in order, split
-    off or move each group it tells apart from its node's home. Without an answer the
-    node stays whole: a change rests on an answer, and node verification has already
-    asked twice."""
-    questions = [
-        MemberQuestion(
-            check.pair.first,
-            check.pair.second,
-            graph.graph.nodes[node_id].get("page_description", ""),
-        )
-        for node_id, check in checks
-    ]
+    """Ask the verifier about every check's closest pair at once, each member shown with
+    its own description, then, in order, split off or move each group it tells apart from
+    its node's home. Without an answer the node stays whole: a change rests on an answer,
+    and node verification has already asked twice."""
+    questions = [MemberQuestion(check.pair.first, check.pair.second) for _, check in checks]
     results: list[dict[str, object]] = []
     answers = graph.verify_member_pairs(questions, verdicts)
     for (node_id, check), verdict in zip(checks, answers, strict=True):

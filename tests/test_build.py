@@ -28,6 +28,7 @@ from android_app_graph.step_log import (
 )
 from android_app_graph.utils import MatchingSettings, ModelSettings, graph_manager
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
+from android_app_graph.utils.vlm_utils import DescribedScreenshot
 
 APP = "com.demo"
 OTHER_APP = "com.other"
@@ -199,25 +200,25 @@ class _FakeVlm:
         self,
         _client: OpenRouter | None,
         screenshot_b64: str,
-        existing_nodes: list[str] | None = None,
+        known_descriptions: list[str] | None = None,
         existing_keys: list[str] | None = None,
         settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
-        del existing_nodes, existing_keys, settings
+        del known_descriptions, existing_keys, settings
         page = self.by_image[screenshot_b64]
         return page.description, dict(page.state), [], page.external_web
 
     def verify(
         self,
         _client: OpenRouter | None,
-        screenshot_new_b64: str,
-        screenshot_existing_b64: str,
-        existing_description: str,
+        *,
+        existing: DescribedScreenshot,
+        new: DescribedScreenshot,
         settings: ModelSettings | None = None,
     ) -> dict[str, Any]:
-        del existing_description, settings
+        del settings
         self.verifier_calls += 1
-        same = self.by_image[screenshot_new_b64].page == self.by_image[screenshot_existing_b64].page
+        same = self.by_image[new.screenshot_b64].page == self.by_image[existing.screenshot_b64].page
         return {"same": same, "reason": "the same page" if same else "another page"}
 
     def embed(
@@ -415,9 +416,9 @@ def test_a_build_replays_the_audit_runs_when_asked(
     assert _build(config, recorded, out, "--audit-runs") == 0
 
     graph = _load(out, MatchingSettings())
-    audited = graph.node_of(recorded.observations["audit"].observation_id)
-    assert audited is not None
-    assert graph.graph.nodes[audited]["page_description"] == "Screen 8"
+    audited = recorded.observations["audit"].observation_id
+    assert graph.node_of(audited) is not None
+    assert graph.description(audited) == "Screen 8"
 
 
 @pytest.mark.usefixtures("config")
