@@ -980,15 +980,22 @@ decided once whatever proposed it. Each pair names its sources:
 
 - `text_audit`: the model's `merge_nodes` issues;
 - `image`: two in-app nodes of one package whose closest members reach a cosine of
-  0.67, the merge floor, between their screenshot vectors (see
-  [Embedding caches](#embedding-caches)). The merge floor and the grouping floor of
-  [member checks](#member-checks) are set separately: a lower merge floor proposes
-  more pairs, and a higher grouping floor separates more members.
+  0.65, the image merge floor, between their screenshot vectors (see
+  [Embedding caches](#embedding-caches));
+- `text`: two in-app nodes of one package whose closest members reach a cosine of
+  0.55, the text merge floor, between their description vectors. A
+  [black](#step-log) member, never described, is left out, so a node whose members
+  are all black is proposed by the model and the images alone.
 
-A near-identical image proves nothing on its own: a start search and a destination
-search look alike and are different screens. A pair is verified on its two closest
-members: the verifier sees the member of the more-visited node, with that node's
-description, beside the member of the other.
+The merge floors and the grouping floors of [member checks](#member-checks) are set
+separately: a lower merge floor proposes more pairs, and a higher grouping floor
+separates more members.
+
+A near-identical image or description proves nothing on its own: a start search and
+a destination search look alike and are different screens. A pair is verified on the
+two members whose screenshots are closest, whichever source proposed it: the verifier
+sees the member of the more-visited node, with that node's description, beside the
+member of the other.
 
 Two answers can decide a third: A = B and B = C give A = C, and A = B and B ≠ C give
 A ≠ C. So the pairs are ordered by the image cosine of their closest members, most
@@ -1013,34 +1020,36 @@ stay apart unless "same" answers on other pairs join them.
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage
 checkpoint's merge audit verifies the model's pairs the same way and proposes none
-from images, since every checkpoint would otherwise propose again each pair an
-earlier one kept apart.
+from images or descriptions, since every checkpoint would otherwise propose again each
+pair an earlier one kept apart.
 
 `<app_name>_merge.json` holds:
 
 - `rounds`, and how many pairs were `asked` and `deduced`;
 - `merges`: each cluster's `kept` node and the nodes `removed` into it;
 - `pairs`: every pair with `node_a` and `node_b`, the `sources` and what each found in
-  `findings` (the model's `issue`, or the image `members` and their `score`), the
-  closest `members` by node and their `image_score`, whether it was `asked`, the
-  `round` that asked it or after which it was deduced, the answer `same` (`null`
-  when the verifier gave no answer), the verifier's `reason` and `reused` for an
-  asked pair or the asked pairs it is `deduced_from`, and the `status`: `merged`,
-  with the node both are `kept` in, `kept_separate`, or `skipped` with the `reason`
-  the pair cannot be verified.
+  `findings` (the model's `issue`, or the `members` whose screenshots or descriptions
+  are closest and their `score`), the `members` shown to the verifier by node and
+  their `image_score`, whether it was `asked`, the `round` that asked it or after
+  which it was deduced, the answer `same` (`null` when the verifier gave no answer),
+  the verifier's `reason` and `reused` for an asked pair or the asked pairs it is
+  `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
+  `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
 
 #### Member checks
 
-After the merges, the members of each in-app node are grouped by their screenshot
-vectors: two members with a cosine of at least 0.95, the grouping floor, are linked,
-and the groups are the connected components of those links, single-linkage
-clustering. The largest group is the node's home; of two groups as large, the one
-holding the earliest member.
+After the merges, the members of each in-app node are grouped by their screenshot and
+description vectors. Two members are linked when their screenshot vectors reach a
+cosine of 0.95, the image grouping floor, or their description vectors reach 0.91, the
+text grouping floor, so two members are apart only when both signals separate them. A
+[black](#step-log) member, never described, is linked by its screenshot alone. The
+groups are the connected components of those links, single-linkage clustering. The
+largest group is the node's home; of two groups as large, the one holding the earliest
+member.
 
-- A node whose home holds fewer than half of its members is `diffuse` and is left
-  alone, without a verifier call.
-- Every other group is checked against home on the closest pair across them, the
-  strongest evidence that the two are one screen:
+- Every other group is checked against home, larger groups first, on the pair whose
+  screenshots are closest across them, the strongest evidence that the two are one
+  screen:
   - a group of two or more members is a split check. When the verifier tells the
     pair apart, the group becomes a new node.
   - a lone member is a move check. When the verifier tells it apart from its closest
@@ -1057,19 +1066,20 @@ holding the earliest member.
   - a split or move check the verifier gives no answer on (see
     [Requests and recovery](#requests-and-recovery)) leaves the node whole: every
     change rests on a verifier answer.
-- A node gets three checks at most, larger groups first; the rest are `unchecked`.
-  A node of one member is never checked. Since home holds at least half the members,
-  a node of fewer than four is never split: of two or three, only a member can move.
+- A node of one member is never checked. A split group has at least two members and
+  home at least as many, so a node of fewer than four is never split: of two or
+  three, only members can move.
 - Every node's split checks are asked at once, up to 16 at a time, and the splits
   are made in node order; then every move check is asked at once and the moves are
   made in node order, so a member can move to a node a split made. A rejected
   member's short list asks its verifier calls one at a time. A verifier answer on a
   pair of members is reused within the run; a check without an answer is not, so a
   later check of the pair asks again.
-  Two merged nodes whose closest members fall below the grouping floor, a pair from
-  `text_audit` or one the images propose between the merge floor and the grouping
-  floor, are two groups of the merged node: their split check is the pair the merge
-  was verified on, so it reuses that answer and the node stays whole.
+  Two merged nodes whose members are linked by neither signal, a pair from
+  `text_audit` or one the images or the descriptions propose between their merge
+  floor and their grouping floor, are two groups of the merged node: their split check
+  is the pair the merge was verified on, so it reuses that answer and the node stays
+  whole.
 
 A node a split or a move makes takes its description and elements from the stored
 describe output of its earliest member, or from its activity when that member is
@@ -1090,18 +1100,14 @@ taken from, and the action stays with that screen. It keeps its target observati
 too, which describes the screen it reached. An edge that lost an action drops its
 instruction templates, which the final normalization rebuilds.
 
-`<app_name>_members.json` holds the `grouping_floor`, `home_share` and
-`checks_per_node`, and:
-
-- `checks`: each check's `kind` (`split` or `move`), its `node` and `group`, the
-  `members` compared (a home member, then one of the group) and their `image_score`,
-  the verifier's `same` (`null` when it gave no answer) and `reason`, and `reused`.
-  A check the verifier answered "different" adds the `change`: `from`, `to`,
-  `new_node`, the `members` moved, the `edge_actions` moved, each with its `edge`,
-  `action` and the edges it is on `now`, and, for a move, the `short_list`'s
-  `candidates` and `verifications`, or, for a black member, its `black_activity`;
-- `diffuse`: each diffuse node with its groups;
-- `unchecked`: each node with the groups past its three checks.
+`<app_name>_members.json` holds the `image_grouping_floor`, the
+`text_grouping_floor` and the `checks`: each check's `kind` (`split` or `move`), its
+`node` and `group`, the `members` compared (a home member, then one of the group) and
+their `image_score`, the verifier's `same` (`null` when it gave no answer) and
+`reason`, and `reused`. A check the verifier answered "different" adds the `change`:
+`from`, `to`, `new_node`, the `members` moved, the `edge_actions` moved, each with its
+`edge`, `action` and the edges it is on `now`, and, for a move, the `short_list`'s
+`candidates` and `verifications`, or, for a black member, its `black_activity`.
 
 Last, without a model call or a device, the audit adds `no_path_to_start` to
 `<app_name>_audit.json`: the nodes of the final audited graph from which no
