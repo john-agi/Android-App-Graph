@@ -1322,7 +1322,7 @@ def test_each_call_takes_its_call_types_own_timeout_when_its_role_sets_none(
     assert [kwargs["timeout_ms"] for kwargs in sent] == [
         55_000,
         35_000,
-        180_000,
+        50_000,
         300_000,
         25_000,
         300_000,

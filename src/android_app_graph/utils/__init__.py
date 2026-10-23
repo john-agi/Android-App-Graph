@@ -63,13 +63,15 @@ DEFAULT_AUDIT_TIMEOUT = 300.0
 DEFAULT_UNREACHABLE_LIMIT = 1800.0
 # Seconds one attempt of each call type may take, README.md#requests-and-recovery: three
 # times the 99th percentile of its answered attempts in long exploration runs, rounded up
-# to 5 s and at least 15 s. The relabelling of a flagged edge, which those runs never
-# made, takes the planner's, the other instruction call on one screenshot.
+# to 5 s and at least 15 s. Edge normalization's attempts are those of the normalizer
+# sent at most 20 instructions, timed on the edges of those runs. The relabelling of a
+# flagged edge, which those runs never made, takes the planner's, the other instruction
+# call on one screenshot.
 REQUEST_TIMEOUTS: Mapping[str, float] = MappingProxyType(
     {
         "page_describe_and_state": 55.0,
         "node_verify": 35.0,
-        "normalize_edge": 180.0,
+        "normalize_edge": 50.0,
         "exploration_target": 25.0,
         "node_merge_audit": DEFAULT_AUDIT_TIMEOUT,
         "graph_audit": DEFAULT_AUDIT_TIMEOUT,

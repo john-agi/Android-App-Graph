@@ -220,7 +220,7 @@ with each request:
 |---|---|---|---|
 | Screen description | `page_describe_and_state` | `page_detail` | 55 s |
 | Node verification | `node_verify` | `page_detail` | 35 s |
-| Edge normalization | `normalize_edge` | `page_detail` | 180 s |
+| Edge normalization | `normalize_edge` | `page_detail` | 50 s |
 | The coverage checkpoint's target choice | `exploration_target` | `page_detail` | 25 s |
 | Node-merge audit and graph audit | `node_merge_audit`, `graph_audit` | `page_detail` | 300 s |
 | Exploration planning | `instruction` | `instruction` | 70 s |

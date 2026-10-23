@@ -263,7 +263,7 @@ _TIMEOUTS_BY_ROLE: dict[str, dict[str, float]] = {
     "page_detail": {
         "page_describe_and_state": 55,
         "node_verify": 35,
-        "normalize_edge": 180,
+        "normalize_edge": 50,
         "exploration_target": 25,
         "node_merge_audit": 300,
         "graph_audit": 300,
