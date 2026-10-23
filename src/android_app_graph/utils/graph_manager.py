@@ -427,14 +427,10 @@ def _text_scores(
     graph: GraphManager, query: ScreenQuery, node_ids: Sequence[str]
 ) -> list[tuple[str, float]]:
     """Score each node by its member whose description vector is most similar to the
-    screen's."""
+    screen's; a node whose members are all black has no score."""
     member_scores = score_by_cosine(
         query.description_embedding,
-        [
-            ((node_id, member), graph.text_vector(member))
-            for node_id in node_ids
-            for member in _member_observations(graph.graph.nodes[node_id])
-        ],
+        graph.member_description_vectors(node_ids).items(),
         scope="identify_state description-embedding",
     )
     best: dict[str, float] = {}
@@ -839,14 +835,15 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         raise unloadable_graph(path, problems)
 
 
-def _without_image_vectors(without: Mapping[str, Sequence[str]]) -> ValueError:
-    """Return the ``ValueError`` that choosing a node's image raises for the members of
-    each node of ``without`` that have no image vector, naming each node and member."""
-    named = ". ".join(
-        f"Node {node_id!r} has members without an image vector: {', '.join(members)}"
-        for node_id, members in without.items()
-    )
-    return ValueError(named)
+def _raise_for_members_without(vector: str, without: Mapping[str, Sequence[str]]) -> None:
+    """Raise ``ValueError`` naming each node of ``without`` and its members that have no
+    ``vector``, such as ``"an image vector"``, when ``without`` names any."""
+    if without:
+        named = ". ".join(
+            f"Node {node_id!r} has members without {vector}: {', '.join(members)}"
+            for node_id, members in without.items()
+        )
+        raise ValueError(named)
 
 
 def _stored_screens(
@@ -1025,9 +1022,32 @@ class GraphManager:
                 if member not in self._unit_vectors:
                     self._unit_vectors[member] = unit_vector(vector)
                 units[member] = self._unit_vectors[member]
-        if without:
-            raise _without_image_vectors(without)
+        _raise_for_members_without("an image vector", without)
         return units
+
+    def member_description_vectors(
+        self, node_ids: Iterable[str]
+    ) -> dict[tuple[str, str], list[float]]:
+        """Return the description vector of every member of ``node_ids`` that is not
+        black, by node and member.
+
+        A black member is never described, so it is left out. Any other member without
+        a description vector raises ``ValueError`` naming its node and every such member.
+        """
+        vectors: dict[tuple[str, str], list[float]] = {}
+        without: dict[str, list[str]] = {}
+        for node_id in node_ids:
+            for member in _member_observations(self.graph.nodes[node_id]):
+                stored = self._stored_screens.get(member)
+                if stored is not None and stored.black_activity is not None:
+                    continue
+                vector = self._text_vectors.get(member)
+                if vector is None:
+                    without.setdefault(node_id, []).append(member)
+                else:
+                    vectors[node_id, member] = vector
+        _raise_for_members_without("a description vector", without)
+        return vectors
 
     def close_member_pairs(self, floor: float = MERGE_FLOOR) -> list[tuple[str, str, MemberPair]]:
         """Return every pair of in-app nodes of one package whose closest members, by
@@ -1256,6 +1276,7 @@ class GraphManager:
         """Add the screen to ``node_id`` as an exact copy of its ``member``, whose
         describe output and text vector it takes, and record that on the screen's record."""
         described = self._stored_screens[member].described
+        text_vector = self.member_description_vectors([node_id])[node_id, member]
         logger.info(
             "Exact pixel match with member %s of %s; reusing its description", member, node_id
         )
@@ -1264,7 +1285,7 @@ class GraphManager:
         self._stored_screens[observation.observation_id] = _StoredScreen(
             observation.pixel_hash, described
         )
-        self._text_vectors[observation.observation_id] = self._text_vectors[member]
+        self._text_vectors[observation.observation_id] = text_vector
         decision = _Decision(expected_node, "exact", exact_match=member)
         annotate_observation(
             self._require_steps_dir(),
@@ -2095,7 +2116,7 @@ class GraphManager:
             observation,
             self._image_vectors[member],
             screen,
-            self._text_vectors[member],
+            self.member_description_vectors([node_id])[node_id, member],
             _Decision(expected_node=None),
             verdicts=verdicts,
         )

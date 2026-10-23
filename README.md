@@ -369,10 +369,10 @@ first rejection refined it to (`identify.refinement.new_description`), which als
 the node the screen starts when every check rejects it. An exact match copies its
 member's vector without a request. The file is written with the graph, just before it.
 Nothing embeds a description again, so a graph loads only with the vector of every
-member of an in-app node but a [black](#step-log) one, which is never described: a
-missing file, one tagged with another model, or one without such a member's vector
-stops exploration or the audit as it loads the graph, with an error naming the file
-and the problem.
+member of an in-app node but a [black](#step-log) one, which is never described and
+which every reader of these vectors leaves out: a missing file, one tagged with
+another model, or one without such a member's vector stops exploration or the audit
+as it loads the graph, with an error naming the file and the problem.
 
 When exploration resumes a graph and when the audit loads one, every member of an
 in-app node that has no image vector is embedded first, as when `image_emb.json` is
@@ -721,8 +721,9 @@ that has a black member of its package and activity, or starts a node described 
 the activity's class name, such as `secure screen: ChooseLockPattern`, with no
 elements. Neither the description model, the text embedding nor the verifier runs:
 its `identify` stage is `black`, and its record holds no `describe` output, so it has
-no description vector. The `text` source never ranks a node by a black member, and an
-exact match never copies one: a screenshot black only below the status bar is
+no description vector. The `text` source ranks a node only by its members that are
+not black, so a node whose members are all black has no `text` score. An exact match
+never copies a black member: a screenshot black only below the status bar is
 described. Each secure screen of an app gets a node per activity, so flows that reach
 different secure screens stay apart. The [merge proposals](#merge-proposals), at each
 coverage checkpoint and in `app-graph-audit`, keep them apart too: the verifier would
@@ -730,8 +731,9 @@ see two identical black images, so a pair of nodes whose members are all black, 
 different activities, is skipped without a verifier call, with the reason `black
 screens of different activities`, whether the model or the images proposed it.
 
-A member without an image vector of the screenshot's dimension stops the command with
-an error naming it and its node.
+A member without an image vector of the screenshot's dimension, or one that is not
+black and has no description vector, stops the command with an error naming it and
+its node.
 
 The graph file's `node_aliases` maps each node ID a rename or merge retired to
 the ID that replaced it, so a node ID recorded in the step log by an earlier run
