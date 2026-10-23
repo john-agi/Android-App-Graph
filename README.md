@@ -100,11 +100,11 @@ graph TD;
   `pyproject.toml` enforces the range `>=0.12.9,<0.13` with `required-version`;
   run `uv self update 0.12.9` if yours is outside it.
 - Android SDK with `adb` on `PATH`
-- A running emulator or a USB-debugging device on `adb devices`, with the target
-  app installed. `device.udid` in the config is its serial. `device.avd_name`
-  is read only when `adb devices` lists nothing: exploration then copies that
-  AVD to `<avd_name>_dup` and starts the copy with `emulator`, which must be on
-  `PATH`. When `adb devices` fails or times out, adb cannot reach its server, and
+- A running emulator, Android container such as Redroid, or USB-debugging device on
+  `adb devices`, with the target app installed. `device.udid` in the config is its
+  serial. `device.avd_name` is read only when `adb devices` lists nothing:
+  exploration then copies that AVD to `<avd_name>_dup` and starts the copy with
+  `emulator`, which must be on `PATH`. When `adb devices` fails or times out, adb cannot reach its server, and
   `app-graph` copies and starts nothing: it exits with status 1 and an error naming
   the server's address, `ADB_SERVER_SOCKET` or else
   `tcp:<ANDROID_ADB_SERVER_ADDRESS>:<ANDROID_ADB_SERVER_PORT>`, by default
@@ -456,10 +456,26 @@ Back leaves the app and [continues from a ranked target](#replaying-to-a-node) s
 screen the device shows when it answers again as `<to>`. A run that continues a graph
 with completed steps first logs the step it resumes from and the target total.
 
+Exploring an app starts by clearing recent apps. The explorer opens the app switcher,
+finds Clear all in the switcher's UI dump by Launcher3's resource id
+`com.android.launcher3:id/clear_all` or by its text, "Clear all" in any case, and taps
+it. Until Clear all appears it swipes the list from left to right, one app per swipe,
+at most 10 times; then it logs a warning, presses Home and explores with the recent
+apps left.
+
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
 every permission it requests with `adb shell pm grant`, so no permission prompt
 interrupts exploration. The grants stay on the device. Permissions that
 `pm grant` refuses, such as `INTERNET`, are logged and skipped.
+
+The app is then launched with `adb shell am start -n <component>`. The component is
+the app's optional `launch_activity` (`<package>/<activity>`) when the config sets
+one, and otherwise the package's launcher activity, which
+`adb shell pm resolve-activity` names; every [restart](#replaying-to-a-node) of the run
+starts the same component. A package with no launcher activity and no
+`launch_activity`, or a component `am start` cannot start, stops the run with an error
+naming it. Clearing recent apps and launching both work on devices without hardware
+keys, such as Redroid containers.
 
 For long runs, use the auto-resume wrapper:
 
@@ -478,8 +494,9 @@ with its task cleared (`adb shell am start -n <component> -f 0x10008000`), so an
 app's screen left in that task, such as a search screen the app opened, does not come
 back. The component is the app's `launch_activity` when the config sets one, and
 otherwise the package's launcher activity, looked up once per run; of several, the
-first is used and a warning names the others. Whatever the app holds only in memory,
-such as an unsaved form, is lost at each replay; data it has stored survives.
+first is used and a warning names the others. A component that `am start` cannot
+start raises an error naming it and adb's error. Whatever the app holds only in
+memory, such as an unsaved form, is lost at each replay; data it has stored survives.
 
 Some apps open on the screen used last rather than on their start screen, the screen
 the app opened on when exploration began: Clock opens on the tab used last, even with
