@@ -240,6 +240,7 @@ def test_adb_executable_raises_file_not_found_naming_adb_when_adb_is_not_on_path
 def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A call that names no timeout gets the 30 s every read gets."""
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -281,7 +282,7 @@ def test_run_adb_runs_the_adb_on_path_with_the_given_options_in_text_mode(
                 "text": True,
                 "encoding": "utf-8",
                 "errors": None,
-                "timeout": None,
+                "timeout": 30,
                 "check": False,
             },
         ),
@@ -531,7 +532,8 @@ class _FakeAdb:
     output. Stdout stays bytes unless the caller asks for text, which must name its
     encoding: the host's locale differs between machines, and Android writes UTF-8.
     ``stalls`` maps the arguments after ``adb`` to how many of their next calls stall
-    until their timeout expires; a stalled call without a timeout would never return.
+    until their timeout expires. Every call must name a timeout: a call without one
+    blocks for as long as the device does not answer.
     """
 
     def __init__(self) -> None:
@@ -550,13 +552,13 @@ class _FakeAdb:
         timeout: float | None = None,
         **_kwargs: object,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        if timeout is None:
+            msg = f"adb call without a timeout: {command}"
+            raise AssertionError(msg)
         self.events.append(command)
         self.timeouts.append(timeout)
         args = tuple(command[1:])
         if self.stalls.get(args, 0) > 0:
-            if timeout is None:
-                msg = f"a stalled call without a timeout never returns: {command}"
-                raise AssertionError(msg)
             self.stalls[args] -= 1
             raise subprocess.TimeoutExpired(command, timeout)
         returncode, stdout = self.replies.get(args, (0, b""))
@@ -825,6 +827,38 @@ def test_each_action_sends_its_adb_command_and_pause(
     assert adb.events == events
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"action": "tap", "x": 10, "y": 20},
+        {"action": "long_press", "x": 10, "y": 20},
+        {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4},
+        {"action": "back"},
+        {"action": "type", "text": "Hi"},
+    ],
+)
+def test_every_input_command_gives_adb_15_seconds(
+    controller: device.AdbController, adb: _FakeAdb, action: dict[str, Any]
+) -> None:
+    controller.exe_action(action)
+    assert adb.timeouts
+    assert set(adb.timeouts) == {15}
+
+
+def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    """A timed-out input may have reached the device, so sending it again could act twice."""
+    tap = [*_INPUT, "tap", "10", "20"]
+    adb.stalls[tuple(tap[1:])] = 1
+
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        controller.exe_action({"action": "tap", "x": 10, "y": 20})
+
+    assert (raised.value.cmd, raised.value.timeout) == (tap, 15)
+    assert adb.events == [tap]
+
+
 _CLEAR_FIELD = [[*_INPUT, "keyevent", "KEYCODE_DEL"], 0.2] * 20
 
 
@@ -928,14 +962,61 @@ def test_no_running_devices_is_an_empty_list(adb: _FakeAdb) -> None:
     assert adb.events == [["adb", *_DEVICES]]
 
 
-def test_running_devices_are_none_when_adb_devices_fails(
-    adb: _FakeAdb, caplog: pytest.LogCaptureFixture
+_SERVER_VARIABLES = ("ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS", "ANDROID_ADB_SERVER_PORT")
+
+
+@pytest.mark.parametrize(
+    ("environment", "address"),
+    [
+        pytest.param(
+            {"ADB_SERVER_SOCKET": "tcp:100.64.0.7:5037"}, "tcp:100.64.0.7:5037", id="socket"
+        ),
+        pytest.param(
+            {"ANDROID_ADB_SERVER_ADDRESS": "10.0.2.2", "ANDROID_ADB_SERVER_PORT": "5038"},
+            "tcp:10.0.2.2:5038",
+            id="host and port",
+        ),
+        pytest.param({}, "tcp:localhost:5037", id="default"),
+    ],
+)
+def test_running_devices_raise_naming_the_server_adb_cannot_reach(
+    adb: _FakeAdb,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    address: str,
 ) -> None:
-    adb.replies[_DEVICES] = (1, b"")
-    with caplog.at_level(logging.ERROR, logger="test"):
-        running = device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
-    assert running is None
-    assert caplog.messages == ["Failed to get running AVD list: "]
+    for name in _SERVER_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    adb.replies[_DEVICES] = (
+        1,
+        b"adb: failed to check server version: cannot connect to daemon: Connection refused\n",
+    )
+
+    with pytest.raises(device.AdbServerUnreachableError) as raised:
+        device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
+
+    assert str(raised.value) == (
+        f"adb cannot reach its server at {address}: "
+        "adb: failed to check server version: cannot connect to daemon: Connection refused"
+    )
+    assert adb.events == [["adb", *_DEVICES]]
+
+
+def test_running_devices_raise_naming_the_server_when_adb_devices_times_out(
+    adb: _FakeAdb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ADB_SERVER_SOCKET", "tcp:100.64.0.7:5037")
+    adb.stalls[_DEVICES] = 1
+
+    with pytest.raises(device.AdbServerUnreachableError) as raised:
+        device.EmulatorManager(logging.getLogger("test")).get_running_avd_list()
+
+    assert str(raised.value) == (
+        "adb cannot reach its server at tcp:100.64.0.7:5037: adb devices timed out after 30 s"
+    )
+    assert adb.events == [["adb", *_DEVICES]]
 
 
 def _write_avd(avd_root_dir: Path, *, avd_ini: str) -> None:

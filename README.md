@@ -104,7 +104,13 @@ graph TD;
   app installed. `device.udid` in the config is its serial. `device.avd_name`
   is read only when `adb devices` lists nothing: exploration then copies that
   AVD to `<avd_name>_dup` and starts the copy with `emulator`, which must be on
-  `PATH`.
+  `PATH`. When `adb devices` fails or times out, adb cannot reach its server, and
+  `app-graph` copies and starts nothing: it exits with status 1 and an error naming
+  the server's address, `ADB_SERVER_SOCKET` or else
+  `tcp:<ANDROID_ADB_SERVER_ADDRESS>:<ANDROID_ADB_SERVER_PORT>`, by default
+  `tcp:localhost:5037`, and adb's error or the timeout. `device.unreachable_limit`
+  is how long exploration waits for a device that stops answering (see
+  [Device outages](#device-outages)).
 - VLM provider credentials exported as environment variables
 
 ## Install
@@ -331,13 +337,7 @@ or still answered with 429 at its deadline, cancels the requests not yet sent; t
 templates of those already answered are still written, and then the error stops
 the command.
 
-Every read of the screen, in exploration and in the audit, runs three adb
-commands: the UI dump, the screenshot and `dumpsys window`. Each one that runs
-longer than 30 seconds is stopped and run once more, with a warning naming the
-command (`adb ... timed out after 30 s; retrying once`). A second timeout raises
-`subprocess.TimeoutExpired`, which names the command and the timeout, and the run
-fails as it does when any other adb command fails. A normal read takes at most
-about 12 seconds, when a dump gives up waiting for an idle screen.
+Every adb command has a timeout too: see [Device outages](#device-outages).
 
 Screenshots are embedded through OpenRouter's
 [multimodal embeddings API](https://openrouter.ai/docs/api_reference/embeddings), as
@@ -449,9 +449,11 @@ screenshot and action in its [step log](#step-log).
 Every step that counts toward `--max-steps` logs a `Step N/M: <from> --[<action>]--> <to>`
 line and then the tokens it used. `<to>` is `ext_<package>` for a step into another
 app and `ext_web` for one onto [outside web content](#external-apps-and-web-pages).
-A step that only waits shows `wait` as its action, and a step that plans Back where
+A step that only waits shows `wait` as its action, a step that plans Back where
 Back leaves the app and [continues from a ranked target](#replaying-to-a-node) shows
-`continue`, with the node it continues from as `<to>`. A run that continues a graph
+`continue`, with the node it continues from as `<to>`, and a step a
+[device outage](#device-outages) interrupted shows `interrupted`, with the node of the
+screen the device shows when it answers again as `<to>`. A run that continues a graph
 with completed steps first logs the step it resumes from and the target total.
 
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
@@ -564,6 +566,42 @@ package. A dialog's node is therefore never a target of
 `--resume-from auto` or the coverage checkpoint, which replay from the screen the app
 opens on.
 
+### Device outages
+
+Every adb command has a timeout. An input (a tap, swipe, key press or text) is
+stopped after 15 seconds, the check whether the keyboard is up and the device check
+below after 3, and every other command after 30. A command that works ends well
+within its timeout: the slowest, a UI dump that gives up waiting for an idle screen,
+takes about 12 seconds.
+
+Every read of the screen, in exploration and in the audit, runs three adb commands:
+the UI dump, the screenshot and `dumpsys window`. Each one that times out is run
+once more, with a warning naming the command (`adb ... timed out after 30 s;
+retrying once`). An input that times out is not sent again: it may have reached the
+device, and sending it again could act twice.
+
+When a read times out the second time, or an input or another adb command of an
+exploration step times out, the explorer logs that the device is unreachable, naming
+the command, and checks the device at once and then every 30 seconds with
+`adb shell true`, until the device answers or `device.unreachable_limit` seconds
+have passed, 1800 (30 minutes) by default. When the device answers, the explorer
+logs how long it waited, reads the screen the device shows, identifies it and
+continues the run from there. The interrupted step counts toward `--max-steps`, and
+its `Step N/M` line shows `interrupted` as its action. What its action did is
+unknown, so a step interrupted before it recorded its edge records none, and the
+[setup](#graph-edges) of the next action is unknown. An outage after the step was
+counted, such as one during the coverage checkpoint that follows it, counts no other
+step. In the step log, the screen read after the outage has the `source`
+`device_recovery`.
+
+Past the limit, exploration saves the graph and logs `Device <udid> unreachable for
+<N> minutes. Exploration stopped at step <n>. Graph saved. Re-run to resume.`, and
+`app-graph` exits with status 1 and `app-graph: error: Device <udid> unreachable for
+<N> minutes`, without a traceback; `scripts/run_explore.sh` then starts it again,
+resuming from the saved graph. Only the exploration loop waits: an adb command that
+times out as a run starts, or in `app-graph-audit`, stops the command with its
+error. The explorer never restarts the adb server, which other runs can share.
+
 ### Step log
 
 Exploration and `app-graph-audit --re-explore` record every screenshot they take,
@@ -628,7 +666,8 @@ of screenshots, and `screencap` captures it with every pixel 0.
 
 `source` names the part of the run that took the step: `main_loop`,
 `navigation_replay`, `coverage_checkpoint`, `external_app_recovery`,
-`external_web_recovery`, `re_explore` (the audit's exploration steps) or
+`external_web_recovery`, `device_recovery` (the screen read after a
+[device outage](#device-outages)), `re_explore` (the audit's exploration steps) or
 `edge_retry` (the audit's replay of a flagged edge). A retried edge has no
 planner, so its transition holds the flagged instruction and a `null` element.
 

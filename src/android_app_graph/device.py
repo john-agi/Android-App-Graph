@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import platform
 import re
 import shlex
@@ -21,6 +22,15 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
 
 logger = logging.getLogger(__name__)
+
+# How long each kind of adb call may run. About one adb call in a hundred stalls between
+# the host and the device, sometimes for good, and the next call succeeds. An input
+# returns once the device has queued its events. Of the calls that wait for the device's
+# answer, the slowest is a dump that gives up waiting for an idle screen, after about
+# 12 s. A probe answers a question the run can go on without.
+_INPUT_TIMEOUT_SECONDS = 15
+_READ_TIMEOUT_SECONDS = 30
+_PROBE_TIMEOUT_SECONDS = 3
 
 _SOFT_KEYBOARD_HINT = (
     " (Note: the soft keyboard is currently visible — a text field is focused "
@@ -43,7 +53,7 @@ class DeviceController(Protocol):
 class AvdManager(Protocol):
     """What ``check_avd`` needs to find a running device or start an emulator."""
 
-    def get_running_avd_list(self) -> list[dict[str, Any]] | None: ...
+    def get_running_avd_list(self) -> list[dict[str, Any]]: ...
 
     def duplicate_avd(self, avd_name: str) -> None: ...
 
@@ -67,11 +77,12 @@ def run_adb(
     *,
     output: Literal["capture", "discard"],
     errors: str | None = None,
-    timeout: float | None = None,
+    timeout: float = _READ_TIMEOUT_SECONDS,
     check: bool,
 ) -> subprocess.CompletedProcess[str]:
     """Run the adb on ``PATH`` with ``args``, capturing its stdout and stderr as text or
-    discarding both.
+    discarding both, and stop it with ``subprocess.TimeoutExpired`` after ``timeout``
+    seconds.
 
     Text is decoded as UTF-8 whatever the host's locale, because Android writes UTF-8.
     """
@@ -148,11 +159,6 @@ def status_bar_frame(dumpsys_window: str) -> list[int] | None:
         return [left, top, right, bottom]
     return None
 
-
-# About one adb call in a hundred stalls between the host and the device, sometimes
-# for good, and the next call succeeds. The slowest legitimate read is a dump that
-# gives up waiting for an idle screen, after about 12 s.
-_READ_TIMEOUT_SECONDS = 30
 
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
@@ -248,7 +254,16 @@ class AdbController:
         time.sleep(1.5)
 
     def _input(self, *args: str, check: bool = False) -> None:
-        run_adb([*self._serial, "shell", "input", *args], output="discard", check=check)
+        """Run ``adb shell input`` with ``args``. A timeout raises
+        ``subprocess.TimeoutExpired`` at once: the input may have reached the device, and
+        sending it again could act twice.
+        """
+        run_adb(
+            [*self._serial, "shell", "input", *args],
+            output="discard",
+            timeout=_INPUT_TIMEOUT_SECONDS,
+            check=check,
+        )
 
     def _tap(self, x: int, y: int) -> None:
         self._input("tap", str(x), str(y))
@@ -324,20 +339,41 @@ def _rewrite_lines(path: Path, new_lines: Mapping[str, str]) -> None:
         f.writelines(lines)
 
 
+def _adb_server_address() -> str:
+    """Return the socket of the adb server that adb talks to, as adb reads it from the
+    environment: ``ADB_SERVER_SOCKET``, or else ``ANDROID_ADB_SERVER_ADDRESS`` and
+    ``ANDROID_ADB_SERVER_PORT``, which default to ``localhost`` and ``5037``."""
+    host = os.environ.get("ANDROID_ADB_SERVER_ADDRESS") or "localhost"
+    port = os.environ.get("ANDROID_ADB_SERVER_PORT") or "5037"
+    return os.environ.get("ADB_SERVER_SOCKET") or f"tcp:{host}:{port}"
+
+
+class AdbServerUnreachableError(ConnectionError):
+    """adb cannot reach its server, so which devices run is unknown."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(f"adb cannot reach its server at {_adb_server_address()}: {cause}")
+
+
 class EmulatorManager:
     """Lists the devices adb sees and duplicates an AVD for ``check_avd`` to start."""
 
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger
 
-    def get_running_avd_list(self) -> list[dict[str, Any]] | None:
-        """Return each device on ``adb devices`` with its AVD name, ``None`` for a phone,
-        or ``None`` instead of a list when adb fails.
+    def get_running_avd_list(self) -> list[dict[str, Any]]:
+        """Return each device on ``adb devices`` with its AVD name, ``None`` for a phone.
+
+        An ``adb devices`` that fails or times out raises ``AdbServerUnreachableError``
+        naming the adb server's address and adb's error.
         """
-        devices = run_adb(["devices"], output="capture", check=False)
+        try:
+            devices = run_adb(["devices"], output="capture", check=False)
+        except subprocess.TimeoutExpired as exc:
+            cause = f"adb devices timed out after {exc.timeout:g} s"
+            raise AdbServerUnreachableError(cause) from exc
         if devices.returncode != 0:
-            self._logger.error("Failed to get running AVD list: %s", devices.stderr)
-            return None
+            raise AdbServerUnreachableError(_adb_error(devices))
         running: list[dict[str, Any]] = []
         for line in devices.stdout.splitlines()[1:]:
             if not line:
@@ -586,7 +622,7 @@ def soft_keyboard_hint(udid: str) -> str:
             # Undecodable dumpsys output must never raise UnicodeDecodeError out of a
             # best-effort probe; replace bad bytes instead of failing to decode them.
             errors="replace",
-            timeout=3,
+            timeout=_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
@@ -603,6 +639,44 @@ def keyboard_status(hint: str) -> str:
         "No OS keyboard signal detected. Still inspect the screenshot: "
         "a bottom input/keyboard bar can mean a text field is active."
     )
+
+
+_CHECK_INTERVAL_SECONDS = 30
+
+
+class DeviceUnreachableError(RuntimeError):
+    """The device answered no adb call for as long as the run waits for it."""
+
+
+def wait_for_device(udid: str, limit: float) -> float:
+    """Return how many seconds passed until the device ``udid`` answered a quick read,
+    checking at once and then every 30 s.
+
+    Raises ``DeviceUnreachableError`` naming the device and ``limit`` when ``limit``
+    seconds have passed without an answer.
+    """
+    started = time.monotonic()
+    while not _answers(udid):
+        if time.monotonic() - started >= limit:
+            msg = f"Device {udid} unreachable for {limit / 60:g} minutes"
+            raise DeviceUnreachableError(msg)
+        time.sleep(_CHECK_INTERVAL_SECONDS)
+    return time.monotonic() - started
+
+
+def _answers(udid: str) -> bool:
+    """Return whether the device ``udid`` runs ``true`` in its shell within the probe
+    timeout; adb exits non-zero for a device it does not reach."""
+    try:
+        probe = run_adb(
+            ["-s", udid, "shell", "true"],
+            output="discard",
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return probe.returncode == 0
 
 
 _SYSTEM_OVERLAY_PACKAGES = frozenset(

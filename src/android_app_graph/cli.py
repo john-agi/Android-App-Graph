@@ -2,6 +2,7 @@ import argparse
 import logging
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,9 @@ import yaml
 
 from android_app_graph.device import (
     AdbController,
+    AdbServerUnreachableError,
     AvdManager,
+    DeviceUnreachableError,
     EmulatorManager,
     grant_runtime_permissions,
     launch_app,
@@ -22,12 +25,17 @@ from android_app_graph.utils import (
     resolve_api_key,
     resolve_matching_settings,
     resolve_model_settings,
+    resolve_unreachable_limit,
 )
 from android_app_graph.utils.logging import setup_logging
 
 
 def check_avd(avd_manager: AvdManager, config: dict[str, Any], logger: logging.Logger) -> None:
-    """Ensure an AVD is running. If not, duplicate the base AVD and launch it."""
+    """Ensure an AVD is running. If not, duplicate the base AVD and launch it.
+
+    An adb server that adb cannot reach raises ``AdbServerUnreachableError`` before
+    anything is copied or started.
+    """
     running_avd_list = avd_manager.get_running_avd_list()
     if running_avd_list:
         logger.info("Running AVD found.")
@@ -79,6 +87,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run app-graph. When adb cannot reach its server, or the device stays unreachable
+    past ``device.unreachable_limit``, exit with status 1 and the error, without a
+    traceback."""
+    try:
+        _explore()
+    except (AdbServerUnreachableError, DeviceUnreachableError) as exc:
+        sys.exit(f"app-graph: error: {exc}")
+
+
+def _explore() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
@@ -89,6 +107,7 @@ def main() -> None:
         check_config_keys(config)
         resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
         resolve_matching_settings(vlm_config)
+        unreachable_limit = resolve_unreachable_limit(config)
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
@@ -129,6 +148,7 @@ def main() -> None:
                 coverage_checkpoint_steps=coverage_checkpoint_steps,
                 coverage_checkpoint_top_k=coverage_checkpoint_top_k,
                 launch_activity=app.get("launch_activity"),
+                unreachable_limit=unreachable_limit,
             )
             kobe = Kobe(controller, explorer_config, client=client, logger=logger)
             try:

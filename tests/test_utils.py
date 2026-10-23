@@ -30,6 +30,7 @@ from android_app_graph.utils import (
     resolve_env,
     resolve_matching_settings,
     resolve_model_settings,
+    resolve_unreachable_limit,
     vlm_utils,
 )
 from android_app_graph.utils import logging as app_logging
@@ -106,7 +107,7 @@ def test_a_missing_or_empty_openrouter_key_is_actionable(
 
 
 _EVERY_ACCEPTED_KEY: dict[str, object] = {
-    "device": {"udid": "emulator-5554", "avd_name": "Pixel"},
+    "device": {"udid": "emulator-5554", "avd_name": "Pixel", "unreachable_limit": 1800},
     "experiment": {
         "graph_dir": "graphs",
         "max_steps": 10,
@@ -370,6 +371,25 @@ def test_an_invalid_audit_timeout_is_reported_with_the_page_detail_settings(valu
     with pytest.raises(ValueError, match=r"page_detail\.audit_request_timeout must be a positive"):
         resolve_model_settings(config, roles=("page_detail",))
     resolve_model_settings({**config, "embedding": {"model": "e"}}, roles=("embedding",))
+
+
+@pytest.mark.parametrize(
+    ("device", "seconds"),
+    [({}, 1800.0), ({"unreachable_limit": 600}, 600.0), ({"unreachable_limit": "90.5"}, 90.5)],
+)
+def test_the_unreachable_limit_defaults_to_thirty_minutes(
+    device: dict[str, object], seconds: float
+) -> None:
+    assert resolve_unreachable_limit({"device": device}) == seconds
+
+
+@pytest.mark.parametrize("value", ["soon", "nan", 0, -1])
+def test_an_invalid_unreachable_limit_is_a_configuration_error(value: object) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^device\.unreachable_limit must be a positive finite number of seconds$",
+    ):
+        resolve_unreachable_limit({"device": {"unreachable_limit": value}})
 
 
 def test_every_invalid_setting_is_reported_on_one_line() -> None:

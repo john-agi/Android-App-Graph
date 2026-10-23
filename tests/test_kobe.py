@@ -8,7 +8,8 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, override
 
@@ -18,12 +19,12 @@ from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 from PIL import Image
 
-from android_app_graph.device import DeviceController, StillOutsideAppError
+from android_app_graph.device import DeviceController, DeviceUnreachableError, StillOutsideAppError
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
-from android_app_graph.utils import MatchingSettings
+from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
 from android_app_graph.utils.vlm_utils import PlanRequest
 
@@ -129,6 +130,7 @@ def _explorer(
     router_client: OpenRouter,
     *,
     launch_activity: str | None = None,
+    unreachable_limit: float = DEFAULT_UNREACHABLE_LIMIT,
 ) -> Kobe:
     return Kobe(
         device,
@@ -138,6 +140,7 @@ def _explorer(
             graph_dir=tmp_path,
             vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
             launch_activity=launch_activity,
+            unreachable_limit=unreachable_limit,
         ),
         client=router_client,
         logger=logging.getLogger("test"),
@@ -3128,3 +3131,291 @@ def test_exploration_that_starts_in_another_app_restarts_the_app_and_stops_if_it
 
     assert device_log == _FIRST_RESTART
     assert list(explorer.graph.graph) == []
+
+
+_PROBE = ["adb", "-s", "test-device", "shell", "true"]
+
+
+def _timed_out(*args: str, timeout: float) -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(["adb", "-s", "test-device", *args], timeout)
+
+
+def _dump_timed_out() -> subprocess.TimeoutExpired:
+    """What a screen read raises when its UI dump times out twice."""
+    return _timed_out("exec-out", "uiautomator dump /dev/stdout", timeout=30)
+
+
+class _StallingDevice:
+    """A DeviceController that answers each read with the next of ``reads``, raising one
+    that is an exception as adb does for a device that does not answer, and logs each
+    action to the device log, timing out the actions ``stalled_actions`` numbers from 1."""
+
+    w = 100
+    h = 200
+
+    def __init__(
+        self,
+        log: list[object],
+        reads: Sequence[dict[str, object] | Exception],
+        stalled_actions: tuple[int, ...] = (),
+    ) -> None:
+        self.config: dict[str, object] = {"device": {"udid": "test-device"}}
+        self._log = log
+        self._reads = iter(reads)
+        self._stalled_actions = stalled_actions
+        self._actions = 0
+
+    def get_state(self) -> dict[str, object]:
+        read = next(self._reads)
+        if isinstance(read, Exception):
+            raise read
+        return read
+
+    def exe_action(self, action: dict[str, object]) -> None:
+        self._log.append(action)
+        self._actions += 1
+        if self._actions in self._stalled_actions:
+            stalled = _timed_out("shell", "input", "tap", "50", "100", timeout=15)
+            raise stalled
+
+
+def _adb_probed(log: list[object], *probes: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A ``subprocess.run`` that logs each command and answers the device's quick reads as
+    ``probes`` says in turn, the last for every read after it: ``"answer"``, ``"timeout"``
+    or ``"offline"``, which adb reports with exit status 1. Every other command succeeds."""
+
+    def run(
+        command: list[str], *, timeout: float | None = None, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        log.append(command)
+        outcome = "answer"
+        if command == _PROBE:
+            outcome = probes[min(log.count(_PROBE), len(probes)) - 1]
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(command, timeout or 0)
+        returncode = 1 if outcome == "offline" else 0
+        return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
+
+    return run
+
+
+_LIST_SCREEN = _screen("com.demo.List", "gray")
+_DETAIL_SCREEN = _screen("com.demo.Detail", "blue")
+
+
+@pytest.mark.parametrize(
+    ("reads", "stalled_actions", "probes", "sleeps"),
+    [
+        pytest.param(
+            [HOME_SCREEN, _LIST_SCREEN, _dump_timed_out(), _LIST_SCREEN, _DETAIL_SCREEN],
+            (),
+            ["timeout", "answer"],
+            [0.5, 0.5, 30, 0.5],
+            id="a read times out twice",
+        ),
+        pytest.param(
+            [HOME_SCREEN, _LIST_SCREEN, _LIST_SCREEN, _DETAIL_SCREEN],
+            (2,),
+            ["offline", "answer"],
+            [0.5, 30, 0.5],
+            id="an input times out",
+        ),
+        pytest.param(
+            [HOME_SCREEN, _LIST_SCREEN, _dump_timed_out(), _LIST_SCREEN, _DETAIL_SCREEN],
+            (2,),
+            ["answer"],
+            [0.5, 0.5],
+            id="the read after the device answers times out",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("adb_on_path")
+def test_a_device_that_stops_answering_and_answers_again_continues_from_the_screen_it_shows(
+    reads: list[dict[str, object] | Exception],
+    stalled_actions: tuple[int, ...],
+    probes: list[str],
+    sleeps: list[float],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    """The step the outage interrupted counts as ``interrupted`` and records no edge, since
+    what its action did is unknown; the next step plans from the screen the device shows
+    when it answers again, where the setup of its action is unknown too. The screen read
+    after the outage is recorded with the source ``device_recovery``."""
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, *probes))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    explorer = _explorer(_StallingDevice(log, reads, stalled_actions), tmp_path, router_client)
+    _list_reached_from_home(explorer, "s2_detail")
+    identified = _identifying(explorer, monkeypatch, "s0_home", "s1_list", "s1_list", "s2_detail")
+    planned_from: list[object] = []
+    monkeypatch.setattr(
+        "android_app_graph.kobe.plan_next_action", _planner("Open it", planned_from)
+    )
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(3))
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=3)
+
+    assert _numbered_steps(caplog.messages) == [
+        "Step 1/3: s0_home --[tap]--> s1_list",
+        "Step 2/3: s1_list --[interrupted]--> s1_list",
+        "Step 3/3: s1_list --[tap]--> s2_detail",
+    ]
+    assert planned_from == ["s0_home", "s1_list", "s1_list"]
+    assert identified == [None, None, None, None]
+    assert list(explorer.graph.graph.edges) == [("s0_home", "s1_list"), ("s1_list", "s2_detail")]
+    assert explorer.graph.graph["s1_list"]["s2_detail"]["setups"] == [None]
+    assert log == [_TAP, _TAP, *[_PROBE] * 2, _TAP]
+    assert no_sleep == sleeps
+    in_app = [("action", "main_loop"), ("observation", "main_loop"), ("match", "main_loop")]
+    assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
+        ("observation", "main_loop"),
+        ("match", "main_loop"),
+        *in_app,
+        ("transition", "main_loop"),
+        ("action", "main_loop"),
+        ("observation", "device_recovery"),
+        ("match", "device_recovery"),
+        *in_app,
+        ("transition", "main_loop"),
+    ]
+    assert json.loads(explorer.graph_path.read_text("utf-8"))["total_steps_completed"] == 3
+
+
+@pytest.mark.parametrize(
+    ("limit", "minutes", "checks"),
+    [
+        pytest.param(DEFAULT_UNREACHABLE_LIMIT, "30", 61, id="default"),
+        pytest.param(90, "1.5", 4, id="configured"),
+    ],
+)
+@pytest.mark.usefixtures("adb_on_path")
+def test_a_device_that_does_not_answer_within_the_limit_stops_the_run_with_the_graph_saved(
+    limit: float,
+    minutes: str,
+    checks: int,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The device is checked at once and then every 30 s, up to the limit, by default 30
+    minutes. The run then stops with an error naming the device and the limit, and logs
+    it without a traceback after saving the graph."""
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "timeout"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    device = _StallingDevice(log, [HOME_SCREEN, _LIST_SCREEN], stalled_actions=(2,))
+    explorer = _explorer(device, tmp_path, router_client, unreachable_limit=limit)
+    _list_reached_from_home(explorer)
+    _identifying(explorer, monkeypatch, "s0_home", "s1_list")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Open it", []))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(2))
+    caplog.set_level(logging.INFO, logger="test")
+    unreachable = f"Device test-device unreachable for {minutes} minutes"
+
+    with pytest.raises(DeviceUnreachableError) as raised:
+        explorer.explore(max_steps=3)
+
+    assert str(raised.value) == unreachable
+    assert log == [_TAP, _TAP, *[_PROBE] * checks]
+    assert no_sleep == [0.5, *[30] * (checks - 1)]
+    saved = json.loads(explorer.graph_path.read_text("utf-8"))
+    assert saved["total_steps_completed"] == 1
+    assert [(edge["source"], edge["target"]) for edge in saved["edges"]] == [("s0_home", "s1_list")]
+    stopped = f"{unreachable}. Exploration stopped at step 1. Graph saved. Re-run to resume."
+    (record,) = [record for record in caplog.records if record.getMessage() == stopped]
+    assert record.exc_info is None
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.usefixtures("no_sleep", "adb_on_path")
+def test_a_device_that_stops_answering_after_a_counted_step_counts_no_other_step(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An outage during the coverage checkpoint that follows a step leaves that step as it
+    was counted, and the next step plans from the screen the device shows when it answers."""
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    reads = [HOME_SCREEN, _LIST_SCREEN, _LIST_SCREEN, _DETAIL_SCREEN]
+    explorer = _explorer(_StallingDevice(log, reads), tmp_path, router_client)
+    _list_reached_from_home(explorer, "s2_detail")
+    _identifying(explorer, monkeypatch, "s0_home", "s1_list", "s1_list", "s2_detail")
+    planned_from: list[object] = []
+    monkeypatch.setattr(
+        "android_app_graph.kobe.plan_next_action", _planner("Open it", planned_from)
+    )
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    checkpoints: list[int] = []
+
+    def checkpoint(step: int, _max_steps: int, _current_node: str) -> str | None:
+        checkpoints.append(step)
+        if len(checkpoints) == 1:
+            stalled = _timed_out("shell", "am", "force-stop", "com.demo", timeout=30)
+            raise stalled
+        return None
+
+    monkeypatch.setattr(explorer, "maybe_continue_from_coverage_checkpoint", checkpoint)
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(2))
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=2)
+
+    assert _numbered_steps(caplog.messages) == [
+        "Step 1/2: s0_home --[tap]--> s1_list",
+        "Step 2/2: s1_list --[tap]--> s2_detail",
+    ]
+    assert checkpoints == [1, 2]
+    assert planned_from == ["s0_home", "s1_list"]
+    assert log == [_TAP, _PROBE, _TAP]
+
+
+def test_a_checkpoint_whose_navigation_times_out_reads_nothing_more_from_the_device(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device that stops answering during the replay is waited for by the exploration
+    loop, not read again as after a navigation that fails for another reason."""
+    explorer = _explorer(
+        _Device(AssertionError("the screen was read after the device stopped answering")),
+        tmp_path,
+        router_client,
+    )
+    _settings_and_detail(explorer)
+    router_responses.extend(
+        [
+            chat_response(content=_NO_DUPLICATES),
+            chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
+        ]
+    )
+    stalled = _timed_out("shell", "input", "tap", "1", "2", timeout=15)
+
+    def navigate(_node: str) -> str:
+        raise stalled
+
+    monkeypatch.setattr(explorer, "navigate_to_node", navigate)
+
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
+
+    assert raised.value is stalled

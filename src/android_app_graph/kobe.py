@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -14,6 +15,7 @@ from openrouter import OpenRouter
 from android_app_graph.device import (
     AppLaunch,
     DeviceController,
+    DeviceUnreachableError,
     ForceStopRefusedError,
     is_outside_app,
     keyboard_status,
@@ -21,10 +23,12 @@ from android_app_graph.device import (
     restart_into_app,
     return_to_app,
     soft_keyboard_hint,
+    wait_for_device,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
 from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.utils import (
+    DEFAULT_UNREACHABLE_LIMIT,
     resolve_audit_timeout,
     resolve_matching_settings,
     resolve_model_settings,
@@ -98,7 +102,8 @@ class _Move:
 
 @dataclass(frozen=True, kw_only=True)
 class ExplorerConfig:
-    """The app ``Kobe`` explores, its model settings, where its graph is saved and its budgets."""
+    """The app ``Kobe`` explores, its model settings, where its graph is saved and its
+    budgets, among them the seconds it waits for a device that stops answering."""
 
     app_name: str
     package_name: str
@@ -108,6 +113,7 @@ class ExplorerConfig:
     coverage_checkpoint_steps: int = 50
     coverage_checkpoint_top_k: int = 15
     launch_activity: str | None = None
+    unreachable_limit: float = DEFAULT_UNREACHABLE_LIMIT
 
 
 class Kobe:
@@ -142,6 +148,7 @@ class Kobe:
         self.max_steps = config.max_steps
         self.coverage_checkpoint_steps = config.coverage_checkpoint_steps
         self.coverage_checkpoint_top_k = config.coverage_checkpoint_top_k
+        self.unreachable_limit = config.unreachable_limit
 
         vlm_config = config.vlm_config or {}
         settings = resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
@@ -264,7 +271,8 @@ class Kobe:
     def _navigate_to_continuation(self, selected: str, current_node: str) -> str | None:
         """Return the node exploration continues from after navigating to ``selected``, or
         ``None`` when the navigation failed before the app restart and the device is still
-        on ``current_node``."""
+        on ``current_node``. An adb call that times out is raised for the exploration loop,
+        which waits for the device."""
         try:
             actual_node = self.navigate_to_node(selected)
         except (NoPathError, ForceStopRefusedError) as exc:
@@ -276,6 +284,8 @@ class Kobe:
                 exc_info=exc,
             )
             return None
+        except subprocess.TimeoutExpired:
+            raise
         except Exception as exc:
             self.logger.warning(
                 "Navigation to continuation target %s failed after the app restart; "
@@ -467,7 +477,9 @@ class Kobe:
                 Special values:
                   - "auto": the top-ranked exploration target, chosen without a model call.
 
-        The graph is auto-saved after every step so crashes lose at most one step.
+        The graph is auto-saved after every step so crashes lose at most one step. A
+        device that stops answering during a step is waited for, up to
+        ``unreachable_limit`` seconds; past it ``DeviceUnreachableError`` is raised.
         """
         max_steps = max_steps if max_steps is not None else self.max_steps
         start_step = self.graph.total_steps_completed
@@ -487,10 +499,19 @@ class Kobe:
 
         try:
             while self.graph.total_steps_completed < max_steps:
-                position = self._explore_step(position, max_steps)
+                position = self._explore_step_through_outage(position, max_steps)
         except KeyboardInterrupt:
             self.logger.warning(
                 "Exploration interrupted at step %d. Saving graph before exit.",
+                self.graph.total_steps_completed,
+            )
+            self.save_graph()
+            token_tracker.print_summary()
+            raise
+        except DeviceUnreachableError as unreachable:
+            self.logger.warning(
+                "%s. Exploration stopped at step %d. Graph saved. Re-run to resume.",
+                unreachable,
                 self.graph.total_steps_completed,
             )
             self.save_graph()
@@ -540,6 +561,59 @@ class Kobe:
         node, device_state = self._identify(self.controller.get_state())
         self._setup_trail.begin(node, None)
         return _Position(node, device_state)
+
+    def _explore_step_through_outage(self, position: _Position, max_steps: int) -> _Position:
+        """Take one step from ``position`` and return where the next one starts.
+
+        When an adb call times out during the step, the device is waited for, and the
+        next step starts from the screen it shows when it answers again. The step counts
+        as ``interrupted`` unless it was counted before the outage, as when the outage
+        interrupts the coverage checkpoint after it.
+        """
+        tokens_before = token_tracker.snapshot_by_type()
+        steps_before = self.graph.total_steps_completed
+        try:
+            return self._explore_step(position, max_steps)
+        except subprocess.TimeoutExpired as timeout:
+            outage = timeout
+        node, device_state = self._recover_from_outage(outage)
+        if self.graph.total_steps_completed == steps_before:
+            interrupted = [{"action": "interrupted"}]
+            self._count_step(position.node, interrupted, node, tokens_before, max_steps)
+        self.save_graph()
+        return _Position(node, device_state)
+
+    def _recover_from_outage(
+        self, timeout: subprocess.TimeoutExpired
+    ) -> tuple[str, dict[str, Any]]:
+        """Wait for the device, which stopped answering with ``timeout``, and return the
+        node and state of the screen it shows when it answers again.
+
+        A read that times out after the device answers is waited for again. What the
+        interrupted action did is unknown, so the setup of the next action is unknown.
+        """
+        udid = self.controller.config["device"]["udid"]
+        with self.controller.source("device_recovery"):
+            while True:
+                self.logger.warning(
+                    "Device %s is unreachable: %s. Waiting up to %g minutes for it to answer.",
+                    udid,
+                    timeout,
+                    self.unreachable_limit / 60,
+                )
+                waited = wait_for_device(udid, self.unreachable_limit)
+                self.logger.info(
+                    "Device %s answers again after %.0f s. Continuing from the screen it shows.",
+                    udid,
+                    waited,
+                )
+                try:
+                    node, device_state = self._identify(self.controller.get_state())
+                except subprocess.TimeoutExpired as again:
+                    timeout = again
+                else:
+                    self._setup_trail.begin(node, None)
+                    return node, device_state
 
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
         """Take one step from ``position``, record it, and return where the next one starts."""
