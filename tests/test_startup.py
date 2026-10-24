@@ -27,7 +27,7 @@ from android_app_graph.utils.graph_manager import GraphManager
 
 def _startup_config(tmp_path: Path, phase: str) -> tuple[Path, Path, int]:
     graph_path = tmp_path / "graphs" / "demo" / "demo.json"
-    saved_steps = 4 if phase == "resume" else 0
+    saved_steps = 4 if phase.startswith("resume") else 0
     config = tmp_path / "startup.yaml"
     config.write_text(
         json.dumps(
@@ -90,7 +90,9 @@ def _install_startup_device(
 
     def interrupt(name: str) -> None:
         events.append(name)
-        if phase == name and name not in interrupted:
+        if (phase == name and name not in interrupted) or (
+            phase == "grant_limit" and name in {"grant", "capture"}
+        ):
             interrupted.add(name)
             raise subprocess.TimeoutExpired(["adb", "-s", "test-device", name], 30)
 
@@ -107,7 +109,7 @@ def _install_startup_device(
             events.append("recents")
 
         def get_state(self, **_kwargs: float | None) -> dict[str, object]:
-            interrupt("capture")
+            interrupt("resume_capture" if phase == "resume_capture" else "capture")
             return state
 
         def exe_action(self, _action: dict[str, object]) -> None:
@@ -118,7 +120,9 @@ def _install_startup_device(
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
-@pytest.mark.parametrize("phase", ["grant", "capture", "resume", "launch", "refusal"])
+@pytest.mark.parametrize(
+    "phase", ["grant", "capture", "resume", "resume_capture", "launch", "refusal"]
+)
 def test_cli_startup_reaches_one_valid_step_after_each_interruption(
     phase: str,
     tmp_path: Path,
@@ -173,6 +177,7 @@ def test_cli_startup_reaches_one_valid_step_after_each_interruption(
     assert saved["total_steps_completed"] == saved_steps + 1
     assert [node["id"] for node in saved["nodes"]] == ["s0_home"]
     assert saved["edges"] == []
+    assert saved["nodes"][0]["replay_misses"] == (2 if saved_steps else 0)
     assert events.count("recents") == 1
     assert events.count("resume") == (1 if saved_steps else 0)
     assert events.count("launch") == 1
@@ -240,3 +245,32 @@ def test_startup_capture_limit_saves_the_graph_without_counting_a_step(
     assert [node["id"] for node in saved["nodes"]] == (["s0_home"] if resumed else [])
     assert saved["edges"] == []
     assert no_sleep == [30, 15]
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_cli_startup_grant_limit_exits_nonzero_and_preserves_saved_graph(
+    tmp_path: Path,
+    png_screenshot: str,
+    add_member: Callable[..., None],
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setattr(cli, "check_avd", lambda *_args: None)
+    monkeypatch.setattr(cli, "setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    config, graph_path, _saved_steps = _startup_config(tmp_path, "resume")
+    _seed_startup_graph(graph_path, add_member)
+    saved = graph_path.read_bytes()
+    events: list[str] = []
+    _install_startup_device(monkeypatch, "grant_limit", events, png_screenshot)
+    monkeypatch.setattr(sys, "argv", ["app-graph", "-c", str(config)])
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+
+    assert caught.value.code == "app-graph: error: Device test-device unreachable for 0.75 minutes"
+    assert graph_path.read_bytes() == saved
+    assert events.count("grant") == 1
+    assert events.count("recents") == 1
+    assert no_sleep == [1, 30, 15]

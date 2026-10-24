@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
@@ -40,6 +41,8 @@ from android_app_graph.device import (
     AdbController,
     AppLaunch,
     DeviceController,
+    DeviceUnreachableError,
+    StartupRecovery,
     grant_runtime_permissions,
     is_outside_app,
     keyboard_status,
@@ -70,6 +73,7 @@ from android_app_graph.utils import (
     resolve_audit_timeout,
     resolve_matching_settings,
     resolve_model_settings,
+    resolve_unreachable_limit,
 )
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
@@ -819,7 +823,9 @@ def _open_re_explore_session(
 ) -> ReExploreSession:
     """Build the device session for ``--re-explore``."""
     return ReExploreSession(
-        controller=AdbController(config, logger),
+        controller=AdbController(
+            config, logger, unreachable_limit=resolve_unreachable_limit(config)
+        ),
         instruction=settings["instruction"],
         action=settings["action"],
         steps_per_issue=steps_per_issue,
@@ -947,8 +953,9 @@ def _re_explore_app(
     package_name = app["package_name"]
     logger.info("Starting re-exploration for %d issues...", len(issues))
 
-    grant_runtime_permissions(run.config["device"]["udid"], package_name)
-    launch_activity = launch_app(run.config, app, logger)
+    recovery = StartupRecovery(session.controller, resolve_unreachable_limit(run.config), logger)
+    grant_runtime_permissions(run.config["device"]["udid"], package_name, recovery)
+    launch_activity = launch_app(run.config, app, logger, recovery)
     time.sleep(4)
 
     target = ReExploreTarget(
@@ -1041,6 +1048,14 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except DeviceUnreachableError as exc:
+        sys.stderr.write(f"app-graph-audit: error: {exc}\n")
+        return 1
+
+
+def _main(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1070,6 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
             vlm_config, roles=RE_EXPLORE_ROLES if args.re_explore else AUDIT_ROLES
         )
         matching = resolve_matching_settings(vlm_config)
+        resolve_unreachable_limit(config)
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
