@@ -839,6 +839,7 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     for kind in ("overflow menu", "dropdown", "popup", "context menu", "expanded"):
         assert kind in same_cases, kind
     assert "picker, popup" not in same_cases
+    assert "menu" not in different_cases
     assert "modal purpose" in different_cases
 
 
