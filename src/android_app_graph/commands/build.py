@@ -43,6 +43,7 @@ from android_app_graph.utils.graph_manager import (
     EdgeDetails,
     GraphManager,
     SetupTrail,
+    open_menu_in,
     schema_delta,
     target_observation,
 )
@@ -234,7 +235,12 @@ class _Replay:
             arrival = self._states[start] if start in self._arrivals else None
             run.trail.begin(source, arrival)
         self.graph.add_edge(
-            source, target, actions, details=replace(details, setup=run.trail.setup(source))
+            source,
+            target,
+            actions,
+            details=replace(
+                details, setup=run.trail.setup(source), open_menu=open_menu_in(self._states[start])
+            ),
         )
         element = record.get("element")
         self.graph.mark_element_explored(source, element if isinstance(element, int) else None)

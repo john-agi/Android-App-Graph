@@ -39,6 +39,7 @@ from android_app_graph.utils.graph_manager import (
     EdgeDetails,
     GraphManager,
     SetupTrail,
+    open_menu_in,
     schema_delta,
     target_observation,
 )
@@ -777,14 +778,20 @@ class Kobe:
     def _record_edge(
         self, move: _Move, target: str, after: dict[str, Any], details: EdgeDetails
     ) -> None:
-        """Add the edge ``move`` took to ``target``, with the move's setup, and its
-        transition to the step log, and count whether it stayed on its node."""
+        """Add the edge ``move`` took to ``target``, with its setup and open menu,
+        record its transition, and count whether it stayed on its node."""
         self._self_loops_in_a_row[move.source] = (
             self._self_loops_in_a_row.get(move.source, 0) + 1 if target == move.source else 0
         )
-        setup = self._setup_trail.setup(move.source)
         self.graph.add_edge(
-            move.source, target, action=move.action_sequence, details=replace(details, setup=setup)
+            move.source,
+            target,
+            action=move.action_sequence,
+            details=replace(
+                details,
+                setup=self._setup_trail.setup(move.source),
+                open_menu=open_menu_in(move.detail_before),
+            ),
         )
         self.controller.record_transition(
             Transition(

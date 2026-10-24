@@ -81,6 +81,7 @@ from android_app_graph.utils.graph_manager import (
     MemberVerdicts,
     MergeProposal,
     SetupTrail,
+    open_menu_in,
 )
 from android_app_graph.utils.logging import setup_logging
 from android_app_graph.utils.vlm_utils import (
@@ -297,9 +298,10 @@ class _Step:
 
     ``instruction`` is what the edge records; ``planned_instruction`` is what the planner
     wrote, which differs when an ``end`` is recorded as a back press. ``setup`` is what
-    ``SetupTrail.setup`` read for the action, ``None`` when unknown. ``start`` is the
-    screenshot the run last matched before the step, which shows the screen the step
-    starts from.
+    ``SetupTrail.setup`` read for the action, ``None`` when unknown, and ``open_menu`` the
+    menu open over the source as the action was sent, ``None`` when none was. ``start``
+    is the screenshot the run last matched before the step, which shows the screen the
+    step starts from.
     """
 
     start: str | None
@@ -309,6 +311,7 @@ class _Step:
     element: int | None
     action: dict[str, Any]
     setup: list[dict[str, Any]] | None = None
+    open_menu: str | None = None
 
 
 def _identify(
@@ -492,7 +495,11 @@ def _record_step(
         new_node,
         action=[action],
         details=EdgeDetails(
-            instruction=instruction, target_observation=target_obs, num_steps=1, setup=step.setup
+            instruction=instruction,
+            target_observation=target_obs,
+            num_steps=1,
+            setup=step.setup,
+            open_menu=step.open_menu,
         ),
     )
     run.recorder.record_transition(
@@ -573,7 +580,11 @@ def _explore_steps(
             trail.begin(current_node, None)
             continue
 
-        step = replace(step, setup=trail.setup(current_node))
+        step = replace(
+            step,
+            setup=trail.setup(current_node),
+            open_menu=open_menu_in(_last_state(run, current_node)),
+        )
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
         step_results.append(step_result)
         if step_result["to"] == EXTERNAL_WEB_NODE:
@@ -602,7 +613,16 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, action = found
 
-    for setup_action in run.graph.action_setup(source, target, index):
+    setup = run.graph.action_setup(source, target, index)
+    if setup is None:
+        logger.warning(
+            "No recorded action opens the menu that '%s' on %s → %s is sent in",
+            instruction,
+            source,
+            target,
+        )
+        return {"status": "unverified", "reached": source}
+    for setup_action in setup:
         _execute(run.recorder, setup_action)
     before = run.recorder.get_state()
     _execute(run.recorder, action)

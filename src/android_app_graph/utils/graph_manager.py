@@ -121,8 +121,6 @@ EXTERNAL_WEB_NODE = "ext_web"
 EXTERNAL_WEB_BACK_PRESSES = 3
 # A longer setup is an excursion, not a recipe for the state an action needs.
 MAX_SETUP_ACTIONS = 8
-# One miss can be a list that loaded differently or a dialog; a second in a row is a pattern.
-REPLAY_MISSES_LEFT_OUT = 2
 
 
 class _SamePackageNodes(NamedTuple):
@@ -169,6 +167,8 @@ class EdgeDetails:
             the traversal last arrived there from elsewhere, whose effect on the node's
             state is in force when the action is sent, as ``SetupTrail`` reads them;
             None when they are unknown.
+        open_menu: The menu open over the source node when the action is sent, as
+            ``open_menu_in`` reads it from the node's state; None when none is.
     """
 
     instruction: str | None = None
@@ -176,6 +176,24 @@ class EdgeDetails:
     schema_delta: dict[str, Any] | None = None
     num_steps: int | None = None
     setup: Sequence[dict[str, Any]] | None = None
+    open_menu: str | None = None
+
+
+def open_menu_in(state: Mapping[str, object]) -> str | None:
+    """Return the menu a node's state records open over the screen, its ``open_menu``,
+    or None when none is."""
+    menu = state.get("open_menu")
+    return menu if isinstance(menu, str) and menu else None
+
+
+class _ReplayOption(NamedTuple):
+    """An action of an edge a replay can send: its index on the edge, the device actions
+    sent on the edge's source before it, and how many device actions that makes with
+    the action's own steps."""
+
+    cost: int
+    index: int
+    setup: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -831,17 +849,49 @@ def _count_repeat(
     return False
 
 
-def _action_costs(edge_data: dict[str, Any]) -> list[int]:
-    """Return how many device actions a replay of each action of an edge sends: the
-    action's steps and its setup's."""
-    aligned = _aligned_lists(edge_data)
-    steps = as_int_list(aligned["num_steps"]) or [
-        _default_num_steps(action) for action in aligned["actions"]
-    ]
-    return [
-        own + len(_setup_actions(setup))
-        for own, setup in zip(steps, aligned["setups"], strict=False)
-    ]
+def _device_actions(action: object) -> tuple[dict[str, Any], ...]:
+    """Return the device actions of an edge's action entry, one action or a list of them."""
+    return tuple(as_str_dict(step) for step in (action if isinstance(action, list) else [action]))
+
+
+def _menu_openers(loop: dict[str, Any] | None) -> dict[str, tuple[dict[str, Any], ...]]:
+    """Return, by menu, the fewest device actions that open it on a node whose self-loop
+    is ``loop``: a recorded self-loop action whose schema delta records the menu opening,
+    after its setup. An action whose setup is unknown opens the menu only when it was
+    sent with no menu open, the state a replay arrives in."""
+    if loop is None:
+        return {}
+    aligned = _aligned_lists(loop)
+    openers: dict[str, tuple[dict[str, Any], ...]] = {}
+    for action, delta, setup, menu in zip(
+        aligned["actions"],
+        aligned["schema_deltas"],
+        aligned["setups"],
+        aligned["open_menus"],
+        strict=True,
+    ):
+        opened = as_object_dict(as_object_dict(delta).get("open_menu")).get("after")
+        replayable = isinstance(setup, list) or menu is None
+        if not isinstance(opened, str) or not replayable:
+            continue
+        sent = (*_setup_actions(setup), *_device_actions(action))
+        if opened not in openers or len(sent) < len(openers[opened]):
+            openers[opened] = sent
+    return openers
+
+
+def _replay_setup(
+    setup: object, menu: object, openers: Mapping[str, tuple[dict[str, Any], ...]]
+) -> tuple[dict[str, Any], ...] | None:
+    """Return the device actions a replay sends before an action whose ``setups`` and
+    ``open_menus`` entries are ``setup`` and ``menu``: its recorded setup, or, when that
+    is unknown, the opening of the menu it was sent in from ``openers``; None when no
+    recorded action opens that menu."""
+    if isinstance(setup, list):
+        return _setup_actions(setup)
+    if not isinstance(menu, str):
+        return ()
+    return openers.get(menu)
 
 
 def _instructions_hash(instructions: list[str]) -> str:
@@ -1938,7 +1988,6 @@ class GraphManager:
         node_data["state_schema"] = schema
         node_data["last_detail_snapshot"] = detail_snapshot
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
-        node_data["replay_misses"] = 0
         # Structural elements accumulate across visits, so merge rather than replace.
         _merge_elements(node_data, elements)
         _add_member(node_data, observation.observation_id)
@@ -2088,7 +2137,8 @@ class GraphManager:
 
         If an edge with the same action already exists, it is not duplicated.
         Instead, a visit counter is incremented, and a known setup replaces the
-        action's recorded one when that is unknown or longer.
+        action's recorded one when that is unknown or longer. A new action from another
+        node clears the target's replay misses: it can give a replay another way there.
 
         A setup of more than ``MAX_SETUP_ACTIONS`` actions is logged as dropped and
         recorded as unknown.
@@ -2130,8 +2180,11 @@ class GraphManager:
             ("target_observations", details.target_observation or ""),
             ("schema_deltas", details.schema_delta),
             ("setups", setup),
+            ("open_menus", details.open_menu),
         ):
             edge_data[key].append(value)
+        if source != target:
+            self.graph.nodes[target]["replay_misses"] = 0
 
         n_actions = len(edge_data.get("actions", []))
         n_templates = len(edge_data.get("instruction_templates", []))
@@ -2167,10 +2220,39 @@ class GraphManager:
                 return index, action
         return None
 
-    def action_setup(self, source: str, target: str, index: int) -> tuple[dict[str, Any], ...]:
-        """Return the setup of action *index* of source→target, the device actions a replay
-        sends on *source* before it; an action whose setup is unknown has none."""
-        return _setup_actions(self.graph[source][target]["setups"][index])
+    def action_setup(
+        self, source: str, target: str, index: int
+    ) -> tuple[dict[str, Any], ...] | None:
+        """Return the device actions a replay sends on *source* before action *index* of
+        source→target, or None when it sends none because no recorded action opens the
+        menu the action was sent in (see ``_replay_options``)."""
+        return next(
+            (o.setup for o in self._replay_options(source, target) if o.index == index), None
+        )
+
+    def _replay_options(self, source: str, target: str) -> list[_ReplayOption]:
+        """Return the actions of source→target a replay can send, in edge order.
+
+        Before an action, a replay sends its recorded setup. When that is unknown and a
+        menu was open over *source* as the action was sent, such as the navigation
+        drawer whose row the action taps, it first opens that menu with the fewest
+        device actions a recorded self-loop action of *source* opened it with. An action
+        sent in a menu that no recorded action opens is left out.
+        """
+        aligned = _aligned_lists(self.graph[source][target])
+        steps = as_int_list(aligned["num_steps"]) or [
+            _default_num_steps(action) for action in aligned["actions"]
+        ]
+        loop = self.graph[source][source] if self.graph.has_edge(source, source) else None
+        openers = _menu_openers(loop)
+        options: list[_ReplayOption] = []
+        for index, (own, setup, menu) in enumerate(
+            zip(steps, aligned["setups"], aligned["open_menus"], strict=True)
+        ):
+            sent = _replay_setup(setup, menu, openers)
+            if sent is not None:
+                options.append(_ReplayOption(own + len(sent), index, sent))
+        return options
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
         """Move action *index* of source→target, with its entry in every per-action list, to
@@ -2662,22 +2744,24 @@ class GraphManager:
             actions.extend(edge.get("actions", []))
         return actions
 
-    @staticmethod
-    def _edge_weight(_source: str, _target: str, edge_data: dict[str, Any]) -> int:
+    def _edge_weight(self, source: str, target: str, _edge_data: dict[str, Any]) -> int | None:
         """Return the fewest device actions a replay of one of the edge's actions sends,
-        its setup's included (used as path weight)."""
-        return min(_action_costs(edge_data))
+        what it sends before the action included (used as path weight); None, which
+        hides the edge from a path, when a replay can send none of its actions."""
+        return min((o.cost for o in self._replay_options(source, target)), default=None)
 
     def find_path(self, source: str, target: str) -> list[PathStep] | None:
         """Find the shortest weighted path from source to target.
 
-        An edge weighs as its cheapest action: the fewest steps, its setup's included,
-        so a path whose actions need no setup is preferred.
+        An edge weighs as its cheapest action: the fewest steps, what a replay sends
+        before it included, so a path whose actions need no setup is preferred. A path
+        never takes an action sent in a menu that no recorded action opens (see
+        ``_replay_options``).
 
         Returns:
             The path's steps, the first being the source itself. A step's action is the
             edge's cheapest action, a single dict or a list of dicts (compound action),
-            with its setup.
+            with what a replay sends before it.
             Returns None if no path exists.
         """
         if source == target:
@@ -2697,17 +2781,10 @@ class GraphManager:
             return None
 
         result = [PathStep(_node_id(node_path[0]), {}, ())]
-        for i in range(len(node_path) - 1):
-            s, t = node_path[i], node_path[i + 1]
-            edge_data = self.graph[s][t]
-            costs = _action_costs(edge_data)
-            best_idx = costs.index(min(costs))
+        for s, t in itertools.pairwise(node_path):
+            best = min(self._replay_options(s, t), key=lambda option: option.cost)
             result.append(
-                PathStep(
-                    _node_id(t),
-                    edge_data["actions"][best_idx],
-                    self.action_setup(_node_id(s), _node_id(t), best_idx),
-                )
+                PathStep(_node_id(t), self.graph[s][t]["actions"][best.index], best.setup)
             )
 
         return result
@@ -2879,15 +2956,17 @@ class GraphManager:
     def record_replay_miss(self, node_id: str) -> None:
         """Count a replay to ``node_id`` that landed on another screen.
 
-        ``REPLAY_MISSES_LEFT_OUT`` misses in a row take the node out of
-        ``get_exploration_target_candidates``; identifying a screen as the node clears
-        them.
+        A miss takes the node out of ``get_exploration_target_candidates`` until
+        ``add_edge`` records a new action into it from another node, which clears the
+        misses.
         """
         node_id = self.resolve_node_id(node_id)
         node_data = self.graph.nodes[node_id]
         misses = node_data["replay_misses"] + 1
         node_data["replay_misses"] = misses
-        logger.info("Replay missed %s %d time(s) in a row", node_id, misses)
+        logger.info(
+            "Replay missed %s %d time(s) since an action into it was recorded", node_id, misses
+        )
 
     def get_resume_target(self, package_name: str | None = None) -> str | None:
         """Return the node ``get_exploration_target_candidates`` ranks first, or ``None``
@@ -2902,15 +2981,17 @@ class GraphManager:
         *,
         always_offer_start: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return reachable nodes that are good candidates for continued exploration.
+        """Return the nodes a replay from the start node can reach that are good
+        candidates for continued exploration.
 
         This is a lightweight coverage signal for live exploration checkpoints.
         It favors nodes with many unexplored elements, few outgoing edges, and
         lower visit counts. Each candidate's ``descriptions`` are its node's
         ``node_descriptions``, and its ``is_start_node`` says whether it is the start
-        node. A node replay has missed ``REPLAY_MISSES_LEFT_OUT`` times in a
-        row is left out, except the start node, which a replay reaches by launching the
-        app.
+        node. A node that no path of actions a replay can send reaches from the start
+        node (see ``find_path``) is left out, and so is a node whose replay missed since
+        an action into it was last recorded, except the start node, which a replay
+        reaches by launching the app.
 
         With ``always_offer_start``, a start node that ranks below the first
         ``top_k`` but still has unexplored elements takes the last of their places.
@@ -2919,7 +3000,9 @@ class GraphManager:
         if start is None:
             return []
 
-        reachable = nx.descendants(self.graph, start) | {start}
+        reachable = nx.single_source_dijkstra_path_length(
+            self.graph, start, weight=self._edge_weight
+        )
         candidates: list[dict[str, Any]] = []
 
         for node_id in reachable:
@@ -2931,7 +3014,7 @@ class GraphManager:
                 node_pkg = node_data.get("package", "")
                 if node_pkg and node_pkg != package_name:
                     continue
-            if node_id != start and node_data["replay_misses"] >= REPLAY_MISSES_LEFT_OUT:
+            if node_id != start and node_data["replay_misses"]:
                 continue
 
             elements = node_data.get("interactable_elements", [])
@@ -3023,6 +3106,7 @@ class GraphManager:
                 "visit_count": attrs.get("visit_count", 0),
                 "schema_deltas": attrs.get("schema_deltas", []),
                 "setups": attrs.get("setups", []),
+                "open_menus": attrs.get("open_menus", []),
             }
             if attrs.get("normalized_instructions_hash"):
                 edge_data["normalized_instructions_hash"] = attrs["normalized_instructions_hash"]

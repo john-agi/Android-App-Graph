@@ -2621,7 +2621,8 @@ def test_a_setup_trail_matches_a_node_merged_away_while_it_holds_it() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["num_steps", "instructions", "target_observations", "schema_deltas", "setups"]
+    "key",
+    ["num_steps", "instructions", "target_observations", "schema_deltas", "setups", "open_menus"],
 )
 @pytest.mark.parametrize("entries", [None, []], ids=["absent", "short"])
 def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
@@ -2635,6 +2636,7 @@ def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
         "target_observations": ["Settings"],
         "schema_deltas": [None],
         "setups": [[]],
+        "open_menus": [None],
     }
     lacking = {"source": "s0_home", "target": "s1_settings", **complete}
     if entries is None:
@@ -2900,7 +2902,8 @@ def test_merge_nodes_merges_edge_data_into_an_existing_edge() -> None:
 
 
 def edge_rows(gm: GraphManager, source: str, target: str) -> list[tuple[Any, ...]]:
-    """One (action, num_steps, instruction, observation, schema_delta, setup) row per action."""
+    """One (action, num_steps, instruction, observation, schema_delta, setup, open_menu)
+    row per action."""
     data = gm.graph[source][target]
     return list(zip(*(data[key] for key in ("actions", *PER_ACTION_LISTS)), strict=True))
 
@@ -2931,6 +2934,7 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
             target_observation="Settings page",
             schema_delta={"query": {"after": "milk"}},
             setup=[_SCROLL],
+            open_menu="search toolbar menu",
         ),
     )
     gm.add_edge("s0_home", "s1_settings", {"action": "swipe"}, details=EdgeDetails(num_steps=3))
@@ -2945,11 +2949,11 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
     assert gm.move_edge_action("s0_home", "s1_settings", 1, "s2_search") is True
 
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None),
-        ({"action": "swipe"}, 3, "", "", None, None),
+        ({"action": "tap"}, 1, "open settings", "", None, None, None),
+        ({"action": "swipe"}, 3, "", "", None, None, None),
     ]
     assert edge_rows(gm, "s0_home", "s2_search") == [
-        ({"action": "enter"}, 1, "submit the search", "", None, None),
+        ({"action": "enter"}, 1, "submit the search", "", None, None, None),
         (
             search,
             2,
@@ -2957,6 +2961,7 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
             "Settings page",
             {"query": {"after": "milk"}},
             [_SCROLL],
+            "search toolbar menu",
         ),
     ]
     assert gm.graph["s0_home"]["s1_settings"]["instruction_templates"] == []
@@ -2978,7 +2983,7 @@ def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_ne
 
     assert not gm.graph.has_edge("s0_home", "s1_settings")
     assert edge_rows(gm, "s0_home", "s0_home") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None)
     ]
     assert gm.graph["s0_home"]["s0_home"]["visit_count"] == 1
 
@@ -3001,7 +3006,7 @@ def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
 
     assert list(gm.graph.nodes) == ["s0_home", "s1_settings"]
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None)
     ]
     assert "move_edge_action: missing node ext_com.other" in caplog.text
 
@@ -3027,7 +3032,7 @@ def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
         assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
 
     assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
-        ({"action": "tap"}, 1, "open settings", "", None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None)
     ]
     assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
     assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
@@ -3773,7 +3778,9 @@ def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen")
     add_screen(gm, "s1_settings", "Settings page")
-    gm.graph.add_edge("s0_home", "s1_settings", actions=[{"action": "row"}], setups=setups)
+    gm.graph.add_edge(
+        "s0_home", "s1_settings", actions=[{"action": "row"}], setups=setups, open_menus=[None]
+    )
 
     path = gm.find_path("s0_home", "s1_settings")
 
@@ -3803,6 +3810,79 @@ def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
         PathStep("s1_settings", {"action": "a"}, ()),
         PathStep("s3_results", {"action": "b"}, ()),
     ]
+
+
+_DRAWER = "navigation drawer"
+_OPEN_DRAWER = {"action": "tap", "x": 5, "y": 5}
+_SWIPE_DRAWER_OPEN = {"action": "swipe", "x1": 0, "y1": 50, "x2": 60, "y2": 50}
+_RECENT = {"action": "tap", "x": 20, "y": 30}
+
+
+def _drawer_opened(gm: GraphManager, action: dict[str, Any], details: EdgeDetails) -> None:
+    """Record ``action`` as a self-loop of the home screen that opened its drawer."""
+    delta = {"open_menu": {"before": details.open_menu, "after": _DRAWER}}
+    gm.add_edge(
+        "s0_home", "s0_home", action, details=dataclasses.replace(details, schema_delta=delta)
+    )
+
+
+def _home_and_recent() -> GraphManager:
+    gm = make_manager()
+    add_screen(gm, "s0_home", "Home screen")
+    add_screen(gm, "s1_recent", "Recent files")
+    return gm
+
+
+def test_find_path_opens_the_menu_of_an_unknown_setup_with_the_fewest_recorded_actions() -> None:
+    """Of the recorded actions that opened the drawer, one sent in another menu with an
+    unknown setup cannot be replayed, and those after a recorded scroll send more than
+    one with an unknown setup sent with no menu open, the state a replay arrives in."""
+    gm = _home_and_recent()
+    _drawer_opened(gm, {"action": "tap", "x": 9}, EdgeDetails(open_menu="overflow menu"))
+    _drawer_opened(gm, _OPEN_DRAWER, EdgeDetails(setup=[_SCROLL]))
+    _drawer_opened(gm, _SWIPE_DRAWER_OPEN, EdgeDetails())
+    _drawer_opened(gm, {"action": "tap", "x": 7}, EdgeDetails(setup=[_SCROLL, _SCROLL]))
+    gm.add_edge("s0_home", "s1_recent", _RECENT, details=EdgeDetails(open_menu=_DRAWER))
+
+    assert gm.find_path("s0_home", "s1_recent") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_recent", _RECENT, (_SWIPE_DRAWER_OPEN,)),
+    ]
+
+
+def test_find_path_sends_the_known_setup_of_an_action_sent_in_a_menu() -> None:
+    gm = _home_and_recent()
+    _drawer_opened(gm, _SWIPE_DRAWER_OPEN, EdgeDetails())
+    gm.add_edge(
+        "s0_home",
+        "s1_recent",
+        _RECENT,
+        details=EdgeDetails(setup=[_OPEN_DRAWER], open_menu=_DRAWER),
+    )
+
+    assert gm.find_path("s0_home", "s1_recent") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_recent", _RECENT, (_OPEN_DRAWER,)),
+    ]
+
+
+def test_no_path_takes_an_action_sent_in_a_menu_that_no_recorded_action_opens() -> None:
+    """Neither a replay nor the checkpoint relies on the tap; another action that reaches
+    the screen, though it sends more, is taken."""
+    gm = _home_and_recent()
+    gm.add_edge("s0_home", "s1_recent", _RECENT, details=EdgeDetails(open_menu=_DRAWER))
+
+    assert gm.find_path("s0_home", "s1_recent") is None
+    assert gm.action_setup("s0_home", "s1_recent", 0) is None
+    assert _candidate_ids(gm) == ["s0_home"]
+
+    gm.add_edge("s0_home", "s1_recent", _TAP, details=EdgeDetails(setup=[_SCROLL]))
+
+    assert gm.find_path("s0_home", "s1_recent") == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_recent", _TAP, (_SCROLL,)),
+    ]
+    assert _candidate_ids(gm) == ["s1_recent", "s0_home"]
 
 
 def test_find_guided_path_navigates_and_runs_a_matching_self_loop() -> None:
@@ -4235,7 +4315,7 @@ def _candidate_ids(gm: GraphManager) -> list[str]:
 
 def _form_replay_missed(times: int) -> GraphManager:
     """A start screen and a form that outranks it, which replay has missed ``times``
-    times in a row."""
+    times since the edge to it was recorded."""
     gm = make_manager()
     add_screen(gm, "s0_home", "Home screen", interactable_elements=_unexplored("Display"))
     add_screen(gm, "s1_form", "Form", interactable_elements=_unexplored("Name", "Port"))
@@ -4245,17 +4325,27 @@ def _form_replay_missed(times: int) -> GraphManager:
     return gm
 
 
-def test_a_node_replay_missed_once_stays_the_top_candidate() -> None:
+def test_a_node_whose_last_replay_missed_leaves_the_ranking() -> None:
     gm = _form_replay_missed(1)
 
-    assert gm.get_resume_target() == "s1_form"
+    assert gm.get_resume_target() == "s0_home"
+    assert _candidate_ids(gm) == ["s0_home"]
+
+
+def test_a_new_action_into_a_node_whose_replay_missed_brings_it_back_to_the_ranking() -> None:
+    """The action the replay missed with, recorded again, and an action that stays on the
+    node give the replay no other way, and one more miss after the new action takes the
+    node out again."""
+    gm = _form_replay_missed(1)
+
+    gm.add_edge("s0_home", "s1_form", {"action": "a"})
+    gm.add_edge("s1_form", "s1_form", {"action": "scroll"})
+    assert _candidate_ids(gm) == ["s0_home"]
+
+    gm.add_edge("s0_home", "s1_form", {"action": "b"})
     assert _candidate_ids(gm) == ["s1_form", "s0_home"]
 
-
-def test_a_node_replay_missed_twice_in_a_row_leaves_the_ranking() -> None:
-    gm = _form_replay_missed(2)
-
-    assert gm.get_resume_target() == "s0_home"
+    gm.record_replay_miss("s1_form")
     assert _candidate_ids(gm) == ["s0_home"]
 
 
@@ -4269,7 +4359,7 @@ def test_replay_misses_never_take_the_start_node_out_of_the_candidates() -> None
 
 def test_a_replay_miss_counts_on_the_node_its_target_was_merged_into() -> None:
     """A coverage checkpoint can merge away the node a replay was sent to."""
-    gm = _form_replay_missed(1)
+    gm = _form_replay_missed(0)
     add_screen(gm, "s2_form", "Form")
     assert gm.merge_nodes("s1_form", "s2_form") is True
 
@@ -4278,10 +4368,10 @@ def test_a_replay_miss_counts_on_the_node_its_target_was_merged_into() -> None:
     assert _candidate_ids(gm) == ["s0_home"]
 
 
-def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager:
+def _settings_replay_missed(vlm: FakeVlm, screen: Screens) -> GraphManager:
     """A home screen and a settings page reached from it, each identified from one
-    screenshot, which look unlike each other; replay has missed the settings page twice
-    in a row."""
+    screenshot, which look unlike each other; the last replay to the settings page
+    missed it."""
     vlm.images.update({SHOT_A: FAR, SHOT_B: NEAR, SHOT_C: NEAR})
     vlm.descriptions.extend([("Home screen", {}, []), ("Settings page", {}, [])])
     vlm.verdicts.append({"same": False, "reason": "another page"})
@@ -4290,8 +4380,7 @@ def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager
     settings = gm.identify_state(screen(SETTINGS, SHOT_B, PACKAGE))
     assert (home, settings) == ("s0", "s1")
     gm.add_edge(home, settings, {"action": "open settings"})
-    for _ in range(2):
-        gm.record_replay_miss(settings)
+    gm.record_replay_miss(settings)
     return gm
 
 
@@ -4303,11 +4392,11 @@ def _settings_replay_missed_twice(vlm: FakeVlm, screen: Screens) -> GraphManager
         pytest.param(SHOT_C, None, "short_list", id="short-list"),
     ],
 )
-def test_a_screen_identified_as_a_node_replay_missed_clears_its_misses(
+def test_a_screen_identified_as_a_node_whose_replay_missed_leaves_it_out_of_the_ranking(
     screenshot: str, expected_node: str | None, stage: str, vlm: FakeVlm, screen: Screens
 ) -> None:
-    """The node is a candidate again, and one more miss leaves it one."""
-    gm = _settings_replay_missed_twice(vlm, screen)
+    """Reaching the node gives the replay no new way to it."""
+    gm = _settings_replay_missed(vlm, screen)
     assert "s1" not in _candidate_ids(gm)
     vlm.descriptions.append(("Settings page", {}, []))
     vlm.verdicts.append({"same": True, "reason": "the settings page"})
@@ -4318,9 +4407,7 @@ def test_a_screen_identified_as_a_node_replay_missed_clears_its_misses(
     assert gm.identify_state(observation, expected_observation=expected) == "s1"
 
     assert screen.decision(observation)["identify"]["stage"] == stage
-    assert "s1" in _candidate_ids(gm)
-    gm.record_replay_miss("s1")
-    assert "s1" in _candidate_ids(gm)
+    assert "s1" not in _candidate_ids(gm)
 
 
 def _app_with_a_gmail_screen(package: str, activity: str, other_activity: str) -> GraphManager:
@@ -5096,6 +5183,7 @@ def _graph_edge(source: str, target: str, instruction: str, observation: str) ->
         "num_steps": [1],
         "schema_deltas": [None],
         "setups": [None],
+        "open_menus": [None],
         "visit_count": 1,
     }
 
@@ -5484,6 +5572,7 @@ recorded_actions = st.lists(
         st.text(max_size=12),
         st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
         setup_entries,
+        st.none() | st.text(max_size=12),
     ),
     min_size=1,
     max_size=3,
@@ -5547,6 +5636,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "visit_count": d.get("visit_count", 0),
             "schema_deltas": d.get("schema_deltas", []),
             "setups": d.get("setups", []),
+            "open_menus": d.get("open_menus", []),
             "normalized_instructions_hash": d.get("normalized_instructions_hash") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
@@ -5646,6 +5736,7 @@ edge_and_merge_operations = st.lists(
         st.none() | st.text(max_size=12),
         st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
         setup_entries,
+        st.none() | st.text(max_size=12),
     ),
     max_size=25,
 )
@@ -5680,6 +5771,7 @@ def test_every_per_action_list_has_one_entry_per_action(
             str | None,
             dict[str, Any] | None,
             list[dict[str, Any]] | None,
+            str | None,
         ]
     ],
 ) -> None:
@@ -5687,7 +5779,7 @@ def test_every_per_action_list_has_one_entry_per_action(
     gm = make_manager()
     for node_id in POOL:
         add_screen(gm, node_id, f"screen {node_id}", **members(path.parent / "steps"))
-    for kind, a, b, action, instruction, observation, delta, setup in ops:
+    for kind, a, b, action, instruction, observation, delta, setup, menu in ops:
         if kind == "edge":
             gm.add_edge(
                 a,
@@ -5698,6 +5790,7 @@ def test_every_per_action_list_has_one_entry_per_action(
                     target_observation=observation,
                     schema_delta=delta,
                     setup=setup,
+                    open_menu=menu,
                 ),
             )
         else:
