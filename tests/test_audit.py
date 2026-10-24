@@ -17,7 +17,7 @@ from openrouter import OpenRouter
 from PIL import Image
 
 from android_app_graph.commands import audit
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, InputRejectedError
 from android_app_graph.graph_files import (
     append_json_line,
     graph_steps_dir,
@@ -27,7 +27,7 @@ from android_app_graph.graph_files import (
     text_embeddings_path,
 )
 from android_app_graph.screen_image import encode_screenshot
-from android_app_graph.step_log import Observation, StepRecorder
+from android_app_graph.step_log import Observation, StepRecorder, read_records
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
 from android_app_graph.utils.vlm_utils import ActionRequest, PlanRequest
@@ -1578,7 +1578,7 @@ def test_re_explore_relabels_only_the_flagged_instruction_when_its_action_reache
     (call,) = described
     assert call["screenshot_b64"] == _webp(_png(0))
     assert call["action"] == [_DETAIL_TAP]
-    assert call["screen_size"] == (1080, 1920)
+    assert call["screen_size"] == (8, 8)
     assert call["settings"] == ModelSettings("instruction-model")
 
 
@@ -2802,3 +2802,83 @@ def test_recorded_confirmation_uses_the_source_screen_context(
     assert "policy" in result["reason"]
     assert _DETAIL_TAP not in device_log
     assert device_log == []
+
+
+def _reject_inputs(controller: FakeController, monkeypatch: pytest.MonkeyPatch) -> None:
+    def reject(_action: dict[str, object]) -> None:
+        reason = "App input targets a system touch region"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(controller, "exe_action", reject)
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_retry_skips_an_unreachable_action_without_changing_the_edge(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    original = _edges(graph)
+    _identifying(graph, monkeypatch, "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _ReplayController(device_log)
+    _reject_inputs(controller, monkeypatch)
+
+    (result,) = _re_explore(graph, [_retry()], controller, client, tmp_path)
+
+    assert result["status"] == "skipped"
+    assert "system touch region" in result["reason"]
+    assert _edges(graph) == original
+    assert controller.actions == []
+    assert device_log == _FIRST_RESTART
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_replay_reports_the_screen_reached_when_a_coordinate_is_unreachable(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, "s0_home", "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _ReplayController(device_log)
+    _reject_inputs(controller, monkeypatch)
+
+    (result,) = _re_explore(
+        graph, [_retry(source="s1_detail", target="s2_settings")], controller, client, tmp_path
+    )
+
+    assert (result["status"], result["reached"]) == ("unverified", "s0_home")
+    assert controller.actions == []
+    assert device_log == _FIRST_RESTART
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_unreachable_plans_spend_the_bounded_step_budget_without_coverage(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    original = _edges(graph)
+    _identifying(graph, monkeypatch, "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _ReplayController(device_log)
+    _reject_inputs(controller, monkeypatch)
+    monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr(
+        audit, "predict_next_action", lambda **_kwargs: ({"action": "tap", "x": 257, "y": 1190}, "")
+    )
+
+    (result,) = _re_explore(
+        graph,
+        [{**_inspection(), "type": "explore_node", "node": "s0_home", "expected_pages": []}],
+        controller,
+        client,
+        tmp_path,
+        steps_per_issue=2,
+    )
+
+    assert (result["status"], result["steps"]) == ("explored", [])
+    assert _edges(graph) == original
+    assert controller.actions == []
+    rejected = [
+        record for record in read_records(tmp_path / "steps") if record["kind"] == "action_rejected"
+    ]
+    assert len(rejected) == 2
