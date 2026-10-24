@@ -80,3 +80,24 @@ def test_planned_instructions_distinguish_inspection_and_commitment(
     instruction: str, context: str, *, blocked: bool
 ) -> None:
     assert (inspection_block_reason(instruction, context=context) is not None) is blocked
+
+
+@pytest.mark.parametrize(
+    ("instruction", "blocked"),
+    [
+        ('Tap the green "Call" button at the bottom center of the dialpad.', True),
+        ('Tap the blue "Send" icon at the right end of the message field.', True),
+        ('Tap the red "Delete" button at the bottom right of the dialog.', True),
+        ('Tap "Reset settings" at the bottom of the screen.', True),
+        ('Tap "Reset apps" at the bottom right of the "Reset app preferences?" dialog.', True),
+        ("Tap the X clear search button at the right end of the query.", False),
+        ("Tap the backspace-shaped Delete icon at the right of the numeric keypad.", False),
+        ("Tap outside the Remove menu to dismiss it", False),
+        ("Tap the overflow icon to the right of the delete icon", False),
+        ('Tap the purple "OK" button at the bottom of the "Delete contact?" dialog.', True),
+    ],
+)
+def test_control_descriptions_preserve_the_inspection_boundary(
+    instruction: str, *, blocked: bool
+) -> None:
+    assert (inspection_block_reason(instruction) is not None) is blocked

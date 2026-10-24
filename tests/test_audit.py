@@ -164,7 +164,13 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
     graph, graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
     planned = iter(["Confirm deletion of the contact", "Press Cancel"])
-    monkeypatch.setattr(audit, "plan_next_action", lambda **_kwargs: (next(planned), None))
+    descriptions: list[str] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+        descriptions.append(request.page_description)
+        return next(planned), None
+
+    monkeypatch.setattr(audit, "plan_next_action", plan)
     grounded: list[str] = []
 
     def act(*, request: ActionRequest, **_kwargs: object) -> tuple[dict[str, str], str]:
@@ -182,6 +188,9 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
         steps_per_issue=2,
     )
 
+    assert "Excluded by the inspection policy" not in descriptions[0]
+    assert "Excluded by the inspection policy" in descriptions[1]
+    assert "Confirm deletion of the contact" in descriptions[1]
     assert result["steps"][0]["status"] == "skipped"
     assert "policy" in result["steps"][0]["reason"]
     assert result["steps"][1]["step"] == 2
@@ -2680,3 +2689,107 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
         ("launch",),
         ("re-explore", "com.demo/.Home"),
     ]
+
+
+@pytest.mark.parametrize("reached", ["s1_detail", "s2_settings"])
+@pytest.mark.usefixtures("_fake_device")
+def test_a_policy_block_after_correction_keeps_the_correction_outcome(
+    reached: str,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph = _flagged_graph()
+    graph.graph.add_node("s3_recents", replay_misses=0, observations=["recents"])
+    graph.add_edge(
+        "s3_recents",
+        "s0_home",
+        [_GEAR_TAP],
+        details=EdgeDetails(instruction='Tap "Send file" in the foreground menu.'),
+    )
+    _identifying(graph, monkeypatch, "s0_home", reached, "s3_recents")
+    _describing_by_node_id(graph, monkeypatch)
+    monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Open Detail")
+
+    (result,) = _re_explore(
+        graph, [_retry()], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
+    )
+
+    assert result["status"] == ("moved" if reached == "s2_settings" else "relabelled")
+    assert result["steps"] == []
+    assert "policy" in result["reason"]
+    assert _DETAIL_TAP in device_log
+    if reached == "s2_settings":
+        assert result["moved_to"] == reached
+        assert not graph.graph.has_edge("s0_home", "s1_detail")
+    else:
+        assert result["instruction"] == "Open Detail"
+        assert graph.graph["s0_home"]["s1_detail"]["instructions"] == ["Open Detail"]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.usefixtures("_fake_device")
+def test_recorded_setup_commitments_are_checked_before_execution(
+    *,
+    retry: bool,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph = _flagged_graph()
+    graph.add_edge(
+        "s0_home",
+        "s0_home",
+        [_SWIPE],
+        details=EdgeDetails(instruction='Tap "Send file", the second option in the menu.'),
+    )
+    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail", "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Open Detail")
+    issue = (
+        _retry()
+        if retry
+        else {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
+    )
+
+    (result,) = _re_explore(graph, [issue], _ReplayController(device_log), client, tmp_path)
+
+    assert result["status"] == "skipped"
+    assert "policy" in result["reason"]
+    assert _SWIPE not in device_log
+    assert _DETAIL_TAP not in device_log
+    assert graph.graph["s0_home"]["s1_detail"]["instructions"] == [_FLAGGED]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.usefixtures("_fake_device")
+def test_recorded_confirmation_uses_the_source_screen_context(
+    *,
+    retry: bool,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph = _flagged_graph()
+    graph.graph["s0_home"]["s1_detail"]["instructions"] = ['Tap "OK"']
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail", "s0_home")
+    monkeypatch.setattr(
+        graph, "latest_description", lambda _node: "Delete contact confirmation dialog"
+    )
+    monkeypatch.setattr(audit, "describe_executed_action", lambda **_kwargs: "Open Detail")
+    issue = (
+        _retry('Tap "OK"')
+        if retry
+        else {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
+    )
+
+    (result,) = _re_explore(graph, [issue], _ReplayController(device_log), client, tmp_path)
+
+    assert result["status"] == "skipped"
+    assert "policy" in result["reason"]
+    assert _DETAIL_TAP not in device_log
+    assert device_log == []
