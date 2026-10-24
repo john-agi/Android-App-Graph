@@ -182,6 +182,10 @@ def _ui_nodes(ui_dump: str) -> list[dict[str, str]]:
 
 
 def _shows_recent_apps(ui_dump: str) -> bool:
+    """Recognize Launcher3's overview panel by its resource name in any package.
+
+    Launchers built on Launcher3, including the Pixel launcher, share this view name.
+    """
     return any(
         node.get("resource-id", "").endswith(":id/overview_panel") for node in _ui_nodes(ui_dump)
     )
@@ -190,13 +194,9 @@ def _shows_recent_apps(ui_dump: str) -> bool:
 def _shows_no_recent_apps(ui_dump: str) -> bool:
     """Return whether ``uiautomator dump`` output shows the recent apps screen with no
     app in it: an ``overview_panel`` node and no ``task_view`` node, an app's card.
-
-    The ids are matched by name in any package, as Launcher3 and the launchers built on
-    it, such as the Pixel launcher, name these views alike.
     """
     resource_ids = [node.get("resource-id", "") for node in _ui_nodes(ui_dump)]
-    shows_recent_apps = any(rid.endswith(":id/overview_panel") for rid in resource_ids)
-    return shows_recent_apps and not any(":id/task_view" in rid for rid in resource_ids)
+    return _shows_recent_apps(ui_dump) and not any(":id/task_view" in rid for rid in resource_ids)
 
 
 def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
@@ -282,10 +282,10 @@ class AdbController:
                 self._tap(action["x"], action["y"])
             case "long_press":
                 x, y = action["x"], action["y"]
-                self._swipe(x, y, x, y, _GESTURE_MS)
+                self._swipe((x, y), (x, y), _GESTURE_MS)
             case "swipe":
                 duration = action.get("duration", action.get("time", _GESTURE_MS))
-                self._swipe(action["x1"], action["y1"], action["x2"], action["y2"], duration)
+                self._swipe((action["x1"], action["y1"]), (action["x2"], action["y2"]), duration)
             case "type":
                 self._clear()
                 self._type(action["text"])
@@ -350,13 +350,10 @@ class AdbController:
                 return ui_dump
             recovery.input(
                 "scroll recent apps",
-                lambda deadline: self._input(
-                    "swipe",
-                    str(int(0.1 * self.w)),
-                    str(middle),
-                    str(int(0.9 * self.w)),
-                    str(middle),
-                    str(_RECENT_APPS_SWIPE_MS),
+                lambda deadline: self._swipe(
+                    (int(0.1 * self.w), middle),
+                    (int(0.9 * self.w), middle),
+                    _RECENT_APPS_SWIPE_MS,
                     deadline=deadline,
                 ),
             )
@@ -381,8 +378,15 @@ class AdbController:
     def _tap(self, x: int, y: int, *, deadline: float | None = None) -> None:
         self._input("tap", str(x), str(y), deadline=deadline)
 
-    def _swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int) -> None:
-        self._input("swipe", str(x1), str(y1), str(x2), str(y2), str(duration))
+    def _swipe(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        duration: int,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        self._input("swipe", *(str(value) for value in (*start, *end, duration)), deadline=deadline)
 
     def _press(self, keycode: str, *, deadline: float | None = None) -> None:
         self._input("keyevent", keycode, deadline=deadline)

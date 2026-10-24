@@ -679,6 +679,9 @@ checks whether the app is in front. Interrupted resume navigation continues from
 the recovered app screen. Startup recovery counts no exploration action, adds no
 edge, and retains the loaded graph and its counters.
 
+`app-graph-audit --re-explore` uses the same outage limit during device startup.
+A basic audit runs without validating or using `device.unreachable_limit`.
+
 The interrupted exploration step counts toward `--max-steps`, and
 its `Step N/M` line shows `interrupted` as its action. What its action did is
 unknown, so a step interrupted before it recorded its edge records none, and the

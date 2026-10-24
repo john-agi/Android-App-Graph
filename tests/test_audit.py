@@ -145,7 +145,10 @@ def test_audit_execution_policy_skips_commitments_before_navigation(
             app_name="demo", package_name="com.demo", graph_path=graph_path
         ),
         session=audit.ReExploreSession(
-            controller, ModelSettings("instruction-model"), ModelSettings("action-model")
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -605,6 +608,7 @@ def test_re_explore_issues_retries_explores_and_skips(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -651,6 +655,7 @@ def test_re_explore_issues_records_an_action_model_end_as_press_back(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -776,6 +781,7 @@ def test_re_explore_issues_skips_unreachable_nodes(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -811,6 +817,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=2,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -869,6 +876,7 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=2,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -961,6 +969,7 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
                 ModelSettings("provider/instruction"),
                 ModelSettings("provider/action"),
                 steps_per_issue=1,
+                unreachable_limit=37,
             ),
             client=router_client,
         )
@@ -1067,6 +1076,7 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
             ModelSettings("provider/instruction"),
             ModelSettings("provider/action"),
             steps_per_issue=2,
+            unreachable_limit=37,
         ),
         client=router_client,
     )
@@ -1266,6 +1276,7 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
                 FakeController("com.demo"),
                 ModelSettings("instruction-model"),
                 ModelSettings("action-model"),
+                unreachable_limit=37,
             ),
             client=client,
         )
@@ -1325,6 +1336,7 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -1364,6 +1376,7 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -1456,6 +1469,7 @@ def _re_explore(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=steps_per_issue,
+            unreachable_limit=37,
         ),
         client=client,
     )

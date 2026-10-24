@@ -895,7 +895,7 @@ def re_explore_issues(
 
 
 class ReExploreSession(NamedTuple):
-    """Device controller, role settings and step budget needed by ``--re-explore``.
+    """Device controller, role settings and limits needed by ``--re-explore``.
 
     Built as a unit so ``re_explore_issues`` takes non-optional arguments: the
     audit-only path never constructs one and never touches a device.
@@ -904,6 +904,7 @@ class ReExploreSession(NamedTuple):
     controller: DeviceController
     instruction: ModelSettings
     action: ModelSettings
+    unreachable_limit: float
     steps_per_issue: int = 5
 
 
@@ -911,14 +912,15 @@ def _open_re_explore_session(
     config: dict[str, Any],
     settings: dict[str, ModelSettings],
     steps_per_issue: int,
+    *,
+    unreachable_limit: float,
 ) -> ReExploreSession:
     """Build the device session for ``--re-explore``."""
     return ReExploreSession(
-        controller=AdbController(
-            config, logger, unreachable_limit=resolve_unreachable_limit(config)
-        ),
+        controller=AdbController(config, logger, unreachable_limit=unreachable_limit),
         instruction=settings["instruction"],
         action=settings["action"],
+        unreachable_limit=unreachable_limit,
         steps_per_issue=steps_per_issue,
     )
 
@@ -1046,9 +1048,7 @@ def _re_explore_app(
 
     launch_activity = None
     if any(execution_decision(issue).executable for issue in issues):
-        recovery = StartupRecovery(
-            session.controller, resolve_unreachable_limit(run.config), logger
-        )
+        recovery = StartupRecovery(session.controller, session.unreachable_limit, logger)
         grant_runtime_permissions(run.config["device"]["udid"], package_name, recovery)
         launch_activity = launch_app(run.config, app, logger, recovery)
         time.sleep(4)
@@ -1180,7 +1180,7 @@ def _main(argv: list[str] | None) -> int:
             vlm_config, roles=RE_EXPLORE_ROLES if args.re_explore else AUDIT_ROLES
         )
         matching = resolve_matching_settings(vlm_config)
-        resolve_unreachable_limit(config)
+        unreachable_limit = resolve_unreachable_limit(config) if args.re_explore else None
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
@@ -1190,8 +1190,10 @@ def _main(argv: list[str] | None) -> int:
     setup_logging(level=logging.INFO)
 
     session = (
-        _open_re_explore_session(config, settings, args.steps_per_issue)
-        if args.re_explore
+        _open_re_explore_session(
+            config, settings, args.steps_per_issue, unreachable_limit=unreachable_limit
+        )
+        if unreachable_limit is not None
         else None
     )
 
