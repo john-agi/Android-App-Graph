@@ -1399,7 +1399,7 @@ decision and reason. Re-exploration requires a reasoned inspection assessment
 and checks the description, retry instruction and expected pages for explicit
 commitments. Missing assessments, consequential advice and uncertain operations
 are saved as `skipped` before navigation. When every proposal is skipped, the
-app's permissions and launch stay untouched.
+app's permissions, launch and display baseline stay untouched.
 
 Inspection includes opening a dialer, editing disposable form data, reading
 settings, opening a Share chooser, and viewing a confirmation followed by

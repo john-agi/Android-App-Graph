@@ -2855,6 +2855,7 @@ def test_a_display_rejected_return_replay_retains_the_applied_edge_correction(
 ) -> None:
     graph = _flagged_graph()
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s2_settings")
+    _describing_by_node_id(graph, monkeypatch)
     replays = 0
 
     def replay(_run: object, target: str) -> str:
@@ -2901,7 +2902,9 @@ def test_re_explore_reports_a_missing_run_baseline_without_a_traceback(
         )
     )
     monkeypatch.setattr(
-        audit, "run_audit", lambda *_args: {"issues": [{"type": "explore_node", "node": "s0"}]}
+        audit,
+        "run_audit",
+        lambda *_args: {"issues": [{**_inspection(), "type": "explore_node", "node": "s0"}]},
     )
     assert audit.main(["--config", str(config), "--re-explore"]) == 1
     error = capsys.readouterr().err
