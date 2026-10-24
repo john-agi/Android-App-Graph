@@ -697,11 +697,11 @@ Reveal a partly obscured control or choose an unobscured point on that same cont
 An unreachable coordinate, unavailable geometry or a display change defers the
 input with a recorded reason. Exploration counts one wait without marking the
 target explored; replay stops and identifies the screen reached. Audit retries
-report the skipped action. Coordinates are never moved to another control.
+report the skipped action. Dispatched inputs retain their requested coordinates.
 
 The detection uses the default display's authoritative `InsetsState` in
 `dumpsys window`. Its visible `tappableElement`, `systemGestures` and
-`mandatorySystemGestures` sources define the regions, rather than fixed margins.
+`mandatorySystemGestures` sources define regions that follow the current window geometry.
 
 ### Step log
 
