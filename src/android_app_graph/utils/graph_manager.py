@@ -1568,9 +1568,8 @@ class GraphManager:
         described: list[tuple[str, str]] = []
         expected_member: str | None = None
         for node_id in node_ids:
-            closest = self.closest_member(node_id, image_vector)
             if node_id == expected_node:
-                expected_member = closest.observation_id
+                expected_member = self.closest_member(node_id, image_vector).observation_id
             members = _member_observations(self.graph.nodes[node_id])
             described += zip(members, self._member_descriptions(node_id, members), strict=True)
         described.sort(key=lambda member_description: step_order(member_description[0]))
