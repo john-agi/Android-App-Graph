@@ -40,10 +40,12 @@ from android_app_graph.device import (
     AdbController,
     AppLaunch,
     DeviceController,
+    UnresolvedPermissionError,
     grant_runtime_permissions,
     is_outside_app,
     keyboard_status,
     launch_app,
+    resolve_permission_prompt,
     restart_app,
     return_to_app,
     soft_keyboard_hint,
@@ -61,6 +63,7 @@ from android_app_graph.step_log import (
     TransitionRecord,
     read_exploration_transitions,
 )
+from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
 from android_app_graph.utils import (
     MatchingSettings,
     ModelSettings,
@@ -320,13 +323,34 @@ def _identify(
 ) -> str:
     """Record a match of the screen in ``device_state``, which the caller expects to show
     the screen of ``expected_observation`` when it names one, and return its node."""
+    if device_state.get("system_surface") is not None:
+        run.graph.record_external_app_visit(Observation.from_state(device_state))
+        device_state = _recover_system_surface(run, device_state)
     observation = Observation.from_state(device_state)
     run.recorder.record_match(observation, expected_observation)
     return run.graph.identify_state(observation, expected_observation=expected_observation)
 
 
+def _recover_system_surface(run: _ReExploreRun, state: dict[str, Any]) -> dict[str, Any]:
+    with run.recorder.source("system_surface_recovery"):
+        run.recorder.record_system_event(
+            {"status": "boundary_recovery", "surface": state.get("system_surface")}
+        )
+        recovered = (
+            resolve_permission_prompt(
+                run.recorder, run.app_launch, state, run.recorder.record_system_event
+            )
+            if state.get("system_surface") == "permission"
+            else return_to_app(run.recorder, run.app_launch, logger)
+        )
+        run.recorder.record_system_event(
+            {"status": "boundary_resolved", "package": recovered.get("package")}
+        )
+        return recovered
+
+
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
-    """A keyboard or system dialog on top of the app does not count as leaving it."""
+    """Use the observation's owner to distinguish app state from another destination."""
     return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
@@ -362,10 +386,13 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
 
     actual = opened_on
     if len(path) > 1:
-        for step in path[1:]:
-            for setup_action in step.setup:
-                _execute(run.recorder, setup_action)
-            _execute(run.recorder, step.action)
+        try:
+            for step in path[1:]:
+                for setup_action in step.setup:
+                    _execute(run.recorder, setup_action)
+                _execute(run.recorder, step.action)
+        except SystemOverlayActionError as exc:
+            logger.info("Audit replay stops at system feedback: %s", exc)
         actual = _identify(
             run,
             run.recorder.get_state(),
@@ -429,13 +456,14 @@ def _plan_and_act(
     planned_instruction, element = plan_next_action(
         client=run.client,
         request=PlanRequest(
-            screenshot_b64=before.screenshot_b64,
+            screenshot_b64=before.app_image,
             page_description=page_description,
             node=node,
             explored_edges=explored_edges,
             app_name=run.target.app_name,
             input_status=input_status,
             back_leaves_app=run.graph.back_leaves_app(node),
+            system_feedback=bool(before.system_overlays),
         ),
         settings=run.session.instruction,
     )
@@ -443,11 +471,12 @@ def _plan_and_act(
     action, _history_entry = predict_next_action(
         client=run.client,
         request=ActionRequest(
-            screenshot_b64=before.screenshot_b64,
+            screenshot_b64=before.app_image,
             instruction=f"{planned_instruction}\n{input_status}",
             screen_w=run.recorder.w,
             screen_h=run.recorder.h,
             action_history=[],
+            system_feedback=bool(before.system_overlays),
         ),
         settings=run.session.action,
     )
@@ -460,12 +489,14 @@ def _plan_and_act(
         )
         action = {"action": "back"}
         instruction = "Press back"
-        run.recorder.exe_action(action)
-    elif action.get("action") == "wait":
+    if action.get("action") == "wait":
         time.sleep(1)
         return None
-    else:
+    try:
         run.recorder.exe_action(action)
+    except SystemOverlayActionError as exc:
+        logger.info("Audit action waits for system feedback: %s", exc)
+        return None
     return _Step(
         start=run.recorder.last_match,
         before=before,
@@ -541,6 +572,46 @@ def _record_step(
     return new_node, step_result
 
 
+def _record_system_step(
+    run: _ReExploreRun, source: str, step: _Step, state: dict[str, Any], number: int
+) -> tuple[str, dict[str, Any]]:
+    """Keep the executed app input's boundary and its separately recovered app screen."""
+    after = Observation.from_state(state)
+    boundary = run.graph.record_external_app_visit(after)
+    run.graph.add_edge(
+        source,
+        boundary,
+        action=[step.action],
+        details=EdgeDetails(
+            instruction=step.instruction,
+            target_observation=f"[system surface: {after.system_surface}]",
+        ),
+    )
+    run.recorder.record_transition(
+        Transition(
+            before=step.before,
+            after=after,
+            instruction=step.planned_instruction,
+            element=step.element,
+            action=step.action,
+            from_node=source,
+            to_node=boundary,
+        )
+    )
+    recovered = _identify(run, _recover_system_surface(run, state), expected_observation=step.start)
+    run.graph.save_graph(run.target.graph_path)
+    return recovered, {
+        "step": number,
+        "from": source,
+        "to": boundary,
+        "instruction": step.instruction,
+        "action": step.action,
+        "status": "system_boundary",
+        "system_surface": after.system_surface,
+        "recovered_to": recovered,
+    }
+
+
 def _last_state(run: _ReExploreRun, node: str) -> dict[str, Any]:
     """Return the state the latest visit to ``node`` recorded."""
     return run.graph.graph.nodes[node].get("last_detail_snapshot", {})
@@ -575,6 +646,13 @@ def _explore_steps(
         time.sleep(0.5)
         device_state = run.recorder.get_state()
 
+        if device_state.get("system_surface") is not None:
+            current_node, outcome = _record_system_step(
+                run, current_node, step, device_state, step_i + 1
+            )
+            step_results.append(outcome)
+            trail.begin(current_node, None)
+            continue
         if _left_app(run, device_state):
             logger.warning("Left app during re-explore, pressing back")
             with run.recorder.source("external_app_recovery"):
@@ -648,6 +726,9 @@ def _correct_flagged_edge(
         )
     )
 
+    if after.get("system_surface") is not None:
+        run.graph.record_external_app_visit(Observation.from_state(after))
+        _recover_system_surface(run, after)
     if reached != target:
         if not run.graph.move_edge_action(source, target, index, reached):
             return {"status": "unverified", "reached": reached}
@@ -655,7 +736,7 @@ def _correct_flagged_edge(
 
     label = describe_executed_action(
         client=run.client,
-        screenshot_b64=before["screenshot"],
+        screenshot_b64=Observation.from_state(before).app_image,
         action=action,
         screen_size=(run.recorder.w, run.recorder.h),
         settings=run.session.instruction,
@@ -685,10 +766,13 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     if reached != source:
         return {"issue": issue, "status": "unverified", "reached": reached}
 
-    with run.recorder.source("edge_retry"):
-        outcome = _correct_flagged_edge(run, source, target, instruction)
+    try:
+        with run.recorder.source("edge_retry"):
+            outcome = _correct_flagged_edge(run, source, target, instruction)
+    except SystemOverlayActionError as exc:
+        outcome = {"status": "skipped", "reason": str(exc)}
     logger.info("Flagged edge %s → %s: %s", source, target, outcome)
-    if outcome["status"] == "unverified":
+    if outcome["status"] in {"unverified", "skipped"}:
         return {"issue": issue, **outcome}
     source = run.graph.resolve_node_id(source)
     # Only an executed flagged action has moved the device off the source.
@@ -788,13 +872,17 @@ def re_explore_issues(
         client=client,
         start_node=start_node,
     )
-    for issue in issues:
-        itype = issue.get("type", "")
+    try:
+        for issue in issues:
+            itype = issue.get("type", "")
 
-        if itype == "retry_edge":
-            results.append(_retry_edge(run, issue))
-        elif itype == "explore_node":
-            results.append(_explore_node(run, issue))
+            if itype == "retry_edge":
+                results.append(_retry_edge(run, issue))
+            elif itype == "explore_node":
+                results.append(_explore_node(run, issue))
+    except UnresolvedPermissionError, UnresolvedSystemOverlayError:
+        graph.save_graph(target.graph_path)
+        raise
 
     return results
 

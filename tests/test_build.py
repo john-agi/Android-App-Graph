@@ -28,7 +28,7 @@ from android_app_graph.step_log import (
 )
 from android_app_graph.utils import MatchingSettings, ModelSettings, graph_manager
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
-from android_app_graph.utils.vlm_utils import DescribedScreenshot
+from android_app_graph.utils.vlm_utils import DescribedScreenshot, DescribeRequest
 
 APP = "com.demo"
 OTHER_APP = "com.other"
@@ -203,13 +203,12 @@ class _FakeVlm:
     def describe(
         self,
         _client: OpenRouter | None,
-        screenshot_b64: str,
-        known_descriptions: list[str] | None = None,
-        existing_keys: list[str] | None = None,
+        request: DescribeRequest,
+        *,
         settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
-        del known_descriptions, existing_keys, settings
-        page = self.by_image[screenshot_b64]
+        del settings
+        page = self.by_image[request.screenshot_b64]
         return page.description, dict(page.state), [], page.external_web
 
     def verify(
@@ -452,7 +451,7 @@ def test_a_build_stops_naming_how_many_matched_screenshots_have_no_image_vector(
         _build(config, recorded, tmp_path / "built")
 
     assert caught.value.code == 2
-    assert "2 of the 15 screenshot(s) the log matches have no image vector" in (
+    assert "2 of the 15 app screenshot(s) the log matches have no image vector" in (
         capsys.readouterr().err
     )
     assert not (tmp_path / "built").exists()
@@ -524,3 +523,19 @@ def test_a_build_skips_a_step_with_no_matched_start_or_an_unmatched_screen_of_th
     assert "ends on a screen of the app that was not matched" in caplog.text
     graph = _load(tmp_path / "built", MatchingSettings())
     assert graph.graph.number_of_edges() == 0
+
+
+def test_a_recorded_system_boundary_requires_no_model_image_vector(tmp_path: Path) -> None:
+    from android_app_graph.commands.build import RecordedLog, require_image_vectors
+
+    record: dict[str, object] = {
+        "id": "000001",
+        "native_size": [720, 1280],
+        "system_surface": "permission",
+        "system_overlays": [],
+        "underlying_package": "com.demo",
+        "permission_requester": "com.demo",
+        "system_overlay_error": None,
+    }
+    log = RecordedLog(tmp_path, [{"kind": "match", "observation": "000001"}], {"000001": record})
+    assert require_image_vectors(log, "image-model") == {}

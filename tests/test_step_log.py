@@ -106,6 +106,7 @@ def test_get_state_records_one_webp_image_and_one_observation(device: _Device, s
         "observation_id": "000000",
         "pixel_hash": pixel_hash(webp, 0),
         "black": False,
+        "native_size": [40, 30],
     }
     record = _record(steps, "000000")
     timestamp = record.pop("timestamp")
@@ -123,6 +124,12 @@ def test_get_state_records_one_webp_image_and_one_observation(device: _Device, s
         "status_bar_rows": 0,
         "pixel_hash": pixel_hash(webp, 0),
         "black": False,
+        "native_size": [40, 30],
+        "system_surface": None,
+        "system_overlays": [],
+        "underlying_package": None,
+        "permission_requester": None,
+        "system_overlay_error": None,
     }
 
 
@@ -403,6 +410,7 @@ def test_observation_from_state_reads_a_recorded_state(device: _Device, steps: P
         package=HOME["package"],
         pixel_hash=state["pixel_hash"],
         black=False,
+        native_size=(40, 30),
     )
 
 
@@ -540,3 +548,155 @@ def test_a_malformed_vector_raises_naming_every_such_observation(steps: Path) ->
 def test_observation_deadline_reaches_the_wrapped_device(device: _Device, steps: Path) -> None:
     _recorder(device, steps).get_state(deadline=123)
     assert device.deadlines == [123]
+
+
+def test_unresolved_feedback_geometry_preserves_the_raw_capture_before_stopping(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.system_surfaces import UnresolvedSystemOverlayError
+
+    monkeypatch.setattr(
+        device,
+        "get_state",
+        lambda **_kwargs: {
+            **HOME,
+            "screenshot": device.screenshot,
+            "system_overlay_error": "Visible ClipboardOverlay has no reported touchable region",
+        },
+    )
+    with pytest.raises(UnresolvedSystemOverlayError, match="no reported touchable region"):
+        _recorder(device, steps).get_state()
+    assert (steps / "000000.webp").read_bytes() == encode_screenshot(device.screenshot)
+    assert (
+        _record(steps, "000000")["system_overlay_error"]
+        == "Visible ClipboardOverlay has no reported touchable region"
+    )
+
+
+def test_feedback_appearing_at_dispatch_has_a_recorded_skipped_action(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.system_surfaces import SystemOverlayActionError
+
+    recorder = _recorder(device, steps)
+    recorder.get_state()
+
+    def reject(_action: dict[str, object]) -> None:
+        msg = "New clipboard feedback covers this input"
+        raise SystemOverlayActionError(msg)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    with pytest.raises(SystemOverlayActionError, match="New clipboard"):
+        recorder.exe_action({"action": "tap", "x": 10, "y": 10})
+    assert _record(steps, "000001")["kind"] == "action"
+    assert _record(steps, "000002")["status"] == "action_skipped"
+    assert _record(steps, "000002")["observation"] == "000000"
+    assert device.actions == []
+
+
+def _ownership_record() -> dict[str, object]:
+    return {
+        "id": "000001",
+        "native_size": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "underlying_package": None,
+        "permission_requester": None,
+        "system_overlay_error": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "native_size",
+        "system_surface",
+        "system_overlays",
+        "underlying_package",
+        "permission_requester",
+        "system_overlay_error",
+    ],
+)
+def test_persisted_observations_require_explicit_ownership_fields(missing: str) -> None:
+    from android_app_graph.step_log import observation_ownership
+
+    record = _ownership_record()
+    del record[missing]
+    with pytest.raises(ValueError, match=f"lacks ownership metadata:.*{missing}"):
+        observation_ownership(record)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("native_size", []),
+        ("native_size", [0, 1280]),
+        ("native_size", [720, True]),
+        ("native_size", "720x1280"),
+        ("system_surface", 5),
+        ("system_surface", ""),
+        ("system_surface", "unknown_surface"),
+        ("system_overlays", None),
+        ("system_overlays", [[0, 0, 5]]),
+        ("system_overlays", [[0, 0, "5", 10]]),
+        ("system_overlays", [[0, 0, 5, True]]),
+        ("system_overlays", [[0, 0, 0, 5]]),
+        ("underlying_package", 7),
+        ("permission_requester", False),
+        ("system_overlay_error", {}),
+    ],
+)
+def test_persisted_ownership_rejects_malformed_geometry_and_owners(
+    field: str, value: object
+) -> None:
+    from android_app_graph.step_log import observation_ownership
+
+    with pytest.raises(ValueError, match=f"{field}"):
+        observation_ownership({**_ownership_record(), field: value})
+
+
+def test_persisted_feedback_requires_native_geometry_for_model_masks() -> None:
+    from android_app_graph.step_log import observation_ownership
+
+    with pytest.raises(ValueError, match="system_overlays without native_size"):
+        observation_ownership({**_ownership_record(), "system_overlays": [[0, 0, 5, 10]]})
+
+
+def test_explicit_unknown_ownership_has_a_typed_representation() -> None:
+    from android_app_graph.step_log import observation_ownership
+
+    ownership = observation_ownership(_ownership_record())
+    assert ownership.surface is None
+    assert ownership.native_size is None
+    assert ownership.overlays == ()
+
+
+def test_a_recorded_unresolved_capture_stops_before_its_image_enters_matching(steps: Path) -> None:
+    from android_app_graph.step_log import recorded_observation
+    from android_app_graph.system_surfaces import UnresolvedSystemOverlayError
+
+    record = {**_ownership_record(), "system_overlay_error": "Unknown clipboard geometry"}
+    with pytest.raises(UnresolvedSystemOverlayError, match="Unknown clipboard geometry"):
+        recorded_observation(steps, record)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("system_surface", "unknown_surface"),
+        ("system_overlays", [[0, 0, 10]]),
+        ("system_overlay_error", {}),
+    ],
+)
+def test_capture_preserves_and_rejects_malformed_owner_metadata_before_matching(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    monkeypatch.setattr(
+        device,
+        "get_state",
+        lambda **_kwargs: {**HOME, "screenshot": device.screenshot, field: value},
+    )
+    with pytest.raises(ValueError, match=field):
+        _recorder(device, steps).get_state()
+    assert _record(steps, "000000")[field] == value
+    assert (steps / "000000.webp").is_file()

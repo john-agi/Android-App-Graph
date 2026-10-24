@@ -427,7 +427,17 @@ def _write_member_record(steps_dir: Path, identify_file: Path, observation_id: s
     """Write what exploration leaves for a member observation: its record with its pixel
     hash in ``steps_dir``, and its describe output in ``identify_file``, which describes it
     as ``Screen <observation_id>``."""
-    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"hash-{observation_id}"}
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "native_size": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "underlying_package": None,
+        "permission_requester": None,
+        "system_overlay_error": None,
+        "pixel_hash": f"hash-{observation_id}",
+    }
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     describe = {"page_description": f"Screen {observation_id}", "state": {}, "elements": []}
     line = {"observation": observation_id, "describe": {**describe, "is_external_web": False}}
@@ -544,6 +554,12 @@ def write_member_graph() -> Callable[..., None]:
                 record: dict[str, object] = {
                     "id": observation_id,
                     "kind": "observation",
+                    "native_size": None,
+                    "system_surface": None,
+                    "system_overlays": [],
+                    "underlying_package": None,
+                    "permission_requester": None,
+                    "system_overlay_error": None,
                     "run_kind": "explore",
                     "activity": black_activity or f"com.demo.Activity{observation_id}",
                     "package": "com.demo",
