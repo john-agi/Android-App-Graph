@@ -811,11 +811,13 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
         prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
         kept_out = re.search(r'[^.]*never change "page_description"', prompt)
         assert kept_out is not None
-        for kind in ("menu", "dropdown", "picker", "popup", "expanded"):
+        for kind in ("menu", "dropdown", "popup", "expanded"):
             assert kind in kept_out.group(), kind
         assert '"open_menu"' in prompt
         assert '"expanded_sections"' in prompt
-        assert "full-screen picker that has its own purpose" in prompt
+        assert (
+            "Modal dialogs, picker dialogs and modal bottom sheets are separate screens" in prompt
+        )
 
 
 def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen(
@@ -834,10 +836,10 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     same_cases, different_cases = prompt.split("Two screenshots are DIFFERENT screens", 1)
     same_cases = same_cases[same_cases.index("Two screenshots are the SAME screen") :]
     different_cases = different_cases[: different_cases.index("Answer with ONLY")]
-    for kind in ("overflow menu", "dropdown", "picker", "popup", "context menu", "expanded"):
+    for kind in ("overflow menu", "dropdown", "popup", "context menu", "expanded"):
         assert kind in same_cases, kind
-    assert "menu" not in different_cases
-    assert "its own purpose" in different_cases
+    assert "picker, popup" not in same_cases
+    assert "modal purpose" in different_cases
 
 
 def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
@@ -854,7 +856,7 @@ def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
     _verify_itself(router_client, png_screenshot, "Wi-Fi Direct")
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     refinement = prompt[prompt.index("If they are DIFFERENT screens") :]
-    for kind in ("keyboard", "focus", "scrolled", "menu", "dropdown", "picker", "expanded"):
+    for kind in ("keyboard", "focus", "scrolled", "menu", "dropdown", "expanded"):
         assert kind in refinement, kind
 
 
@@ -925,7 +927,8 @@ def test_the_merge_audit_may_report_a_page_with_its_menu_open(
     router_responses.append(chat_response(content='{"issues":[],"summary":"fine"}'))
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
-    assert "menu" not in prompt
+    assert "Anchored menus" in prompt
+    assert "modal bottom sheets are separate screens" in prompt
 
 
 @pytest.mark.parametrize(
@@ -2324,3 +2327,51 @@ def test_text_planning_establishes_the_intended_field_before_typing(
     assert "tap the intended field as a separate action, then observe before typing" in prompt
     assert "current screenshot description" in prompt
     assert "current caret or field highlight" in prompt
+
+
+@pytest.mark.parametrize("operation", ["page", "verify", "merge", "audit"])
+def test_screen_identity_policy_reaches_every_model_entry(
+    operation: str,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """Descriptions, matching and audit proposals use one modal identity policy."""
+    router_responses.append(
+        chat_response(content='{"page_description":"home","same":true,"issues":[],"summary":"ok"}')
+    )
+    _ROLE_HELPERS[operation](router_client, png_screenshot)
+    content = json.loads(router_requests[0].content)["messages"][0]["content"]
+    prompt = content if isinstance(content, str) else content[0]["text"]
+    for rule in (
+        "Modal dialogs, picker dialogs and modal bottom sheets are separate screens",
+        "Anchored menus",
+        "modal purpose and opening navigation destination",
+        "Selected values, input modes and underlying scroll positions are state",
+        "Dimming supports this distinction",
+        "Preserve the visible opening destination in the modal's description",
+    ):
+        assert rule in prompt
+    assert "dropdown, picker, popup" not in prompt
+
+
+def test_modal_refinement_retains_the_opening_destination(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """Refining a modal's description keeps its purpose and visible opening destination."""
+    router_responses.append(chat_response(content='{"same":false,"reason":"other destination"}'))
+    vlm.verify_same_node(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Alarm time picker"),
+        new=vlm.DescribedScreenshot(png_screenshot, "Bedtime time picker"),
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    refinement = prompt[prompt.index("If they are DIFFERENT screens") :]
+    assert "modal purpose and opening navigation destination" in refinement
