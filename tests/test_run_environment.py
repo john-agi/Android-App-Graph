@@ -10,7 +10,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, override
 
 import pytest
 from openrouter import OpenRouter
@@ -554,3 +554,36 @@ def test_native_frame_rotation_is_attributed_without_a_settings_override(
     assert changes[-1]["observation"] == after["observation_id"]
     assert changes[-1]["native_size"] == [64, 32]
     assert changes[0]["display"] == changes[1]["display"]
+
+
+class _LateFontWrite(_Access):
+    def __init__(self) -> None:
+        super().__init__()
+        self.restoring = False
+        self.late_write = False
+
+    @override
+    def execute(self, command: tuple[str, ...], *, deadline: float) -> None:
+        super().execute(command, deadline=deadline)
+        self.restoring = True
+
+    @override
+    def capture(self, *, deadline: float | None = None) -> DisplayState:
+        if self.restoring and not self.late_write:
+            self.current = replace(self.current, font_scale="1.0")
+            self.late_write = True
+        return super().capture(deadline=deadline)
+
+
+def test_cleanup_restores_absence_after_a_late_configuration_write(
+    tmp_path: Path, png_screenshot: str
+) -> None:
+    access = _LateFontWrite()
+    environment = _environment(tmp_path, png_screenshot, access)
+    with environment:
+        access.current = replace(
+            access.current, size_override=(768, 1280), density_override=360, font_scale="1.15"
+        )
+    assert access.current == access.original
+    report = json.loads(environment.path.read_text())
+    assert report["cleanup"][-1]["status"] == "restored"
