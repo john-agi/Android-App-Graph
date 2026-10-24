@@ -84,6 +84,11 @@ def test_shorten_edge_label_strips_noise() -> None:
     assert "Tap" in label
 
 
+@pytest.mark.parametrize("template", ["Search for {query}", "Search for {{query}}"])
+def test_shorten_edge_label_replaces_named_placeholders(template: str) -> None:
+    assert plot.shorten_edge_label(template) == "Search for value"
+
+
 def test_wrap_label_breaks_on_width() -> None:
     assert plot.wrap_label("alpha beta gamma", width=10) == "alpha beta\\ngamma"
 

@@ -299,8 +299,8 @@ the common pattern, or answer that they are different actions.
 
 Rules:
 - Replace specific user-provided values (search queries, names, addresses, numbers, dates, \
-  item selections) with descriptive {{placeholder}} names like {{query}}, {{location}}, \
-  {{item_name}}, {{date}}, {{amount}}, etc.
+  item selections) with descriptive {placeholder} names like {query}, {location}, \
+  {item_name}, {date}, {amount}, etc.
 - Keep the action verb and UI element references as-is (e.g. "Tap the search bar" stays unchanged).
 - If only one instruction is given, still normalize it — replace any concrete value with a placeholder.
 - If multiple instructions are given, find the common pattern and merge them.
@@ -312,33 +312,33 @@ Rules:
   set different_actions to true and leave every other field empty. Never join several actions \
   into one template, by line breaks, numbering, "|", "OR" or "or", and never answer with a \
   template made of placeholders alone or of a verb and placeholders, such as \
-  "{{action}} {{target_element}}" or "Tap {{target}}".
+  "{action} {target_element}" or "Tap {target}".
 
 Return a JSON object:
-{{
+{
   "different_actions": true/false (true when the instructions are different actions),
   "instruction_template": "the normalized instruction template",
   "observation_template": "the normalized observation template (or empty string if none)",
   "is_template": true/false (true if any placeholders were inserted),
   "param_names": ["list", "of", "placeholder", "names"] (empty if is_template is false),
   "examples": [
-    {{"instruction": "original instruction 1", "params": {{"query": "egg"}}}},
-    {{"instruction": "original instruction 2", "params": {{"query": "milk"}}}}
+    {"instruction": "original instruction 1", "params": {"query": "egg"}},
+    {"instruction": "original instruction 2", "params": {"query": "milk"}}
   ]
-}}
+}
 
 Examples:
 - Input: ["Search for egg", "Search for milk"]
-  Output: {{"different_actions": false, "instruction_template": "Search for {{query}}", "observation_template": "search results for {{query}}", "is_template": true, "param_names": ["query"], "examples": [{{"instruction": "Search for egg", "params": {{"query": "egg"}}}}, {{"instruction": "Search for milk", "params": {{"query": "milk"}}}}]}}
+  Output: {"different_actions": false, "instruction_template": "Search for {query}", "observation_template": "search results for {query}", "is_template": true, "param_names": ["query"], "examples": [{"instruction": "Search for egg", "params": {"query": "egg"}}, {"instruction": "Search for milk", "params": {"query": "milk"}}]}
 
 - Input: ["Tap the Settings icon"]
-  Output: {{"different_actions": false, "instruction_template": "Tap the Settings icon", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}
+  Output: {"different_actions": false, "instruction_template": "Tap the Settings icon", "observation_template": "", "is_template": false, "param_names": [], "examples": []}
 
 - Input: ["Type 'Waterloo' in the start location field", "Type '221B Baker Street' in the start location field"]
-  Output: {{"different_actions": false, "instruction_template": "Type '{{location}}' in the start location field", "observation_template": "start location field shows {{location}}", "is_template": true, "param_names": ["location"], "examples": [{{"instruction": "Type 'Waterloo' in the start location field", "params": {{"location": "Waterloo"}}}}, {{"instruction": "Type '221B Baker Street' in the start location field", "params": {{"location": "221B Baker Street"}}}}]}}
+  Output: {"different_actions": false, "instruction_template": "Type '{location}' in the start location field", "observation_template": "start location field shows {location}", "is_template": true, "param_names": ["location"], "examples": [{"instruction": "Type 'Waterloo' in the start location field", "params": {"location": "Waterloo"}}, {"instruction": "Type '221B Baker Street' in the start location field", "params": {"location": "221B Baker Street"}}]}
 
 - Input: ["Tap the three-dot overflow menu in the top-right corner", "Swipe upward on the alarm list", "Tap the switch of the 7:00 AM alarm"]
-  Output: {{"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}"""
+  Output: {"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}"""
 
 PAGE_DESCRIBE_AND_STATE_PROMPT = """\
 You are an expert at analyzing mobile app screenshots. You are helping build a navigation \
