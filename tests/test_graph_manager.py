@@ -3367,6 +3367,8 @@ def test_an_edge_answered_as_different_actions_keeps_no_template(
 @pytest.mark.parametrize(
     "template",
     [
+        "{instruction}",
+        "{action} {target_element}",
         "{{instruction}}",
         "{{action}} {{target_element}} {{interaction_details}}",
         'Search for "{{query}}"\nTap the "{{filter}}" chip',
@@ -3374,7 +3376,16 @@ def test_an_edge_answered_as_different_actions_keeps_no_template(
         'Search for "{{query}}" | Tap the "{{filter}}" chip',
         'Search for "{{query}}" OR Tap the "{{filter}}" chip',
     ],
-    ids=["placeholder", "placeholders", "lines", "numbered", "bar", "OR"],
+    ids=[
+        "single-placeholder",
+        "single-placeholders",
+        "placeholder",
+        "placeholders",
+        "lines",
+        "numbered",
+        "bar",
+        "OR",
+    ],
 )
 def test_a_template_of_only_placeholders_or_of_several_actions_counts_as_different_actions(
     template: str,
