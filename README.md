@@ -81,6 +81,8 @@ graph TD;
     gm --> steps;
     gm --> vlm;
     gf --> pay;
+    dev --> pay;
+    steps --> dev;
     steps --> gf;
     steps --> pay;
     steps --> img;
@@ -701,6 +703,31 @@ its device initialization, permission grants and launch; its action recovery fol
 the audit error policy. The explorer never restarts the adb server, which other runs
 can share.
 
+### App input boundaries
+
+Action grounding uses each capture's native display dimensions, including rotation.
+Before every app tap, hold or swipe, the device reads its current window insets.
+Taps and holds stay outside visible system touch regions; swipes start outside
+system gesture regions. A visible gesture navigation bar can pass ordinary taps
+through to app content. Keyboard keys and unobscured app controls stay available.
+
+Reveal a partly obscured control or choose an unobscured point on that same control.
+An unreachable coordinate, unavailable geometry or a display change between capture
+and its input defers the input with a recorded reason. Exploration counts one wait
+without marking the target explored. The rejected action kind and reason accompany
+the next exploration or audit plan while its app, activity, image and input regions
+stay the same; an accepted input or changed observation clears that feedback.
+Replay checks each input against current regions after the preceding action, so
+intermediate rotations can be traversed. A rejected replay input stops the replay
+and identifies the screen reached. Audit retries report the skipped action.
+Dispatched inputs retain their requested coordinates.
+
+The detection uses the default display's authoritative `InsetsState` in
+`dumpsys window`. Its visible `tappableElement`, `systemGestures` and
+`mandatorySystemGestures` sources define regions that follow the current window
+geometry. Step records keep native pixel bounds; model instructions give
+coordinate-free reachability guidance.
+
 ### Step log
 
 Exploration and `app-graph-audit --re-explore` record every screenshot they take,
@@ -726,8 +753,9 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash` and `black` |
-| `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash`, `black` and captured `input_regions` |
+| `action` | each requested device action, written before dispatch | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `action_rejected` | each unreachable app coordinate input, with no input dispatched | `action_record`, the rejected request's ID, its `action`, the `reason` and current `input_regions` |
 | `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, and `expected_observation`, a screenshot of the screen the run expects it to show, or `null` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
 
