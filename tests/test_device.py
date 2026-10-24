@@ -635,6 +635,7 @@ def controller(adb: _FakeAdb) -> device.AdbController:
         (
             b"  WindowInsetsStateController\n    InsetsState\n"
             b"      mDisplayFrame=Rect(0, 0 - 1080, 2400)\n"
+            b"      InsetsSource type=tappableElement frame=[0,0][0,0] visible=true\n"
         ),
     )
     return built
@@ -700,6 +701,7 @@ _GESTURE_NAVIGATION = (
             (
                 "  WindowInsetsStateController\n    InsetsState\n"
                 "      mDisplayFrame=Rect(0, 0 - 1280, 720)\n"
+                "      InsetsSource type=tappableElement frame=[0,0][0,0] visible=true\n"
             ),
             {"action": "tap", "x": 331, "y": 1002},
             "outside the display",
@@ -780,7 +782,10 @@ def test_a_rotation_between_observation_and_dispatch_defers_the_input(
     adb.events.clear()
     adb.replies[_DUMPSYS_WINDOW] = (
         0,
-        b"WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 1280, 720)\n",
+        (
+            b"WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 1280, 720)\n"
+            b"InsetsSource type=tappableElement frame=[0,0][0,0] visible=true\n"
+        ),
     )
     with pytest.raises(device.InputRejectedError, match="Display geometry changes") as error:
         controller.exe_action({"action": "tap", "x": 100, "y": 200})

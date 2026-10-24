@@ -13,6 +13,11 @@ from android_app_graph.device import InputRegions, input_region_hint, input_regi
         "",
         "InsetsSource type=tappableElement frame=[0,0][720,48] visible=true",
         "WindowInsetsStateController\nInsetsState",
+        "WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 720, 1280)\n",
+        (
+            "WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 720, 1280)\n"
+            "InsetsSource type=tappableElement frame=unknown visible=true\n"
+        ),
     ],
 )
 def test_missing_authoritative_display_geometry_is_explicit(window: str) -> None:
@@ -42,6 +47,13 @@ def test_only_visible_nonempty_authoritative_sources_define_input_regions() -> N
         "tap": [[0, 1184, 720, 1280]],
         "gesture": [[0, 1184, 720, 1280]],
     }
+
+
+def test_known_hidden_input_sources_preserve_immersive_app_content() -> None:
+    assert input_regions(
+        "WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 720, 1280)\n"
+        "InsetsSource type=tappableElement frame=[0,1184][720,1280] visible=false\n"
+    ) == InputRegions((0, 0, 720, 1280), (), ())
 
 
 @pytest.mark.parametrize(
