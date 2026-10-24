@@ -121,6 +121,7 @@ def test_get_state_records_one_webp_image_and_one_observation(device: _Device, s
         "height": 30,
         "status_bar": None,
         "status_bar_rows": 0,
+        "display_state": None,
         "pixel_hash": pixel_hash(webp, 0),
         "black": False,
     }

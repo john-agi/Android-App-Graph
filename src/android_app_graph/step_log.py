@@ -35,6 +35,7 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.payloads import as_int_list, as_object_dict, as_str
+from android_app_graph.run_environment import RunRecording, UnsafeReplayError
 from android_app_graph.screen_image import (
     encode_screenshot,
     is_black,
@@ -295,8 +296,11 @@ class StepRecorder:
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
                 "black": observation.black,
+                "display_state": state.get("display_state"),
             },
         )
+        if isinstance(self._controller, RunRecording):
+            self._controller.record_observation(observation.observation_id, self._source)
         self._last_observation = observation
         return {
             **state,
@@ -313,6 +317,17 @@ class StepRecorder:
         replay, which acts without looking; ``source`` says which.
         """
         last = self._last_observation
+        if isinstance(self._controller, RunRecording):
+            try:
+                self._controller.prepare_action(action, source=self._source)
+            except UnsafeReplayError as error:
+                self._write_record(
+                    self._take_step_id(),
+                    "action_rejected",
+                    last,
+                    {"action": action, "reason": str(error)},
+                )
+                raise
         self._write_record(
             self._take_step_id(),
             "action",
@@ -360,7 +375,7 @@ class StepRecorder:
     def _write_record(
         self,
         step_id: str,
-        kind: Literal["observation", "action", "match", "transition"],
+        kind: Literal["observation", "action", "match", "transition", "action_rejected"],
         screen: Observation | None,
         fields: Mapping[str, object],
     ) -> None:
