@@ -1303,8 +1303,9 @@ batch text, app label, rule/schema and model settings. A matching request reuses
 proposals, including after revisits that preserve its displayed descriptions and
 navigation context. Cache misses run concurrently, up to 16 requests at a time;
 cache writes and report results follow batch order. Separately, answered member questions
-are keyed by both members' IDs, image bytes and descriptions and the verifier's
-rule/schema and resolved settings. A matching question reuses its answer while rounds
+are keyed by both members' IDs, masked image bytes, system feedback context and
+descriptions, and by the verifier's rule/schema and resolved settings. A matching
+question reuses its answer while rounds
 retain their deductions. Changes make the affected evidence eligible again. Timeouts,
 malformed replies and out-of-scope proposal replies remain eligible for a fresh
 request. Saving keeps these in-memory caches; loading a graph and a new process start

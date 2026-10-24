@@ -68,7 +68,6 @@ from android_app_graph.graph_files import (
     identify_file_path,
     load_embeddings,
     member_problems,
-    observation_image_b64,
     read_json_lines,
     require_known_edge_endpoints,
     save_embeddings,
@@ -528,7 +527,7 @@ class _MemberReply(NamedTuple):
 
 
 def _shown_member_key(member: str, shown: DescribedScreenshot) -> str:
-    return evidence_key([member, shown.description, shown.screenshot_b64])
+    return evidence_key([member, shown.description, shown.screenshot_b64, shown.system_feedback])
 
 
 class ShownMembers(NamedTuple):
@@ -2070,10 +2069,7 @@ class GraphManager:
             current = None
             if all(isinstance(description, str) for description in descriptions):
                 shown = [
-                    DescribedScreenshot(
-                        observation_image_b64(self._require_steps_dir(), member),
-                        as_str(description, ""),
-                    )
+                    self._described_app_member(member, as_str(description, ""))
                     for member, description in zip(question, descriptions, strict=True)
                 ]
                 current = self._checkpoint_question_key(question, shown[0], shown[1], settings)

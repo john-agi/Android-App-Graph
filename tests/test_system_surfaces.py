@@ -423,3 +423,51 @@ def test_an_app_name_containing_keyboard_preserves_its_app_identity() -> None:
     observed = window_ownership("", package, package + ".Home")
     assert observed.package == package
     assert observed.system_surface is None
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_permission_recovery_retains_grant_evidence_through_its_configured_outage_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _PermissionDevice([_APP])
+    events: list[Mapping[str, object]] = []
+    grants: list[list[str]] = []
+    limits: list[float] = []
+
+    def run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[-3:] == ["dumpsys", "package", "com.demo"]:
+            text = f"  requested permissions:\n    {_CAMERA}\n"
+        elif "grant" in args:
+            grants.append(args)
+            if len(grants) == 1:
+                raise subprocess.TimeoutExpired(args, 30)
+            text = ""
+        else:
+            assert args[-3:] == ["dumpsys", "package", "permissions"]
+            text = _CATALOG
+        return subprocess.CompletedProcess(args, 0, text, "")
+
+    def recovered(
+        observed: device.DeviceController, limit: float, _logger: object, **_kwargs: object
+    ) -> dict[str, object]:
+        assert observed is controller
+        limits.append(limit)
+        return _APP
+
+    monkeypatch.setattr(device, "run_adb", run)
+    monkeypatch.setattr(device, "wait_for_device_state", recovered)
+
+    result = device.resolve_permission_prompt(
+        controller,
+        device.AppLaunch("demo", "com.demo"),
+        _PROMPT,
+        events.append,
+        device.StartupRecovery(controller, 37, logging.getLogger("test")),
+    )
+
+    assert result == _APP
+    assert limits == [37]
+    assert grants == [["-s", "test-device", "shell", "pm", "grant", "com.demo", _CAMERA]] * 2
+    assert events[1]["granted"] == [_CAMERA]
+    assert events[-1]["status"] == "permission_resolved"
+    assert controller.actions == []
