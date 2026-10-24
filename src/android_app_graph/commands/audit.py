@@ -335,16 +335,28 @@ class _InspectionBlockedError(ValueError):
     """A recorded navigation instruction crosses the audit's inspection boundary."""
 
 
+def _check_instruction_policy(run: _ReExploreRun, source: str, instruction: str) -> None:
+    blocked = inspection_block_reason(instruction, context=run.graph.latest_description(source))
+    if blocked is not None:
+        raise _InspectionBlockedError(blocked)
+
+
+def _check_setup_policy(run: _ReExploreRun, source: str, setup: Sequence[object]) -> None:
+    for edge in run.graph.get_all_edges_from_node(source):
+        for actions, instruction in zip(edge["actions"], edge["instructions"], strict=True):
+            if any(action in actions for action in setup):
+                _check_instruction_policy(run, source, instruction)
+
+
 def _check_navigation_policy(run: _ReExploreRun, path: list[PathStep]) -> None:
     for source, step in pairwise(path):
+        _check_setup_policy(run, source.node, step.setup)
         edge = run.graph.graph.get_edge_data(source.node, step.node, {})
         for action, instruction in zip(
             edge.get("actions", []), edge.get("instructions", []), strict=True
         ):
             if action == step.action:
-                blocked = inspection_block_reason(instruction)
-                if blocked is not None:
-                    raise _InspectionBlockedError(blocked)
+                _check_instruction_policy(run, source.node, instruction)
 
 
 def _identify(
@@ -594,6 +606,7 @@ def _explore_steps(
     from the description of the screen the device was last identified on. ``arrived`` says
     the replay before them arrived at the node, so the setup of the first step is known."""
     current_node = start_from
+    excluded: dict[str, list[str]] = {}
     step_results: list[dict[str, Any]] = []
     trail = SetupTrail(run.graph.resolve_node_id)
     trail.begin(start_from, _last_state(run, start_from) if arrived else None)
@@ -606,10 +619,15 @@ def _explore_steps(
         page_desc = (
             f"{run.graph.latest_description(current_node)}\n[AUDIT HINT: {hint}]\n{INSPECTION_HINT}"
         )
+        if skipped_instructions := excluded.get(current_node):
+            page_desc += "\nExcluded by the inspection policy:\n" + "\n".join(skipped_instructions)
         step = _plan_and_act(run, current_node, device_state, page_desc)
         if step is None:
             continue
         if isinstance(step, _SkippedAction):
+            instructions = excluded.setdefault(current_node, [])
+            if step.instruction not in instructions:
+                instructions.append(step.instruction)
             step_results.append(
                 {
                     "step": step_i + 1,
@@ -676,6 +694,7 @@ def _correct_flagged_edge(
             target,
         )
         return {"status": "unverified", "reached": source}
+    _check_setup_policy(run, source, setup)
     for setup_action in setup:
         _execute(run.recorder, setup_action)
     before = run.recorder.get_state()
@@ -730,6 +749,7 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
         logger.warning("Source node %s is external, skipping", source)
         return {"issue": issue, "status": "skipped", "reason": "external source"}
 
+    _check_instruction_policy(run, source, instruction)
     logger.info("Retrying edge: %s → %s (instruction: '%s')", source, target, instruction)
     reached = _replay_to(run, source)
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
@@ -744,9 +764,15 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     source = run.graph.resolve_node_id(source)
     # Only an executed flagged action has moved the device off the source.
     executed = outcome["status"] != "instruction_not_found"
-    if executed and _replay_to(run, source) != run.graph.resolve_node_id(source):
-        logger.warning("Replay after the correction missed %s; not exploring", source)
-        return {"issue": issue, **outcome, "steps": []}
+    if executed:
+        try:
+            reached = _replay_to(run, source)
+        except _InspectionBlockedError as exc:
+            outcome["reason"] = str(exc)
+            reached = None
+        if reached != run.graph.resolve_node_id(source):
+            logger.warning("Replay after the correction missed %s; not exploring", source)
+            return {"issue": issue, **outcome, "steps": []}
 
     target = run.graph.resolve_node_id(target)
     target_desc = run.graph.node_descriptions(target) if target in run.graph.graph else target

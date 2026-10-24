@@ -56,7 +56,7 @@ def inspection_block_reason(instruction: str, *, context: str = "") -> str | Non
             return "inspection policy excludes call or transmission commitments"
         if re.search(
             r"^(?:please\s+)?(?:permanently\s+)?(?:call(?!\s+(?:history|settings)\b)|"
-            r"send|delete|erase|remove|clear|purchase|buy|pay|enroll|"
+            r"send|delete|erase|remove|clear|reset|purchase|buy|pay|enroll|"
             r"register|subscribe|sign in|sign up|sync)\b",
             clause,
         ):
@@ -66,22 +66,33 @@ def inspection_block_reason(instruction: str, *, context: str = "") -> str | Non
             r"clear\w*|purchas\w*|payment|send\w*|call|enroll\w*|registration|subscription)\b",
             clause,
         )
-        consequential_control = re.search(
-            r"\b(?:tap|press|click|select|choose|activate)\s+(?:the\s+)?(?:final\s+)?"
-            r"[\"']?(?:call(?!\s+(?:history|settings)\b)|"
-            r"send|delete|erase|remove|clear|buy|pay|purchase|confirm)\b",
-            clause,
+        control = re.search(r"\b(?:tap|press|click|select|choose|activate)\s+(.+)", clause)
+        control_text = re.split(r"\s+(?:to|at|in)\s+", control[1], maxsplit=1)[0] if control else ""
+        local_edit = re.search(
+            r"\b(?:clear search|clear (?:query|filter|field text)|backspace(?:-shaped)?)\b",
+            control_text,
+        )
+        consequential_control = (
+            not control_text.startswith("outside ")
+            and not local_edit
+            and re.search(
+                r"\b(?:call(?!\s+(?:history|settings)\b)|"
+                r"send|delete|erase|remove|clear|reset|buy|pay|purchase|confirm)\b",
+                control_text,
+            )
         )
         opens_confirmation = re.search(
             r"\bto (?:open|inspect|view)\b.*\bconfirmation (?:dialog|sheet)\b", clause
         )
         if commits or (consequential_control and not opens_confirmation):
             return "inspection policy excludes committing a consequential control"
-        if re.search(
-            r"\b(?:tap|press|click|choose)\s+(?:the\s+)?[\"']?(?:ok|yes|continue)\b", clause
-        ) and (
-            re.search(r"\b(?:delet\w*|clear\w*|send\w*|purchas\w*|payment)\b", context.lower())
-            and re.search(r"\b(?:dialog|confirmation)\b", context.lower())
+        confirmation_context = f"{clause} {context.lower()}"
+        if re.search(r"\b(?:ok|yes|continue)\b", control_text) and (
+            re.search(
+                r"\b(?:delet\w*|clear\w*|reset\w*|send\w*|purchas\w*|payment)\b",
+                confirmation_context,
+            )
+            and re.search(r"\b(?:dialog|confirmation)\b", confirmation_context)
         ):
             return "inspection policy excludes a positive consequential confirmation"
         if re.search(

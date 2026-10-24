@@ -1314,10 +1314,13 @@ Inspection includes opening a dialer, editing disposable form data, reading
 settings, opening a Share chooser, and viewing a confirmation followed by
 Cancel. Calls, actual sends, destructive confirmations, purchases, account
 enrollment and security changes stay unexecuted. A recorded instruction receives
-the same commitment check before navigation replay. Each newly planned audit
-instruction is checked before action grounding; a skipped instruction consumes
-one of `--steps-per-issue` and records its reason. These checks use the model's
-effect assessment and conservative language rules. Their limits include model
+the same commitment check before navigation replay. Recorded setup actions are
+checked against their instructions on the source node before replay or retry.
+Confirmation checks include the source node's description. Each newly planned
+audit instruction is checked before action grounding; a skipped instruction
+consumes one of `--steps-per-issue` and records its reason. Subsequent plans on
+that node receive the excluded instructions so they can choose another action.
+These checks use the model's effect assessment and conservative language rules. Their limits include model
 misclassification, unfamiliar wording and an action grounded onto the wrong
 control; they provide no proof of an app control's real effect.
 
@@ -1336,7 +1339,9 @@ destination, it:
    - the edge's target: the transition is real and its label is wrong. The
      instruction model describes the action from the screenshot taken before it
      ran, and that description replaces the instruction.
-4. replays to the source again, and stops if this replay misses it;
+4. replays to the source again, and stops if this replay misses it or crosses the
+   inspection boundary; the correction's outcome remains recorded, with `reason`
+   when policy blocks the replay;
 5. runs `--steps-per-issue` exploration steps from the source, with a hint about
    the flagged edge.
 

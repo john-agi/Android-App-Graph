@@ -163,7 +163,9 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
 ) -> None:
     graph, graph_path = _two_node_graph(tmp_path)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
-    planned = iter(["Confirm deletion of the contact", "Press Cancel"])
+    planned = iter(
+        ["Confirm deletion of the contact", "Confirm deletion of the contact", "Press Cancel"]
+    )
     descriptions: list[str] = []
 
     def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
@@ -185,7 +187,7 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
         controller,
         client,
         graph_path.parent,
-        steps_per_issue=2,
+        steps_per_issue=3,
     )
 
     assert "Excluded by the inspection policy" not in descriptions[0]
@@ -193,7 +195,9 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
     assert "Confirm deletion of the contact" in descriptions[1]
     assert result["steps"][0]["status"] == "skipped"
     assert "policy" in result["steps"][0]["reason"]
-    assert result["steps"][1]["step"] == 2
+    assert descriptions[2].count("Confirm deletion of the contact") == 1
+    assert result["steps"][1]["status"] == "skipped"
+    assert result["steps"][2]["step"] == 3
     assert len(grounded) == 1
     assert grounded[0].startswith("Press Cancel\n")
     assert controller.actions == [({"action": "back"}, True)]
@@ -1588,6 +1592,7 @@ def test_re_explore_leaves_the_graph_unchanged_when_the_replay_misses_the_source
     device_log: list[object],
 ) -> None:
     graph = _flagged_graph()
+    _describing_by_node_id(graph, monkeypatch)
     if arrives_at is None:
         monkeypatch.setattr(graph, "find_path", lambda *_args: None)
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: arrives_at)
@@ -1773,6 +1778,7 @@ def test_re_explore_does_not_explore_when_the_replay_after_a_correction_misses_t
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph = _flagged_graph()
+    _describing_by_node_id(graph, monkeypatch)
     reached = iter(["s0_home", "s2_settings", "s2_settings"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
 
@@ -1852,6 +1858,7 @@ def test_re_explore_replays_from_the_node_the_app_opened_on(
     graph = _graph_with_nodes(
         *((node, {}) for node in ("s0_alarms", "s1_clock", "s2_alarm", "s3_whats_new"))
     )
+    _describing_by_node_id(graph, monkeypatch)
     graph.add_edge(
         "s1_clock", "s0_alarms", [_OPEN_ALARMS], details=EdgeDetails(setup=[_SCROLL_CLOCKS])
     )
@@ -1881,6 +1888,7 @@ def test_re_explore_replays_each_action_after_its_setup(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}))
+    _describing_by_node_id(graph, monkeypatch)
     graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=EdgeDetails(setup=[_SWIPE]))
     _identifying(graph, monkeypatch, "s0_home", "s1_detail")
     issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
@@ -1916,6 +1924,7 @@ def test_re_explore_leaves_a_flagged_action_unverified_when_no_recorded_action_o
     """The flagged tap was sent in a menu with an unknown setup, so the retry could not
     send it in that menu: it sends nothing and leaves the graph as it was."""
     graph = _flagged_graph()
+    _describing_by_node_id(graph, monkeypatch)
     graph.graph["s0_home"]["s1_detail"]["open_menus"] = ["overflow menu"]
     edges = _edges(graph)
     _identifying(graph, monkeypatch, "s0_home")
