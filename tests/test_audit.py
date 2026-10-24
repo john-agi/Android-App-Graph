@@ -96,6 +96,62 @@ def test_audit_parser_defaults() -> None:
     assert args.steps_per_issue == 5
 
 
+@pytest.mark.parametrize(
+    ("kind", "advice", "effect"),
+    [
+        ("explore_node", "Test call initiation only with a controlled test number", "side_effect"),
+        ("explore_node", "Confirm Clear call history", "side_effect"),
+        ("explore_node", "Place a call to the controlled test number", "inspection"),
+        ("explore_node", "Confirm deletion of the contact", "inspection"),
+        ("retry_edge", "Send the message to Alice", "inspection"),
+        ("retry_edge", "Tap the final Delete button", "side_effect"),
+        ("explore_node", "Try the unlabeled action", "uncertain"),
+        ("explore_node", "Inspect the dialer", None),
+    ],
+)
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_execution_policy_skips_commitments_before_navigation(
+    kind: str,
+    advice: str,
+    effect: str | None,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph, graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    issue: dict[str, object] = {
+        "type": kind,
+        "node": "s0_home",
+        "source_node": "s0_home",
+        "target_node": "s1_detail",
+        "instruction": advice,
+        "expected_pages": [advice],
+    }
+    if effect is not None:
+        issue["execution"] = {"effect": effect, "reason": "Assessed proposed operation."}
+    controller = FakeController("com.demo")
+
+    [result] = audit.re_explore_issues(
+        graph,
+        [issue],
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=graph_path
+        ),
+        session=audit.ReExploreSession(
+            controller, ModelSettings("instruction-model"), ModelSettings("action-model")
+        ),
+        client=client,
+    )
+
+    assert result["status"] == "skipped"
+    assert "policy" in result["reason"]
+    assert result["issue"] == issue
+    assert controller.actions == []
+    assert device_log == []
+
+
 def test_audit_parser_overrides() -> None:
     args = audit.build_parser().parse_args(
         ["-c", "custom.yaml", "--app", "demo", "--re-explore", "--steps-per-issue", "9"]
