@@ -3436,7 +3436,7 @@ def _dump_timed_out() -> subprocess.TimeoutExpired:
 
 def _read_failed(diagnostic: str) -> subprocess.CalledProcessError:
     return subprocess.CalledProcessError(
-        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window"], stderr=diagnostic
+        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window", "-a"], stderr=diagnostic
     )
 
 
@@ -3764,7 +3764,9 @@ def _recovery_explorer(
 @pytest.mark.parametrize(
     "diagnostic", ["Permission denied", "invalid option -- bad", "Can't find service: window"]
 )
-@pytest.mark.parametrize("read", [["dumpsys", "window"], ["wm", "size"]])
+@pytest.mark.parametrize(
+    "read", [["dumpsys", "window", "-a"], ["dumpsys", "activity", "activities"], ["wm", "size"]]
+)
 def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     diagnostic: str,
     read: list[str],
@@ -3876,7 +3878,15 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
 @pytest.mark.parametrize(
     ("read_command", "stderr", "stdout", "failures", "diagnostic", "excluded", "stops"),
     [
-        (["shell", "dumpsys", "window"], b"error: closed", None, 2, "error: closed", "", False),
+        (
+            ["shell", "dumpsys", "window", "-a"],
+            b"error: closed",
+            None,
+            2,
+            "error: closed",
+            "",
+            False,
+        ),
         (
             ["exec-out", "uiautomator dump /dev/stdout"],
             "android.os.DeadObjectException",
@@ -3887,7 +3897,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             None,
             "Window{private-screen}\nerror: device offline",
             2,
@@ -3905,7 +3915,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             b"unclassified " + b"x" * 1100 + b"private-tail",
             None,
             1,
@@ -3914,7 +3924,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             None,
             "Permission denied\nWindow{private-screen}",
             1,
@@ -3987,7 +3997,7 @@ def test_recovery_uses_bounded_error_diagnostics_and_preserves_observation_paylo
             "com.demo",
             "android.permission.CAMERA",
         ],
-        ["adb", "-s", "other-device", "shell", "dumpsys", "window"],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "window", "-a"],
         ["adb", "-s", "other-device", "shell", "wm", "size"],
         ["adb", "-s", "test-device", "shell", "wm", "density", "reset"],
         ["adb", "-s", "test-device", "shell", "settings", "put", "system", "font_scale", "1"],

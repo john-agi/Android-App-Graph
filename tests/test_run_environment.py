@@ -767,3 +767,80 @@ def test_recorded_display_and_current_input_regions_guard_the_same_replay(
     report = json.loads(environment.path.read_text())
     assert report["lifecycle"] == "restored"
     assert report["changes"][0]["observation"] == observed["observation_id"]
+
+
+@pytest.mark.usefixtures("adb_on_path")
+@pytest.mark.parametrize(
+    "command", [("dumpsys", "window", "-a"), ("dumpsys", "activity", "activities")]
+)
+@pytest.mark.parametrize("diagnostic", ["error: device offline", "Permission denied", ""])
+def test_native_ownership_reads_share_recovery_policy_inside_the_baseline_lifecycle(
+    tmp_path: Path,
+    png_screenshot: str,
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: list[float],
+    command: tuple[str, ...],
+    diagnostic: str,
+) -> None:
+    permission = "com.android.permissioncontroller/.GrantPermissionsActivity"
+    window = (
+        f"mCurrentFocus=Window{{window u0 {permission}}}\n"
+        f"mFocusedApp=ActivityRecord{{focused u0 {permission} t1}}\n"
+    )
+    activities = f"  * Hist #0: ActivityRecord{{focused u0 {permission} t1}}\n    launchedFromPackage=com.demo\n"
+    replies: dict[tuple[str, ...], str | bytes] = {
+        ("shell", "wm", "size"): "Physical size: 720x1280\n",
+        ("shell", "true"): "",
+        ("exec-out", "uiautomator dump /dev/stdout"): "<hierarchy/>",
+        ("shell", "dumpsys", "window", "-a"): window,
+        ("shell", "dumpsys", "activity", "activities"): activities,
+        ("exec-out", "screencap -p"): base64.b64decode(png_screenshot),
+    }
+    attempts: list[tuple[str, ...]] = []
+    failures: list[subprocess.CalledProcessError] = []
+    failed_read = ("shell", *command)
+    failure_limit = 2 if not diagnostic else 1
+
+    def run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str | bytes]:
+        read = tuple(args[3:])
+        attempts.append(read)
+        if read == failed_read and len(failures) < failure_limit:
+            error = subprocess.CalledProcessError(1, args, stderr=diagnostic)
+            failures.append(error)
+            raise error
+        reply = replies[read]
+        return subprocess.CompletedProcess(args, 0, stdout=reply, stderr="")
+
+    monkeypatch.setattr(device.subprocess, "run", run)
+    monkeypatch.setattr(device.time, "monotonic", lambda: sum(no_sleep))
+    controller = device.AdbController(
+        {"device": {"udid": "fake"}}, logging.getLogger("test"), unreachable_limit=35
+    )
+    access = _Access()
+    environment = RunEnvironment(
+        controller, access, tmp_path / "demo.json", mutation={}, logger=logging.getLogger("test")
+    )
+    with environment:
+        recorder = StepRecorder(
+            environment,
+            tmp_path / "steps",
+            run_kind="explore",
+            source="device_recovery",
+            target_package="com.demo",
+        )
+        if diagnostic == "error: device offline":
+            observed = device.wait_for_device_state(recorder, 35, logging.getLogger("test"))
+            assert observed["system_surface"] == "permission"
+            assert observed["permission_requester"] == "com.demo"
+            assert observed["display_state"] == access.original.to_dict()
+        else:
+            with pytest.raises(subprocess.CalledProcessError) as caught:
+                device.wait_for_device_state(recorder, 35, logging.getLogger("test"))
+            assert caught.value is failures[-1]
+    assert len(failures) == failure_limit
+    assert no_sleep == ([] if diagnostic == "Permission denied" else [30])
+    assert attempts.count(("shell", "true")) == (1 if diagnostic == "Permission denied" else 2)
+    assert attempts.count(failed_read) == (
+        2 if diagnostic == "error: device offline" else failure_limit
+    )
+    assert json.loads(environment.path.read_text())["lifecycle"] == "restored"
