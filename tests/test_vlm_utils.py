@@ -1599,6 +1599,133 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
     assert "finish_reason=length, reasoning_tokens=2950" in caplog.text
 
 
+@pytest.fixture
+def normalization_prompt(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> str:
+    router_responses.append(chat_response(content='{"instruction_template":"Tap Search"}'))
+    vlm.normalize_edge(router_client, ["Tap Search"], settings=PAGE_DETAIL)
+
+    (request,) = router_requests
+    body = as_object_dict(json.loads(request.content))
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    content = as_object_dict(messages[-1])["content"]
+    assert isinstance(content, str)
+    return content
+
+
+def _normalization_example(prompt: str, index: int) -> dict[str, object]:
+    outputs = [
+        line.strip().removeprefix("Output: ")
+        for line in prompt.splitlines()
+        if line.strip().startswith("Output: ")
+    ]
+    assert len(outputs) == 4
+    return as_object_dict(json.loads(outputs[index]))
+
+
+@pytest.mark.parametrize(
+    ("index", "is_template", "different_actions"),
+    [(0, True, False), (1, False, False), (2, True, False), (3, False, True)],
+    ids=["search", "unchanged", "location", "different-actions"],
+)
+def test_normalization_output_examples_are_json_with_the_response_fields(
+    normalization_prompt: str, index: int, is_template: bool, different_actions: bool
+) -> None:
+    example = _normalization_example(normalization_prompt, index)
+
+    assert set(example) == {
+        "different_actions",
+        "instruction_template",
+        "observation_template",
+        "is_template",
+        "param_names",
+        "examples",
+    }
+    assert isinstance(example["instruction_template"], str)
+    assert isinstance(example["observation_template"], str)
+    assert isinstance(example["param_names"], list)
+    assert isinstance(example["examples"], list)
+    assert example["is_template"] is is_template
+    assert example["different_actions"] is different_actions
+    if not is_template:
+        assert example["instruction_template"] == (
+            "" if different_actions else "Tap the Settings icon"
+        )
+        assert example["observation_template"] == ""
+        assert example["param_names"] == []
+        assert example["examples"] == []
+
+
+def test_normalization_guidance_uses_single_brace_placeholder_names(
+    normalization_prompt: str,
+) -> None:
+    guidance = normalization_prompt.split("\n\nReturn a JSON object:\n", 1)[0]
+
+    assert "{{" not in guidance
+    assert "}}" not in guidance
+    for name in ("placeholder", "query", "location", "item_name", "date", "amount"):
+        assert f"{{{name}}}" in guidance
+
+
+@pytest.mark.parametrize(
+    ("index", "name", "values"),
+    [(0, "query", ["egg", "milk"]), (2, "location", ["Waterloo", "221B Baker Street"])],
+)
+def test_normalization_parameter_examples_match_single_brace_templates(
+    normalization_prompt: str, index: int, name: str, values: list[str]
+) -> None:
+    output = _normalization_example(normalization_prompt, index)
+    instruction = as_str(output["instruction_template"], "")
+    observation = as_str(output["observation_template"], "")
+    placeholder = f"{{{name}}}"
+
+    assert re.findall(r"\{+[^{}]+\}+", instruction) == [placeholder]
+    assert re.findall(r"\{+[^{}]+\}+", observation) == [placeholder]
+    assert output["param_names"] == [name]
+    examples = output["examples"]
+    assert isinstance(examples, list)
+    assert len(examples) == len(values)
+    for example, value in zip(examples, values, strict=True):
+        concrete = as_object_dict(example)
+        assert concrete["params"] == {name: value}
+        assert concrete["instruction"] == instruction.replace(placeholder, value)
+
+
+def test_normalize_edge_preserves_literal_input_braces_and_template_reply(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    instruction = "Type '{query}' and '{{literal_query}}' in the start location field"
+    observation = '{"location": {"name": "{{literal_name}}"}} and {unfinished'
+    reply = {
+        "different_actions": False,
+        "instruction_template": "Type '{{location}}' in the start location field",
+        "observation_template": "start location field shows {{location}}",
+        "is_template": True,
+        "param_names": ["location"],
+        "examples": [],
+    }
+    router_responses.append(chat_response(content=json.dumps(reply)))
+
+    result = vlm.normalize_edge(router_client, [instruction], [observation], settings=PAGE_DETAIL)
+
+    (request,) = router_requests
+    body = as_object_dict(json.loads(request.content))
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    prompt = as_object_dict(messages[-1])["content"]
+    assert isinstance(prompt, str)
+    assert prompt.endswith(f'- Instruction: "{instruction}" → Observation: "{observation}"\n')
+    assert result == reply
+
+
 def test_normalize_edge_pairs_each_instruction_with_its_own_observation(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
