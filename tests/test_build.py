@@ -28,7 +28,7 @@ from android_app_graph.step_log import (
 )
 from android_app_graph.utils import MatchingSettings, ModelSettings, graph_manager
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, GraphManager
-from android_app_graph.utils.vlm_utils import DescribedScreenshot
+from android_app_graph.utils.vlm_utils import DescribedScreenshot, DescribeRequest
 
 APP = "com.demo"
 OTHER_APP = "com.other"
@@ -203,13 +203,12 @@ class _FakeVlm:
     def describe(
         self,
         _client: OpenRouter | None,
-        screenshot_b64: str,
-        known_descriptions: list[str] | None = None,
-        existing_keys: list[str] | None = None,
+        request: DescribeRequest,
+        *,
         settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
-        del known_descriptions, existing_keys, settings
-        page = self.by_image[screenshot_b64]
+        del settings
+        page = self.by_image[request.screenshot_b64]
         return page.description, dict(page.state), [], page.external_web
 
     def verify(

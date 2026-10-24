@@ -26,6 +26,7 @@ from android_app_graph.graph_files import (
 from android_app_graph.payloads import as_object_dict, as_str
 from android_app_graph.step_log import (
     load_image_embeddings,
+    observation_ownership,
     read_records,
     recorded_observation,
     step_order,
@@ -109,6 +110,8 @@ def read_recorded_log(steps: Path, run_kinds: Collection[str]) -> RecordedLog:
     if unrecorded:
         msg = f"{steps} has match records of observations without a record: {unrecorded}"
         raise ValueError(msg)
+    for record in observations.values():
+        observation_ownership(record)
     return log
 
 

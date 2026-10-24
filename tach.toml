@@ -22,6 +22,7 @@ depends_on = [
     "android_app_graph.payloads",
     "android_app_graph.screen_image",
     "android_app_graph.step_log",
+    "android_app_graph.system_surfaces",
     "android_app_graph.utils",
     "android_app_graph.utils.graph_manager",
     "android_app_graph.utils.logging",
@@ -50,6 +51,7 @@ depends_on = [
     "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.screen_image",
+    "android_app_graph.system_surfaces",
 ]
 
 [[modules]]
@@ -67,6 +69,7 @@ depends_on = [
     "android_app_graph.device",
     "android_app_graph.graph_files",
     "android_app_graph.step_log",
+    "android_app_graph.system_surfaces",
     "android_app_graph.utils",
     "android_app_graph.utils.graph_manager",
     "android_app_graph.utils.vlm_utils",
@@ -103,7 +106,7 @@ depends_on = []
 
 [[modules]]
 path = "android_app_graph.device"
-depends_on = []
+depends_on = ["android_app_graph.system_surfaces"]
 
 [[modules]]
 path = "android_app_graph.payloads"
@@ -112,3 +115,7 @@ depends_on = []
 [[modules]]
 path = "android_app_graph.retrying"
 depends_on = []
+
+[[modules]]
+path = "android_app_graph.system_surfaces"
+depends_on = ["android_app_graph.payloads"]

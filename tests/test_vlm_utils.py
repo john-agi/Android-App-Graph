@@ -404,7 +404,11 @@ def _verify_itself(client: OpenRouter, screenshot: str, description: str) -> dic
 
 _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
     "page": lambda client, screenshot: vlm.describe_page_and_state(
-        client, screenshot, settings=PAGE_DETAIL
+        client,
+        vlm.DescribeRequest(
+            screenshot_b64=screenshot,
+        ),
+        settings=PAGE_DETAIL,
     ),
     "verify": lambda client, screenshot: _verify_itself(client, screenshot, "home"),
     "normalize": lambda client, _screenshot: vlm.normalize_edge(
@@ -678,7 +682,13 @@ def _sent_schemas(
             "{}",
         )
     )
-    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+    vlm.describe_page_and_state(
+        router_client,
+        vlm.DescribeRequest(
+            screenshot_b64=png_screenshot,
+        ),
+        settings=PAGE_DETAIL,
+    )
     _verify_itself(router_client, png_screenshot, "home")
     vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
@@ -737,7 +747,11 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
         chat_response(content='{"page_description":"news article","is_external_web":true}')
     )
     *_, is_external_web = vlm.describe_page_and_state(
-        router_client, png_screenshot, settings=PAGE_DETAIL
+        router_client,
+        vlm.DescribeRequest(
+            screenshot_b64=png_screenshot,
+        ),
+        settings=PAGE_DETAIL,
     )
     assert is_external_web is True
     body = json.loads(router_requests[0].content)
@@ -789,8 +803,9 @@ def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
         )
         vlm.describe_page_and_state(
             router_client,
-            png_screenshot,
-            known_descriptions=known_descriptions,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot, known_descriptions=known_descriptions
+            ),
             settings=PAGE_DETAIL,
         )
     for request in router_requests:
@@ -832,8 +847,9 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
         )
         vlm.describe_page_and_state(
             router_client,
-            png_screenshot,
-            known_descriptions=known_descriptions,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot, known_descriptions=known_descriptions
+            ),
             settings=PAGE_DETAIL,
         )
     for request in router_requests:
@@ -1156,7 +1172,13 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
                 settings=ACTION,
             )[0]
         case _:
-            return vlm.describe_page_and_state(client, png_screenshot, settings=PAGE_DETAIL)[0]
+            return vlm.describe_page_and_state(
+                client,
+                vlm.DescribeRequest(
+                    screenshot_b64=png_screenshot,
+                ),
+                settings=PAGE_DETAIL,
+            )[0]
 
 
 _GOOD_REPLIES: dict[str, str] = {
@@ -1302,7 +1324,13 @@ def _send_every_model_call(
     )
     page_detail = settings["page_detail"]
     shown = vlm.DescribedScreenshot(screenshot, "home")
-    vlm.describe_page_and_state(client, screenshot, settings=page_detail)
+    vlm.describe_page_and_state(
+        client,
+        vlm.DescribeRequest(
+            screenshot_b64=screenshot,
+        ),
+        settings=page_detail,
+    )
     vlm.verify_same_node(client, existing=shown, new=shown, settings=page_detail)
     vlm.normalize_edge(client, ["search milk"], settings=page_detail)
     vlm.audit_merge_nodes(client, "home", settings=page_detail)
@@ -1524,7 +1552,13 @@ def test_a_malformed_page_description_is_re_asked_once_then_raises(
 ) -> None:
     router_responses.extend(chat_response(content=malformed) for _ in range(2))
     with pytest.raises(UnusableOutputError, match="Malformed page description") as caught:
-        vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+        vlm.describe_page_and_state(
+            router_client,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot,
+            ),
+            settings=PAGE_DETAIL,
+        )
     assert isinstance(caught.value.__cause__, error)
     assert message in str(caught.value.__cause__)
     assert len(router_requests) == 2
@@ -1831,7 +1865,13 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
 
     def request() -> object:
         if operation == "description":
-            return vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+            return vlm.describe_page_and_state(
+                router_client,
+                vlm.DescribeRequest(
+                    screenshot_b64=png_screenshot,
+                ),
+                settings=PAGE_DETAIL,
+            )
         return vlm.plan_next_action(
             router_client,
             vlm.PlanRequest(
@@ -1991,7 +2031,13 @@ def test_a_page_description_that_still_times_out_raises(
     timing_out_client: OpenRouter, png_screenshot: str
 ) -> None:
     with pytest.raises(httpx.ReadTimeout, match="no complete response"):
-        vlm.describe_page_and_state(timing_out_client, png_screenshot, settings=PAGE_DETAIL)
+        vlm.describe_page_and_state(
+            timing_out_client,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot,
+            ),
+            settings=PAGE_DETAIL,
+        )
 
 
 def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_content(
@@ -2480,3 +2526,70 @@ def test_text_planning_establishes_the_intended_field_before_typing(
     assert "tap the intended field as a separate action, then observe before typing" in prompt
     assert "current screenshot description" in prompt
     assert "current caret or field highlight" in prompt
+
+
+def test_observed_feedback_scope_preserves_app_controls_and_action_context(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.extend(
+        [
+            chat_response(
+                content='{"page_description":"Calculator","state":{},"elements":[{"description":"App Share","position":"top"}]}'
+            ),
+            chat_response(content='{"element":1,"instruction":"Tap unobscured app Share"}'),
+            chat_response(content='{"action":"wait"}'),
+            chat_response(content='{"same":true}'),
+        ]
+    )
+    vlm.describe_page_and_state(
+        router_client,
+        vlm.DescribeRequest(screenshot_b64=png_screenshot, system_feedback=True),
+        settings=PAGE_DETAIL,
+    )
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot,
+            page_description="Calculator",
+            node="s0",
+            explored_edges=[],
+            app_name="Calculator",
+            system_feedback=True,
+        ),
+        settings=PAGE_DETAIL,
+    )
+    vlm.predict_next_action(
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot,
+            instruction="Tap unobscured app Share",
+            action_history=["Copy app result"],
+            overall_task="Inspect calculator actions",
+            system_feedback=True,
+        ),
+        settings=PAGE_DETAIL,
+    )
+    vlm.verify_same_node(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Calculator", system_feedback=True),
+        new=vlm.DescribedScreenshot(png_screenshot, "Calculator"),
+        settings=PAGE_DETAIL,
+    )
+    bodies = [json.loads(r.content) for r in router_requests]
+    prompts = [
+        " ".join(
+            part.get("text", "")
+            for m in body["messages"]
+            for part in (m["content"] if isinstance(m["content"], list) else [])
+        )
+        for body in bodies
+    ]
+    assert all("clipboard feedback" in prompt for prompt in prompts)
+    assert "App Copy and Share controls outside the mask remain available" in prompts[1]
+    assert "Copy app result" in prompts[2]
+    assert "Inspect calculator actions" in prompts[2]
+    assert "compare the app outside them" in prompts[3]

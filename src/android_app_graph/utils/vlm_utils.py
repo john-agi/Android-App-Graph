@@ -953,11 +953,19 @@ def _parse_page_description(
     return description, as_object_dict(state), elements, is_external_web
 
 
+@dataclass(frozen=True, kw_only=True)
+class DescribeRequest:
+    """An app image with bounded context and observed system-feedback ownership."""
+
+    screenshot_b64: str
+    known_descriptions: list[str] | None = None
+    existing_keys: list[str] | None = None
+    system_feedback: bool = False
+
+
 def describe_page_and_state(
     client: OpenRouter,
-    screenshot_b64: str,
-    known_descriptions: list[str] | None = None,
-    existing_keys: list[str] | None = None,
+    request: DescribeRequest,
     *,
     settings: ModelSettings,
 ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
@@ -978,6 +986,9 @@ def describe_page_and_state(
         where elements_list is a list of {"description": str, "position": str} dicts
         and is_external_web is true only for web content from outside the app.
     """
+    screenshot_b64 = request.screenshot_b64
+    known_descriptions, existing_keys = request.known_descriptions, request.existing_keys
+    system_feedback = request.system_feedback
     if known_descriptions:
         listed = "\n".join(f'  - "{d}"' for d in known_descriptions)
         known_descriptions_section = (
@@ -1008,7 +1019,15 @@ def describe_page_and_state(
             "dynamic parameters that define this screen's state."
         )
 
-    prompt = PAGE_DESCRIBE_AND_STATE_PROMPT.format(
+    ownership_hint = (
+        (
+            "Gray masked regions are observed system-owned clipboard feedback. Describe only the "
+            "underlying app and its visible controls; masked feedback supplies no app elements or state.\n"
+        )
+        if system_feedback
+        else ""
+    )
+    prompt = ownership_hint + PAGE_DESCRIBE_AND_STATE_PROMPT.format(
         known_descriptions_section=known_descriptions_section,
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
@@ -1061,11 +1080,17 @@ class DescribedScreenshot:
 
     screenshot_b64: str
     description: str
+    system_feedback: bool = False
 
 
 def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItemsTypedDict]:
+    ownership = (
+        " Gray masked regions are unavailable system-owned clipboard feedback; compare the app outside them."
+        if screenshot.system_feedback
+        else ""
+    )
     return [
-        {"type": "text", "text": f'{label}, described as "{screenshot.description}":'},
+        {"type": "text", "text": f'{label}, described as "{screenshot.description}":{ownership}'},
         build_image_message(screenshot.screenshot_b64),
     ]
 
@@ -1990,6 +2015,7 @@ class PlanRequest:
     unexplored_elements: list[dict[str, Any]] | None = None
     input_status: str = "Keyboard visibility and focused field are unknown."
     back_leaves_app: bool = False
+    system_feedback: bool = False
 
 
 def _tried_actions(edge: dict[str, Any]) -> list[tuple[str, str]]:
@@ -2068,7 +2094,16 @@ def plan_next_action(
     else:
         unexplored_section = ""
 
-    prompt = NEXT_ACTION_PLAN_PROMPT.format(
+    ownership_hint = (
+        (
+            "Gray masked regions are unavailable system-owned clipboard feedback. Select an "
+            "unobscured app control, or wait for an ordinary observation. App Copy and Share "
+            "controls outside the mask remain available.\n"
+        )
+        if request.system_feedback
+        else ""
+    )
+    prompt = ownership_hint + NEXT_ACTION_PLAN_PROMPT.format(
         app_name=request.app_name,
         page_description=request.page_description,
         input_status=request.input_status,
@@ -2315,6 +2350,7 @@ class ActionRequest:
     screen_h: int = 1920
     action_history: list[str] | None = None
     overall_task: str = ""
+    system_feedback: bool = False
 
 
 def predict_next_action(
@@ -2347,7 +2383,15 @@ def predict_next_action(
     else:
         overall_task_section = ""
 
-    user_prompt = NEXT_ACTION_USER_PROMPT.format(
+    ownership_hint = (
+        (
+            "Gray masked regions belong to system clipboard feedback. Act only on an "
+            "unobscured app control; wait if the intended target is covered.\n"
+        )
+        if request.system_feedback
+        else ""
+    )
+    user_prompt = ownership_hint + NEXT_ACTION_USER_PROMPT.format(
         instruction=request.instruction,
         overall_task_section=overall_task_section,
         history_section=history_section,
