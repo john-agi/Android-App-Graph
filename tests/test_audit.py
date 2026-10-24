@@ -2880,7 +2880,7 @@ def test_a_display_rejected_return_replay_retains_the_applied_edge_correction(
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
 def test_re_explore_reports_a_missing_run_baseline_without_a_traceback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _install_fake_adb(monkeypatch, FakeController("com.demo"))
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
@@ -2904,6 +2904,7 @@ def test_re_explore_reports_a_missing_run_baseline_without_a_traceback(
         audit, "run_audit", lambda *_args: {"issues": [{"type": "explore_node", "node": "s0"}]}
     )
     assert audit.main(["--config", str(config), "--re-explore"]) == 1
-    assert "original run baseline" in caplog.text
-    assert "Traceback" not in caplog.text
+    error = capsys.readouterr().err
+    assert "app-graph-audit: error: The existing graph requires its original run baseline" in error
+    assert "Traceback" not in error
     assert not graph_path.with_name("demo_run.json").exists()

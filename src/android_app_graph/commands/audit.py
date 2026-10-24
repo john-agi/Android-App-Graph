@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
@@ -62,7 +63,12 @@ from android_app_graph.member_groups import (
     TEXT_GROUPING_FLOOR,
     MemberCheck,
 )
-from android_app_graph.run_environment import RunEnvironment, UnsafeReplayError, mutation_config
+from android_app_graph.run_environment import (
+    RunBaselineError,
+    RunEnvironment,
+    UnsafeReplayError,
+    mutation_config,
+)
 from android_app_graph.step_log import (
     Observation,
     StepRecorder,
@@ -770,8 +776,8 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     if executed:
         try:
             reached = _replay_to(run, source)
-        except _InspectionBlockedError as exc:
-            outcome["reason"] = str(exc)
+        except (_InspectionBlockedError, UnsafeReplayError) as error:
+            outcome = {**outcome, "reason": str(error)}
             reached = None
         if reached != run.graph.resolve_node_id(source):
             logger.warning("Replay after the correction missed %s; not exploring", source)
@@ -1207,8 +1213,12 @@ def main(argv: list[str] | None = None) -> int:
             matching=matching,
             session=session,
         )
-        for app in selected_apps:
-            _audit_app(run, app)
+        try:
+            for app in selected_apps:
+                _audit_app(run, app)
+        except RunBaselineError as error:
+            sys.stderr.write(f"app-graph-audit: error: {error}\n")
+            return 1
 
     token_tracker.print_summary()
     logger.info("Audit complete.")

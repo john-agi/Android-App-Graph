@@ -379,6 +379,13 @@ class AdbDisplayAccess:
         self._serial = ["-s", udid]
 
     def _read(self, command: tuple[str, ...], deadline: float) -> str:
+        try:
+            return self._run(command, deadline)
+        except subprocess.TimeoutExpired:
+            logger.warning("Display read %s timed out; retrying once", shlex.join(command))
+            return self._run(command, deadline)
+
+    def _run(self, command: tuple[str, ...], deadline: float) -> str:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(command, 0)
@@ -433,7 +440,7 @@ class AdbDisplayAccess:
         return [int(match[1]), int(match[2])] if pair else int(match[1])
 
     def execute(self, command: tuple[str, ...], *, deadline: float) -> None:
-        self._read(command, deadline)
+        self._run(command, deadline)
 
     def seed_hashes(self, root: str, *, deadline: float | None = None) -> dict[str, str]:
         bound = time.monotonic() + _READ_TIMEOUT_SECONDS if deadline is None else deadline
@@ -857,6 +864,16 @@ def _read_phase(command: object, udid: str) -> str | None:
             return "screenshot"
         case [str(), "-s", serial, "shell", "dumpsys", "window"] if serial == udid:
             return "window"
+        case [str(), "-s", serial, "shell", *arguments] if serial == udid:
+            display_reads = (
+                ("wm", "size"),
+                ("wm", "density"),
+                ("dumpsys", "uimode"),
+                ("cmd", "uimode", "night"),
+                ("settings", "get", "system", "font_scale"),
+                *(("settings", "get", "secure", key) for key in NIGHT_KEYS),
+            )
+            return "display" if tuple(arguments) in display_reads else None
         case _:
             return None
 

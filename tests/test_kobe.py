@@ -3750,8 +3750,10 @@ def _recovery_explorer(
 @pytest.mark.parametrize(
     "diagnostic", ["Permission denied", "invalid option -- bad", "Can't find service: window"]
 )
+@pytest.mark.parametrize("read", [["dumpsys", "window"], ["wm", "size"]])
 def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     diagnostic: str,
+    read: list[str],
     tmp_path: Path,
     router_client: OpenRouter,
     no_sleep: list[float],
@@ -3761,7 +3763,9 @@ def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     log: list[object] = []
     monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
     monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
-    failure = _read_failed(diagnostic)
+    failure = subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", "shell", *read], stderr=diagnostic
+    )
     explorer = _recovery_explorer(log, [failure], tmp_path, router_client, monkeypatch)
 
     with pytest.raises(subprocess.CalledProcessError) as raised:
@@ -3771,7 +3775,7 @@ def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     assert log == [_PROBE]
     assert no_sleep == []
     assert any(
-        "dumpsys window" in line and "exit 1" in line and diagnostic in line
+        " ".join(read) in line and "exit 1" in line and diagnostic in line
         for line in caplog.messages
     )
 
@@ -3970,6 +3974,9 @@ def test_recovery_uses_bounded_error_diagnostics_and_preserves_observation_paylo
             "android.permission.CAMERA",
         ],
         ["adb", "-s", "other-device", "shell", "dumpsys", "window"],
+        ["adb", "-s", "other-device", "shell", "wm", "size"],
+        ["adb", "-s", "test-device", "shell", "wm", "density", "reset"],
+        ["adb", "-s", "test-device", "shell", "settings", "put", "system", "font_scale", "1"],
     ],
 )
 def test_recovery_stops_nonzero_commands_outside_its_observation_reads(

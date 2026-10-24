@@ -226,23 +226,17 @@ def test_display_reads_retry_one_timeout_within_the_original_deadline(
     now = 10.0
 
     def run(
-        args: list[str], *, timeout: float, **kwargs: object
+        args: list[str], *, output: str, check: bool, timeout: float
     ) -> subprocess.CompletedProcess[str]:
         nonlocal now
         attempts.append(timeout)
         if len(attempts) <= failures:
             now += 2
             raise subprocess.TimeoutExpired(args, timeout)
-        return adb.run(args, output="capture", check=True, timeout=timeout, **kwargs)
-
-    def adapter(
-        args: list[str], *, output: str, check: bool, timeout: float
-    ) -> subprocess.CompletedProcess[str]:
-        del output, check
-        return run(args, timeout=timeout)
+        return adb.run(args, output=output, check=check, timeout=timeout)
 
     monkeypatch.setattr(device.time, "monotonic", lambda: now)
-    monkeypatch.setattr(device, "run_adb", adapter)
+    monkeypatch.setattr(device, "run_adb", run)
     if failures == 1:
         assert device.AdbDisplayAccess("fake").capture(deadline=14).physical_size == (720, 1280)
         assert attempts[:2] == [3, 2]
@@ -296,3 +290,20 @@ def test_display_transport_failures_recover_the_complete_observation(
     state = device.wait_for_device_state(ObservedDisplay(), 5, logging.getLogger("test"))
     assert failed
     assert state["display"]["physical_size"] == [720, 1280]
+
+
+def test_display_write_timeout_leaves_retry_to_cleanup_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[list[str]] = []
+
+    def timeout(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        attempts.append(args)
+        raise subprocess.TimeoutExpired(args, 3)
+
+    monkeypatch.setattr(device, "run_adb", timeout)
+    with pytest.raises(subprocess.TimeoutExpired):
+        device.AdbDisplayAccess("fake").execute(
+            ("wm", "density", "reset"), deadline=time.monotonic() + 10
+        )
+    assert attempts == [["-s", "fake", "shell", "wm", "density", "reset"]]

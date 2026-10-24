@@ -36,6 +36,10 @@ class RunRecording(Protocol):
     def record_observation(self, observation_id: str, source: str) -> None: ...
 
 
+class RunBaselineError(ValueError):
+    """The graph and device require their original recorded baseline."""
+
+
 class UnsafeReplayError(ValueError):
     """The current display differs from a coordinate action's recorded display."""
 
@@ -142,17 +146,17 @@ class RunEnvironment:
             self._report = as_object_dict(json.loads(self.path.read_text()))
             if self._report["graph"] != str(self._graph.resolve()):
                 msg = "The run baseline belongs to another graph path"
-                raise ValueError(msg)
+                raise RunBaselineError(msg)
             if self._report["device"] != self._device:
                 msg = "The run baseline belongs to another device"
-                raise ValueError(msg)
+                raise RunBaselineError(msg)
             DisplayState.from_dict(self._report["baseline"])
             for name in ("changes", "cleanup", "unsafe_replays"):
                 self._items(name)
         else:
             if self._graph.exists():
                 msg = f"The existing graph requires its original run baseline: {self.path}"
-                raise ValueError(msg)
+                raise RunBaselineError(msg)
             baseline = self._access.capture()
             self._report = {
                 "graph": str(self._graph.resolve()),

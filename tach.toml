@@ -69,6 +69,7 @@ depends_on = [
 [[modules]]
 path = "android_app_graph.kobe"
 depends_on = [
+    "android_app_graph.run_environment",
     "android_app_graph.device",
     "android_app_graph.graph_files",
     "android_app_graph.step_log",

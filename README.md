@@ -537,7 +537,11 @@ For long runs, use the auto-resume wrapper:
 `app-graph` captures a display baseline before app startup and keeps it in
 `<graph_dir>/<app>/<app>_run.json`. The sidecar belongs to that graph path and
 ADB device. Resume uses its original baseline; an existing graph requires its
-sidecar. Library callers scope their `DeviceController` through the
+sidecar. A missing sidecar or a graph/device identity mismatch stops the CLI
+with an operator error. Keep a graph and its sidecar at their recorded path
+on the recorded device. For a new baseline, configure a fresh `graph_dir`
+and build a new graph; preserve existing graph files as read-only evidence.
+Library callers scope their `DeviceController` through the
 `RunEnvironment` context manager and its typed `DisplayAccess` backend.
 
 The supported baseline includes physical size/density, the presence and values
@@ -553,7 +557,9 @@ graph save/load. Replay compares it with current settings and native screenshot
 size, even when the old coordinates fit inside the new frame. A mismatch or
 missing evidence records a rejected action and requires the recorded display
 state or fresh grounding. Fresh app actions continue under the current display
-configuration.
+configuration. A resume whose coordinate replay is rejected identifies the
+current screen and continues with freshly planned actions. Audit results retain
+an applied edge correction when the return replay is rejected.
 
 On completion, interruption or handled failure, cleanup attempts only supported
 display restoration within one bounded deadline. Verification allows one selective

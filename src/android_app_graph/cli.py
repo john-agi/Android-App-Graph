@@ -22,7 +22,7 @@ from android_app_graph.device import (
 from android_app_graph.graph_files import app_graph_path
 from android_app_graph.kobe import EXPLORATION_ROLES, ExplorerConfig, Kobe
 from android_app_graph.payloads import as_object_dict
-from android_app_graph.run_environment import RunEnvironment, mutation_config
+from android_app_graph.run_environment import RunBaselineError, RunEnvironment, mutation_config
 from android_app_graph.utils import (
     check_config_keys,
     open_client,
@@ -92,11 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """Run app-graph. When adb cannot reach its server, or the device stays unreachable
-    past ``device.unreachable_limit``, exit with status 1 and the error, without a
-    traceback."""
+    past ``device.unreachable_limit``, or a graph requires a matching baseline,
+    exit with status 1 and a diagnostic."""
     try:
         _explore()
-    except (AdbServerUnreachableError, DeviceUnreachableError) as exc:
+    except (AdbServerUnreachableError, DeviceUnreachableError, RunBaselineError) as exc:
         sys.exit(f"app-graph: error: {exc}")
 
 
