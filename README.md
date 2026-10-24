@@ -770,10 +770,11 @@ where text goes. When the intended field's focus is unclear, it taps that field 
 one step and observes the result before typing. An already identified active field
 can receive text directly.
 
-Type replaces the complete focused value as one recorded action. It targets standard
-editable fields that handle Android Select All and delete keyboard editing: a keyboard
-Ctrl+A combination selects the value, one Delete removes it, and the requested text
-is entered with shell quoting and virtual keyboard character support.
+On the [supported Android versions](#prerequisites), Type replaces the complete focused
+value as one recorded action. It targets standard editable fields that handle Android
+Select All and delete keyboard editing: a keyboard Ctrl+A combination selects the value,
+one Delete removes it, and the requested text is entered with shell quoting and virtual
+keyboard character support.
 Replacement is independent of the previous value's length, caret position and selection.
 Custom widgets, intercepted shortcuts and other IMEs are outside the validated support.
 An adb command's successful exit reports command acceptance, without acknowledging
