@@ -1302,6 +1302,20 @@ For example:
 - A "search results page" with no edge for tapping a result item
 For each, describe what edges/actions are likely missing.
 
+## Unattended execution policy
+Every retry_edge and explore_node includes an execution assessment with effect
+"inspection", "side_effect" or "uncertain", and a concrete reason. Inspection includes
+opening a dialer, an editable form, a share chooser, or a confirmation dialog followed
+by Cancel, and reading settings. Temporary form edits on disposable data remain usable.
+Keep executable suggestions within these inspection actions. Placing a call (including
+with a controlled test number), actually sending data, confirming deletion or clearing
+history, purchases, account enrollment and security changes are side_effect operations.
+Record their missing coverage as non-executable advice rather than an instruction to
+try them. Use uncertain when the operation's effect is unclear. A recorded action is
+not permission to repeat it: assess the retry instruction too. Describe opening a
+confirmation and cancelling separately from committing it. Every expected_pages entry
+must stay within the assessment; a safe entry cannot authorize a consequential one.
+
 Return a JSON object:
 {{
   "issues": [
@@ -1318,14 +1332,16 @@ Return a JSON object:
       "description": "why this edge looks wrong",
       "source_node": "node_id where the edge starts",
       "target_node": "node_id where the edge currently goes (wrongly)",
-      "instruction": "the edge instruction that looks mismatched"
+      "instruction": "the edge instruction that looks mismatched",
+      "execution": {{"effect": "inspection" | "side_effect" | "uncertain", "reason": "operation and effect"}}
     }},
     {{
       "type": "explore_node",
       "severity": "high" | "medium" | "low",
       "description": "what is likely missing from this node",
       "node": "node_id that needs more exploration",
-      "expected_pages": ["page that should be reachable from this node", "another reachable page"]
+      "expected_pages": ["page that should be reachable from this node", "another reachable page"],
+      "execution": {{"effect": "inspection" | "side_effect" | "uncertain", "reason": "operation and effect"}}
     }}
   ],
   "summary": "one-paragraph overall assessment of graph quality"
@@ -1391,6 +1407,21 @@ _NODE_MERGE_AUDIT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_AUDIT_EXECUTION_ASSESSMENT: dict[str, object] = {
+    "type": "object",
+    "description": "Assessment of unattended execution under the inspection policy.",
+    "properties": {
+        "effect": {
+            "type": "string",
+            "enum": ["inspection", "side_effect", "uncertain"],
+            "description": "Whether the whole proposed operation stays within inspection.",
+        },
+        "reason": {"type": "string", "description": "The concrete operation and its effect."},
+    },
+    "required": ["effect", "reason"],
+    "additionalProperties": False,
+}
+
 _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1425,6 +1456,7 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
                                 "type": "string",
                                 "description": "The edge instruction that looks mismatched.",
                             },
+                            "execution": _AUDIT_EXECUTION_ASSESSMENT,
                         },
                         "required": [
                             "type",
@@ -1433,6 +1465,7 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
                             "source_node",
                             "target_node",
                             "instruction",
+                            "execution",
                         ],
                         "additionalProperties": False,
                     },
@@ -1458,8 +1491,16 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
                                 "items": {"type": "string"},
                                 "description": "Pages that should be reachable from this node.",
                             },
+                            "execution": _AUDIT_EXECUTION_ASSESSMENT,
                         },
-                        "required": ["type", "severity", "description", "node", "expected_pages"],
+                        "required": [
+                            "type",
+                            "severity",
+                            "description",
+                            "node",
+                            "expected_pages",
+                            "execution",
+                        ],
                         "additionalProperties": False,
                     },
                 ]

@@ -1314,8 +1314,32 @@ merges. When the graph has no start node, `start_node` is `null` and both lists
 are empty.
 
 With `--re-explore`, the audit then works through the other issues on the
-device, following the node IDs each issue names through those merges. For each
-`retry_edge` issue, an edge whose instruction looks wrong for where it leads, it:
+device, following the node IDs each issue names through those merges. Each
+`retry_edge` and `explore_node` has an `execution` assessment: `effect` is
+`inspection`, `side_effect` or `uncertain`, with a concrete `reason`. The saved
+audit adds `execution_policy`, the local inspection policy's `executable`
+decision and reason. Re-exploration requires a reasoned inspection assessment
+and checks the description, retry instruction and expected pages for explicit
+commitments. Missing assessments, consequential advice and uncertain operations
+are saved as `skipped` before navigation. When every proposal is skipped, the
+app's permissions and launch stay untouched.
+
+Inspection includes opening a dialer, editing disposable form data, reading
+settings, opening a Share chooser, and viewing a confirmation followed by
+Cancel. Calls, actual sends, destructive confirmations, purchases, account
+enrollment and security changes stay unexecuted. A recorded instruction receives
+the same commitment check before navigation replay. Recorded setup actions are
+checked against their instructions on the source node before replay or retry.
+Confirmation checks include the source node's description. Each newly planned
+audit instruction is checked before action grounding; a skipped instruction
+consumes one of `--steps-per-issue` and records its reason. Subsequent plans on
+that node receive the excluded instructions so they can choose another action.
+These checks use the model's effect assessment and conservative language rules. Their limits include model
+misclassification, unfamiliar wording and an action grounded onto the wrong
+control; they provide no proof of an app control's real effect.
+
+For each permitted `retry_edge` issue, whose instruction looks wrong for its
+destination, it:
 
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action
@@ -1329,7 +1353,9 @@ device, following the node IDs each issue names through those merges. For each
    - the edge's target: the transition is real and its label is wrong. The
      instruction model describes the action from the screenshot taken before it
      ran, and that description replaces the instruction.
-4. replays to the source again, and stops if this replay misses it;
+4. replays to the source again, and stops if this replay misses it or crosses the
+   inspection boundary; the correction's outcome remains recorded, with `reason`
+   when policy blocks the replay;
 5. runs `--steps-per-issue` exploration steps from the source, with a hint about
    the flagged edge.
 
@@ -1347,7 +1373,7 @@ Each issue's outcome is saved to `<app_name>_re_explore.json` as its `status`:
 | `relabel_failed` | The action reached the target, but the instruction model gave no usable description | Unchanged |
 | `instruction_not_found` | The edge is gone, or the instruction is not on it word for word, for example because the auditor paraphrased it. Steps 3 and 4 are skipped | Unchanged |
 | `unverified` | The replay missed the source, the action's setup is unknown and no recorded action opens the menu it was sent in (see [Graph edges](#graph-edges)), so it is not sent, or the action left for an app with no `ext_<package>` node; `reached` is where it ended. Nothing is explored | Unchanged |
-| `skipped` | The source node is not in the graph, or is an `ext_` node, which keeps no outgoing edge | Unchanged |
+| `skipped` | The inspection policy excludes the proposal or a replay instruction, or the source node is missing or external; `reason` records why | Unchanged |
 
 One replay can be misled by content that changes between runs, such as a feed;
 the outcome records what each correction was based on.
