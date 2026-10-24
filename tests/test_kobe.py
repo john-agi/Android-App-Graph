@@ -26,7 +26,7 @@ from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
-from android_app_graph.utils.vlm_utils import PlanRequest
+from android_app_graph.utils.vlm_utils import ActionRequest, PlanRequest
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -3990,3 +3990,71 @@ def test_recovery_stops_nonzero_commands_outside_its_observation_reads(
     assert raised.value is failure
     assert log == [_PROBE]
     assert no_sleep == []
+
+
+@pytest.mark.parametrize("unfocused", [{"focused_field": None}, {}])
+@pytest.mark.usefixtures("no_sleep")
+def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
+    unfocused: dict[str, object],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    embedding_body: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each tab's current description supplies focus to both models before a field tap or Type."""
+    device = _Screens(*[_screen("com.demo.Form", color) for color in ("white", "gray", "blue")])
+    explorer = _explorer(device, tmp_path, router_client)
+    monkeypatch.setattr(explorer.graph, "normalize_all_edges", lambda: 0)
+    instructions = iter(["Tap Options", "Tap Note", "Type 'Grocery rewards card'"])
+    actions: list[dict[str, object]] = [
+        {"action": "tap", "x": 20, "y": 40},
+        {"action": "tap", "x": 30, "y": 60},
+        {"action": "type", "text": "Grocery rewards card"},
+    ]
+    proposed = iter(actions)
+    plans: list[PlanRequest] = []
+    grounding: list[ActionRequest] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+        plans.append(request)
+        return next(instructions), None
+
+    def act(*, request: ActionRequest, **_kwargs: object) -> tuple[dict[str, object], str]:
+        grounding.append(request)
+        return next(proposed), ""
+
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
+    monkeypatch.setattr("android_app_graph.kobe.predict_next_action", act)
+    monkeypatch.setattr(
+        "android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "keyboard visible"
+    )
+    for index, state in enumerate(
+        [{"focused_field": "Name"}, unfocused, {"focused_field": "Note"}]
+    ):
+        router_responses.extend(
+            [
+                httpx.Response(200, json=embedding_body),
+                chat_response(
+                    content=json.dumps({"page_description": "Card editor", "state": state})
+                ),
+                httpx.Response(200, json=embedding_body),
+            ]
+        )
+        if index:
+            router_responses.append(chat_response(content='{"same":true,"reason":"one form"}'))
+    router_responses.append(httpx.Response(200, json=embedding_body))
+
+    explorer.explore(max_steps=3)
+
+    middle = "null" if "focused_field" in unfocused else "unknown (not reported)"
+    for plan_request, action_request, focus in zip(
+        plans, grounding, ['"Name"', middle, '"Note"'], strict=True
+    ):
+        expected = f"Current screenshot description reports focused_field: {focus}."
+        assert expected in plan_request.input_status
+        assert plan_request.input_status in action_request.instruction
+    assert device.actions == actions
+    assert explorer.graph.total_steps_completed == 3
+    assert explorer.graph.graph.nodes["s0"]["state_schema"]["focused_field"][0] == "Name"

@@ -32,10 +32,7 @@ _INPUT_TIMEOUT_SECONDS = 15
 _READ_TIMEOUT_SECONDS = 30
 _PROBE_TIMEOUT_SECONDS = 3
 
-_SOFT_KEYBOARD_HINT = (
-    " (Note: the soft keyboard is currently visible — a text field is focused "
-    "and ready for typing.)"
-)
+_SOFT_KEYBOARD_HINT = " (Note: the soft keyboard is currently visible.)"
 
 
 class DeviceController(Protocol):
@@ -693,11 +690,8 @@ def soft_keyboard_hint(udid: str) -> str:
 def keyboard_status(hint: str) -> str:
     """Return the planner-prompt sentence for ``hint`` from ``soft_keyboard_hint``."""
     if hint:
-        return "Soft keyboard is visible; a text field is focused and ready for typing."
-    return (
-        "No OS keyboard signal detected. Still inspect the screenshot: "
-        "a bottom input/keyboard bar can mean a text field is active."
-    )
+        return "Soft keyboard is visible; identify the intended editable field from the current screen."
+    return "OS keyboard visibility is unknown. Inspect the current screen for the intended editable field."
 
 
 _CHECK_INTERVAL_SECONDS = 30

@@ -1217,6 +1217,20 @@ class GraphManager:
         has none."""
         return self._descriptions.get(observation_id)
 
+    def observation_state(self, observation: Observation) -> dict[str, object]:
+        """Return the description's state for this observation or its exact current image.
+
+        A fresh audit capture can repeat an identified image. An image with no unique
+        exact member supplies no reported focus, even when its node has older state.
+        """
+        stored = self._stored_screens.get(observation.observation_id)
+        if stored is None:
+            same_package = self._same_package_nodes(observation.package)
+            exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
+            if exact is not None:
+                stored = self._stored_screens[exact[1]]
+        return dict(stored.described.state) if stored is not None else {}
+
     def latest_description(self, node_id: str) -> str:
         """Return the description of ``node_id``'s latest member, the screen
         ``identify_state`` last placed in the node: on the node the device was last

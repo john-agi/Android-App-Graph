@@ -50,6 +50,7 @@ from android_app_graph.utils.vlm_utils import (
     plan_next_action,
     predict_next_action,
     select_exploration_target,
+    text_input_status,
     token_tracker,
 )
 
@@ -707,7 +708,10 @@ class Kobe:
 
         # Check before planning so the planner can choose type vs tap.
         keyboard_hint = soft_keyboard_hint(self.controller.config["device"]["udid"])
-        input_status = keyboard_status(keyboard_hint)
+        input_status = text_input_status(
+            keyboard_status(keyboard_hint),
+            self.graph.observation_state(Observation.from_state(position.device_state)),
+        )
 
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(
@@ -729,7 +733,7 @@ class Kobe:
             client=self.client,
             request=ActionRequest(
                 screenshot_b64=screenshot,
-                instruction=instruction + keyboard_hint,
+                instruction=f"{instruction}\n{input_status}",
                 screen_w=self.controller.w,
                 screen_h=self.controller.h,
                 action_history=[],

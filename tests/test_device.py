@@ -360,6 +360,8 @@ def test_soft_keyboard_hint_when_the_keyboard_is_shown(monkeypatch: pytest.Monke
     )
     hint = device.soft_keyboard_hint("test-device")
     assert "soft keyboard is currently visible" in hint
+    assert "focused" not in hint
+    assert "ready for typing" not in hint
 
 
 @pytest.mark.usefixtures("adb_on_path")
@@ -425,14 +427,13 @@ def test_soft_keyboard_hint_reads_past_a_replacement_character(
 
 def test_keyboard_status_when_the_keyboard_is_shown() -> None:
     assert device.keyboard_status(" (Note: the soft keyboard is visible.)") == (
-        "Soft keyboard is visible; a text field is focused and ready for typing."
+        "Soft keyboard is visible; identify the intended editable field from the current screen."
     )
 
 
 def test_keyboard_status_when_the_keyboard_is_hidden() -> None:
     assert device.keyboard_status("") == (
-        "No OS keyboard signal detected. Still inspect the screenshot: "
-        "a bottom input/keyboard bar can mean a text field is active."
+        "OS keyboard visibility is unknown. Inspect the current screen for the intended editable field."
     )
 
 

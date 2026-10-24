@@ -2302,3 +2302,25 @@ def test_action_retries_and_the_single_re_ask_are_separate(
             )
     assert len(router_requests) == 3
     assert len(no_sleep) == 1
+
+
+def test_text_planning_establishes_the_intended_field_before_typing(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"element":null,"instruction":"Tap Note"}'))
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot, page_description="Options", node="s0", explored_edges=[]
+        ),
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
+    assert "Keyboard visibility alone establishes no field identity or focus." in prompt
+    assert "tap the intended field as a separate action, then observe before typing" in prompt
+    assert "current screenshot description" in prompt
+    assert "current caret or field highlight" in prompt
