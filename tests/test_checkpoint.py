@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,6 +97,69 @@ def test_unchanged_checkpoint_evidence_reuses_its_answer(
     checkpoint_graph.run_node_merge_audit()
 
     assert len(checkpoint_models.comparisons) == 1
+
+
+def test_same_description_revisits_reuse_every_unchanged_proposal_batch(
+    tmp_path: Path,
+    write_member_graph: Callable[..., None],
+    router_client: OpenRouter,
+    checkpoint_models: CheckpointModels,
+) -> None:
+    path = tmp_path / "revisited" / "graph.json"
+    nodes = {f"s{n}": [(f"{n + 1:06d}", [1.0, float(n)])] for n in range(150)}
+    revisits = {"s5": "000151", "s140": "000152"}
+    for node, member in revisits.items():
+        nodes[node].append((member, nodes[node][0][1]))
+    write_member_graph(
+        path,
+        nodes,
+        described={"000151": "Screen 000006", "000152": "Screen 000141"},
+    )
+    graph = _load(path, router_client)
+    for node, member in revisits.items():
+        graph.graph.nodes[node]["observations"].remove(member)
+    checkpoint_models.proposal_reply = {"issues": [], "summary": "distinct"}
+    first = graph.run_node_merge_audit()
+    warm = graph.run_node_merge_audit()
+    before = [batch.text for batch in graph.checkpoint_batches()]
+
+    for node, member in revisits.items():
+        graph.graph.nodes[node]["observations"].append(member)
+    after = [batch.text for batch in graph.checkpoint_batches()]
+    revisited = graph.run_node_merge_audit()
+
+    assert before == after
+    assert (first["proposal_requests"], warm["proposal_reused"]) == (6, 6)
+    assert (revisited["proposal_requests"], revisited["proposal_reused"]) == (0, 6)
+    assert len(checkpoint_models.summaries) == 6
+
+
+def test_independent_proposal_misses_run_concurrently_and_keep_batch_order(
+    tmp_path: Path,
+    write_member_graph: Callable[..., None],
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "concurrent" / "graph.json"
+    write_member_graph(path, {f"s{n}": [(f"{n + 1:06d}", [1.0, float(n)])] for n in range(65)})
+    graph = _load(path, router_client)
+    cross_started = threading.Event()
+
+    def propose(_client: object, graph_summary: str, **_kwargs: object) -> dict[str, object]:
+        cross = graph_summary.startswith("Compare only pairs across")
+        if cross:
+            cross_started.set()
+        else:
+            assert cross_started.wait(5), "Independent cross-block request starts concurrently"
+        return {"issues": [], "summary": "cross" if cross else "within"}
+
+    monkeypatch.setattr(graph_manager, "audit_merge_nodes", propose)
+    result = graph.run_node_merge_audit()
+    reused = graph.run_node_merge_audit()
+
+    assert result["summary"] == reused["summary"] == "within\ncross"
+    assert (result["proposal_requests"], result["proposal_reused"]) == (2, 0)
+    assert (reused["proposal_requests"], reused["proposal_reused"]) == (0, 2)
 
 
 @pytest.mark.parametrize(
