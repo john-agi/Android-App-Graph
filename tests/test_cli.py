@@ -309,6 +309,19 @@ class _NoRunningAvd:
         self.duplicated.append(avd_name)
 
 
+def test_check_avd_uses_a_connected_device_without_creating_an_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    avds = _NoRunningAvd()
+    monkeypatch.setattr(
+        avds, "get_running_avd_list", lambda: [{"udid": "test-device", "status": "device"}]
+    )
+
+    cli.check_avd(avds, {"device": {"udid": "test-device"}}, logging.getLogger("test"))
+
+    assert avds.duplicated == []
+
+
 @pytest.mark.usefixtures("no_sleep")
 def test_check_avd_starts_the_duplicate_with_the_emulator_on_path(
     monkeypatch: pytest.MonkeyPatch,
