@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
 
@@ -180,16 +181,22 @@ def _ui_nodes(ui_dump: str) -> list[dict[str, str]]:
     return [dict(_NODE_ATTRIBUTE.findall(node)) for node in _UI_NODE.findall(ui_dump)]
 
 
+def _shows_recent_apps(ui_dump: str) -> bool:
+    """Recognize Launcher3's overview panel by its resource name in any package.
+
+    Launchers built on Launcher3, including the Pixel launcher, share this view name.
+    """
+    return any(
+        node.get("resource-id", "").endswith(":id/overview_panel") for node in _ui_nodes(ui_dump)
+    )
+
+
 def _shows_no_recent_apps(ui_dump: str) -> bool:
     """Return whether ``uiautomator dump`` output shows the recent apps screen with no
     app in it: an ``overview_panel`` node and no ``task_view`` node, an app's card.
-
-    The ids are matched by name in any package, as Launcher3 and the launchers built on
-    it, such as the Pixel launcher, name these views alike.
     """
     resource_ids = [node.get("resource-id", "") for node in _ui_nodes(ui_dump)]
-    shows_recent_apps = any(rid.endswith(":id/overview_panel") for rid in resource_ids)
-    return shows_recent_apps and not any(":id/task_view" in rid for rid in resource_ids)
+    return _shows_recent_apps(ui_dump) and not any(":id/task_view" in rid for rid in resource_ids)
 
 
 def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
@@ -212,11 +219,14 @@ def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
 class AdbController:
     """Reads the screen of the device ``config["device"]["udid"]`` and acts on it over adb."""
 
-    def __init__(self, config: dict[str, Any], logger: logging.Logger) -> None:
+    def __init__(
+        self, config: dict[str, Any], logger: logging.Logger, *, unreachable_limit: float
+    ) -> None:
         self.config = config
         self._logger = logger
         self._serial = ["-s", config["device"]["udid"]]
-        size = run_adb([*self._serial, "shell", "wm", "size"], output="capture", check=True)
+        recovery = StartupRecovery(self, unreachable_limit, logger)
+        size = recovery.command("screen size", [*self._serial, "shell", "wm", "size"], check=True)
         match = re.search(r"(\d+)x(\d+)", size.stdout)
         if match is None:
             msg = "Failed to get screen size"
@@ -272,10 +282,10 @@ class AdbController:
                 self._tap(action["x"], action["y"])
             case "long_press":
                 x, y = action["x"], action["y"]
-                self._swipe(x, y, x, y, _GESTURE_MS)
+                self._swipe((x, y), (x, y), _GESTURE_MS)
             case "swipe":
                 duration = action.get("duration", action.get("time", _GESTURE_MS))
-                self._swipe(action["x1"], action["y1"], action["x2"], action["y2"], duration)
+                self._swipe((action["x1"], action["y1"]), (action["x2"], action["y2"]), duration)
             case "type":
                 self._clear()
                 self._type(action["text"])
@@ -289,18 +299,29 @@ class AdbController:
                 msg = f"Unknown device action: {unknown!r}"
                 raise ValueError(msg)
 
-    def terminate_all_apps(self) -> None:
+    def terminate_all_apps(self, recovery: StartupRecovery) -> None:
         """Open recent apps and tap their Clear all button, which ``_scroll_to_clear_all``
         brings on screen, or press Home when they show no app.
 
         When Clear all does not appear, log a warning and press Home; the recent apps
         stay.
         """
-        self._press("KEYCODE_APP_SWITCH")
-        ui_dump = self._scroll_to_clear_all()
+
+        def open_recents(deadline: float | None, state: dict[str, Any] | None) -> None:
+            if state is None or not _shows_recent_apps(state.get("xml", "")):
+                self._press("KEYCODE_APP_SWITCH", deadline=deadline)
+
+        recovery.run("recent apps", open_recents)
+        ui_dump = self._scroll_to_clear_all(recovery)
         clear_all = _clear_all_center(ui_dump)
         if clear_all is not None:
-            self._tap(*clear_all)
+
+            def clear_recents(deadline: float | None, state: dict[str, Any] | None) -> None:
+                target = clear_all if state is None else _clear_all_center(state.get("xml", ""))
+                if target is not None:
+                    self._tap(*target, deadline=deadline)
+
+            recovery.run("clear recent apps", clear_recents)
             time.sleep(1.5)
             return
         if not _shows_no_recent_apps(ui_dump):
@@ -308,9 +329,11 @@ class AdbController:
                 "Clear all did not appear in recent apps after %d swipes; pressing Home.",
                 _CLEAR_ALL_SWIPES,
             )
-        self._press("KEYCODE_HOME")
+        recovery.run(
+            "home", lambda deadline, _state: self._press("KEYCODE_HOME", deadline=deadline)
+        )
 
-    def _scroll_to_clear_all(self) -> str:
+    def _scroll_to_clear_all(self, recovery: StartupRecovery) -> str:
         """Return the UI dump of the recent apps on screen once it shows Clear all or no
         app, swiping the list from left to right before each look after the first, at
         most ``_CLEAR_ALL_SWIPES`` times.
@@ -318,17 +341,29 @@ class AdbController:
         In a left-to-right layout that swipe moves the list toward its oldest app, which
         Clear all follows.
         """
-        ui_dump = self._ui_dump()
+        ui_dump = recovery.run(
+            "recent apps observation", lambda deadline, _state: self._ui_dump(deadline)
+        )
+        middle = int(0.5 * self.h)
         for _ in range(_CLEAR_ALL_SWIPES):
             if _clear_all_center(ui_dump) is not None or _shows_no_recent_apps(ui_dump):
                 return ui_dump
-            middle = int(0.5 * self.h)
-            self._swipe(int(0.1 * self.w), middle, int(0.9 * self.w), middle, _RECENT_APPS_SWIPE_MS)
+            recovery.input(
+                "scroll recent apps",
+                lambda deadline: self._swipe(
+                    (int(0.1 * self.w), middle),
+                    (int(0.9 * self.w), middle),
+                    _RECENT_APPS_SWIPE_MS,
+                    deadline=deadline,
+                ),
+            )
             time.sleep(1)
-            ui_dump = self._ui_dump()
+            ui_dump = recovery.run(
+                "recent apps observation", lambda deadline, _state: self._ui_dump(deadline)
+            )
         return ui_dump
 
-    def _input(self, *args: str, check: bool = False) -> None:
+    def _input(self, *args: str, check: bool = False, deadline: float | None = None) -> None:
         """Run ``adb shell input`` with ``args``. A timeout raises
         ``subprocess.TimeoutExpired`` at once: the input may have reached the device, and
         sending it again could act twice.
@@ -336,18 +371,25 @@ class AdbController:
         run_adb(
             [*self._serial, "shell", "input", *args],
             output="discard",
-            timeout=_INPUT_TIMEOUT_SECONDS,
+            timeout=min(_INPUT_TIMEOUT_SECONDS, _observation_timeout(args, deadline)),
             check=check,
         )
 
-    def _tap(self, x: int, y: int) -> None:
-        self._input("tap", str(x), str(y))
+    def _tap(self, x: int, y: int, *, deadline: float | None = None) -> None:
+        self._input("tap", str(x), str(y), deadline=deadline)
 
-    def _swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int) -> None:
-        self._input("swipe", str(x1), str(y1), str(x2), str(y2), str(duration))
+    def _swipe(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        duration: int,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        self._input("swipe", *(str(value) for value in (*start, *end, duration)), deadline=deadline)
 
-    def _press(self, keycode: str) -> None:
-        self._input("keyevent", keycode)
+    def _press(self, keycode: str, *, deadline: float | None = None) -> None:
+        self._input("keyevent", keycode, deadline=deadline)
         time.sleep(1)
 
     def _clear(self) -> None:
@@ -523,7 +565,9 @@ class EmulatorManager:
         self._logger.info("AVD hardware file '%s' modified.", hardware_ini)
 
 
-def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> str:
+def launch_app(
+    config: dict[str, Any], app: dict[str, Any], logger: logging.Logger, recovery: StartupRecovery
+) -> str:
     """Start ``app``, an entry of ``config["apps"]``, with ``am start -n`` and return the
     component started, which ``AppLaunch.component`` names: its ``launch_activity``, or
     else the package's launcher activity.
@@ -534,9 +578,17 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
     """
     udid = config["device"]["udid"]
     launch = AppLaunch(app["name"], app["package_name"], app.get("launch_activity"))
-    component = launch.component(udid, logger)
+    component = recovery.run(
+        "launcher resolution",
+        lambda deadline, _state: launch.component(udid, logger, deadline=deadline),
+    )
     logger.info("Launching app %s via activity %s ...", app["name"], component)
-    _start_activity(udid, component)
+
+    def start(deadline: float | None, state: dict[str, Any] | None) -> None:
+        if state is None or is_outside_app(state.get("package", ""), app["package_name"]):
+            _start_activity(udid, component, deadline=deadline)
+
+    recovery.run("app launch", start)
     return component
 
 
@@ -574,15 +626,17 @@ class AppLaunch:
         self.package_name = package_name
         self._component = launch_activity
 
-    def component(self, udid: str, logger: logging.Logger) -> str:
+    def component(self, udid: str, logger: logging.Logger, *, deadline: float | None = None) -> str:
         """Return the component to start, asking ``udid`` for the launcher activity on the
         first call when no ``launch_activity`` is configured."""
         if self._component is None:
-            self._component = _launcher_activity(udid, self.package_name, logger)
+            self._component = _launcher_activity(udid, self.package_name, logger, deadline=deadline)
         return self._component
 
 
-def _launcher_activity(udid: str, package_name: str, logger: logging.Logger) -> str:
+def _launcher_activity(
+    udid: str, package_name: str, logger: logging.Logger, *, deadline: float | None = None
+) -> str:
     """Return the activity ``pm resolve-activity`` resolves the package's launcher intent
     to, or else the first that ``pm query-activities`` lists for it.
 
@@ -592,10 +646,16 @@ def _launcher_activity(udid: str, package_name: str, logger: logging.Logger) -> 
     """
     pm = ["-s", udid, "shell", "pm"]
     intent = [*_LAUNCHER_INTENT, package_name]
-    resolved = run_adb([*pm, "resolve-activity", "--brief", *intent], output="capture", check=True)
+    resolve = [*pm, "resolve-activity", "--brief", *intent]
+    resolved = run_adb(
+        resolve, output="capture", check=True, timeout=_observation_timeout(resolve, deadline)
+    )
     if components := _package_components(resolved.stdout, package_name):
         return components[0]
-    listed = run_adb([*pm, "query-activities", "--brief", *intent], output="capture", check=True)
+    query = [*pm, "query-activities", "--brief", *intent]
+    listed = run_adb(
+        query, output="capture", check=True, timeout=_observation_timeout(query, deadline)
+    )
     components = _package_components(listed.stdout, package_name)
     if not components:
         msg = f"{package_name} has no launcher activity; set launch_activity for it in the config"
@@ -638,16 +698,15 @@ def restart_app(controller: DeviceController, app: AppLaunch, logger: logging.Lo
     time.sleep(_LAUNCH_SETTLE_SECONDS)
 
 
-def _start_activity(udid: str, component: str, *flags: str) -> None:
+def _start_activity(udid: str, component: str, *flags: str, deadline: float | None = None) -> None:
     """Start ``component`` on the device ``udid`` with ``am start -n`` and ``flags``.
 
     Raises ``ActivityStartError`` naming the component and adb's error when ``am start``
     reports that it could not start it.
     """
+    args = ["-s", udid, "shell", "am", "start", "-n", component, *flags]
     started = run_adb(
-        ["-s", udid, "shell", "am", "start", "-n", component, *flags],
-        output="capture",
-        check=False,
+        args, output="capture", check=False, timeout=_observation_timeout(args, deadline)
     )
     if _start_failed(started):
         msg = f"am start could not start {component}: {_adb_error(started)}"
@@ -718,18 +777,28 @@ def _remaining_recovery_time(udid: str, deadline: float, limit: float) -> float:
     return remaining
 
 
+@dataclass(slots=True)
+class _RecoveryEpisode:
+    deadline: float
+    confirmation_used: bool = False
+
+
 def wait_for_device_state(
-    controller: DeviceController, limit: float, logger: logging.Logger
+    controller: DeviceController,
+    limit: float,
+    logger: logging.Logger,
+    *,
+    episode: _RecoveryEpisode | None = None,
 ) -> dict[str, Any]:
-    """Recover a complete observation within one deadline after an exploration outage.
+    """Recover a complete observation within one deadline after a device outage.
 
     Only the observation reads qualify for nonzero recovery. One unclassified failure
     gets a confirmation observation; the allowance belongs to the entire episode.
     """
     udid = controller.config["device"]["udid"]
     started = time.monotonic()
-    deadline = started + limit
-    confirmation_used = False
+    episode = episode or _RecoveryEpisode(started + limit)
+    deadline = episode.deadline
     while True:
         remaining = _remaining_recovery_time(udid, deadline, limit)
         if _answers(udid, min(_PROBE_TIMEOUT_SECONDS, remaining)):
@@ -739,9 +808,9 @@ def wait_for_device_state(
                 logger.warning("Device %s observation is unavailable: %s", udid, timeout)
             except subprocess.CalledProcessError as failure:
                 policy = _recovery_read_failure(udid, failure, logger)
-                if policy == "stop" or (policy == "confirm" and confirmation_used):
+                if policy == "stop" or (policy == "confirm" and episode.confirmation_used):
                     raise
-                confirmation_used |= policy == "confirm"
+                episode.confirmation_used |= policy == "confirm"
             else:
                 _remaining_recovery_time(udid, deadline, limit)
                 logger.info(
@@ -752,6 +821,62 @@ def wait_for_device_state(
                 return state
         remaining = _remaining_recovery_time(udid, deadline, limit)
         time.sleep(min(_CHECK_INTERVAL_SECONDS, remaining))
+
+
+class StartupRecovery:
+    """Resume one startup phase within its device-outage deadline.
+
+    Reads and idempotent commands retry their phase. Inputs with uncertain completion
+    yield the recovered screen to their caller, which inspects it before continuing.
+    """
+
+    def __init__(self, controller: DeviceController, limit: float, logger: logging.Logger) -> None:
+        self.controller = controller
+        self.limit = limit
+        self.logger = logger
+
+    def run[T](
+        self, phase: str, operation: Callable[[float | None, dict[str, Any] | None], T]
+    ) -> T:
+        udid = self.controller.config["device"]["udid"]
+        episode: _RecoveryEpisode | None = None
+        state: dict[str, Any] | None = None
+        while True:
+            deadline = episode.deadline if episode is not None else None
+            if deadline is not None:
+                _remaining_recovery_time(udid, deadline, self.limit)
+            try:
+                result = operation(deadline, state)
+            except subprocess.TimeoutExpired as timeout:
+                if episode is None:
+                    episode = _RecoveryEpisode(time.monotonic() + self.limit)
+                self.logger.warning(
+                    "Device %s is unreachable during startup %s: %s. Waiting up to %g minutes.",
+                    udid,
+                    phase,
+                    timeout,
+                    self.limit / 60,
+                )
+                state = wait_for_device_state(
+                    self.controller, self.limit, self.logger, episode=episode
+                )
+            else:
+                if deadline is not None:
+                    _remaining_recovery_time(udid, deadline, self.limit)
+                return result
+
+    def command(
+        self, phase: str, args: list[str], *, check: bool
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run(
+            phase,
+            lambda deadline, _state: run_adb(
+                args, output="capture", check=check, timeout=_observation_timeout(args, deadline)
+            ),
+        )
+
+    def input(self, phase: str, action: Callable[[float | None], None]) -> None:
+        self.run(phase, lambda deadline, state: action(deadline) if state is None else None)
 
 
 def _answers(udid: str, timeout: float) -> bool:
@@ -941,7 +1066,7 @@ def return_to_app(
     return restart_into_app(controller, app, logger)
 
 
-def grant_runtime_permissions(udid: str, package_name: str) -> None:
+def grant_runtime_permissions(udid: str, package_name: str, recovery: StartupRecovery) -> None:
     """Grant ``package_name`` every permission it requests.
 
     A permission prompt that appears during exploration would be dismissed, which
@@ -950,12 +1075,16 @@ def grant_runtime_permissions(udid: str, package_name: str) -> None:
     a refusal is only logged.
     """
     shell = ["-s", udid, "shell"]
-    dumpsys = run_adb([*shell, "dumpsys", "package", package_name], output="capture", check=True)
+    dumpsys = recovery.command(
+        "requested permissions", [*shell, "dumpsys", "package", package_name], check=True
+    )
     permissions = _requested_permissions(dumpsys.stdout)
     granted = 0
     for permission in permissions:
-        grant = run_adb(
-            [*shell, "pm", "grant", package_name, permission], output="capture", check=False
+        grant = recovery.command(
+            f"permission grant {permission}",
+            [*shell, "pm", "grant", package_name, permission],
+            check=False,
         )
         if grant.returncode == 0:
             granted += 1

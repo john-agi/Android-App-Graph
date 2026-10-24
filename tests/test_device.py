@@ -6,9 +6,10 @@ import base64
 import logging
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from types import SimpleNamespace
+from typing import Any, Literal, NoReturn, override
 
 import pytest
 
@@ -249,7 +250,9 @@ def test_launch_app_starts_the_launch_activity_or_else_the_launcher_activity_and
     app: dict[str, str], launches: list[list[str]], component: str, device_log: list[object]
 ) -> None:
     """The launch returns the component it started, which the run's restarts start too."""
-    assert device.launch_app(_CONFIG, app, logging.getLogger("test")) == component
+    assert (
+        device.launch_app(_CONFIG, app, logging.getLogger("test"), _startup_recovery()) == component
+    )
     assert device_log == launches
 
 
@@ -264,7 +267,10 @@ def test_launch_app_without_a_launcher_activity_raises_naming_the_package_and_st
         match=r"^com\.demo has no launcher activity; set launch_activity for it in the config$",
     ):
         device.launch_app(
-            _CONFIG, {"name": "demo", "package_name": "com.demo"}, logging.getLogger("test")
+            _CONFIG,
+            {"name": "demo", "package_name": "com.demo"},
+            logging.getLogger("test"),
+            _startup_recovery(),
         )
     assert device_log == [_RESOLVE_LAUNCHER, _QUERY_LAUNCHERS]
 
@@ -282,7 +288,7 @@ def test_launch_app_raises_naming_the_component_when_am_start_cannot_start_it(
     _refuse(monkeypatch, device_log, start, (returncode, stdout, stderr))
     app = {"name": "demo", "package_name": "com.demo", "launch_activity": "com.demo/.Gone"}
     with pytest.raises(RuntimeError) as raised:
-        device.launch_app(_CONFIG, app, logging.getLogger("test"))
+        device.launch_app(_CONFIG, app, logging.getLogger("test"), _startup_recovery())
     assert str(raised.value) == f"am start could not start com.demo/.Gone: {error}"
     assert device_log == [start]
 
@@ -559,7 +565,7 @@ def test_each_requested_permission_is_granted_and_a_refusal_is_logged_and_skippe
 
     monkeypatch.setattr(device.subprocess, "run", adb)
     with caplog.at_level(logging.INFO, logger="android_app_graph.device"):
-        device.grant_runtime_permissions("emulator-5554", "com.example.app")
+        device.grant_runtime_permissions("emulator-5554", "com.example.app", _startup_recovery())
 
     shell = ["adb", "-s", "emulator-5554", "shell"]
     assert commands == [
@@ -649,7 +655,9 @@ def adb(monkeypatch: pytest.MonkeyPatch, adb_on_path: None) -> _FakeAdb:
 @pytest.fixture
 def controller(adb: _FakeAdb) -> device.AdbController:
     adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
-    built = device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
+    built = device.AdbController(
+        {"device": {"udid": _UDID}}, logging.getLogger("test"), unreachable_limit=1800
+    )
     adb.events.clear()
     adb.timeouts.clear()
     return built
@@ -659,7 +667,7 @@ def test_adb_controller_reads_the_screen_size_of_the_configured_device(adb: _Fak
     adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
     config = {"device": {"udid": _UDID}}
 
-    controller = device.AdbController(config, logging.getLogger("test"))
+    controller = device.AdbController(config, logging.getLogger("test"), unreachable_limit=1800)
 
     assert (controller.w, controller.h) == (1080, 2400)
     assert controller.config is config
@@ -669,7 +677,9 @@ def test_adb_controller_reads_the_screen_size_of_the_configured_device(adb: _Fak
 def test_adb_controller_raises_when_wm_size_reports_no_size(adb: _FakeAdb) -> None:
     adb.replies[_WM_SIZE] = (0, b"Physical size: unknown\n")
     with pytest.raises(ValueError, match=r"^Failed to get screen size$"):
-        device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
+        device.AdbController(
+            {"device": {"udid": _UDID}}, logging.getLogger("test"), unreachable_limit=1800
+        )
 
 
 # PNG's signature contains CR LF, so any newline translation would change the base64.
@@ -1040,7 +1050,9 @@ def test_terminate_all_apps_taps_the_clear_all_button_the_recent_apps_show(
     controller: device.AdbController, adb: _FakeAdb, dump: bytes, tap: list[str]
 ) -> None:
     adb.replies[_UI_DUMP] = (0, dump)
-    controller.terminate_all_apps()
+    controller.terminate_all_apps(
+        device.StartupRecovery(controller, 1800, logging.getLogger("test"))
+    )
     assert adb.events == [_OPEN_RECENT_APPS, 1, _LOOK, [*_INPUT, "tap", *tap], 1.5]
 
 
@@ -1050,7 +1062,9 @@ def test_terminate_all_apps_swipes_toward_clear_all_until_it_appears(
     """Each swipe moves the list by one app, toward the oldest, which Clear all follows."""
     adb.queued[_UI_DUMP] = [(0, _CARDS_ONLY), (0, _CARDS_ONLY)]
     adb.replies[_UI_DUMP] = (0, _CLEAR_ALL_SHOWN)
-    controller.terminate_all_apps()
+    controller.terminate_all_apps(
+        device.StartupRecovery(controller, 1800, logging.getLogger("test"))
+    )
     assert adb.events == [
         _OPEN_RECENT_APPS,
         1,
@@ -1067,7 +1081,9 @@ def test_terminate_all_apps_presses_home_without_a_warning_when_no_app_is_in_rec
     """The recent apps screen shows no app card, so there is nothing to clear."""
     adb.replies[_UI_DUMP] = (0, _NO_RECENT_APPS)
     with caplog.at_level(logging.WARNING, logger="test"):
-        controller.terminate_all_apps()
+        controller.terminate_all_apps(
+            device.StartupRecovery(controller, 1800, logging.getLogger("test"))
+        )
     assert adb.events == [_OPEN_RECENT_APPS, 1, _LOOK, [*_INPUT, "keyevent", "KEYCODE_HOME"], 1]
     assert caplog.messages == []
 
@@ -1088,7 +1104,9 @@ def test_terminate_all_apps_presses_home_and_warns_when_clear_all_never_appears(
 ) -> None:
     adb.replies[_UI_DUMP] = (0, dump)
     with caplog.at_level(logging.WARNING, logger="test"):
-        controller.terminate_all_apps()
+        controller.terminate_all_apps(
+            device.StartupRecovery(controller, 1800, logging.getLogger("test"))
+        )
     assert adb.events == [
         _OPEN_RECENT_APPS,
         1,
@@ -1342,7 +1360,8 @@ def test_observation_reads_and_retries_use_the_remaining_deadline(
     expired: bool,
 ) -> None:
     clock = iter(times)
-    monkeypatch.setattr(device.time, "monotonic", lambda: next(clock))
+    # SDK finalizers also read the stdlib clock while these finite readings belong to adb.
+    monkeypatch.setattr(device, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     adb.stalls[_UI_DUMP] = stalls
 
     if expired:
@@ -1373,3 +1392,192 @@ def test_recovery_probe_is_bounded_by_its_remaining_time(
 
     assert timeouts == [2]
     assert adb.events == []
+
+
+def _startup_recovery() -> device.StartupRecovery:
+    class Controller:
+        w = 100
+        h = 200
+
+        def __init__(self) -> None:
+            self.config: dict[str, object] = {"device": {"udid": "emulator-5554"}}
+
+        def get_state(self, *, deadline: float | None = None) -> dict[str, object]:
+            del deadline
+            pytest.fail("healthy startup requires no recovery observation")
+
+        def exe_action(self, action: dict[str, object]) -> None:
+            del action
+            pytest.fail("startup recovery sends no input")
+
+    return device.StartupRecovery(Controller(), 1800, logging.getLogger("test"))
+
+
+def test_startup_screen_size_timeout_recovers_before_controller_initialization(
+    adb: _FakeAdb,
+) -> None:
+    adb.stalls[_WM_SIZE] = 1
+    adb.replies[_WM_SIZE] = (0, b"Physical size: 1080x2400\n")
+
+    controller = device.AdbController(
+        {"device": {"udid": _UDID}}, logging.getLogger("test"), unreachable_limit=45
+    )
+
+    assert (controller.w, controller.h) == (1080, 2400)
+    assert adb.events == [
+        ["adb", *_WM_SIZE],
+        [*_ADB, "shell", "true"],
+        *_STATE_READS,
+        ["adb", *_WM_SIZE],
+    ]
+
+
+@pytest.mark.parametrize("delivered", [False, True])
+def test_startup_rechecks_recent_apps_after_an_uncertain_app_switch(
+    delivered: bool, controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.stalls[tuple(_OPEN_RECENT_APPS[1:])] = 1
+    adb.queued[_UI_DUMP] = [(0, _CARDS_ONLY if delivered else _HOME_SCREEN)]
+    adb.replies[_UI_DUMP] = (0, _CLEAR_ALL_SHOWN)
+
+    controller.terminate_all_apps(device.StartupRecovery(controller, 45, logging.getLogger("test")))
+
+    assert adb.events.count(_OPEN_RECENT_APPS) == (1 if delivered else 2)
+    assert adb.events.count([*_INPUT, "tap", "168", "560"]) == 1
+    assert [*_ADB, "shell", "true"] in adb.events
+
+
+@pytest.mark.parametrize("delivered", [False, True])
+def test_startup_rechecks_clear_all_and_uses_its_current_coordinates_after_a_tap_timeout(
+    delivered: bool, controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    tap = [*_INPUT, "tap", "168", "560"]
+    moved = b'<hierarchy><node text="Clear all" bounds="[0,0][200,100]" /></hierarchy>'
+    adb.stalls[tuple(tap[1:])] = 1
+    adb.queued[_UI_DUMP] = [(0, _CLEAR_ALL_SHOWN), (0, _HOME_SCREEN if delivered else moved)]
+
+    controller.terminate_all_apps(device.StartupRecovery(controller, 45, logging.getLogger("test")))
+
+    assert adb.events.count(tap) == 1
+    assert adb.events.count([*_INPUT, "tap", "100", "50"]) == (0 if delivered else 1)
+    assert [*_ADB, "shell", "true"] in adb.events
+
+
+def test_startup_observes_recent_apps_after_an_uncertain_swipe(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    swipe = [*_INPUT, "swipe", "108", "1200", "972", "1200", "300"]
+    adb.stalls[tuple(swipe[1:])] = 1
+    adb.queued[_UI_DUMP] = [(0, _CARDS_ONLY)]
+    adb.replies[_UI_DUMP] = (0, _CLEAR_ALL_SHOWN)
+
+    controller.terminate_all_apps(device.StartupRecovery(controller, 45, logging.getLogger("test")))
+
+    assert adb.events.count(swipe) == 1
+    assert adb.events.count([*_INPUT, "tap", "168", "560"]) == 1
+    assert adb.events.count(_LOOK) == 3
+
+
+def test_repeated_grant_timeouts_share_a_deadline_while_observations_succeed(
+    controller: device.AdbController, adb: _FakeAdb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grant = ("-s", _UDID, "shell", "pm", "grant", "com.demo", "android.permission.CAMERA")
+    adb.replies[("-s", _UDID, "shell", "dumpsys", "package", "com.demo")] = (
+        0,
+        b"  requested permissions:\n    android.permission.CAMERA\n",
+    )
+    adb.stalls[grant] = 10
+    elapsed = [0.0]
+    monkeypatch.setattr(device.time, "monotonic", lambda: elapsed[0])
+
+    original = device.run_adb
+
+    def run(
+        args: Sequence[str],
+        *,
+        output: Literal["capture", "discard"],
+        check: bool,
+        timeout: float = 30,
+        errors: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return original(args, output=output, check=check, timeout=timeout, errors=errors)
+        except subprocess.TimeoutExpired as exc:
+            elapsed[0] += exc.timeout
+            raise
+
+    monkeypatch.setattr(device, "run_adb", run)
+    with pytest.raises(device.DeviceUnreachableError, match=r"unreachable for 0\.75 minutes"):
+        device.grant_runtime_permissions(
+            _UDID, "com.demo", device.StartupRecovery(controller, 45, logging.getLogger("test"))
+        )
+
+    grant_timeouts = [
+        timeout
+        for event, timeout in zip(
+            (event for event in adb.events if isinstance(event, list)), adb.timeouts, strict=True
+        )
+        if event == ["adb", *grant]
+    ]
+    assert grant_timeouts == [30, 30, 15]
+    assert elapsed == [75]
+
+
+@pytest.mark.usefixtures("adb_on_path")
+def test_startup_keeps_one_confirmation_allowance_across_repeated_phase_timeouts(
+    no_sleep: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unknown = subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window"]
+    )
+    reads = iter([unknown, {"package": "com.demo"}, unknown])
+
+    class Controller(_Device):
+        @override
+        def get_state(self, **_kwargs: float | None) -> dict[str, object]:
+            result = next(reads)
+            if isinstance(result, subprocess.CalledProcessError):
+                raise result
+            return dict(result)
+
+    monkeypatch.setattr(device.time, "monotonic", lambda: sum(no_sleep))
+    monkeypatch.setattr(
+        device, "run_adb", lambda args, **_kwargs: subprocess.CompletedProcess(args, 0)
+    )
+    attempts: list[float | None] = []
+
+    def grant(deadline: float | None, _state: dict[str, object] | None) -> None:
+        attempts.append(deadline)
+        raise subprocess.TimeoutExpired(["pm", "grant"], 30)
+
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        device.StartupRecovery(Controller(), 90, logging.getLogger("test")).run("permission", grant)
+
+    assert caught.value is unknown
+    assert attempts == [None, 90]
+    assert no_sleep == [30]
+
+
+def test_startup_grants_resume_at_the_timed_out_permission(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    shell = ("-s", _UDID, "shell")
+    adb.replies[(*shell, "dumpsys", "package", "com.example.app")] = (
+        0,
+        _DUMPSYS_PACKAGE.read_bytes(),
+    )
+    grants = [
+        ["adb", *shell, "pm", "grant", "com.example.app", permission]
+        for permission in _REQUESTED_PERMISSIONS
+    ]
+    adb.stalls[tuple(grants[1][1:])] = 1
+
+    device.grant_runtime_permissions(
+        _UDID, "com.example.app", device.StartupRecovery(controller, 45, logging.getLogger("test"))
+    )
+
+    assert [event for event in adb.events if isinstance(event, list) and "grant" in event] == [
+        grants[0],
+        grants[1],
+        *grants[1:],
+    ]
