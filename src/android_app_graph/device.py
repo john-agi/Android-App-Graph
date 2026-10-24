@@ -1153,8 +1153,10 @@ def _read_phase(command: object, udid: str) -> str | None:
             return "hierarchy"
         case [str(), "-s", serial, "exec-out", "screencap -p"] if serial == udid:
             return "screenshot"
-        case [str(), "-s", serial, "shell", "dumpsys", "window"] if serial == udid:
+        case [str(), "-s", serial, "shell", "dumpsys", "window", "-a"] if serial == udid:
             return "window"
+        case [str(), "-s", serial, "shell", "dumpsys", "activity", "activities"] if serial == udid:
+            return "activity"
         case [str(), "-s", serial, "shell", *arguments] if serial == udid:
             display_reads = (
                 ("wm", "size"),

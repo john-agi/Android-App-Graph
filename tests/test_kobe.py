@@ -3998,6 +3998,8 @@ def test_recovery_uses_bounded_error_diagnostics_and_preserves_observation_paylo
             "android.permission.CAMERA",
         ],
         ["adb", "-s", "other-device", "shell", "dumpsys", "window", "-a"],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "activity", "activities"],
+        ["adb", "-s", "test-device", "shell", "input", "tap", "10", "20"],
         ["adb", "-s", "other-device", "shell", "wm", "size"],
         ["adb", "-s", "test-device", "shell", "wm", "density", "reset"],
         ["adb", "-s", "test-device", "shell", "settings", "put", "system", "font_scale", "1"],
