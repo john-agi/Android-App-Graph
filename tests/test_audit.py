@@ -17,7 +17,7 @@ from openrouter import OpenRouter
 from PIL import Image
 
 from android_app_graph.commands import audit
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, StartupRecovery
 from android_app_graph.graph_files import (
     append_json_line,
     graph_steps_dir,
@@ -2644,6 +2644,92 @@ def test_re_explore_session_shares_the_audit_client(
     assert audit.main(["--config", str(config), "--re-explore"]) == 0
     assert len(opened_clients) == 1
     assert opened_clients[0].sdk_configuration.client is None
+
+
+@pytest.mark.parametrize("re_explore", [False, True])
+@pytest.mark.usefixtures("model_environment")
+def test_audit_validates_the_device_outage_limit_only_for_re_exploration(
+    re_explore: bool,
+    tmp_path: Path,
+    opened_clients: list[OpenRouter],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A basic audit uses no device settings; re-exploration validates them first."""
+    _deny_device_work(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\ndevice:\n  unreachable_limit: invalid\n", encoding="utf-8")
+    args = ["--config", str(config)]
+
+    if re_explore:
+        with pytest.raises(SystemExit) as caught:
+            audit.main([*args, "--re-explore"])
+        assert caught.value.code == 2
+        assert "device.unreachable_limit" in capsys.readouterr().err
+        assert opened_clients == []
+    else:
+        assert audit.main(args) == 0
+        assert len(opened_clients) == 1
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
+def test_re_exploration_resolves_one_outage_limit_for_the_device_and_each_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Controller initialization and each app's startup share the resolved limit."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    for name in ("demo", "other"):
+        app_dir = graph_dir / name
+        app_dir.mkdir(parents=True)
+        document = {"matching": DEFAULT_MATCHING._asdict(), "nodes": [], "edges": []}
+        (app_dir / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    config = tmp_path / "audit.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "device": {"udid": "test-device", "unreachable_limit": 37},
+                "experiment": {"graph_dir": str(graph_dir)},
+                "apps": [
+                    {"name": "demo", "package_name": "com.demo"},
+                    {"name": "other", "package_name": "com.other"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    resolutions: list[float] = []
+    startup_limits: list[tuple[str, float]] = []
+    resolve = audit.resolve_unreachable_limit
+
+    def resolve_limit(config: Mapping[str, object]) -> float:
+        limit = resolve(config)
+        resolutions.append(limit)
+        return limit
+
+    def controller(
+        _config: dict[str, object], _logger: logging.Logger, *, unreachable_limit: float
+    ) -> DeviceController:
+        startup_limits.append(("device", unreachable_limit))
+        return FakeController("com.demo")
+
+    def grant(_udid: str, package: str, recovery: StartupRecovery) -> None:
+        startup_limits.append((package, recovery.limit))
+
+    monkeypatch.setattr(audit, "resolve_unreachable_limit", resolve_limit)
+    monkeypatch.setattr(audit, "AdbController", controller)
+    monkeypatch.setattr(audit, "grant_runtime_permissions", grant)
+    monkeypatch.setattr(audit, "launch_app", lambda *_args: "com.demo/.Home")
+    monkeypatch.setattr(
+        audit, "run_audit", lambda *_args: {"issues": [{"type": "explore_node", "node": "s0"}]}
+    )
+    monkeypatch.setattr(audit, "re_explore_issues", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+
+    assert audit.main(["--config", str(config), "--re-explore"]) == 0
+    assert resolutions == [37]
+    assert startup_limits == [("device", 37), ("com.demo", 37), ("com.other", 37)]
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
