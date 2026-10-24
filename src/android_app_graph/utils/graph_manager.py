@@ -121,6 +121,8 @@ EXTERNAL_WEB_NODE = "ext_web"
 EXTERNAL_WEB_BACK_PRESSES = 3
 # A longer setup is an excursion, not a recipe for the state an action needs.
 MAX_SETUP_ACTIONS = 8
+_DESCRIBE_CONTEXT_ENTRIES = 16
+_DESCRIBE_CONTEXT_BYTES = 2048
 
 
 class _SamePackageNodes(NamedTuple):
@@ -1456,8 +1458,8 @@ class GraphManager:
         4. The short list's candidates are verified in order against their closest
            members, up to the ``verifier_calls`` of the matching settings.
 
-        The describe call is given every distinct description of the members of the
-        package's in-app nodes, and the verifier each screenshot with its own
+        The describe call is given a bounded selection of relevant descriptions of the
+        package's in-app members, and the verifier each screenshot with its own
         description. The first confirmation decides, and a check the verifier gives no
         answer on counts as a rejection. A screen every check rejects starts a new node,
         and the step's first rejection refines the screen's description.
@@ -1488,7 +1490,10 @@ class GraphManager:
             *describe_page_and_state(
                 client,
                 observation.screenshot_b64,
-                known_descriptions=self._package_descriptions(same_package.node_ids) or None,
+                known_descriptions=self._package_descriptions(
+                    same_package.node_ids, image_vector, decision.expected_node
+                )
+                or None,
                 existing_keys=same_package.keys or None,
                 settings=page_detail,
             )
@@ -1551,19 +1556,45 @@ class GraphManager:
                     keys.append(k)
         return _SamePackageNodes(node_ids, keys)
 
-    def _package_descriptions(self, node_ids: Iterable[str]) -> list[str]:
-        """Return every distinct description of the members of ``node_ids``, in the step
-        order of the first member described so.
+    def _package_descriptions(
+        self, node_ids: Sequence[str], image_vector: list[float], expected_node: str | None
+    ) -> list[str]:
+        """Select whole descriptions by image similarity within entry and UTF-8 budgets.
 
-        A member without a description raises ``ValueError`` naming its node and every
-        such member.
+        The expected node's closest member gets first choice, then members by image
+        similarity, with ties in step order. Selected descriptions appear once, in the
+        step order of their first occurrence. The byte budget includes list formatting.
         """
         described: list[tuple[str, str]] = []
+        expected_member: str | None = None
         for node_id in node_ids:
+            closest = self.closest_member(node_id, image_vector)
+            if node_id == expected_node:
+                expected_member = closest.observation_id
             members = _member_observations(self.graph.nodes[node_id])
             described += zip(members, self._member_descriptions(node_id, members), strict=True)
         described.sort(key=lambda member_description: step_order(member_description[0]))
-        return list(dict.fromkeys(description for _, description in described))
+        ranked = sorted(
+            described,
+            key=lambda item: (
+                item[0] != expected_member,
+                -cosine_similarity(image_vector, self._image_vectors[item[0]]),
+                step_order(item[0]),
+            ),
+        )
+        selected: set[str] = set()
+        remaining = _DESCRIBE_CONTEXT_BYTES
+        for _, description in ranked:
+            size = len(f'  - "{description}"\n'.encode())
+            if description in selected or size > remaining:
+                continue
+            selected.add(description)
+            remaining -= size
+            if len(selected) == _DESCRIBE_CONTEXT_ENTRIES:
+                break
+        return list(
+            dict.fromkeys(description for _, description in described if description in selected)
+        )
 
     def _exact_match(self, pixel_hash: str, node_ids: Sequence[str]) -> tuple[str, str] | None:
         """Return the node and member with a describe output whose stored screen has

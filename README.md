@@ -819,9 +819,12 @@ about:
   that action's target observation; a new edge action records the description of the
   screen it reached as its target observation, which it keeps when the audit moves it
   to another edge;
-- the description model is given every distinct description of the members of the
-  in-app nodes of the screen's package, in the step order of the first member
-  described so;
+- the description model is given up to 16 distinct, whole descriptions of the members
+  of the in-app nodes of the screen's package, within 2,048 UTF-8 bytes including list
+  formatting. The expected node's closest member has first choice, followed by members
+  ranked by image similarity, with ties in step order. Descriptions that fit are shown
+  in their first-occurrence order. Every stored description and vector remains available
+  to matching and audit;
 - a whole node lists every distinct description of its members with the number of
   members that have it, most first, then by earliest member, such as
   `"Chrome app permissions overview" (14), "App permissions settings" (2)`: the

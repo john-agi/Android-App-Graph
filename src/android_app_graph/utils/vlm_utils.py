@@ -967,8 +967,8 @@ def describe_page_and_state(
     location search").
 
     Args:
-        known_descriptions: The distinct descriptions of the screens already seen in
-            the same package.
+        known_descriptions: A selection of distinct descriptions of screens already
+            seen in the same package.
         existing_keys: State keys already seen across same-package nodes.
 
     Returns:
@@ -979,7 +979,7 @@ def describe_page_and_state(
     if known_descriptions:
         listed = "\n".join(f'  - "{d}"' for d in known_descriptions)
         known_descriptions_section = (
-            f"The following screens have already been discovered in this app:\n{listed}"
+            f"These selected screens have already been discovered in this app:\n{listed}"
         )
         description_hint = (
             "If this screen is clearly the same type as one in the list, output the same "
@@ -989,7 +989,7 @@ def describe_page_and_state(
             "flow this is."
         )
     else:
-        known_descriptions_section = "No screens have been discovered yet in this app."
+        known_descriptions_section = "No known-screen descriptions are supplied for this screen."
         description_hint = "Focus on the screen's purpose. Use precise words."
 
     if existing_keys:
