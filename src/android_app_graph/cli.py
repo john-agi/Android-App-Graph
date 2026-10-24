@@ -136,7 +136,7 @@ def _explore() -> None:
             time.sleep(1)
 
             grant_runtime_permissions(config["device"]["udid"], package_name)
-            launch_app(config, app, logger)
+            launch_activity = launch_app(config, app, logger)
             time.sleep(4)
 
             explorer_config = ExplorerConfig(
@@ -147,7 +147,7 @@ def _explore() -> None:
                 max_steps=max_steps,
                 coverage_checkpoint_steps=coverage_checkpoint_steps,
                 coverage_checkpoint_top_k=coverage_checkpoint_top_k,
-                launch_activity=app.get("launch_activity"),
+                launch_activity=launch_activity,
                 unreachable_limit=unreachable_limit,
             )
             kobe = Kobe(controller, explorer_config, client=client, logger=logger)

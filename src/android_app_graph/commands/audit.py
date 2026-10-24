@@ -925,14 +925,14 @@ def _re_explore_app(
     logger.info("Starting re-exploration for %d issues...", len(issues))
 
     grant_runtime_permissions(run.config["device"]["udid"], package_name)
-    launch_app(run.config, app, logger)
+    launch_activity = launch_app(run.config, app, logger)
     time.sleep(4)
 
     target = ReExploreTarget(
         app_name=app_name,
         package_name=package_name,
         graph_path=_app_file(run.graph_dir, app_name, "_audited"),
-        launch_activity=app.get("launch_activity"),
+        launch_activity=launch_activity,
     )
     re_results = re_explore_issues(graph, issues, target=target, session=session, client=run.client)
 

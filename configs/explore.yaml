@@ -15,7 +15,8 @@ experiment:
 apps:
   - name: demo_app
     package_name: com.example.app
-    # Optional. Use this when package launch cannot find the correct activity.
+    # Optional: the activity every launch and restart starts; the package's launcher
+    # activity by default.
     # launch_activity: com.example.app/.MainActivity
 
 vlm:

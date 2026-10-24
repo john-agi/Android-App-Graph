@@ -2310,8 +2310,14 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
     )
     events: list[tuple[object, ...]] = []
 
-    def re_explore(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
-        events.append(("re-explore",))
+    def launch(*_args: object) -> str:
+        events.append(("launch",))
+        return "com.demo/.Home"
+
+    def re_explore(
+        *_args: object, target: audit.ReExploreTarget, **_kwargs: object
+    ) -> list[dict[str, Any]]:
+        events.append(("re-explore", target.launch_activity))
         return []
 
     monkeypatch.setattr(
@@ -2320,9 +2326,14 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
     monkeypatch.setattr(
         audit, "grant_runtime_permissions", lambda *args: events.append(("grant", *args))
     )
-    monkeypatch.setattr(audit, "launch_app", lambda *_args: events.append(("launch",)))
+    monkeypatch.setattr(audit, "launch_app", launch)
     monkeypatch.setattr(audit, "re_explore_issues", re_explore)
     monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
 
     assert audit.main(["--config", str(config), "--re-explore"]) == 0
-    assert events == [("grant", "emulator-5554", "com.demo"), ("launch",), ("re-explore",)]
+    # Re-exploration restarts the app through the component its launch started.
+    assert events == [
+        ("grant", "emulator-5554", "com.demo"),
+        ("launch",),
+        ("re-explore", "com.demo/.Home"),
+    ]

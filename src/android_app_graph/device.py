@@ -164,6 +164,55 @@ _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
 _CLEAR_KEY_PRESSES = 20
 
+_CLEAR_ALL_ID = "com.android.launcher3:id/clear_all"
+# Each swipe moves the recent apps by one app, so Clear all is reached past at most this
+# many apps. Every swipe adds a UI dump, about 2 s on a Redroid container.
+_CLEAR_ALL_SWIPES = 10
+# Long enough for a Redroid container, which renders 15 frames per second, to move the
+# recent apps on every swipe.
+_RECENT_APPS_SWIPE_MS = 300
+_UI_NODE = re.compile(r"<node\b[^>]*>")
+_NODE_ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+_BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def _ui_nodes(ui_dump: str) -> list[dict[str, str]]:
+    """Return the attributes of each node in ``uiautomator dump`` output, in order.
+
+    uiautomator escapes ``<``, ``>`` and ``"`` inside attribute values, so each node
+    tag and each attribute is one match.
+    """
+    return [dict(_NODE_ATTRIBUTE.findall(node)) for node in _UI_NODE.findall(ui_dump)]
+
+
+def _shows_no_recent_apps(ui_dump: str) -> bool:
+    """Return whether ``uiautomator dump`` output shows the recent apps screen with no
+    app in it: an ``overview_panel`` node and no ``task_view`` node, an app's card.
+
+    The ids are matched by name in any package, as Launcher3 and the launchers built on
+    it, such as the Pixel launcher, name these views alike.
+    """
+    resource_ids = [node.get("resource-id", "") for node in _ui_nodes(ui_dump)]
+    shows_recent_apps = any(rid.endswith(":id/overview_panel") for rid in resource_ids)
+    return shows_recent_apps and not any(":id/task_view" in rid for rid in resource_ids)
+
+
+def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
+    """Return the centre of the recent apps' Clear all button in ``uiautomator dump``
+    output: the first node whose resource id is Launcher3's ``clear_all`` or whose text,
+    in any case, is "Clear all". ``None`` when no node is.
+    """
+    for attributes in _ui_nodes(ui_dump):
+        bounds = _BOUNDS.fullmatch(attributes.get("bounds", ""))
+        is_clear_all = (
+            attributes.get("resource-id") == _CLEAR_ALL_ID
+            or attributes.get("text", "").casefold() == "clear all"
+        )
+        if bounds is not None and is_clear_all:
+            left, top, right, bottom = (int(value) for value in bounds.groups())
+            return (left + right) // 2, (top + bottom) // 2
+    return None
+
 
 class AdbController:
     """Reads the screen of the device ``config["device"]["udid"]`` and acts on it over adb."""
@@ -185,9 +234,7 @@ class AdbController:
         activity, both ``"unknown"`` when ``dumpsys window`` names none, and the
         ``status_bar`` frame that ``status_bar_frame`` reads from the same dump.
         """
-        xml = self._read(
-            _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"]
-        )
+        xml = self._ui_dump()
         png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"])
         dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"])
         package, activity = _focused_package_activity(dumpsys)
@@ -198,6 +245,11 @@ class AdbController:
             "activity": activity,
             "status_bar": status_bar_frame(dumpsys),
         }
+
+    def _ui_dump(self) -> str:
+        return self._read(
+            _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"]
+        )
 
     def _read[T](self, read: Callable[[Sequence[str], float], T], args: Sequence[str]) -> T:
         """Return ``read(args, timeout)``, logging a warning and running it once more
@@ -244,14 +296,43 @@ class AdbController:
                 raise ValueError(msg)
 
     def terminate_all_apps(self) -> None:
-        """Open recent apps, swipe the list to its left end and tap where the launcher
-        shows Clear all.
+        """Open recent apps and tap their Clear all button, which ``_scroll_to_clear_all``
+        brings on screen, or press Home when they show no app.
+
+        When Clear all does not appear, log a warning and press Home; the recent apps
+        stay.
         """
         self._press("KEYCODE_APP_SWITCH")
-        self._swipe(int(0.1 * self.w), int(0.5 * self.h), int(0.9 * self.w), int(0.5 * self.h), 100)
-        time.sleep(1)
-        self._tap(int(0.2 * self.w), int(0.48 * self.h))
-        time.sleep(1.5)
+        ui_dump = self._scroll_to_clear_all()
+        clear_all = _clear_all_center(ui_dump)
+        if clear_all is not None:
+            self._tap(*clear_all)
+            time.sleep(1.5)
+            return
+        if not _shows_no_recent_apps(ui_dump):
+            self._logger.warning(
+                "Clear all did not appear in recent apps after %d swipes; pressing Home.",
+                _CLEAR_ALL_SWIPES,
+            )
+        self._press("KEYCODE_HOME")
+
+    def _scroll_to_clear_all(self) -> str:
+        """Return the UI dump of the recent apps on screen once it shows Clear all or no
+        app, swiping the list from left to right before each look after the first, at
+        most ``_CLEAR_ALL_SWIPES`` times.
+
+        In a left-to-right layout that swipe moves the list toward its oldest app, which
+        Clear all follows.
+        """
+        ui_dump = self._ui_dump()
+        for _ in range(_CLEAR_ALL_SWIPES):
+            if _clear_all_center(ui_dump) is not None or _shows_no_recent_apps(ui_dump):
+                return ui_dump
+            middle = int(0.5 * self.h)
+            self._swipe(int(0.1 * self.w), middle, int(0.9 * self.w), middle, _RECENT_APPS_SWIPE_MS)
+            time.sleep(1)
+            ui_dump = self._ui_dump()
+        return ui_dump
 
     def _input(self, *args: str, check: bool = False) -> None:
         """Run ``adb shell input`` with ``args``. A timeout raises
@@ -446,52 +527,21 @@ class EmulatorManager:
         self._logger.info("AVD hardware file '%s' modified.", hardware_ini)
 
 
-def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> None:
-    """Launch an app using an explicit activity when configured."""
+def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> str:
+    """Start ``app``, an entry of ``config["apps"]``, with ``am start -n`` and return the
+    component started, which ``AppLaunch.component`` names: its ``launch_activity``, or
+    else the package's launcher activity.
+
+    The app's task is left as it is. Raises ``NoLauncherActivityError`` naming the
+    package when it has no launcher activity, and ``ActivityStartError`` when ``am
+    start`` cannot start the component.
+    """
     udid = config["device"]["udid"]
-    app_name = app["name"]
-    package_name = app["package_name"]
-    launch_activity = app.get("launch_activity")
-
-    if launch_activity:
-        logger.info("Launching app %s via activity %s ...", app_name, launch_activity)
-        result = run_adb(
-            [
-                "-s",
-                udid,
-                "shell",
-                "am",
-                "start",
-                "-n",
-                launch_activity,
-            ],
-            output="capture",
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        logger.warning(
-            "Activity launch failed for %s; falling back to package launch. error=%s",
-            app_name,
-            (result.stderr or result.stdout or "").strip(),
-        )
-
-    logger.info("Launching app %s (%s) ...", app_name, package_name)
-    run_adb(
-        [
-            "-s",
-            udid,
-            "shell",
-            "monkey",
-            "-p",
-            package_name,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        ],
-        output="discard",
-        check=True,
-    )
+    launch = AppLaunch(app["name"], app["package_name"], app.get("launch_activity"))
+    component = launch.component(udid, logger)
+    logger.info("Launching app %s via activity %s ...", app["name"], component)
+    _start_activity(udid, component)
+    return component
 
 
 _LAUNCH_SETTLE_SECONDS = 4
@@ -506,17 +556,21 @@ class ForceStopRefusedError(subprocess.CalledProcessError):
 
 
 class NoLauncherActivityError(RuntimeError):
-    """The package has no launcher activity, so restarting it needs a configured
+    """The package has no launcher activity, so starting it needs a configured
     ``launch_activity``."""
 
 
+class ActivityStartError(RuntimeError):
+    """``am start`` could not start the app's component."""
+
+
 class AppLaunch:
-    """An app that ``restart_app`` restarts, and the one component every restart starts.
+    """An app that ``launch_app`` or ``restart_app`` starts, and the one component every
+    start of it starts.
 
     Every replay begins at the graph's start node, so every restart has to land on the
-    same screen. The component is the configured ``launch_activity``, or else the
-    package's launcher activity, resolved on the first restart and reused; ``monkey``
-    would pick one of several launcher activities at random.
+    same screen. The component is the given ``launch_activity``, or else the package's
+    launcher activity, resolved on first use and reused.
     """
 
     def __init__(self, name: str, package_name: str, launch_activity: str | None = None) -> None:
@@ -553,7 +607,7 @@ def _launcher_activity(udid: str, package_name: str, logger: logging.Logger) -> 
     first, *others = components
     if others:
         logger.warning(
-            "%s has several launcher activities; restarting it through %s, not %s. "
+            "%s has several launcher activities; starting it through %s, not %s. "
             "Set launch_activity to choose another.",
             package_name,
             first,
@@ -576,26 +630,32 @@ def restart_app(controller: DeviceController, app: AppLaunch, logger: logging.Lo
     app whose task still exists brings that task to the foreground as it was
     (https://developer.android.com/guide/components/activities/tasks-and-back-stack),
     so the launch clears the task. A refused force-stop raises ``ForceStopRefusedError``
-    before anything is launched, so no replay starts from an unknown screen. When
-    ``am start`` cannot start the component, the package's launcher intent is sent instead.
+    before anything is launched, so no replay starts from an unknown screen. An ``am
+    start`` that cannot start the component raises ``ActivityStartError``.
     """
-    config = controller.config
-    udid = config["device"]["udid"]
+    udid = controller.config["device"]["udid"]
     force_stop = ["-s", udid, "shell", "am", "force-stop", app.package_name]
     stopped = run_adb(force_stop, output="discard", check=False)
     if stopped.returncode != 0:
         raise ForceStopRefusedError(stopped.returncode, stopped.args)
-    component = app.component(udid, logger)
-    start = ["-s", udid, "shell", "am", "start", "-n", component, "-f", _CLEAR_TASK_FLAGS]
-    started = run_adb(start, output="capture", check=False)
-    if _start_failed(started):
-        logger.warning(
-            "Activity launch failed for %s; falling back to package launch. error=%s",
-            app.name,
-            _adb_error(started),
-        )
-        launch_app(config, {"name": app.name, "package_name": app.package_name}, logger)
+    _start_activity(udid, app.component(udid, logger), "-f", _CLEAR_TASK_FLAGS)
     time.sleep(_LAUNCH_SETTLE_SECONDS)
+
+
+def _start_activity(udid: str, component: str, *flags: str) -> None:
+    """Start ``component`` on the device ``udid`` with ``am start -n`` and ``flags``.
+
+    Raises ``ActivityStartError`` naming the component and adb's error when ``am start``
+    reports that it could not start it.
+    """
+    started = run_adb(
+        ["-s", udid, "shell", "am", "start", "-n", component, *flags],
+        output="capture",
+        check=False,
+    )
+    if _start_failed(started):
+        msg = f"am start could not start {component}: {_adb_error(started)}"
+        raise ActivityStartError(msg)
 
 
 def _start_failed(started: subprocess.CompletedProcess[str]) -> bool:
