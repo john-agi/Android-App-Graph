@@ -977,9 +977,8 @@ def describe_page_and_state(
     location search").
 
     Args:
-        known_descriptions: A selection of distinct descriptions of screens already
-            seen in the same package.
-        existing_keys: State keys already seen across same-package nodes.
+        request: The app image, selected same-package descriptions and state keys,
+            with the observed system-feedback scope.
 
     Returns:
         (page_description, state_dict, elements_list, is_external_web)
@@ -2005,6 +2004,7 @@ class PlanRequest:
         input_status: OS keyboard visibility and current screenshot focus evidence.
         back_leaves_app: Whether Back on this screen leaves the app, which the prompt
             then says.
+        system_feedback: Ownership evidence marks gray image regions as system feedback.
     """
 
     screenshot_b64: str
@@ -2342,6 +2342,7 @@ class ActionRequest:
         screen_h: Actual device screen height in pixels.
         action_history: List of NL descriptions of previous actions taken.
         overall_task: Optional real task for supplementary context.
+        system_feedback: Ownership evidence marks gray image regions as system feedback.
     """
 
     screenshot_b64: str

@@ -432,10 +432,10 @@ class StepRecorder:
         }
 
     def exe_action(self, action: dict[str, Any]) -> None:
-        """Record ``action`` with the latest observation of this run, then send it.
+        """Record the action request and forward it within the observed ownership policy.
 
-        The latest observation is the screen the action was taken from, except in a
-        replay, which acts without looking; ``source`` says which.
+        The latest observation identifies the request's screen; ``source`` distinguishes
+        replay from planning. A rejected request has a system event with its reason.
         """
         last = self._last_observation
         try:
