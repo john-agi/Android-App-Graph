@@ -23,7 +23,7 @@ from android_app_graph.device import (
     restart_into_app,
     return_to_app,
     soft_keyboard_hint,
-    wait_for_device,
+    wait_for_device_state,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
 from android_app_graph.step_log import Observation, StepRecorder, Transition
@@ -589,34 +589,19 @@ class Kobe:
     def _recover_from_outage(
         self, timeout: subprocess.TimeoutExpired
     ) -> tuple[str, dict[str, Any]]:
-        """Wait for the device, which stopped answering with ``timeout``, and return the
-        node and state of the screen it shows when it answers again.
-
-        A read that times out after the device answers is waited for again. What the
-        interrupted action did is unknown, so the setup of the next action is unknown.
-        """
+        """Recover an observation and identify it with an unknown action setup."""
         udid = self.controller.config["device"]["udid"]
+        self.logger.warning(
+            "Device %s is unreachable: %s. Waiting up to %g minutes for a complete observation.",
+            udid,
+            timeout,
+            self.unreachable_limit / 60,
+        )
         with self.controller.source("device_recovery"):
-            while True:
-                self.logger.warning(
-                    "Device %s is unreachable: %s. Waiting up to %g minutes for it to answer.",
-                    udid,
-                    timeout,
-                    self.unreachable_limit / 60,
-                )
-                waited = wait_for_device(udid, self.unreachable_limit)
-                self.logger.info(
-                    "Device %s answers again after %.0f s. Continuing from the screen it shows.",
-                    udid,
-                    waited,
-                )
-                try:
-                    node, device_state = self._identify(self.controller.get_state())
-                except subprocess.TimeoutExpired as again:
-                    timeout = again
-                else:
-                    self._setup_trail.begin(node, None)
-                    return node, device_state
+            state = wait_for_device_state(self.controller, self.unreachable_limit, self.logger)
+            node, device_state = self._identify(state)
+            self._setup_trail.begin(node, None)
+            return node, device_state
 
     def _explore_step(self, position: _Position, max_steps: int) -> _Position:
         """Take one step from ``position``, record it, and return where the next one starts."""

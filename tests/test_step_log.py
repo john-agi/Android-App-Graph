@@ -51,8 +51,10 @@ class _Device:
         self.screenshot = screenshot
         self.status_bar = status_bar
         self.actions: list[dict[str, Any]] = []
+        self.deadlines: list[float | None] = []
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, *, deadline: float | None = None) -> dict[str, Any]:
+        self.deadlines.append(deadline)
         state = {**HOME, "xml": "<hierarchy/>", "screenshot": self.screenshot}
         return state if self.status_bar is None else {**state, "status_bar": self.status_bar}
 
@@ -533,3 +535,8 @@ def test_a_malformed_vector_raises_naming_every_such_observation(steps: Path) ->
         f"Image embedding file {path} has a malformed or non-finite vector for observation(s) "
         "000001, 000002, 000003. Delete it to embed every screenshot again."
     )
+
+
+def test_observation_deadline_reaches_the_wrapped_device(device: _Device, steps: Path) -> None:
+    _recorder(device, steps).get_state(deadline=123)
+    assert device.deadlines == [123]

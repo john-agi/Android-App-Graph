@@ -201,7 +201,7 @@ class FakeController:
         self._package_name = package_name
         self.actions: list[tuple[dict[str, Any], bool]] = []
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         return {
             "activity": "MainActivity",
             "screenshot": _png(0),
@@ -1125,7 +1125,7 @@ class _ReplayController(_LoggingController):
         self._package_after_action = package_after_action
 
     @override
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         state = super().get_state()
         if self.actions:
             state["package"] = self._package_after_action

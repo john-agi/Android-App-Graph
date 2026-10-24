@@ -1400,7 +1400,7 @@ class _StatusBarDevice:
         self.config: dict[str, Any] = {}
         self._screens = list(screens)
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         return {
             "screenshot": _png(self._screens.pop(0)),
             "activity": HOME,
@@ -1631,7 +1631,7 @@ class _ActivityDevice:
         self.config: dict[str, Any] = {}
         self._screens = list(screens)
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         activity, image, package = self._screens.pop(0)
         return {"screenshot": _png(image), "activity": activity, "package": package}
 

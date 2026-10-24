@@ -258,7 +258,7 @@ class StepRecorder:
         finally:
             self._source = outer
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, *, deadline: float | None = None) -> dict[str, Any]:
         """Return the wrapped controller's state with its screenshot encoded as WebP,
         the ``observation_id`` it was recorded under, its ``pixel_hash`` and whether it
         is ``black``.
@@ -266,7 +266,7 @@ class StepRecorder:
         The hash leaves out the rows of the controller's ``status_bar`` frame; a
         controller that reports none has the whole image hashed.
         """
-        state = self._controller.get_state()
+        state = self._controller.get_state(deadline=deadline)
         png = base64.b64decode(state["screenshot"], validate=True)
         webp = encode_screenshot(png)
         with Image.open(io.BytesIO(webp)) as image:

@@ -158,7 +158,7 @@ class _ScreensByLog:
         self._log = log
         self._screens = screens
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         return self._screens[min(len(self._log), len(self._screens) - 1)]
 
     def exe_action(self, action: dict[str, Any]) -> None:
@@ -639,7 +639,7 @@ class _ScreenSequence:
         self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
         self._screens = list(screens)
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         return self._screens[0]
 
     def exe_action(self, action: dict[str, Any]) -> None:

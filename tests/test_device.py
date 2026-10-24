@@ -29,7 +29,7 @@ class _Device:
     def __init__(self) -> None:
         self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         msg = "restarting the app must not read the screen"
         raise AssertionError(msg)
 
@@ -1263,3 +1263,55 @@ def test_duplicate_avd_raises_value_error_on_an_unsupported_os(
     with pytest.raises(ValueError, match=r"^Unsupported OS: FreeBSD$"):
         device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
     assert not (root / "Pixel_dup.avd").exists()
+
+
+@pytest.mark.parametrize(
+    ("times", "stalls", "timeouts", "expired"),
+    [
+        ([100, 110, 125], 0, [30, 25, 10], False),
+        ([100, 125], 2, [30, 10], True),
+        ([100, 135], 1, [30], True),
+        ([135], 0, [], True),
+    ],
+)
+def test_observation_reads_and_retries_use_the_remaining_deadline(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    monkeypatch: pytest.MonkeyPatch,
+    times: list[float],
+    stalls: int,
+    timeouts: list[float],
+    expired: bool,
+) -> None:
+    clock = iter(times)
+    monkeypatch.setattr(device.time, "monotonic", lambda: next(clock))
+    adb.stalls[_UI_DUMP] = stalls
+
+    if expired:
+        with pytest.raises(subprocess.TimeoutExpired):
+            controller.get_state(deadline=135)
+    else:
+        controller.get_state(deadline=135)
+
+    assert adb.timeouts == timeouts
+
+
+def test_recovery_probe_is_bounded_by_its_remaining_time(
+    adb: _FakeAdb,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    elapsed: list[float] = []
+    timeouts: list[float] = []
+    monkeypatch.setattr(device.time, "monotonic", lambda: sum(elapsed))
+
+    def timeout(command: list[str], *, timeout: float, **_kwargs: object) -> NoReturn:
+        timeouts.append(timeout)
+        elapsed.append(timeout)
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(device.DeviceUnreachableError, match="test-device unreachable"):
+        device.wait_for_device_state(_Device(), 2, logging.getLogger("test"))
+
+    assert timeouts == [2]
+    assert adb.events == []

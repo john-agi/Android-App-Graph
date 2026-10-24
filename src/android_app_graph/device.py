@@ -45,7 +45,7 @@ class DeviceController(Protocol):
     h: int
     config: dict[str, Any]
 
-    def get_state(self) -> dict[str, Any]: ...
+    def get_state(self, *, deadline: float | None = None) -> dict[str, Any]: ...
 
     def exe_action(self, action: dict[str, Any]) -> None: ...
 
@@ -229,14 +229,17 @@ class AdbController:
         self.w = int(match.group(1))
         self.h = int(match.group(2))
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, *, deadline: float | None = None) -> dict[str, Any]:
         """Return the UI hierarchy XML, a base64 PNG screenshot, the focused package and
         activity, both ``"unknown"`` when ``dumpsys window`` names none, and the
         ``status_bar`` frame that ``status_bar_frame`` reads from the same dump.
+        ``deadline`` bounds every read and retry by the remaining monotonic time.
         """
-        xml = self._ui_dump()
-        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"])
-        dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"])
+        xml = self._ui_dump(deadline)
+        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"], deadline)
+        dumpsys = self._read(
+            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"], deadline
+        )
         package, activity = _focused_package_activity(dumpsys)
         return {
             "xml": xml,
@@ -246,27 +249,23 @@ class AdbController:
             "status_bar": status_bar_frame(dumpsys),
         }
 
-    def _ui_dump(self) -> str:
+    def _ui_dump(self, deadline: float | None = None) -> str:
         return self._read(
-            _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"]
+            _adb_stdout_text, [*self._serial, "exec-out", "uiautomator dump /dev/stdout"], deadline
         )
 
-    def _read[T](self, read: Callable[[Sequence[str], float], T], args: Sequence[str]) -> T:
-        """Return ``read(args, timeout)``, logging a warning and running it once more
-        when it times out.
-
-        A second timeout raises ``subprocess.TimeoutExpired``, which names the command
-        and the timeout.
-        """
+    def _read[T](
+        self, read: Callable[[Sequence[str], float], T], args: Sequence[str], deadline: float | None
+    ) -> T:
+        """Read with one timeout retry, bounding each attempt by the observation deadline."""
+        timeout = _observation_timeout(args, deadline)
         try:
-            return read(args, _READ_TIMEOUT_SECONDS)
+            return read(args, timeout)
         except subprocess.TimeoutExpired:
             self._logger.warning(
-                "adb %s timed out after %g s; retrying once",
-                shlex.join(args),
-                _READ_TIMEOUT_SECONDS,
+                "adb %s timed out after %g s; retrying once", shlex.join(args), timeout
             )
-            return read(args, _READ_TIMEOUT_SECONDS)
+            return read(args, _observation_timeout(args, deadline))
 
     def exe_action(self, action: dict[str, Any]) -> None:
         """Send ``action``, a device action from ``tool_call_to_action``, to the device.
@@ -705,38 +704,165 @@ _CHECK_INTERVAL_SECONDS = 30
 
 
 class DeviceUnreachableError(RuntimeError):
-    """The device answered no adb call for as long as the run waits for it."""
+    """The device supplied no complete observation within the recovery deadline."""
 
 
-def wait_for_device(udid: str, limit: float) -> float:
-    """Return how many seconds passed until the device ``udid`` answered a quick read,
-    checking at once and then every 30 s.
+def _observation_timeout(args: Sequence[str], deadline: float | None) -> float:
+    if deadline is None:
+        return _READ_TIMEOUT_SECONDS
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(args, 0)
+    return min(_READ_TIMEOUT_SECONDS, remaining)
 
-    Raises ``DeviceUnreachableError`` naming the device and ``limit`` when ``limit``
-    seconds have passed without an answer.
+
+def _remaining_recovery_time(udid: str, deadline: float, limit: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        msg = f"Device {udid} unreachable for {limit / 60:g} minutes"
+        raise DeviceUnreachableError(msg)
+    return remaining
+
+
+def wait_for_device_state(
+    controller: DeviceController, limit: float, logger: logging.Logger
+) -> dict[str, Any]:
+    """Recover a complete observation within one deadline after an exploration outage.
+
+    Only the observation reads qualify for nonzero recovery. One unclassified failure
+    gets a confirmation observation; the allowance belongs to the entire episode.
     """
+    udid = controller.config["device"]["udid"]
     started = time.monotonic()
-    while not _answers(udid):
-        if time.monotonic() - started >= limit:
-            msg = f"Device {udid} unreachable for {limit / 60:g} minutes"
-            raise DeviceUnreachableError(msg)
-        time.sleep(_CHECK_INTERVAL_SECONDS)
-    return time.monotonic() - started
+    deadline = started + limit
+    confirmation_used = False
+    while True:
+        remaining = _remaining_recovery_time(udid, deadline, limit)
+        if _answers(udid, min(_PROBE_TIMEOUT_SECONDS, remaining)):
+            try:
+                state = controller.get_state(deadline=deadline)
+            except subprocess.TimeoutExpired as timeout:
+                logger.warning("Device %s observation is unavailable: %s", udid, timeout)
+            except subprocess.CalledProcessError as failure:
+                policy = _recovery_read_failure(udid, failure, logger)
+                if policy == "stop" or (policy == "confirm" and confirmation_used):
+                    raise
+                confirmation_used |= policy == "confirm"
+            else:
+                _remaining_recovery_time(udid, deadline, limit)
+                logger.info(
+                    "Device %s observation recovered after %.0f s. Continuing from its screen.",
+                    udid,
+                    time.monotonic() - started,
+                )
+                return state
+        remaining = _remaining_recovery_time(udid, deadline, limit)
+        time.sleep(min(_CHECK_INTERVAL_SECONDS, remaining))
 
 
-def _answers(udid: str) -> bool:
-    """Return whether the device ``udid`` runs ``true`` in its shell within the probe
-    timeout; adb exits non-zero for a device it does not reach."""
+def _answers(udid: str, timeout: float) -> bool:
     try:
         probe = run_adb(
-            ["-s", udid, "shell", "true"],
-            output="discard",
-            timeout=_PROBE_TIMEOUT_SECONDS,
-            check=False,
+            ["-s", udid, "shell", "true"], output="discard", timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired:
         return False
     return probe.returncode == 0
+
+
+def _read_phase(command: object, udid: str) -> str | None:
+    match command:
+        case [str(), "-s", serial, "exec-out", "uiautomator dump /dev/stdout"] if serial == udid:
+            return "hierarchy"
+        case [str(), "-s", serial, "exec-out", "screencap -p"] if serial == udid:
+            return "screenshot"
+        case [str(), "-s", serial, "shell", "dumpsys", "window"] if serial == udid:
+            return "window"
+        case _:
+            return None
+
+
+_DIAGNOSTIC_LIMIT = 1024
+_ERROR_PREFIXES = (
+    "error",
+    "adb:",
+    "exception",
+    "java.",
+    "android.os.",
+    "permission",
+    "securityexception",
+    "invalid",
+    "unknown",
+    "unsupported",
+    "can't find service:",
+    "usage:",
+)
+
+
+def _diagnostic_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value[:_DIAGNOSTIC_LIMIT].decode("utf-8", errors="replace").strip()
+    return value[:_DIAGNOSTIC_LIMIT].strip() if isinstance(value, str) else ""
+
+
+def _read_diagnostic(failure: subprocess.CalledProcessError, phase: str) -> str:
+    diagnostic = _diagnostic_text(failure.stderr)
+    if not diagnostic and phase != "screenshot":
+        diagnostic = "\n".join(
+            line
+            for line in _diagnostic_text(failure.stdout).splitlines()
+            if line.lstrip().lower().startswith(_ERROR_PREFIXES)
+        )
+    return "".join(character if character.isprintable() else " " for character in diagnostic)
+
+
+def _recovery_read_failure(
+    udid: str, failure: subprocess.CalledProcessError, logger: logging.Logger
+) -> Literal["retry", "confirm", "stop"]:
+    phase = _read_phase(failure.cmd, udid)
+    if phase is None:
+        return "stop"
+    diagnostic = _read_diagnostic(failure, phase)
+    logger.warning(
+        "Device %s recovery %s read: %s; exit %d; %s",
+        udid,
+        phase,
+        shlex.join(failure.cmd),
+        failure.returncode,
+        diagnostic or "diagnostics absent",
+    )
+    lowered = diagnostic.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "permission denied",
+            "permission denial",
+            "device unauthorized",
+            "securityexception",
+            "invalid option",
+            "invalid argument",
+            "inaccessible or not found",
+            "command not found",
+            "not supported",
+            "unknown option",
+            "unknown command",
+            "unsupported",
+            "can't find service:",
+            "usage:",
+        )
+    ):
+        return "stop"
+    # These failures can clear as the transport or system service returns during the outage.
+    if any(
+        marker in lowered
+        for marker in (
+            "error: device offline",
+            "error: closed",
+            "android.os.deadobjectexception",
+        )
+    ):
+        return "retry"
+    return "confirm"
 
 
 _SYSTEM_OVERLAY_PACKAGES = frozenset(
