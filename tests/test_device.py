@@ -904,7 +904,31 @@ def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again
     assert adb.events == [tap]
 
 
-_CLEAR_FIELD = [[*_INPUT, "keyevent", "KEYCODE_DEL"], 0.2] * 20
+_CLEAR_FIELD = [
+    [*_INPUT, "keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"],
+    [*_INPUT, "keyboard", "keyevent", "KEYCODE_DEL"],
+]
+
+
+@pytest.mark.parametrize("command_index", [0, 1], ids=["select-all", "delete-selection"])
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_clearing_failure_stops_type_without_retrying_input(
+    controller: device.DeviceController, adb: _FakeAdb, command_index: int, failure: str
+) -> None:
+    command = _CLEAR_FIELD[command_index]
+    args = tuple(command[1:])
+    if failure == "timeout":
+        adb.stalls[args] = 1
+        error = subprocess.TimeoutExpired
+    else:
+        adb.replies[args] = (1, b"")
+        error = subprocess.CalledProcessError
+
+    with pytest.raises(error) as raised:
+        controller.exe_action({"action": "type", "text": "New"})
+
+    assert raised.value.cmd == command
+    assert adb.events == _CLEAR_FIELD[: command_index + 1]
 
 
 @pytest.mark.parametrize(
