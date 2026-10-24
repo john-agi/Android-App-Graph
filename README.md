@@ -775,7 +775,7 @@ A node is a screen by its purpose. What changes on a screen without changing its
 purpose is the node's state, which the screen description model records on each
 visit: whether the on-screen keyboard is shown (`keyboard_visible`), the focused
 field (`focused_field`), how far a list is scrolled (`first_visible_item` and
-`last_visible_item`), the overflow menu, dropdown, picker, popup or context menu
+`last_visible_item`), the anchored overflow menu, dropdown, popup or context menu
 open over the screen (`open_menu`, naming the menu, or `null`), and which sections
 are expanded (`expanded_sections`). The verifier counts screens that differ only in
 these as the same screen. So opening or closing a menu is a self-loop whose
@@ -784,9 +784,20 @@ is a self-loop recording the value it changed, and choosing one that leaves the
 screen is an edge to where it leads. A menu's options join the screen's elements as
 rows revealed by scrolling do, and an option's action records the tap that opened
 the menu in its [setup](#graph-edges), or, when its setup is unknown, the menu it was
-sent in, so a replay opens the menu before choosing the option. A dialog, bottom
-sheet or full-screen picker that has its own purpose, such as a data usage warning
-dialog, is a node of its own, and a menu open over it is that node's state.
+sent in, so a replay opens the menu before choosing the option.
+
+Modal dialogs, picker dialogs and modal bottom sheets are nodes distinct from the
+page underneath: time, date, radio-choice and confirmation dialogs each ask for a
+decision or input before returning to their containing screen. Dimming supports
+this distinction. An anchored menu open over a modal is that modal's state.
+The modal's purpose and opening navigation destination identify its node. Selected
+values, clock-face or text-entry input modes, and the underlying scroll position
+are state. An alarm time picker and a Bedtime time picker are different nodes;
+changing one alarm picker's time or input mode keeps its node. Descriptions and
+verifier refinements preserve the visible opening destination, so return edges
+retain their destination. The model uses visible navigation, background controls
+and recorded descriptions; a screenshot that hides its origin cannot establish
+that origin on its own.
 
 A destination the app names in its own navigation, such as a tab, a bottom
 navigation bar item or a navigation drawer entry, is a node of its own too, even when

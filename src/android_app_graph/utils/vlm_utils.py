@@ -340,6 +340,26 @@ Examples:
 - Input: ["Tap the three-dot overflow menu in the top-right corner", "Swipe upward on the alarm list", "Tap the switch of the 7:00 AM alarm"]
   Output: {{"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}"""
 
+_SCREEN_IDENTITY_POLICY = """\
+Screen identity policy:
+Modal dialogs, picker dialogs and modal bottom sheets are separate screens from the \
+page underneath, including time, date, radio-choice and confirmation dialogs. Identify \
+the foreground interaction window: it asks for a decision or input before returning to \
+the containing screen. Dimming supports this distinction; it is not required.
+Anchored menus (overflow, dropdown, popup and context menus) and expanded page controls \
+are state of their containing screen. An anchored menu over a modal is that modal's state.
+Compare the modal purpose and opening navigation destination. A different opening \
+destination or semantic purpose means DIFFERENT screens, even for identical picker layouts. \
+Selected values, input modes and underlying scroll positions are state of the SAME modal. \
+For example, clock-face and text-entry time pickers for one alarm are the same modal; \
+an alarm time picker and a bedtime time picker are different screens. Preserve the visible \
+opening destination in the modal's description and in every refined description, so its \
+return edge names a consistent destination. Use visible titles, selected navigation, \
+background controls and the supplied descriptions as evidence; report uncertainty when \
+the opening destination is hidden instead of inventing one.
+
+"""
+
 PAGE_DESCRIBE_AND_STATE_PROMPT = """\
 You are an expert at analyzing mobile app screenshots. You are helping build a navigation \
 graph of an app where each node is a distinct SCREEN TYPE (template).
@@ -357,11 +377,9 @@ Good: "search results page", "route planning page", "location search page" \
 Bad: "search results for Big Ben", "route from home to work", "John's profile page" \
 All user-specific data belongs in "state", never in "page_description". \
 The on-screen keyboard, which input field has focus, how far a list is scrolled, \
-an overflow menu, dropdown, picker, popup or context menu open over the screen, and which \
+an overflow menu, dropdown, popup or context menu open over the screen, and which \
 of its sections are expanded never change "page_description"; record them in "state". \
-A dialog, bottom sheet or full-screen picker that has its own purpose, such as a \
-"data usage warning dialog", is a screen of its own: describe the dialog, and record a \
-menu open over it in "state". \
+Describe a modal by its purpose and opening navigation destination. \
 Always describe what you actually see. \
 {description_hint}
 
@@ -373,7 +391,7 @@ For the "state" object, focus on:
 - "last_visible_item": the last list/menu item visible on screen
 - "focused_field": the input field that has focus, or null when none has
 - "keyboard_visible": whether the on-screen keyboard is shown
-- "open_menu": the overflow menu, dropdown, picker, popup or context menu open over the \
+- "open_menu": the overflow menu, dropdown, popup or context menu open over the \
   screen, named by what opened it (e.g. "overflow menu", "Security dropdown"), or null \
   when none is open
 - "expanded_sections": on a screen with collapsible sections, the ones shown expanded, \
@@ -441,7 +459,7 @@ them the same page — even if the content (list items, search results, text in 
 For example, a search results page showing different queries is still the same screen. \
 They are also the SAME screen when they differ only in whether the on-screen keyboard is shown, \
 which input field has focus, how far a list is scrolled, whether an overflow menu, dropdown, \
-picker, popup or context menu is open over the screen, or which of its sections are expanded \
+popup or context menu is open over the screen, or which of its sections are expanded \
 or collapsed. A menu open over a dialog leaves it the same dialog.
 
 Two screenshots are DIFFERENT screens if they serve different purposes in the app's workflow, \
@@ -449,8 +467,8 @@ even if they look visually similar. Pay close attention to:
 - Screen titles, headers, or labels (e.g. "Choose start location" vs "Choose destination")
 - The stage in a multi-step flow (e.g. step 1 vs step 2 of a booking)
 - Different form sections or tabs that change the screen's function
-- A dialog, bottom sheet or full-screen picker that has its own purpose, such as a \
-"Data usage warning" dialog, is a DIFFERENT screen from the page beneath it.
+- A modal is DIFFERENT from its containing page; compare its modal purpose and opening \
+navigation destination with those of another modal.
 - A search page and a search result list page is considered different usually, though sometimes the search page also provide some suggestions.
 
 A destination the app names in its own navigation, such as a tab, a bottom navigation bar \
@@ -470,8 +488,9 @@ If they are the SAME screen:
 If they are DIFFERENT screens, you must also provide a slightly more specific description of the \
 second screenshot that distinguishes it from the first. Usually adding one or two extra \
 distinguishing words is enough. Keep the description concise (under 10 words). \
-Name the screen by its purpose, never by its current state: leave out the on-screen keyboard, \
-which input field has focus, how far a list is scrolled, any overflow menu, dropdown, picker, \
+Name the screen by its purpose, preserving its modal purpose and opening navigation destination. \
+Leave out the on-screen keyboard, \
+which input field has focus, how far a list is scrolled, any overflow menu, dropdown, \
 popup or context menu open over it, and which of its sections are expanded, even when the \
 screenshot shows them:
 {"same": false, "reason": "brief explanation", \
@@ -1017,7 +1036,7 @@ def describe_page_and_state(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt},
+                {"type": "text", "text": f"{_SCREEN_IDENTITY_POLICY}{prompt}"},
                 build_image_message(screenshot_b64),
             ],
         }
@@ -1104,7 +1123,7 @@ def verify_same_node(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": NODE_VERIFY_PROMPT},
+                        {"type": "text", "text": f"{_SCREEN_IDENTITY_POLICY}{NODE_VERIFY_PROMPT}"},
                         *_shown("First screenshot (existing node)", existing),
                         *_shown("Second screenshot (new screen)", new),
                     ],
@@ -1492,7 +1511,7 @@ def audit_merge_nodes(
             client,
             call_type="node_merge_audit",
             settings=settings,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"{_SCREEN_IDENTITY_POLICY}{prompt}"}],
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
         )
     except TruncatedReplyError, httpx.TimeoutException:
@@ -1638,7 +1657,7 @@ def audit_graph(
             client,
             call_type="graph_audit",
             settings=settings,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"{_SCREEN_IDENTITY_POLICY}{prompt}"}],
             response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
         )
     except TruncatedReplyError, httpx.TimeoutException:
