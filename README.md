@@ -614,12 +614,13 @@ app the same way, force-stopping it before the launch, because a launch alone
 resumes the app's task with the other app's screen still on top. If another app
 is still in front after the restart, exploration stops with an error naming its
 package. When another app is in front during screen identification, such as at
-the end of a replay, the explorer restarts
-the app first, and stops with the same error if the app does not come back. It
+the end of a replay, the explorer restarts the app first, and stops with the same error if the app does not come back. It
 never records an edge out of an `ext_` node, so a replay never passes through one.
 The screen-description model decides what
 counts as external web, so the app's own screens get regular nodes even when they
-run in a web view or mention a privacy policy. Independently navigable system surfaces have explicit external identities: the
+run in a web view or mention a privacy policy.
+
+Independently navigable system surfaces have explicit external identities: the
 notification shade, runtime permission controller and keyboard settings do not
 count as app coverage or become checkpoint, replay or resume targets. The visible
 shade window takes precedence over the underlying focused app. An attached
@@ -642,8 +643,7 @@ wait without marking the target explored; audit exploration consumes an iteratio
 and replay stops its path. App Copy/Share and unobscured controls remain available.
 No automatic Back press dismisses a clipboard preview. A visible clipboard window
 with unavailable region geometry saves its raw capture and stops with an explicit
-ownership error. Window metadata and screenshots
-are consecutive device reads. The step log records their observed ownership.
+ownership error. Window metadata and screenshots are consecutive device reads. The step log records their observed ownership.
 Persisted observations require explicit native size and ownership fields; graph
 loading and building report missing or malformed metadata before model calls.
 An explicit null represents unavailable evidence under the supported boundary policy.
