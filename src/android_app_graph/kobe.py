@@ -732,6 +732,7 @@ class Kobe:
         )
 
         input_status += input_region_hint(position.device_state)
+        input_status += self.controller.input_rejection_hint
 
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(

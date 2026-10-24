@@ -476,6 +476,7 @@ def _plan_and_act(
     )
 
     input_status += input_region_hint(device_state)
+    input_status += run.recorder.input_rejection_hint
 
     planned_instruction, element = plan_next_action(
         client=run.client,

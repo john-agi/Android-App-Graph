@@ -160,7 +160,8 @@ def status_bar_frame(dumpsys_window: str) -> list[int] | None:
 
 _DISPLAY_FRAME = re.compile(r"mDisplayFrame=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)")
 _INPUT_SOURCE = re.compile(
-    r"^\s*InsetsSource\b.*?\btype=(tappableElement|systemGestures|mandatorySystemGestures)\b"
+    r"^\s*InsetsSource\b.*?\btype=(tappableElement|systemGestures|mandatorySystemGestures|"
+    r"ITYPE_(?:LEFT|TOP|RIGHT|BOTTOM)_(?:TAPPABLE_ELEMENT|(?:MANDATORY_)?GESTURES))\b"
     r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\].*?\bvisible=(true|false)\b"
 )
 
@@ -235,7 +236,9 @@ def input_regions(dumpsys_window: str) -> InputRegions | None:
         x1, y1, x2, y2 = (int(value) for value in source.groups()[1:5])
         if x1 >= x2 or y1 >= y2:
             continue
-        frames = taps if source.group(1) == "tappableElement" else gestures
+        frames = (
+            taps if source.group(1).endswith(("tappableElement", "TAPPABLE_ELEMENT")) else gestures
+        )
         frame = (x1, y1, x2, y2)
         if frame not in frames:
             frames.append(frame)
@@ -255,13 +258,13 @@ class InputRejectedError(ValueError):
 
 
 def input_region_hint(state: Mapping[str, object]) -> str:
-    """Give planning the captured system input boundaries and reachable-target policy."""
-    regions = state.get("input_regions")
-    if regions is None:
+    """Give both model coordinate frames the same reachable-target policy."""
+    if state.get("input_regions") is None:
         return ""
     return (
-        f"\nSystem input regions in native display pixels: {regions}. "
-        "App taps and holds stay outside tap regions; app swipes start outside gesture regions. "
+        "\nSystem navigation regions consume app inputs. "
+        "App taps and holds stay outside system touch regions; "
+        "app swipes start outside system gesture regions. "
         "Reveal an obscured control or use an unobscured point on that same control. "
         "When it cannot be reached, choose another app control or wait."
     )
@@ -408,6 +411,9 @@ class AdbController:
             case unknown:
                 msg = f"Unknown device action: {unknown!r}"
                 raise ValueError(msg)
+
+        # A sent action can rotate the display; only the next capture grounds a new plan.
+        self._observed_display = None
 
     def _check_input(self, action: Mapping[str, object]) -> None:
         """Check current system input geometry once, immediately before coordinate input."""

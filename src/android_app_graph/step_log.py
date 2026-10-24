@@ -245,6 +245,8 @@ class StepRecorder:
         self._run_kind = run_kind
         self._source = source
         self._last_observation: Observation | None = None
+        self._last_input_regions: object = None
+        self.input_rejection_hint: str = ""
         self.last_match: str | None = None
         steps.mkdir(parents=True, exist_ok=True)
         self._next_number = _first_free_number(steps)
@@ -301,7 +303,16 @@ class StepRecorder:
                 **({"input_regions": state["input_regions"]} if "input_regions" in state else {}),
             },
         )
+        last = self._last_observation
+        if (
+            last is None
+            or (last.package, last.activity, last.pixel_hash)
+            != (observation.package, observation.activity, observation.pixel_hash)
+            or self._last_input_regions != state.get("input_regions")
+        ):
+            self.input_rejection_hint = ""
         self._last_observation = observation
+        self._last_input_regions = state.get("input_regions")
         return {
             **state,
             "screenshot": observation.screenshot_b64,
@@ -327,6 +338,10 @@ class StepRecorder:
         try:
             self._controller.exe_action(action)
         except InputRejectedError as error:
+            self.input_rejection_hint = (
+                f"\nPrevious {action['action']} was rejected: {error}. "
+                "Choose another reachable action or reveal the obscured control before trying it."
+            )
             self._write_record(
                 self._take_step_id(),
                 "action_rejected",
@@ -339,6 +354,7 @@ class StepRecorder:
                 },
             )
             raise
+        self.input_rejection_hint = ""
 
     def record_match(self, observation: Observation, expected_observation: str | None) -> None:
         """Record that the run asks for the node of ``observation``, expecting the node

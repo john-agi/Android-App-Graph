@@ -585,3 +585,42 @@ def test_a_malformed_vector_raises_naming_every_such_observation(steps: Path) ->
 def test_observation_deadline_reaches_the_wrapped_device(device: _Device, steps: Path) -> None:
     _recorder(device, steps).get_state(deadline=123)
     assert device.deadlines == [123]
+
+
+@pytest.mark.parametrize(
+    "changed", ["image", "package", "activity", "input_regions", "accepted_input"]
+)
+def test_input_rejection_feedback_belongs_to_the_current_unchanged_screen(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    recorder = _recorder(device, steps)
+    recorder.get_state()
+    original = device.exe_action
+
+    def reject(_action: dict[str, object]) -> None:
+        reason = "System input regions are unavailable"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    with pytest.raises(InputRejectedError):
+        recorder.exe_action({"action": "tap", "x": 10, "y": 20})
+    recorder.get_state()
+    assert "Previous tap was rejected" in recorder.input_rejection_hint
+    assert "System input regions are unavailable" in recorder.input_rejection_hint
+    if changed == "accepted_input":
+        monkeypatch.setattr(device, "exe_action", original)
+        recorder.exe_action({"action": "back"})
+    elif changed == "image":
+        device.screenshot = _png((40, 30), "black")
+    else:
+        read = device.get_state
+        value: object = {"display": [0, 0, 40, 30], "tap": [], "gesture": []}
+        if changed != "input_regions":
+            value = "another"
+
+        def state(*, deadline: float | None = None) -> dict[str, object]:
+            return {**read(deadline=deadline), changed: value}
+
+        monkeypatch.setattr(device, "get_state", state)
+    recorder.get_state()
+    assert recorder.input_rejection_hint == ""

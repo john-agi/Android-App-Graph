@@ -694,14 +694,22 @@ system gesture regions. A visible gesture navigation bar can pass ordinary taps
 through to app content. Keyboard keys and unobscured app controls stay available.
 
 Reveal a partly obscured control or choose an unobscured point on that same control.
-An unreachable coordinate, unavailable geometry or a display change defers the
-input with a recorded reason. Exploration counts one wait without marking the
-target explored; replay stops and identifies the screen reached. Audit retries
-report the skipped action. Dispatched inputs retain their requested coordinates.
+An unreachable coordinate, unavailable geometry or a display change between capture
+and its input defers the input with a recorded reason. Exploration counts one wait
+without marking the target explored. The rejected action kind and reason accompany
+the next exploration or audit plan while its app, activity, image and input regions
+stay the same; an accepted input or changed observation clears that feedback.
+Replay checks each input against current regions after the preceding action, so
+intermediate rotations can be traversed. A rejected replay input stops the replay
+and identifies the screen reached. Audit retries report the skipped action.
+Dispatched inputs retain their requested coordinates.
 
 The detection uses the default display's authoritative `InsetsState` in
-`dumpsys window`. Its visible `tappableElement`, `systemGestures` and
-`mandatorySystemGestures` sources define regions that follow the current window geometry.
+`dumpsys window`. API 33's directional `ITYPE_*_TAPPABLE_ELEMENT`,
+`ITYPE_*_GESTURES` and `ITYPE_*_MANDATORY_GESTURES` sources and API 34+'s
+`tappableElement`, `systemGestures` and `mandatorySystemGestures` sources define
+regions that follow the current window geometry. Step records keep native pixel
+bounds; model instructions give coordinate-free reachability guidance.
 
 ### Step log
 
