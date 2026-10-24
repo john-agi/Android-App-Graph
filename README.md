@@ -518,6 +518,64 @@ For long runs, use the auto-resume wrapper:
 ./scripts/run_explore.sh -c configs/explore.yaml
 ```
 
+### Device baseline and run mutations
+
+`app-graph` captures a display baseline before app startup and keeps it in
+`<graph_dir>/<app>/<app>_run.json`. The sidecar belongs to that graph path and
+ADB device. Resume uses its original baseline; an existing graph requires its
+sidecar. Library callers scope their `DeviceController` through the
+`RunEnvironment` context manager and its typed `DisplayAccess` backend.
+
+The supported baseline includes physical size/density, the presence and values
+of their overrides, the raw font-scale setting, night mode, custom schedule
+start/end times, persistent night settings and temporary activation flags.
+An absent setting stays distinct from its effective default. Unsupported
+capture output stops startup with a diagnostic.
+
+Display changes carry UTC timestamps, observation IDs and step sources in the
+sidecar. Observation records also retain their display configuration. Saved
+coordinate actions carry `recorded_display` evidence through normalization and
+graph save/load. Replay compares it with current settings and native screenshot
+size, even when the old coordinates fit inside the new frame. A mismatch or
+missing evidence records a rejected action and requires the recorded display
+state or fresh grounding. Fresh app actions continue under the current display
+configuration.
+
+On completion, interruption or handled failure, cleanup attempts only supported
+display restoration within one bounded deadline. Its per-command results,
+verified final state and remaining commands are written to the sidecar.
+`lifecycle: active` retains pending restoration instructions while the run is
+open; `restored` describes supported display settings, and `pending` records
+unresolved restoration. Temporary activation flags that the shell cannot
+restore remain explicit verification failures. Cleanup errors preserve the
+original run error and graph. If final report storage fails, the persisted
+active baseline remains the operator's recovery source.
+
+Optional mutation metadata describes the disposable device and app cleanup:
+
+```yaml
+experiment:
+  mutation:
+    disposable_device: true
+    cleanup_recipe: "Stop timers and restore the fake seed, or reset the assigned device"
+    seed_manifest: logs/seed-manifest.json
+```
+
+The recipe is descriptive and is not executed. The optional manifest names one
+explicit public-storage subdirectory and its expected file hashes:
+
+```json
+{"root": "/sdcard/AppGraphSeed", "files": {"/sdcard/AppGraphSeed/note.txt": "<SHA-256>"}}
+```
+
+The sidecar preserves that manifest and the observed starting hashes, then
+reports added, removed and changed files in that scope. It reads hashes rather
+than copying file contents or private app data. Alarms, timers, app preferences
+and seed cleanup remain the operator's explicit recipe or authorized fleet
+reset. The explorer performs no implicit fleet reset or general app-data
+rollback. Graph-only audit stays device-free; audit re-exploration uses the same
+baseline lifecycle and replay checks.
+
 ### Replaying to a node
 
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`

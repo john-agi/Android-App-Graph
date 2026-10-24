@@ -8,6 +8,7 @@ import io
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, NoReturn, override
 
@@ -26,6 +27,7 @@ from android_app_graph.graph_files import (
     save_embeddings,
     text_embeddings_path,
 )
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
@@ -1933,6 +1935,10 @@ def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     reached = iter(["s0_home", "s2_settings", "s0_home"] * 2)
     identify_files: list[Path | None] = []
 
+    monkeypatch.setattr(
+        audit, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
+
     def identify(self: GraphManager, *_args: object, **_kwargs: object) -> str:
         identify_files.append(self.identify_file)
         return next(reached)
@@ -2376,6 +2382,10 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
     )
     events: list[tuple[object, ...]] = []
 
+    monkeypatch.setattr(
+        audit, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
+
     def launch(*_args: object) -> str:
         events.append(("launch",))
         return "com.demo/.Home"
@@ -2402,4 +2412,33 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
         ("grant", "emulator-5554", "com.demo"),
         ("launch",),
         ("re-explore", "com.demo/.Home"),
+    ]
+
+
+def test_re_exploration_reports_unsafe_display_replay_as_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client: OpenRouter,
+) -> None:
+    graph = _graph_with_nodes(("s0", {"is_start": True, "activity": "Main", "package": "com.demo"}))
+
+    def refuse(*_args: object) -> NoReturn:
+        message = "Recorded display differs"
+        raise UnsafeReplayError(message)
+
+    monkeypatch.setattr(audit, "_retry_edge", refuse)
+    session = audit.ReExploreSession(
+        FakeController("com.demo"), ModelSettings("fake"), ModelSettings("fake")
+    )
+    results = audit.re_explore_issues(
+        graph,
+        [{"type": "retry_edge"}],
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=tmp_path / "demo.json"
+        ),
+        session=session,
+        client=client,
+    )
+    assert results == [
+        {"issue": {"type": "retry_edge"}, "status": "skipped", "reason": "Recorded display differs"}
     ]

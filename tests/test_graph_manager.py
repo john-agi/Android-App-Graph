@@ -5899,3 +5899,32 @@ def test_observation_focus_comes_from_its_image_and_preserves_unknown(
     unknown = dataclasses.replace(screen(HOME, SHOT_B, PACKAGE), pixel_hash="unobserved-image")
     assert graph.observation_state(unknown) == {}
     assert len(vlm.calls) == calls
+
+
+def test_normalization_deduplication_and_reload_preserve_recorded_display_evidence(
+    normalizer: FakeNormalizer,
+    tmp_path: Path,
+) -> None:
+    normalizer.result = {"is_template": False}
+    gm = make_manager()
+    steps = tmp_path / "steps"
+    add_screen(gm, "s0_home", "Home", **members(steps))
+    add_screen(gm, "s1_results", "Results", **members(steps))
+    display: dict[str, object] = {"settings": {"font_scale": "1.0"}, "native_size": [720, 1280]}
+    action: dict[str, object] = {"action": "tap", "x": 100, "y": 200, "recorded_display": display}
+    details = EdgeDetails(instruction="Open results")
+    gm.add_edge("s0_home", "s1_results", action, details=details)
+    gm.add_edge("s0_home", "s1_results", action, details=details)
+    other = {**action, "recorded_display": {**display, "native_size": [1080, 1920]}}
+    gm.add_edge(
+        "s0_home", "s1_results", other, details=EdgeDetails(instruction="Open results again")
+    )
+    gm.normalize_all_edges()
+    path = tmp_path / "graph.json"
+    save_with_text_vectors(gm, path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+    loaded.normalize_all_edges()
+    actions = loaded.graph["s0_home"]["s1_results"]["actions"]
+    assert actions == [action, other]
+    assert loaded.find_edge_action("s0_home", "s1_results", "Open results") == (0, action)
