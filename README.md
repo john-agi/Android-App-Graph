@@ -622,12 +622,24 @@ retrying once`). An input that times out is not sent again: it may have reached 
 device, and sending it again could act twice.
 
 When a read times out the second time, or an input or another adb command of an
-exploration step times out, the explorer logs that the device is unreachable, naming
-the command, and checks the device at once and then every 30 seconds with
-`adb shell true`, until the device answers or `device.unreachable_limit` seconds
-have passed, 1800 (30 minutes) by default. When the device answers, the explorer
-logs how long it waited, reads the screen the device shows, identifies it and
-continues the run from there. The interrupted step counts toward `--max-steps`, and
+exploration step times out, the explorer logs the command and starts one recovery
+deadline: `device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
+checks the shell with `adb shell true`, then captures the complete UI dump,
+screenshot and window state. A successful shell check leaves that deadline in
+force. Each probe, observation read, retry and 30-second interval uses the time
+remaining. Recovery finishes when the complete observation succeeds; identification
+then runs with its model-request policy, and exploration continues from that screen.
+
+During recovery, the three observation reads may also exit nonzero. Offline or
+closed adb transports and `android.os.DeadObjectException` are retried within the
+same deadline. Permission denials, invalid options, unknown or unsupported commands,
+and missing services stop the run. An unclassified nonzero result gets one
+confirmation observation after the recovery interval; another unclassified result
+in the same episode stops. The recovery log names the device, read phase, command
+and exit status, with up to 1024 characters of error diagnostics or `diagnostics
+absent`. Screenshot bytes and successful observation payloads stay out of that log.
+
+The interrupted step counts toward `--max-steps`, and
 its `Step N/M` line shows `interrupted` as its action. What its action did is
 unknown, so a step interrupted before it recorded its edge records none, and the
 [setup](#graph-edges) of the next action is unknown. An outage after the step was

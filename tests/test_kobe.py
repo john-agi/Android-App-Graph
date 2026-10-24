@@ -68,7 +68,7 @@ class _Screens:
         self._screens = screens
         self.actions: list[dict[str, object]] = []
 
-    def get_state(self) -> dict[str, object]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
         return self._screens[min(len(self.actions), len(self._screens) - 1)]
 
     def exe_action(self, action: dict[str, object]) -> None:
@@ -85,7 +85,7 @@ class _Device:
         self.config: dict[str, object] = {"device": {"udid": "test-device"}}
         self._state = state
 
-    def get_state(self) -> dict[str, object]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
         if isinstance(self._state, Exception):
             raise self._state
         return self._state
@@ -1240,7 +1240,7 @@ class _ScriptedDevice:
         self._screens = screens
         self.actions: list[dict[str, object]] = []
 
-    def get_state(self) -> dict[str, object]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
         return self._screens[len(self.actions)]
 
     def exe_action(self, action: dict[str, object]) -> None:
@@ -1904,7 +1904,7 @@ class _ReplayScript:
         self._screens = iter(screens)
         self._broken = broken
 
-    def get_state(self) -> dict[str, object]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
         return next(self._screens)
 
     def exe_action(self, action: dict[str, object]) -> None:
@@ -3403,7 +3403,7 @@ class _StallingDevice:
         self._stalled_actions = stalled_actions
         self._actions = 0
 
-    def get_state(self) -> dict[str, object]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
         read = next(self._reads)
         if isinstance(read, Exception):
             raise read
@@ -3452,7 +3452,12 @@ _DETAIL_SCREEN = _screen("com.demo.Detail", "blue")
                 [0.5, 30, 0.5],
                 id=f"recovery read exits nonzero: {diagnostic or 'no diagnostics'}",
             )
-            for diagnostic in ("error: device offline", "")
+            for diagnostic in (
+                "error: device offline",
+                "error: closed",
+                "android.os.DeadObjectException",
+                "",
+            )
         ],
         pytest.param(
             [HOME_SCREEN, _LIST_SCREEN, _dump_timed_out(), _LIST_SCREEN, _DETAIL_SCREEN],
@@ -3541,8 +3546,8 @@ def test_a_device_that_stops_answering_and_answers_again_continues_from_the_scre
 @pytest.mark.parametrize(
     ("limit", "minutes", "checks"),
     [
-        pytest.param(DEFAULT_UNREACHABLE_LIMIT, "30", 61, id="default"),
-        pytest.param(90, "1.5", 4, id="configured"),
+        pytest.param(DEFAULT_UNREACHABLE_LIMIT, "30", 60, id="default"),
+        pytest.param(90, "1.5", 3, id="configured"),
     ],
 )
 @pytest.mark.usefixtures("adb_on_path")
@@ -3579,7 +3584,7 @@ def test_a_device_that_does_not_answer_within_the_limit_stops_the_run_with_the_g
 
     assert str(raised.value) == unreachable
     assert log == [_TAP, _TAP, *[_PROBE] * checks]
-    assert no_sleep == [0.5, *[30] * (checks - 1)]
+    assert no_sleep == [0.5, *[30] * checks]
     saved = json.loads(explorer.graph_path.read_text("utf-8"))
     assert saved["total_steps_completed"] == 1
     assert [(edge["source"], edge["target"]) for edge in saved["edges"]] == [("s0_home", "s1_list")]
@@ -3590,7 +3595,9 @@ def test_a_device_that_does_not_answer_within_the_limit_stops_the_run_with_the_g
 
 
 @pytest.mark.usefixtures("no_sleep", "adb_on_path")
+@pytest.mark.parametrize("nonzero_read", [False, True])
 def test_a_device_that_stops_answering_after_a_counted_step_counts_no_other_step(
+    nonzero_read: bool,
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -3602,7 +3609,10 @@ def test_a_device_that_stops_answering_after_a_counted_step_counts_no_other_step
     was counted, and the next step plans from the screen the device shows when it answers."""
     log: list[object] = []
     monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
-    reads = [HOME_SCREEN, _LIST_SCREEN, _LIST_SCREEN, _DETAIL_SCREEN]
+    reads: list[dict[str, object] | Exception] = [HOME_SCREEN, _LIST_SCREEN]
+    if nonzero_read:
+        reads.append(_read_failed(""))
+    reads.extend([_LIST_SCREEN, _DETAIL_SCREEN])
     explorer = _explorer(_StallingDevice(log, reads), tmp_path, router_client)
     _list_reached_from_home(explorer, "s2_detail")
     _identifying(explorer, monkeypatch, "s0_home", "s1_list", "s1_list", "s2_detail")
@@ -3632,7 +3642,7 @@ def test_a_device_that_stops_answering_after_a_counted_step_counts_no_other_step
     ]
     assert checkpoints == [1, 2]
     assert planned_from == ["s0_home", "s1_list"]
-    assert log == [_TAP, _PROBE, _TAP]
+    assert log == [_TAP, *[_PROBE] * (2 if nonzero_read else 1), _TAP]
 
 
 def test_a_checkpoint_whose_navigation_times_out_reads_nothing_more_from_the_device(
@@ -3795,6 +3805,145 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
 
     monkeypatch.setattr(explorer, "_identify", identify)
     with pytest.raises(subprocess.TimeoutExpired) as raised:
+        explorer.explore(max_steps=1)
+
+    assert raised.value is failure
+    assert log == [_PROBE]
+    assert no_sleep == []
+
+
+@pytest.mark.usefixtures("adb_on_path")
+@pytest.mark.parametrize(
+    ("read_command", "stderr", "stdout", "failures", "diagnostic", "excluded", "stops"),
+    [
+        (["shell", "dumpsys", "window"], b"error: closed", None, 2, "error: closed", "", False),
+        (
+            ["exec-out", "uiautomator dump /dev/stdout"],
+            "android.os.DeadObjectException",
+            None,
+            2,
+            "DeadObjectException",
+            "",
+            False,
+        ),
+        (
+            ["shell", "dumpsys", "window"],
+            None,
+            "Window{private-screen}\nerror: device offline",
+            2,
+            "error: device offline",
+            "private-screen",
+            False,
+        ),
+        (
+            ["exec-out", "screencap -p"],
+            None,
+            b"PNG-private-screen",
+            1,
+            "diagnostics absent",
+            "PNG-private-screen",
+            False,
+        ),
+        (
+            ["shell", "dumpsys", "window"],
+            b"unclassified " + b"x" * 1100 + b"private-tail",
+            None,
+            1,
+            "unclassified",
+            "private-tail",
+            False,
+        ),
+        (
+            ["shell", "dumpsys", "window"],
+            None,
+            "Permission denied\nWindow{private-screen}",
+            1,
+            "Permission denied",
+            "private-screen",
+            True,
+        ),
+        (
+            ["exec-out", "uiautomator dump /dev/stdout"],
+            "/system/bin/sh: uiautomator: inaccessible or not found",
+            None,
+            1,
+            "inaccessible or not found",
+            "",
+            True,
+        ),
+    ],
+)
+def test_recovery_uses_bounded_error_diagnostics_and_preserves_observation_payloads(
+    read_command: list[str],
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+    failures: int,
+    diagnostic: str,
+    excluded: str,
+    stops: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    failure = subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", *read_command], output=stdout, stderr=stderr
+    )
+    explorer = _recovery_explorer(
+        log, [*[failure] * failures, HOME_SCREEN], tmp_path, router_client, monkeypatch
+    )
+
+    if stops:
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            explorer.explore(max_steps=1)
+        assert raised.value is failure
+        assert no_sleep == []
+    else:
+        explorer.explore(max_steps=1)
+        assert no_sleep == [30] * failures
+
+    messages = [line for line in caplog.messages if "read:" in line]
+    assert len(messages) == failures
+    assert all(diagnostic in line and len(line) < 1300 for line in messages)
+    if excluded:
+        assert excluded not in caplog.text
+
+
+@pytest.mark.usefixtures("adb_on_path")
+@pytest.mark.parametrize(
+    "command",
+    [
+        [
+            "adb",
+            "-s",
+            "test-device",
+            "shell",
+            "pm",
+            "grant",
+            "com.demo",
+            "android.permission.CAMERA",
+        ],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "window"],
+    ],
+)
+def test_recovery_stops_nonzero_commands_outside_its_observation_reads(
+    command: list[str],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    failure = subprocess.CalledProcessError(1, command, stderr="error: device offline")
+    explorer = _recovery_explorer(log, [failure], tmp_path, router_client, monkeypatch)
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
         explorer.explore(max_steps=1)
 
     assert raised.value is failure

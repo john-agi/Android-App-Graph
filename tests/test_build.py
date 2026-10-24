@@ -80,7 +80,7 @@ class _Device:
         self.config: dict[str, Any] = {"device": {"udid": "test-device"}}
         self.page = PAGES[0]
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
         page = self.page
         return {
             "activity": f"{page.package}.Main",
