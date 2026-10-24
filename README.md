@@ -213,10 +213,26 @@ temperature does not guarantee deterministic output.
 
 ### Requests and recovery
 
-All model roles accept a positive, finite `request_timeout` (or `timeout`) in
-seconds, sent with each request; the default is 60 seconds. A screenshot embedding
-takes the `embedding` block's timeout when the `image_embedding` block sets none.
-The graph audit and node-merge audit send the whole graph in one prompt, so they use
+Each call type has its own request timeout, the seconds one attempt may take, sent
+with each request:
+
+| Call | Call type | Role | Timeout |
+|---|---|---|---|
+| Screen description | `page_describe_and_state` | `page_detail` | 55 s |
+| Node verification | `node_verify` | `page_detail` | 35 s |
+| Edge normalization | `normalize_edge` | `page_detail` | 50 s |
+| The coverage checkpoint's target choice | `exploration_target` | `page_detail` | 25 s |
+| Node-merge audit and graph audit | `node_merge_audit`, `graph_audit` | `page_detail` | 300 s |
+| Exploration planning | `instruction` | `instruction` | 70 s |
+| Relabelling a flagged edge | `action_description` | `instruction` | 70 s |
+| Action prediction | `action` | `action` | 35 s |
+| Text embedding | `embedding` | `embedding` | 15 s |
+| Screenshot embedding | `image_embedding` | `image_embedding` | 15 s |
+
+A role's positive, finite `request_timeout` (or `timeout`) in seconds replaces these
+for every call of the role. A screenshot embedding takes the `embedding` block's
+timeout when the `image_embedding` block sets none. The graph audit and node-merge
+audit send the whole graph in one prompt, so they take
 `page_detail.audit_request_timeout` instead, default 300 seconds.
 
 Each attempt ends at that timeout by the wall clock, counted from when the
@@ -226,30 +242,28 @@ connection open with whitespace every few seconds while the model works, so that
 timeout alone would never fire. A connection that sends nothing at all still ends
 at httpx's read timeout.
 
-The OpenRouter SDK retries 5XX responses, dropped connections (refused, reset or
-failed reads and writes) and timeouts with its default exponential backoff
-(0.5 s, then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s between
-tries), waiting as long as a 5XX response's `Retry-After` or `retry-after-ms`
-header asks instead. The application sends a request answered with 429 (too many
-requests) again after the same backoff, or after as long as the response's
-`Retry-After` header asks, in seconds or as a date, when that is positive and
-ends by the deadline below. A backoff that would end past the deadline is cut
-short to end at it, so no 429 is sent again after the deadline, and a 429 that
-arrives at or past it fails at once. Each 429 sent again logs a warning naming
-the call (`normalize_edge: rate limited (HTTP 429); sending again in 1.2 s`), so
-the log shows how often the provider limited the run. Both share one deadline:
-they stop once twice the request's timeout has passed since the first attempt,
-so a timed-out attempt gets exactly one more, and 5XX and 429 responses are
-retried for up to two minutes at the default timeout and ten minutes for the
-audits, after which the last one fails. Other 4xx responses, including 402 (no
-credit left), fail at once, as does a server that closes the connection without
-sending a response. The application retries what the SDK has given up on only
-for node verification: a verifier request that still times out is sent once more,
-with a deadline of its own for the retries above. Any other call that still times
-out takes the fallback listed below for a truncated reply, and a call without one
-raises. OpenRouter bills a non-streaming request in full even after the client
-disconnects, so an attempt cut off at its deadline is still billed, and a timeout
-shorter than the model needs pays for the same request twice.
+The OpenRouter SDK retries nothing itself: the application sends a request again
+after an attempt that times out, drops its connection (refused, reset or failed
+reads and writes), or is answered with 429 (too many requests) or a 5XX status. It
+waits as long as the response's `Retry-After` header asks, in seconds or as a date,
+when that is positive and ends by the deadline, and otherwise an exponential
+backoff (0.5 s, then ×1.5 per retry, plus up to 1 s of jitter, at most 60 s
+between tries) cut short to end at the deadline. The deadline is twice the call's
+timeout after its first attempt, so a timed-out attempt gets exactly one more, and
+no attempt starts after it. Each failed attempt logs a warning naming the call, the
+attempt's number and how long it took, then when it is sent again
+(`node_verify: attempt 1 timed out after 35.0 s; sending again in 1.2 s`) or, for
+one that ends past the deadline, that it is the last
+(`node_verify: attempt 2 timed out after 35.0 s; its deadline has passed`), so the
+log shows every hung attempt and how often the provider limited the run. The last
+attempt's error then propagates. Other 4xx responses, including 402 (no credit
+left), fail at once, as does a server that closes the connection without sending a
+response. Only node verification asks again after the deadline: a verifier request
+that still times out is sent once more, with a deadline of its own. Any other call
+that still times out takes the fallback listed below for a truncated reply, and a
+call without one raises. OpenRouter bills a non-streaming request in full even after
+the client disconnects, so an attempt cut off at its deadline is still billed, and a
+timeout shorter than the model needs pays for the same request twice.
 
 The application asks a model once more, and only once, for output it cannot use:
 a malformed page description, an action reply that cannot be parsed or converted,
@@ -278,10 +292,9 @@ reasoning tokens, and the caller applies its final fallback at once: an action
 waits, node verification reports no answer, edge normalization
 and relabelling a flagged edge keep the instruction, the audits report no
 issues, the coverage checkpoint uses its top candidate, and a page description
-or an exploration plan raises. A call that still times out after the SDK's
-retries is logged with its name as timed out after retries and takes the same
-fallback, so an action waits too; a page description, an exploration plan or an
-embedding still raises. A reply stopped by the provider's content filter
+or an exploration plan raises. A call that still times out at its deadline takes
+the same fallback, so an action waits too; a page description, an exploration plan
+or an embedding still raises. A reply stopped by the provider's content filter
 (`finish_reason: "content_filter"`) is logged with the call's name and otherwise
 handled like any other empty or partial reply.
 
@@ -321,8 +334,8 @@ since OpenRouter bills it; embedding replies report cost but no cached or
 reasoning tokens.
 
 Each command opens one OpenRouter client for the whole run, shares it across every
-role and closes it when the run ends; each request carries its own role's model,
-temperature and timeout.
+role and closes it when the run ends; each request carries its own role's model
+and temperature, and its call type's timeout.
 
 Edge normalization sends up to 16 requests at once: exploration's pass over a
 node's outgoing edges at every tenth visit and its final pass over every edge,

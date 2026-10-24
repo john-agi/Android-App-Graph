@@ -1,9 +1,9 @@
-"""Bound each request in time, send it again after a rate limit, and ask a model once
-more for output it cannot use; README.md#requests-and-recovery.
+"""Bound each request in time, send it again after a failed attempt, and ask a model
+once more for output it cannot use; README.md#requests-and-recovery.
 
-Transport failures never reach the re-ask as retryable: the OpenRouter SDK has
-already retried them within ``send_within_deadline``'s deadline, and retrying here
-too would multiply the attempts.
+Transport failures never reach the re-ask as retryable: ``send_within_deadline`` has
+already sent them again within its deadline, and retrying here too would multiply the
+attempts.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from typing import override
 
 import httpx
 from openrouter.errors import OpenRouterError, ResponseValidationError
-from openrouter.utils import BackoffStrategy, RetryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,24 +66,17 @@ def call_with_retry[T](label: str, func: Callable[[], T]) -> T:
     raise RuntimeError(msg)
 
 
-def _sdk_retries(time_left: float) -> RetryConfig:
-    """Return the SDK's default retry policy, ended once ``time_left`` seconds have passed.
-
-    The interval, cap and exponent are the SDK's own; its default would keep
-    retrying for an hour.
-    """
-    return RetryConfig(
-        "backoff",
-        BackoffStrategy(500, 60_000, 1.5, max(0, round(time_left * 1000))),
-        retry_connection_errors=True,
-    )
+# The OpenRouter SDK's default backoff: 0.5 s, growing 1.5 times per retry, at most 60 s.
+_FIRST_BACKOFF = 0.5
+_BACKOFF_GROWTH = 1.5
+_LONGEST_BACKOFF = 60.0
 
 
-def _backoff(policy: BackoffStrategy, retries: int) -> float:
-    """Return the seconds the SDK waits before retry ``retries + 1``, jitter included."""
+def _backoff(retries: int) -> float:
+    """Return the seconds to wait before retry ``retries + 1``, jitter included."""
     jitter = random.uniform(0, 1)  # noqa: S311  # spreads retries out; guards no secret
-    exponential = policy.initial_interval / 1000 * math.pow(policy.exponent, retries)
-    return min(exponential + jitter, policy.max_interval / 1000)
+    exponential = _FIRST_BACKOFF * math.pow(_BACKOFF_GROWTH, retries)
+    return min(exponential + jitter, _LONGEST_BACKOFF)
 
 
 def _retry_after(headers: httpx.Headers) -> float | None:
@@ -97,42 +89,75 @@ def _retry_after(headers: httpx.Headers) -> float | None:
     return None
 
 
-def send_within_deadline[T](
-    call_type: str, request_timeout: float, send: Callable[[RetryConfig], T]
-) -> T:
-    """Return what ``send`` returns, sending again after HTTP 429 until the deadline passes.
+def _failed_attempt(
+    error: OpenRouterError | httpx.TimeoutException | httpx.NetworkError,
+) -> str | None:
+    """Say how an attempt that raised ``error`` failed when sending it again may help:
+    it timed out, lost its connection, or was answered with HTTP 429 or a 5XX status."""
+    if isinstance(error, httpx.TimeoutException):
+        return "timed out"
+    if isinstance(error, httpx.NetworkError):
+        return "hit a connection error"
+    if error.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+        return "was rate limited (HTTP 429)"
+    if error.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR:
+        return f"failed with HTTP {error.status_code}"
+    return None
 
-    The deadline is twice ``request_timeout`` after the first attempt, which leaves
-    a timed-out attempt exactly one more, as the application asks once more for
-    unusable output; README.md#requests-and-recovery. ``send`` makes one SDK call
-    with the retry policy it is given, so the SDK retries 5XX answers, dropped
-    connections and timeouts until the same deadline. A 429 answer, which the SDK
-    does not retry, is logged with ``call_type`` and sent again after its
-    ``Retry-After`` when that is positive and ends by the deadline, else after the
-    SDK's backoff cut short to end at the deadline, so no 429 is sent again after
-    it. A 429 that leaves no time propagates, as does every other error.
+
+def send_within_deadline[T](call_type: str, request_timeout: float, send: Callable[[], T]) -> T:
+    """Return what ``send`` returns, sending it again after a failed attempt until the
+    deadline passes; README.md#requests-and-recovery.
+
+    ``send`` makes one attempt. The deadline is twice ``request_timeout`` after the
+    first attempt, which leaves a timed-out attempt exactly one more, as the application
+    asks once more for unusable output. An attempt that ``_failed_attempt`` describes is
+    sent again after its ``Retry-After`` when that is positive and ends by the deadline,
+    else after the backoff cut short to end at the deadline, so none is sent after it.
+    Each such attempt is logged with ``call_type``, its number and how long it took; one
+    that leaves no time propagates, as does every other error.
     """
     budget = 2 * request_timeout
     started = time.monotonic()
-    policy = _sdk_retries(budget)
-    retries = 0
+    attempt = 1
     while True:
+        attempt_started = time.monotonic()
         try:
-            return send(policy)
-        except OpenRouterError as error:
-            time_left = budget - (time.monotonic() - started)
-            if error.status_code != HTTPStatus.TOO_MANY_REQUESTS or time_left <= 0:
+            return send()
+        except (OpenRouterError, httpx.TimeoutException, httpx.NetworkError) as error:
+            failure = _failed_attempt(error)
+            if failure is None:
                 raise
-            retry_after = _retry_after(error.headers)
+            ended = time.monotonic()
+            took = ended - attempt_started
+            time_left = budget - (ended - started)
+            if time_left <= 0:
+                logger.warning(
+                    "%s: attempt %d %s after %.1f s; its deadline has passed",
+                    call_type,
+                    attempt,
+                    failure,
+                    took,
+                )
+                raise
+            retry_after = (
+                _retry_after(error.headers) if isinstance(error, OpenRouterError) else None
+            )
             wait = (
                 retry_after
                 if retry_after is not None and 0 < retry_after <= time_left
-                else min(_backoff(policy.backoff, retries), time_left)
+                else min(_backoff(attempt - 1), time_left)
             )
-        logger.warning("%s: rate limited (HTTP 429); sending again in %.1f s", call_type, wait)
+        logger.warning(
+            "%s: attempt %d %s after %.1f s; sending again in %.1f s",
+            call_type,
+            attempt,
+            failure,
+            took,
+            wait,
+        )
         time.sleep(wait)
-        retries += 1
-        policy = _sdk_retries(budget - (time.monotonic() - started))
+        attempt += 1
 
 
 def _read_timeout(request: httpx.Request) -> float | None:

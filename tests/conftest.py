@@ -91,11 +91,10 @@ def model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record sleeps instead of waiting for them.
 
-    The OpenRouter SDK's retry back-off and the explorer's settling pauses call
-    ``time.sleep`` on the shared stdlib module, so patching it here covers them
-    all. A test must never let the SDK keep failing on a real clock: it retries
-    5XX responses and timeouts until twice the request's timeout has passed on
-    ``time.time``, which no patched sleep moves on.
+    The retry backoff and the explorer's settling pauses call ``time.sleep`` on the
+    shared stdlib module, so patching it here covers them all. A test must never let
+    a request keep failing on a real clock: it is sent again until twice its timeout
+    has passed on ``time.monotonic``, which no patched sleep moves on.
     """
     delays: list[float] = []
     monkeypatch.setattr(time, "sleep", delays.append)
@@ -246,20 +245,24 @@ def timed_out_requests() -> list[httpx.Request]:
 def timing_out_client(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float], timed_out_requests: list[httpx.Request]
 ) -> Iterator[OpenRouter]:
-    """A client whose every attempt times out, a second past the default 60 s timeout, and
-    lands in ``timed_out_requests``.
+    """A client whose every attempt times out a second past its own timeout, and lands in
+    ``timed_out_requests``.
 
-    Time passes only on the clock the SDK's retry loop reads, so it gives up after
-    two attempts instead of retrying without end on a real clock.
+    Time passes only on the clocks the retry loop reads, attempt by attempt, so it gives
+    up after two attempts instead of retrying without end on a real clock.
     """
     del no_sleep  # requested for its side effect on time.sleep
+    elapsed = [0.0]
 
     def time_out(request: httpx.Request) -> httpx.Response:
         timed_out_requests.append(request)
-        msg = "no complete response within 60 s"
+        timeout = float(request.extensions["timeout"]["read"])
+        elapsed[0] += timeout + 1
+        msg = f"no complete response within {timeout:g} s"
         raise httpx.ReadTimeout(msg, request=request)
 
-    monkeypatch.setattr(time, "time", lambda: 61.0 * len(timed_out_requests))
+    monkeypatch.setattr(time, "time", lambda: elapsed[0])
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
     with (
         httpx.Client(transport=httpx.MockTransport(time_out)) as http_client,
         open_client("test-key", http_client=http_client) as client,

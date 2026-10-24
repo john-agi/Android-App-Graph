@@ -5,7 +5,8 @@ utils.vlm_utils' chat completions, page descriptions, text embeddings and
 action responses; this module owns its tests, including which errors are
 re-asked, so the callers cannot drift on it. ``DeadlineTransport`` and
 ``send_within_deadline`` bound how long one request and its retries take, and
-``send_within_deadline`` sends a request answered with HTTP 429 again.
+``send_within_deadline`` sends a request again after a failed attempt and logs
+each one.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ class _Clock:
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
-    """One fake clock for the request's deadline, the SDK's retry time and every sleep."""
+    """One fake clock for the request's deadline, each attempt's duration and every sleep."""
     fake = _Clock()
     monkeypatch.setattr(time, "monotonic", fake)
     monkeypatch.setattr(time, "time", fake)
@@ -169,33 +170,111 @@ def test_closing_the_deadline_transport_closes_the_transport_it_wraps() -> None:
     assert closed == [True]
 
 
-def test_open_client_ends_a_trickling_reply_and_the_sdk_tries_it_only_twice(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
-) -> None:
-    """Both clocks are fake: the SDK measures its retry time with ``time.time``, so
-    with a real clock and patched sleeps it would retry without end.
-    """
-    clock = _Clock()
-    monkeypatch.setattr(time, "monotonic", clock)
-    monkeypatch.setattr(time, "time", clock)
-    trickles: list[_Trickle] = []
+def _verify_through_open_client(
+    monkeypatch: pytest.MonkeyPatch, answers: list[Callable[[], httpx.Response]]
+) -> str:
+    """Send one verifier request through the transport ``open_client`` builds, the
+    transport it wraps answering each attempt with the next of ``answers``."""
 
-    def trickle(_transport: httpx.HTTPTransport, _request: httpx.Request) -> httpx.Response:
+    def answer(_transport: httpx.HTTPTransport, _request: httpx.Request) -> httpx.Response:
+        return answers.pop(0)()
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", answer)
+    with open_client("test-key") as client:
+        reply = send_chat(
+            client,
+            call_type="node_verify",
+            settings=ModelSettings("provider/model", request_timeout=60),
+            messages=[{"role": "user", "content": "Write a 1,500-word essay."}],
+        )
+    return message_text(reply)
+
+
+def _trickling(clock: _Clock, trickles: list[_Trickle]) -> Callable[[], httpx.Response]:
+    def respond() -> httpx.Response:
         trickles.append(_Trickle(clock))
         return httpx.Response(
             200, headers={"content-type": "application/json"}, stream=trickles[-1]
         )
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", trickle)
-    with open_client("test-key") as client, pytest.raises(httpx.ReadTimeout):
-        send_chat(
-            client,
-            call_type="chat",
-            settings=ModelSettings("provider/model", request_timeout=60),
-            messages=[{"role": "user", "content": "Write a 1,500-word essay."}],
-        )
+    return respond
+
+
+def _retry_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.name == retrying.__name__]
+
+
+def test_each_trickling_reply_ends_at_its_timeout_and_every_attempt_is_logged(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each reply's 21st chunk, at 63 s, is the first after its 60 s timeout; the second
+    attempt ends past the request's 120 s deadline, so it is the last."""
+    trickles: list[_Trickle] = []
+    answers = [_trickling(clock, trickles)] * 3
+    with caplog.at_level("WARNING"), pytest.raises(httpx.ReadTimeout):
+        _verify_through_open_client(monkeypatch, answers)
     assert [(t.sent, t.closed) for t in trickles] == [(21, True), (21, True)]
-    assert len(no_sleep) == 1
+    assert _retry_warnings(caplog) == [
+        f"node_verify: attempt 1 timed out after 63.0 s; sending again in {clock.slept[0]:.1f} s",
+        "node_verify: attempt 2 timed out after 63.0 s; its deadline has passed",
+    ]
+
+
+def test_a_timed_out_attempt_is_logged_and_the_attempt_after_it_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _Clock,
+    chat_body: dict[str, object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    answers = [_trickling(clock, []), lambda: httpx.Response(200, json=chat_body)]
+    with caplog.at_level("WARNING"):
+        assert _verify_through_open_client(monkeypatch, answers) == "test reply"
+    assert answers == []
+    assert _retry_warnings(caplog) == [
+        f"node_verify: attempt 1 timed out after 63.0 s; sending again in {clock.slept[0]:.1f} s"
+    ]
+
+
+def _connection_reset(request: httpx.Request) -> httpx.Response:
+    msg = "connection reset"
+    raise httpx.ConnectError(msg, request=request)
+
+
+@pytest.mark.parametrize(
+    ("fail", "failure"),
+    [
+        (
+            lambda _request: httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
+            "failed with HTTP 503",
+        ),
+        (lambda _request: _rate_limited(), "was rate limited (HTTP 429)"),
+        (_connection_reset, "hit a connection error"),
+    ],
+    ids=["5xx", "429", "dropped"],
+)
+def test_each_attempt_sent_again_is_logged_with_its_call_type_number_and_time(
+    fail: Callable[[httpx.Request], httpx.Response],
+    failure: str,
+    clock: _Clock,
+    chat_body: dict[str, object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The failed attempt takes 2 s."""
+    attempts: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) > 1:
+            return httpx.Response(200, json=chat_body)
+        clock.now += 2
+        return fail(request)
+
+    with caplog.at_level("WARNING"):
+        assert _chat(answer) == "test reply"
+    assert len(attempts) == 2
+    assert _retry_warnings(caplog) == [
+        f"chat: attempt 1 {failure} after 2.0 s; sending again in {clock.slept[0]:.1f} s"
+    ]
 
 
 def test_call_with_retry_returns_the_first_success() -> None:
@@ -310,24 +389,28 @@ def test_a_429_with_any_body_is_sent_again(
     assert len(clock.slept) == 1
 
 
+@pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize(("retry_after", "waited"), [("30", 30), ("120", 120)])
-def test_a_429_waits_as_long_as_its_retry_after_asks_when_that_ends_by_the_deadline(
-    retry_after: str, waited: float, clock: _Clock, chat_body: dict[str, object]
+def test_a_429_or_5xx_waits_as_long_as_its_retry_after_asks_when_that_ends_by_the_deadline(
+    status: int, retry_after: str, waited: float, clock: _Clock, chat_body: dict[str, object]
 ) -> None:
     """At a 60 s timeout the deadline is 120 s after the first attempt."""
-    answers = [_rate_limited({"Retry-After": retry_after}), httpx.Response(200, json=chat_body)]
+    refused = httpx.Response(status, json=_RATE_LIMITED, headers={"Retry-After": retry_after})
+    answers = [refused, httpx.Response(200, json=chat_body)]
     assert _chat(lambda _request: answers.pop(0)) == "test reply"
     assert clock.slept == [waited]
 
 
+@pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize(
     "retry_after", ["121", "0", "-5", "soon", "nan", "Wed, 21 Oct 2026 07:28:00 -0000"]
 )
-def test_a_429_whose_retry_after_ends_past_the_deadline_or_is_no_delay_waits_the_backoff(
-    retry_after: str, clock: _Clock, chat_body: dict[str, object]
+def test_a_retry_after_that_ends_past_the_deadline_or_is_no_delay_gives_way_to_the_backoff(
+    status: int, retry_after: str, clock: _Clock, chat_body: dict[str, object]
 ) -> None:
     """A date in ``-0000``, which names no time zone, is not a delay."""
-    answers = [_rate_limited({"Retry-After": retry_after}), httpx.Response(200, json=chat_body)]
+    refused = httpx.Response(status, json=_RATE_LIMITED, headers={"Retry-After": retry_after})
+    answers = [refused, httpx.Response(200, json=chat_body)]
     assert _chat(lambda _request: answers.pop(0)) == "test reply"
     assert len(clock.slept) == 1
     assert 0.5 <= clock.slept[0] <= 1.5
@@ -367,9 +450,11 @@ def test_429s_past_the_deadline_raise_and_each_one_sent_again_is_logged(
     assert len(clock.slept) == 2
     assert 0.5 <= clock.slept[0] <= 1.5
     assert 0.75 <= clock.slept[1] <= 1.75
-    assert [record.getMessage() for record in caplog.records] == [
-        f"chat: rate limited (HTTP 429); sending again in {seconds:.1f} s"
-        for seconds in clock.slept
+    rate_limited = "was rate limited (HTTP 429) after 50.0 s"
+    assert _retry_warnings(caplog) == [
+        f"chat: attempt 1 {rate_limited}; sending again in {clock.slept[0]:.1f} s",
+        f"chat: attempt 2 {rate_limited}; sending again in {clock.slept[1]:.1f} s",
+        f"chat: attempt 3 {rate_limited}; its deadline has passed",
     ]
 
 
@@ -398,9 +483,9 @@ def test_the_429_backoff_grows_to_at_most_a_minute_between_tries(clock: _Clock) 
     assert sum(clock.slept) == pytest.approx(600)
 
 
-def test_the_sdk_retries_a_5xx_after_a_429_only_until_the_same_deadline(clock: _Clock) -> None:
+def test_a_5xx_after_a_429_is_sent_again_only_until_the_same_deadline(clock: _Clock) -> None:
     """Each answer takes 50 s. After the 429 and about 1 s of backoff, 69 s are left, so
-    the SDK sends a 503 once more but not a third time, which a fresh 120 s would allow."""
+    a 503 is sent once more but not a third time, which a fresh 120 s would allow."""
     statuses = [429, 503, 503, 503]
 
     def answer(_request: httpx.Request) -> httpx.Response:

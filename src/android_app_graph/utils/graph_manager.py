@@ -1135,7 +1135,7 @@ class GraphManager:
             client,
             text,
             embedding.model,
-            request_timeout=embedding.request_timeout,
+            request_timeout=embedding.timeout("embedding"),
         )
 
     def _embed_image(self, screenshot_b64: str) -> list[float]:
@@ -1144,7 +1144,7 @@ class GraphManager:
             client,
             screenshot_b64,
             image_embedding.model,
-            request_timeout=image_embedding.request_timeout,
+            request_timeout=image_embedding.timeout("image_embedding"),
         )
 
     def image_vector(self, observation_id: str) -> list[float] | None:
