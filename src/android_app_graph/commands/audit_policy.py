@@ -34,7 +34,11 @@ def inspection_block_reason(instruction: str, *, context: str = "") -> str | Non
     Opening a form, chooser or confirmation and cancelling remain inspection.
     """
     text = " ".join(instruction.lower().split())
-    clauses = re.split(r"[.;\n]|\b(?:and then|then|and)\b", text)
+    clauses = re.split(
+        r"[.;\n]|,(?=\s*(?:tap|press|click|select|choose|activate)\b)"
+        r"|\b(?:and then|then|and)\b",
+        text,
+    )
     for raw_clause in clauses:
         clause = raw_clause.strip(" ,:-")
         if re.match(r"(?:do not|don't|never|avoid)\b", clause):
