@@ -928,6 +928,21 @@ def test_the_merge_audit_may_report_a_page_with_its_menu_open(
     assert "menu" not in prompt
 
 
+@pytest.mark.parametrize("reply", ["not-json", "[]", '{"issues":false}'])
+def test_unusable_merge_proposals_are_explicitly_unanswered(
+    reply: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content=reply))
+
+    result = vlm.audit_merge_nodes(router_client, "nodes", settings=PAGE_DETAIL)
+
+    assert result["answered"] is False
+    assert result["issues"] == []
+
+
 @pytest.mark.parametrize(
     ("operation", "reply", "expected"),
     [
@@ -1574,7 +1589,7 @@ def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Resp
     [
         ("verify", {"same": False, "answered": False, "reason": "reply truncated"}),
         ("normalize", {"instruction_template": "search milk", "is_template": False}),
-        ("merge_audit", {"issues": [], "summary": "reply truncated"}),
+        ("merge_audit", {"issues": [], "summary": "reply truncated", "answered": False}),
         ("audit", {"issues": [], "summary": "reply truncated"}),
         ("target", None),
         ("describe", None),
@@ -1697,7 +1712,11 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
             "normalize_edge",
             {"instruction_template": "search milk", "is_template": False},
         ),
-        ("merge_audit", "node_merge_audit", {"issues": [], "summary": "reply truncated"}),
+        (
+            "merge_audit",
+            "node_merge_audit",
+            {"issues": [], "summary": "reply truncated", "answered": False},
+        ),
         ("audit", "graph_audit", {"issues": [], "summary": "reply truncated"}),
         ("target", "exploration_target", None),
         ("describe", "action_description", None),
