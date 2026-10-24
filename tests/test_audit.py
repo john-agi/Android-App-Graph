@@ -30,7 +30,7 @@ from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
-from android_app_graph.utils.vlm_utils import PlanRequest
+from android_app_graph.utils.vlm_utils import ActionRequest, PlanRequest
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _RESOLVE_LAUNCHER = [
@@ -740,9 +740,20 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
     it ends records the results screen's description, and the next step plans from it,
     not from the node's."""
     planned_from: list[str] = []
-    monkeypatch.setattr(audit, "plan_next_action", _recording_planner(planned_from))
-    tap = {"action": "tap", "x": 1, "y": 2}
-    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+    input_statuses: list[str] = []
+    grounded: list[str] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+        planned_from.append(request.page_description)
+        input_statuses.append(request.input_status)
+        return "Tap the Search button", None
+
+    def act(*, request: ActionRequest, **_kwargs: object) -> tuple[dict[str, object], str]:
+        grounded.append(request.instruction)
+        return {"action": "tap", "x": 1, "y": 2}, ""
+
+    monkeypatch.setattr(audit, "plan_next_action", plan)
+    monkeypatch.setattr(audit, "predict_next_action", act)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     search = {"activity": "com.demo.Search", "screenshot": _png(255), "package": "com.demo"}
     # The restart before the replay sends three adb commands, and the first tap after it
@@ -759,7 +770,9 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search page"}'),
+            chat_response(
+                content='{"page_description":"Chat search page","state":{"focused_field":"Search"}}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -771,7 +784,9 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
             # The replay ends on the search page: an exact match.
             httpx.Response(200, json=embedding_body),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search results"}'),
+            chat_response(
+                content='{"page_description":"Chat search results","state":{"focused_field":null}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=same),
             # The results show again: an exact match.
@@ -800,6 +815,12 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
     )
     assert planned_from == [f"Chat search page{hint}", f"Chat search results{hint}"]
     assert graph.graph[start][start]["target_observations"] == ["Chat search results"]
+
+    for status, instruction, focus in zip(
+        input_statuses, grounded, ['"Search"', "null"], strict=True
+    ):
+        assert f"Current screenshot description reports focused_field: {focus}." in status
+        assert status in instruction
 
 
 @pytest.mark.usefixtures("no_sleep", "device_log")
