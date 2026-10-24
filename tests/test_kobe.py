@@ -2276,7 +2276,7 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
     described_without_known_screens = [
         request
         for request in router_requests
-        if b"No screens have been discovered" in request.content
+        if b"No known-screen descriptions are supplied" in request.content
     ]
     assert len(described_without_known_screens) == 2
 
