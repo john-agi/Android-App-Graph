@@ -446,15 +446,33 @@ uv run app-graph -c configs/explore.yaml --resume-from auto --max-steps 50
 Exploration writes graph files under `graphs/<app_name>/` and records every
 screenshot and action in its [step log](#step-log).
 
+Each step's planner is given the screenshot, the screen's description, the elements
+on it not acted on yet, and the instructions already tried from the screen's node.
+It is told where each action of an edge to another node led, by that action's target
+observation. The node's self-loop, the actions that stayed on the screen, gains an
+action for every state the screen can be put in, such as each day an alarm repeats
+on, so the planner is given only its 30 most recent distinct instructions, without
+where they led, and then how many more were tried. However many actions the
+self-loop collects, the prompt grows only with the actions of edges to other nodes.
+`app-graph-audit --re-explore` plans with the same prompt.
+
+When the last 15 steps planned on a node were all self-loops on it, the next step
+there plans nothing: it [continues from a ranked target](#replaying-to-a-node), as a
+step that plans Back where Back leaves the app does. A step to another node and such
+a continuation start the count again, and a step that waits leaves it as it is. The
+count is kept in memory, so a resumed run starts it at zero. Both bounds are
+`SELF_LOOP_INSTRUCTIONS_LISTED` and `SATURATING_SELF_LOOP_STEPS` in
+`src/android_app_graph/utils/vlm_utils.py`.
+
 Every step that counts toward `--max-steps` logs a `Step N/M: <from> --[<action>]--> <to>`
 line and then the tokens it used. `<to>` is `ext_<package>` for a step into another
 app and `ext_web` for one onto [outside web content](#external-apps-and-web-pages).
-A step that only waits shows `wait` as its action, a step that plans Back where
-Back leaves the app and [continues from a ranked target](#replaying-to-a-node) shows
-`continue`, with the node it continues from as `<to>`, and a step a
-[device outage](#device-outages) interrupted shows `interrupted`, with the node of the
-screen the device shows when it answers again as `<to>`. A run that continues a graph
-with completed steps first logs the step it resumes from and the target total.
+A step that only waits shows `wait` as its action, a step that
+[continues from a ranked target](#replaying-to-a-node) shows `continue`, with the node
+it continues from as `<to>`, and a step a [device outage](#device-outages) interrupted
+shows `interrupted`, with the node of the screen the device shows when it answers again
+as `<to>`. A run that continues a graph with completed steps first logs the step it
+resumes from and the target total.
 
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
 every permission it requests with `adb shell pm grant`, so no permission prompt
@@ -470,7 +488,7 @@ For long runs, use the auto-resume wrapper:
 ### Replaying to a node
 
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
-steps, a step that plans Back where Back leaves the app (below) and each issue that
+steps, a step that continues from a ranked target (below) and each issue that
 `app-graph-audit --re-explore` works on reach their node by replaying recorded actions
 from the screen the app opens on. Before every replay the
 app is force-stopped (`adb shell am force-stop <package_name>`) and launched again
@@ -518,13 +536,15 @@ the step's screen but without the checkpoint's merge audit, replays to it and
 continues from it. The step counts toward `max_steps`, and its log line names the
 node. In the step log, the replay's records have the `source` `navigation_replay` and
 the screen read after it `coverage_checkpoint`. When no other node is ranked, Back is
-pressed.
+pressed. A step on a node whose last 15 steps were all self-loops continues from a
+ranked target the same way, before it plans (see [Explore an App](#explore-an-app)),
+and plans as usual when no other node is ranked.
 
-When a replay for `--resume-from`, a checkpoint or a Back where Back leaves the app
+When a replay for `--resume-from`, a checkpoint or a continuation from a ranked target
 lands on a node other than its target, from whichever screen it starts, it counts a
 miss on the target, saved in the graph file as the node's `replay_misses`. The ranking
 leaves out a node whose replay has missed twice in a row, so `--resume-from auto`, a
-checkpoint and a Back where Back leaves the app pass it over, until a screenshot is
+checkpoint and a continuation pass it over, until a screenshot is
 assigned to that node again (see
 [Screen matching](#screen-matching)), by a replay that reaches it or by exploration.
 The start screen is never left out: its replay is the app's launch.
@@ -737,10 +757,10 @@ about:
 - one screen takes its own: the verifier is shown each screenshot with its own
   description, in screen matching, in the audit's merge checks and in its member
   checks; the planner is given the description of the screen the device was last
-  identified on, and told where each action tried from there led by that action's
-  target observation; a new edge action records the description of the screen it
-  reached as its target observation, which it keeps when the audit moves it to
-  another edge;
+  identified on, and told where each action tried from there to another node led by
+  that action's target observation; a new edge action records the description of the
+  screen it reached as its target observation, which it keeps when the audit moves it
+  to another edge;
 - the description model is given every distinct description of the members of the
   in-app nodes of the screen's package, in the step order of the first member
   described so;

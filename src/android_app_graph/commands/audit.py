@@ -425,6 +425,7 @@ def _plan_and_act(
         request=PlanRequest(
             screenshot_b64=before.screenshot_b64,
             page_description=page_description,
+            node=node,
             explored_edges=explored_edges,
             app_name=run.target.app_name,
             input_status=input_status,

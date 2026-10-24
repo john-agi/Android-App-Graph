@@ -421,7 +421,11 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
     "planner": lambda client, screenshot: vlm.plan_next_action(
         client,
         vlm.PlanRequest(
-            screenshot_b64=screenshot, page_description="home", explored_edges=[], app_name="demo"
+            screenshot_b64=screenshot,
+            page_description="home",
+            node="s0",
+            explored_edges=[],
+            app_name="demo",
         ),
         settings=PAGE_DETAIL,
     ),
@@ -1264,7 +1268,9 @@ def test_every_request_stops_retrying_once_twice_its_timeout_has_passed(
     )
     vlm.plan_next_action(
         router_client,
-        vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
+        ),
         settings=PAGE_DETAIL,
     )
     vlm.predict_next_action(
@@ -1313,7 +1319,7 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
         assert vlm.plan_next_action(
             router_client,
             vlm.PlanRequest(
-                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+                screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
             ),
             settings=PAGE_DETAIL,
         ) == ("", None)
@@ -1611,7 +1617,7 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
         return vlm.plan_next_action(
             router_client,
             vlm.PlanRequest(
-                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+                screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
             ),
             settings=PAGE_DETAIL,
         )
@@ -1770,7 +1776,7 @@ def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_conte
         assert vlm.plan_next_action(
             router_client,
             vlm.PlanRequest(
-                screenshot_b64=png_screenshot, page_description="home", explored_edges=[]
+                screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
             ),
             settings=PAGE_DETAIL,
         ) == ("Tap", None)
@@ -1794,6 +1800,7 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
         vlm.PlanRequest(
             screenshot_b64=png_screenshot,
             page_description="home",
+            node="s0",
             explored_edges=[],
             unexplored_elements=[
                 {"description": "Turn on dark mode toggle", "position": "top"},
@@ -1836,6 +1843,7 @@ def test_the_planner_says_where_each_tried_action_led_by_its_own_target_observat
         vlm.PlanRequest(
             screenshot_b64=png_screenshot,
             page_description="Settings",
+            node="s0_settings",
             explored_edges=explored_edges,
         ),
         settings=PAGE_DETAIL,
@@ -1869,7 +1877,9 @@ def test_the_planner_keeps_every_quote_in_its_instruction(
     router_responses.append(chat_response(content=reply))
     assert vlm.plan_next_action(
         router_client,
-        vlm.PlanRequest(screenshot_b64=png_screenshot, page_description="home", explored_edges=[]),
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
+        ),
         settings=PAGE_DETAIL,
     ) == (instruction, None)
 

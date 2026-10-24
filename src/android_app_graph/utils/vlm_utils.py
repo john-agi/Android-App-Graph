@@ -1910,14 +1910,23 @@ _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
+# A self-loop gains an action for every state its screen can be put in, such as each day an
+# alarm repeats on, and each of them leads back to the screen the planner already sees.
+SELF_LOOP_INSTRUCTIONS_LISTED = 30
+# Steps in a row that each stay on one node change only its screen's state and find no new screen.
+SATURATING_SELF_LOOP_STEPS = 15
+
+
 @dataclass(frozen=True, kw_only=True)
 class PlanRequest:
     """The screen ``plan_next_action`` plans the next instruction for.
 
     Attributes:
+        node: The node of the screen. The explored edge back to it is its self-loop, which
+            the prompt lists without where its actions led.
         explored_edges: List of edge dicts from GraphManager.get_all_edges_from_node(),
-            each with its "actions" and, one entry per action, their "instructions" and
-            "target_observations".
+            each with its "target", its "actions" and, one entry per action, their
+            "instructions" and "target_observations".
         unexplored_elements: List of element dicts not yet interacted with.
         input_status: Runtime hint about whether a text field/keyboard is active.
         back_leaves_app: Whether Back on this screen leaves the app, which the prompt
@@ -1926,6 +1935,7 @@ class PlanRequest:
 
     screenshot_b64: str
     page_description: str
+    node: str
     explored_edges: list[dict[str, Any]]
     app_name: str = ""
     unexplored_elements: list[dict[str, Any]] | None = None
@@ -1949,6 +1959,32 @@ def _tried_actions(edge: dict[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
+def _self_loop_lines(edge: dict[str, Any]) -> list[str]:
+    """Return the prompt's lines for a self-loop: its ``SELF_LOOP_INSTRUCTIONS_LISTED`` most
+    recent distinct instructions, oldest first, and a line counting the others."""
+    distinct = [tried for tried, _ in _latest_distinct(_tried_actions(edge))]
+    listed = distinct[-SELF_LOOP_INSTRUCTIONS_LISTED:]
+    lines = [f"- {tried} → stayed on this screen" for tried in listed]
+    if earlier := len(distinct) - len(listed):
+        lines.append(f"- {earlier} more tried earlier also stayed on this screen")
+    return lines
+
+
+def _explored_lines(request: PlanRequest) -> list[str]:
+    """Return the prompt's lines for the actions tried from the screen: every action of an
+    edge to another node with the observation it led to, then the self-loop's lines."""
+    lines = [
+        f'- {tried} → led to: "{observation}"'
+        for edge in request.explored_edges
+        if edge["target"] != request.node
+        for tried, observation in _tried_actions(edge)
+    ]
+    for edge in request.explored_edges:
+        if edge["target"] == request.node:
+            lines.extend(_self_loop_lines(edge))
+    return lines
+
+
 def plan_next_action(
     client: OpenRouter,
     request: PlanRequest,
@@ -1965,17 +2001,9 @@ def plan_next_action(
         unexplored element the instruction acts on, or None.
     """
 
-    if request.explored_edges:
-        lines = [
-            f'- {tried} → led to: "{observation}"'
-            for edge in request.explored_edges
-            for tried, observation in _tried_actions(edge)
-        ]
-        instructions_str = (
-            "\n".join(lines) if lines else "(none — this screen has not been explored yet)"
-        )
-    else:
-        instructions_str = "(none — this screen has not been explored yet)"
+    instructions_str = (
+        "\n".join(_explored_lines(request)) or "(none — this screen has not been explored yet)"
+    )
 
     if request.unexplored_elements:
         elem_lines = []
