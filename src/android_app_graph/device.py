@@ -224,9 +224,13 @@ def input_regions(dumpsys_window: str) -> InputRegions | None:
     left, top, right, bottom = (int(value) for value in display.groups())
     taps: list[tuple[int, int, int, int]] = []
     gestures: list[tuple[int, int, int, int]] = []
+    known_source = False
     for line in block.splitlines():
         source = _INPUT_SOURCE.search(line)
-        if source is None or source.group(6) != "true":
+        if source is None:
+            continue
+        known_source = True
+        if source.group(6) != "true":
             continue
         x1, y1, x2, y2 = (int(value) for value in source.groups()[1:5])
         if x1 >= x2 or y1 >= y2:
@@ -235,7 +239,11 @@ def input_regions(dumpsys_window: str) -> InputRegions | None:
         frame = (x1, y1, x2, y2)
         if frame not in frames:
             frames.append(frame)
-    return InputRegions((left, top, right, bottom), tuple(taps), tuple(gestures))
+    return (
+        InputRegions((left, top, right, bottom), tuple(taps), tuple(gestures))
+        if known_source
+        else None
+    )
 
 
 class InputRejectedError(ValueError):
