@@ -8,6 +8,7 @@ import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NoReturn
 
 import pytest
@@ -1342,7 +1343,7 @@ def test_observation_reads_and_retries_use_the_remaining_deadline(
     expired: bool,
 ) -> None:
     clock = iter(times)
-    monkeypatch.setattr(device.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(device, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     adb.stalls[_UI_DUMP] = stalls
 
     if expired:
