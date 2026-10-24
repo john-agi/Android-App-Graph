@@ -66,6 +66,9 @@ def test_retry_requires_its_recorded_instruction(instruction: object) -> None:
     ("instruction", "context", "blocked"),
     [
         ("Do not send the message", "", False),
+        ("Do not tap Cancel, tap OK", "Delete this file confirmation dialog", True),
+        ("Never press Cancel, press the Delete button", "", True),
+        ("Do not tap Call, Send or Delete", "", False),
         ("Press OK", "Delete this file confirmation dialog", True),
         ("Tap Yes", "Confirm purchase dialog", True),
         ("Press Cancel", "Delete this file confirmation dialog", False),
