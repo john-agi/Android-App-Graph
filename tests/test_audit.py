@@ -2859,6 +2859,13 @@ def test_audit_unreachable_plans_spend_the_bounded_step_budget_without_coverage(
     original = _edges(graph)
     _identifying(graph, monkeypatch, "s0_home")
     _describing_by_node_id(graph, monkeypatch)
+    planning_hints: list[str] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+        planning_hints.append(request.input_status)
+        return "Open the control", None
+
+    monkeypatch.setattr(audit, "plan_next_action", plan)
     controller = _ReplayController(device_log)
     _reject_inputs(controller, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
@@ -2882,3 +2889,5 @@ def test_audit_unreachable_plans_spend_the_bounded_step_budget_without_coverage(
         record for record in read_records(tmp_path / "steps") if record["kind"] == "action_rejected"
     ]
     assert len(rejected) == 2
+    assert "rejected" not in planning_hints[0]
+    assert "Previous tap was rejected: App input targets a system touch region" in planning_hints[1]

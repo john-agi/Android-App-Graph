@@ -95,7 +95,9 @@ def test_planning_uses_observed_geometry_and_same_control_reachability() -> None
             }
         }
     )
-    assert "[0, 1184, 720, 1280]" in hint
+    assert "1184" not in hint
+    assert "native display pixels" not in hint
+    assert "system" in hint.lower()
     assert "same control" in hint
     assert "wait" in hint
 
@@ -106,4 +108,21 @@ def test_invalid_coordinate_payloads_have_an_explicit_reason(coordinate: object)
     assert (
         regions.reject_reason({"action": "tap", "x": coordinate, "y": 20})
         == "App input has invalid coordinates"
+    )
+
+
+@pytest.mark.parametrize("side", ["LEFT", "TOP", "RIGHT", "BOTTOM"])
+@pytest.mark.parametrize("kind", ["TAPPABLE_ELEMENT", "GESTURES", "MANDATORY_GESTURES"])
+def test_directional_insets_names_identify_system_touch_and_gesture_regions(
+    side: str, kind: str
+) -> None:
+    window = (
+        "WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 720, 1280)\n"
+        f"InsetsSource type=ITYPE_{side}_{kind} frame=[0,1184][720,1280] visible=true\n"
+    )
+    frame = ((0, 1184, 720, 1280),)
+    assert input_regions(window) == InputRegions(
+        (0, 0, 720, 1280),
+        frame if kind == "TAPPABLE_ELEMENT" else (),
+        () if kind == "TAPPABLE_ELEMENT" else frame,
     )

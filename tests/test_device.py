@@ -1523,3 +1523,49 @@ def test_recovery_probe_is_bounded_by_its_remaining_time(
 
     assert timeouts == [2]
     assert adb.events == []
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"action": "tap", "x": 300, "y": 500},
+        {"action": "long_press", "x": 300, "y": 500},
+        {"action": "swipe", "x1": 300, "y1": 500, "x2": 600, "y2": 500},
+    ],
+)
+def test_api33_coordinate_actions_use_authoritative_system_regions(
+    controller: device.AdbController, adb: _FakeAdb, action: dict[str, object]
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, _dumpsys_window("api33").encode())
+    state = controller.get_state()
+    assert state["input_regions"] == {
+        "display": [0, 0, 1080, 2400],
+        "tap": [[0, 2337, 1080, 2400]],
+        "gesture": [[0, 0, 78, 2400], [0, 2337, 1080, 2400]],
+    }
+    controller.exe_action(action)
+    assert any(isinstance(event, list) and event[:5] == _INPUT for event in adb.events)
+    with pytest.raises(device.InputRejectedError, match="system touch region"):
+        controller.exe_action({"action": "tap", "x": 300, "y": 2370})
+    with pytest.raises(device.InputRejectedError, match="system gesture region"):
+        controller.exe_action({"action": "swipe", "x1": 10, "y1": 500, "x2": 600, "y2": 500})
+
+
+@pytest.mark.parametrize("first", [{"action": "tap", "x": 100, "y": 200}, {"action": "back"}])
+def test_replay_checks_each_inputs_current_regions_after_a_rotating_action(
+    controller: device.AdbController, adb: _FakeAdb, first: dict[str, object]
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, _BUTTON_NAVIGATION.encode())
+    controller.get_state()
+    controller.exe_action(first)
+    landscape = (
+        "WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 1280, 720)\n"
+        "InsetsSource type=tappableElement frame=[1184,0][1280,720] visible=true\n"
+    )
+    adb.replies[_DUMPSYS_WINDOW] = (0, landscape.encode())
+    controller.exe_action({"action": "tap", "x": 1100, "y": 300})
+    with pytest.raises(device.InputRejectedError, match="system touch region"):
+        controller.exe_action({"action": "tap", "x": 1250, "y": 300})
+    with pytest.raises(device.InputRejectedError, match="outside the display"):
+        controller.exe_action({"action": "tap", "x": 100, "y": 900})
+    assert [*_INPUT, "tap", "1100", "300"] in adb.events

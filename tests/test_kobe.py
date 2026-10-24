@@ -4102,7 +4102,9 @@ def test_unreachable_planned_inputs_consume_steps_and_preserve_unexplored_target
 
     assert explorer.graph.total_steps_completed == 2
     assert len(planning_hints) == 2
-    assert all("[0, 1184, 720, 1280]" in hint for hint in planning_hints)
+    assert all("1184" not in hint for hint in planning_hints)
+    assert "rejected" not in planning_hints[0]
+    assert "Previous tap was rejected: App input targets a system touch region" in planning_hints[1]
     assert device.actions == []
     assert list(explorer.graph.graph.edges) == []
     assert explorer.graph.get_unexplored_elements("s0_home") == [
