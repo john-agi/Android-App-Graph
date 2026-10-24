@@ -705,11 +705,10 @@ and identifies the screen reached. Audit retries report the skipped action.
 Dispatched inputs retain their requested coordinates.
 
 The detection uses the default display's authoritative `InsetsState` in
-`dumpsys window`. API 33's directional `ITYPE_*_TAPPABLE_ELEMENT`,
-`ITYPE_*_GESTURES` and `ITYPE_*_MANDATORY_GESTURES` sources and API 34+'s
-`tappableElement`, `systemGestures` and `mandatorySystemGestures` sources define
-regions that follow the current window geometry. Step records keep native pixel
-bounds; model instructions give coordinate-free reachability guidance.
+`dumpsys window`. Its visible `tappableElement`, `systemGestures` and
+`mandatorySystemGestures` sources define regions that follow the current window
+geometry. Step records keep native pixel bounds; model instructions give
+coordinate-free reachability guidance.
 
 ### Step log
 

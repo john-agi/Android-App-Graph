@@ -160,8 +160,7 @@ def status_bar_frame(dumpsys_window: str) -> list[int] | None:
 
 _DISPLAY_FRAME = re.compile(r"mDisplayFrame=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)")
 _INPUT_SOURCE = re.compile(
-    r"^\s*InsetsSource\b.*?\btype=(tappableElement|systemGestures|mandatorySystemGestures|"
-    r"ITYPE_(?:LEFT|TOP|RIGHT|BOTTOM)_(?:TAPPABLE_ELEMENT|(?:MANDATORY_)?GESTURES))\b"
+    r"^\s*InsetsSource\b.*?\btype=(tappableElement|systemGestures|mandatorySystemGestures)\b"
     r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\].*?\bvisible=(true|false)\b"
 )
 
@@ -236,9 +235,7 @@ def input_regions(dumpsys_window: str) -> InputRegions | None:
         x1, y1, x2, y2 = (int(value) for value in source.groups()[1:5])
         if x1 >= x2 or y1 >= y2:
             continue
-        frames = (
-            taps if source.group(1).endswith(("tappableElement", "TAPPABLE_ELEMENT")) else gestures
-        )
+        frames = taps if source.group(1) == "tappableElement" else gestures
         frame = (x1, y1, x2, y2)
         if frame not in frames:
             frames.append(frame)
