@@ -624,8 +624,9 @@ Independently navigable system surfaces have explicit external identities: the
 notification shade, runtime permission controller and keyboard settings do not
 count as app coverage or become checkpoint, replay or resume targets. The visible
 shade window takes precedence over the underlying focused app. An attached
-keyboard preserves that app's identity and its visibility is page state. Settings
-pages remain app coverage when Settings is the target.
+keyboard preserves that app's identity and its visibility is page state. The target
+package's own pages remain app coverage, including Settings and keyboard settings
+when their package is the target.
 
 A standard runtime permission prompt is resolved only when its activity's launch
 record identifies the target as its requester and the target's declared dangerous
@@ -732,9 +733,14 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 | `kind` | Written for | Also holds |
 |---|---|---|
 | `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash` and `black` |
-| `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `action` | each input request, before ownership checks and device dispatch | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `system_event` | ownership recovery or rejected input | `observation`, `status`, and event-specific evidence; statuses are `action_skipped`, `boundary_recovery`, `boundary_resolved`, `permission_observed`, `permission_grants`, `permission_resolved` and `permission_unresolved` |
 | `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, and `expected_observation`, a screenshot of the screen the run expects it to show, or `null` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
+
+An `action` record preserves a request, not proof of dispatch. Both captured-feedback
+and dispatch-time rejection add an `action_skipped` system event and produce no app
+transition.
 
 An action, match or transition record takes `activity` and `package` from the
 screenshot it was taken from. A replay acts without looking, so a replayed action

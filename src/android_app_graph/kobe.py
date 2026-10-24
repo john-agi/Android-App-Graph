@@ -186,7 +186,11 @@ class Kobe:
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
         self.controller = StepRecorder(
-            controller, steps_dir, run_kind="explore", source="main_loop"
+            controller,
+            steps_dir,
+            run_kind="explore",
+            source="main_loop",
+            target_package=self.package_name,
         )
         self._setup_trail = SetupTrail(self.graph.resolve_node_id)
         self._self_loops_in_a_row: dict[str, int] = {}
@@ -553,19 +557,19 @@ class Kobe:
                 start_step,
                 max_steps,
             )
-        if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
-            if resume_from == "auto":
-                resume_from = self.graph.get_resume_target(package_name=self.package_name)
-                self.logger.info("Auto-selected resume target: %s", resume_from)
-
-            if resume_from and resume_from in self.graph.graph:
-                node = self.navigate_to_node(resume_from)
-                return _Position(node, self.controller.get_state())
-            self.logger.warning(
-                "Node %s not found in graph. Starting from current screen.",
-                resume_from,
-            )
         try:
+            if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
+                if resume_from == "auto":
+                    resume_from = self.graph.get_resume_target(package_name=self.package_name)
+                    self.logger.info("Auto-selected resume target: %s", resume_from)
+
+                if resume_from and resume_from in self.graph.graph:
+                    node = self.navigate_to_node(resume_from)
+                    return _Position(node, self.controller.get_state())
+                self.logger.warning(
+                    "Node %s not found in graph. Starting from current screen.",
+                    resume_from,
+                )
             node, device_state = self._identify(self.controller.get_state())
         except UnresolvedPermissionError, UnresolvedSystemOverlayError:
             self.save_graph()
@@ -935,10 +939,15 @@ class Kobe:
         show the screen of ``expected_observation`` when it names one, and return its
         node and that state.
 
-        Another app's screen gets no node: with another app in front, the app is
-        restarted first, and the node and state returned are those of the screen the
-        restart shows, which is expected to be the start node.
+        System surfaces retain a boundary node, then recover the app while preserving
+        the caller's expectation. A restart expects the start node, including a restart
+        needed when Back does not dismiss a system surface. Other apps restart directly.
         """
+
+        def expect_start() -> None:
+            nonlocal expected_observation
+            expected_observation = self.graph.earliest_member(self.graph.get_start_node())
+
         package = device_state.get("package", "")
         if is_outside_app(package, self.package_name):
             self.logger.warning(
@@ -958,7 +967,9 @@ class Kobe:
                             self.controller.record_system_event,
                         )
                         if device_state.get("system_surface") == "permission"
-                        else return_to_app(self.controller, self.app_launch, self.logger)
+                        else return_to_app(
+                            self.controller, self.app_launch, self.logger, on_restart=expect_start
+                        )
                     )
                     self.controller.record_system_event(
                         {"status": "boundary_resolved", "package": device_state.get("package")}
@@ -966,7 +977,7 @@ class Kobe:
             else:
                 with self.controller.source("external_app_recovery"):
                     device_state = restart_into_app(self.controller, self.app_launch, self.logger)
-            expected_observation = self.graph.earliest_member(self.graph.get_start_node())
+                expect_start()
         observation = Observation.from_state(device_state)
         self.controller.record_match(observation, expected_observation)
         node = self.graph.identify_state(observation, expected_observation=expected_observation)

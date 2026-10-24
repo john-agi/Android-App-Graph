@@ -1301,7 +1301,13 @@ class _ScriptedDevice:
 
 def _recording(device: DeviceController, kobe: Kobe) -> StepRecorder:
     """Record ``device`` in the step log of ``kobe``, as Kobe records the device it is given."""
-    return StepRecorder(device, kobe.controller.steps, run_kind="explore", source="main_loop")
+    return StepRecorder(
+        device,
+        kobe.controller.steps,
+        run_kind="explore",
+        source="main_loop",
+        target_package=kobe.package_name,
+    )
 
 
 def _explore_one_step_the_action_model_ends(
@@ -4221,13 +4227,24 @@ def test_an_unresolved_startup_permission_saves_its_boundary_before_stopping(
 
 
 @pytest.mark.usefixtures("no_sleep")
-@pytest.mark.parametrize("surface", ["notification_shade", "permission"])
+@pytest.mark.parametrize(
+    "surface", ["notification_shade", "permission", "notification_shade_restart"]
+)
 def test_system_recovery_preserves_the_replay_expectation(
     kobe: Kobe, monkeypatch: pytest.MonkeyPatch, surface: str
 ) -> None:
     app = {**HOME_SCREEN, "activity": "com.demo.Detail"}
-    boundary = {**app, "package": "com.android.systemui", "system_surface": surface}
-    device = _TimedFeedbackDevice(HOME_SCREEN, boundary, app)
+    restart = surface == "notification_shade_restart"
+    boundary = {
+        **app,
+        "package": "com.android.systemui",
+        "system_surface": "notification_shade" if restart else surface,
+    }
+    device = (
+        _TimedFeedbackDevice(HOME_SCREEN, boundary, boundary, HOME_SCREEN)
+        if restart
+        else _TimedFeedbackDevice(HOME_SCREEN, boundary, app)
+    )
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
     kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
     kobe.graph.add_edge("s0_home", "s1_detail", action=[{"action": "tap", "x": 1, "y": 2}])
@@ -4245,11 +4262,15 @@ def test_system_recovery_preserves_the_replay_expectation(
             "android_app_graph.kobe.resolve_permission_prompt",
             lambda controller, *_args: controller.get_state(),
         )
-    assert kobe.navigate_to_node("s1_detail") == "s1_detail"
+    monkeypatch.setattr(
+        "android_app_graph.device.restart_into_app",
+        lambda controller, *_args: controller.get_state(),
+    )
+    assert kobe.navigate_to_node("s1_detail") == ("s0_home" if restart else "s1_detail")
     matches = [json.loads(p.read_text()) for p in sorted(kobe.controller.steps.glob("*.json"))]
     assert [r["expected_observation"] for r in matches if r["kind"] == "match"] == [
         "s0_home-observation",
-        "s1_detail-observation",
+        "s0_home-observation" if restart else "s1_detail-observation",
     ]
 
 
@@ -4262,10 +4283,10 @@ def test_resume_preserves_graph_evidence_when_system_recovery_stops(
     from android_app_graph.system_surfaces import UnresolvedSystemOverlayError
 
     error = UnresolvedPermissionError if failure == "permission" else UnresolvedSystemOverlayError
-    kobe.graph.graph.add_node("s0")
+    kobe.graph.graph.add_node("s0", replay_misses=0)
 
     def stop(*_args: object, **_kwargs: object) -> NoReturn:
-        kobe.graph.graph.add_node("ext_boundary", is_external=True)
+        kobe.graph.graph.add_node("ext_boundary", is_external=True, replay_misses=0)
         msg = "unresolved boundary"
         raise error(msg)
 

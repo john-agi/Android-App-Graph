@@ -1507,6 +1507,7 @@ def test_a_screen_that_differs_only_inside_the_status_bar_is_an_exact_match(
         tmp_path / "steps",
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(recorder.steps)
     vlm.descriptions.extend([("Home screen", {}, [])] * 2)
@@ -1526,6 +1527,7 @@ def test_a_reloaded_graph_matches_its_members_exactly(vlm: FakeVlm, tmp_path: Pa
         steps_dir,
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(steps_dir)
     vlm.descriptions.append(("Home screen", {"tab": "home"}, []))
@@ -1740,7 +1742,11 @@ def _secure(activity: str, package: str = PACKAGE) -> tuple[str, Image.Image, st
 def _captures(steps_dir: Path, *screens: tuple[str, Image.Image, str]) -> list[Observation]:
     """Observations of ``screens`` as a StepRecorder on ``steps_dir`` captures them."""
     recorder = StepRecorder(
-        _ActivityDevice(*screens), steps_dir, run_kind="explore", source="main_loop"
+        _ActivityDevice(*screens),
+        steps_dir,
+        run_kind="explore",
+        source="main_loop",
+        target_package="com.demo",
     )
     return [Observation.from_state(recorder.get_state()) for _ in screens]
 
@@ -1896,6 +1902,7 @@ def test_a_screen_black_below_the_status_bar_alone_is_described_not_copied_from_
         tmp_path / "steps",
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(recorder.steps)
     black_screen = Observation.from_state(recorder.get_state())

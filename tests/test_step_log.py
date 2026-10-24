@@ -73,7 +73,9 @@ def steps(tmp_path: Path) -> Path:
 
 
 def _recorder(device: DeviceController, steps: Path) -> StepRecorder:
-    return StepRecorder(device, steps, run_kind="explore", source="main_loop")
+    return StepRecorder(
+        device, steps, run_kind="explore", source="main_loop", target_package="com.demo"
+    )
 
 
 def _record(steps: Path, step_id: str) -> dict[str, Any]:
@@ -249,7 +251,9 @@ def test_a_second_recorder_continues_the_numbering_as_another_run(
     first.get_state()
     first.exe_action({"action": "back"})
 
-    second = StepRecorder(device, steps, run_kind="audit", source="re_explore")
+    second = StepRecorder(
+        device, steps, run_kind="audit", source="re_explore", target_package="com.demo"
+    )
     state = second.get_state()
 
     assert state["observation_id"] == "000002"
@@ -379,7 +383,9 @@ def test_the_exploration_transitions_are_read_in_step_order(device: _Device, ste
     for number in range(10):
         _transition(explore, {"action": "tap", "x": number, "y": 0}, f"s{number}_page")
     _transition(
-        StepRecorder(device, steps, run_kind="audit", source="re_explore"),
+        StepRecorder(
+            device, steps, run_kind="audit", source="re_explore", target_package="com.demo"
+        ),
         {"action": "back"},
         "s0_home",
     )

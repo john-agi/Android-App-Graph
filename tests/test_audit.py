@@ -931,7 +931,11 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
     graph.steps_dir = tmp_path / "steps"
     graph.identify_file = identify_file_path(tmp_path / "demo_audited.json")
     recorder = StepRecorder(
-        two_screen_device, graph.steps_dir, run_kind="audit", source="re_explore"
+        two_screen_device,
+        graph.steps_dir,
+        run_kind="audit",
+        source="re_explore",
+        target_package="com.demo",
     )
     start = graph.identify_state(Observation.from_state(recorder.get_state()))
     verdict = {
@@ -1041,7 +1045,9 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    recorder = StepRecorder(device, graph.steps_dir, run_kind="audit", source="re_explore")
+    recorder = StepRecorder(
+        device, graph.steps_dir, run_kind="audit", source="re_explore", target_package="com.demo"
+    )
     start = graph.identify_state(Observation.from_state(recorder.get_state()))
     same = '{"same":true,"reason":"one screen","new_description":null}'
     router_responses.extend(

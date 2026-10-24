@@ -939,6 +939,7 @@ def re_explore_issues(
         graph_steps_dir(target.graph_path),
         run_kind="audit",
         source="re_explore",
+        target_package=target.package_name,
     )
     run = _ReExploreRun(
         graph=graph,

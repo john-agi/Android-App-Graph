@@ -156,7 +156,12 @@ def _record_log(steps: Path) -> _Log:
     pages: dict[str, _Page] = {}
     seen: dict[str, Observation] = {}
     run = _Recording(
-        StepRecorder(device, steps, run_kind="explore", source="main_loop"), device, vectors, pages
+        StepRecorder(
+            device, steps, run_kind="explore", source="main_loop", target_package="com.demo"
+        ),
+        device,
+        vectors,
+        pages,
     )
     start = seen["s0"] = run.show(PAGES[0])
     run.match(start)
@@ -182,7 +187,12 @@ def _record_log(steps: Path) -> _Log:
         seen["off_web"] = run.show(PAGES[2])
         run.match(seen["off_web"], expected=screen)
     audit = _Recording(
-        StepRecorder(device, steps, run_kind="audit", source="re_explore"), device, vectors, pages
+        StepRecorder(
+            device, steps, run_kind="audit", source="re_explore", target_package="com.demo"
+        ),
+        device,
+        vectors,
+        pages,
     )
     audit_start = audit.show(PAGES[3])
     audit.match(audit_start)
@@ -507,7 +517,12 @@ def test_a_build_skips_a_step_with_no_matched_start_or_an_unmatched_screen_of_th
     steps = tmp_path / "log" / "steps"
     device = _Device()
     run = _Recording(
-        StepRecorder(device, steps, run_kind="explore", source="main_loop"), device, {}, {}
+        StepRecorder(
+            device, steps, run_kind="explore", source="main_loop", target_package="com.demo"
+        ),
+        device,
+        {},
+        {},
     )
     first = run.show(PAGES[0])
     second = run.step(first, PAGES[1], match=False)

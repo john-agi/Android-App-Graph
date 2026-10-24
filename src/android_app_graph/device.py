@@ -292,8 +292,8 @@ class AdbController:
         A ``long_press`` is held for ``_GESTURE_MS`` whatever its ``duration`` says.
         """
         if action.get("action") in {"tap", "long_press", "swipe"}:
-            dump = _adb_stdout_text(
-                [*self._serial, "shell", "dumpsys", "window", "-a"], _READ_TIMEOUT_SECONDS
+            dump = self._read(
+                _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window", "-a"], None
             )
             package, activity = _focused_package_activity(dump)
             ownership = window_ownership(dump, package, activity)
@@ -924,10 +924,16 @@ def restart_into_app(
 
 
 def return_to_app(
-    controller: DeviceController, app: AppLaunch, logger: logging.Logger
+    controller: DeviceController,
+    app: AppLaunch,
+    logger: logging.Logger,
+    *,
+    on_restart: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Press Back after a step opened another app and return the state of the app's
     screen, restarting the app with ``restart_into_app`` when Back does not return to it.
+
+    ``on_restart`` runs before the restart so callers can reset their expected screen.
 
     Back pops only the top activity, so the other app can stay in front, for example
     when Back only closed its keyboard. A launch would then resume the app's task with
@@ -942,6 +948,8 @@ def return_to_app(
     logger.warning(
         "Back left %s in front of %s. Restarting %s.", package, app.package_name, app.name
     )
+    if on_restart is not None:
+        on_restart()
     return restart_into_app(controller, app, logger)
 
 
@@ -1009,7 +1017,7 @@ def resolve_permission_prompt(
         for node in _ui_nodes(state.get("xml", "")):
             resource = node.get("resource-id", "").partition(":id/")[2]
             if not node.get("resource-id", "").startswith(
-                f"{state.get('package')}:id/"
+                "com.android.permissioncontroller:id/"
             ) or resource not in {
                 "permission_allow_button",
                 "permission_allow_foreground_only_button",

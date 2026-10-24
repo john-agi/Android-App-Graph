@@ -342,8 +342,10 @@ class StepRecorder:
         *,
         run_kind: RunKind,
         source: StepSource,
+        target_package: str,
     ) -> None:
         self._controller = controller
+        self._target_package = target_package
         self.steps = steps
         self.w = controller.w
         self.h = controller.h
@@ -375,6 +377,13 @@ class StepRecorder:
         controller that reports none has the whole image hashed.
         """
         state = self._controller.get_state(deadline=deadline)
+        if state.get("package") == self._target_package and state.get("system_surface") in {
+            "notification_shade",
+            "permission",
+            "ime_settings",
+        }:
+            state = state.copy()
+            state["system_surface"] = None
         png = base64.b64decode(state["screenshot"], validate=True)
         webp = encode_screenshot(png)
         with Image.open(io.BytesIO(webp)) as image:
@@ -438,13 +447,6 @@ class StepRecorder:
         replay from planning. A rejected request has a system event with its reason.
         """
         last = self._last_observation
-        try:
-            check_overlay_action(action, last.system_overlays if last else ())
-        except SystemOverlayActionError as exc:
-            self.record_system_event(
-                {"status": "action_skipped", "action": action, "reason": str(exc)}
-            )
-            raise
         self._write_record(
             self._take_step_id(),
             "action",
@@ -452,6 +454,7 @@ class StepRecorder:
             {"observation": last.observation_id if last else None, "action": action},
         )
         try:
+            check_overlay_action(action, last.system_overlays if last else ())
             self._controller.exe_action(action)
         except SystemOverlayActionError as exc:
             self.record_system_event(
