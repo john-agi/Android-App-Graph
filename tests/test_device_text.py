@@ -60,7 +60,9 @@ def _controller(
     buffer: _EditableBuffer, monkeypatch: pytest.MonkeyPatch
 ) -> device.DeviceController:
     monkeypatch.setattr(device, "run_adb", buffer.run)
-    return device.AdbController({"device": {"udid": "buffer"}}, logging.getLogger("test"))
+    return device.AdbController(
+        {"device": {"udid": "buffer"}}, logging.getLogger("test"), unreachable_limit=37
+    )
 
 
 @pytest.mark.usefixtures("no_sleep")

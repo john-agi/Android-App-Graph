@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import subprocess
 from collections.abc import Mapping
 
@@ -40,6 +41,7 @@ def test_an_unknown_or_other_app_permission_request_sends_no_input(
             device.AppLaunch("demo", "com.demo"),
             {**_PROMPT, "permission_requester": requester},
             events.append,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert controller.actions == []
     assert events[-1]["status"] == "permission_unresolved"
@@ -109,7 +111,11 @@ def test_a_verified_target_prompt_uses_existing_grants_and_its_supported_button(
     )
     events: list[Mapping[str, object]] = []
     state = device.resolve_permission_prompt(
-        controller, device.AppLaunch("demo", "com.demo"), _PROMPT, events.append
+        controller,
+        device.AppLaunch("demo", "com.demo"),
+        _PROMPT,
+        events.append,
+        device.StartupRecovery(controller, 37, logging.getLogger("test")),
     )
     assert state == _APP
     assert controller.actions == [{"action": "tap", "x": 60, "y": 60}]
@@ -123,7 +129,11 @@ def test_a_prompt_closed_by_authorized_grants_needs_no_tap(monkeypatch: pytest.M
     controller = _PermissionDevice([_APP])
     assert (
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
         == _APP
     )
@@ -138,7 +148,11 @@ def test_a_repeated_permission_dialog_stops_after_one_supported_tap(
     controller = _PermissionDevice([prompt, prompt])
     with pytest.raises(device.UnresolvedPermissionError, match="remains unresolved"):
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert len(controller.actions) == 1
     assert controller.states == []
@@ -160,7 +174,11 @@ def test_an_unsupported_permission_button_stops_without_a_tap(
     controller = _PermissionDevice([{**_PROMPT, "xml": xml}])
     with pytest.raises(device.UnresolvedPermissionError, match="remains unresolved"):
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert controller.actions == []
 
@@ -172,7 +190,11 @@ def test_failed_authorized_grants_cannot_authorize_the_dialog_button(
     controller = _PermissionDevice([])
     with pytest.raises(device.UnresolvedPermissionError, match="not fully covered"):
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert controller.actions == []
 
@@ -320,7 +342,11 @@ def test_permission_recovery_verifies_the_target_screen_after_grants(
     controller = _PermissionDevice([{**_APP, "package": "com.other"}])
     with pytest.raises(device.UnresolvedPermissionError, match="instead of target"):
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert controller.actions == []
 
@@ -341,7 +367,11 @@ def test_permission_recovery_does_not_accept_a_button_from_another_package(
     )
     with pytest.raises(device.UnresolvedPermissionError, match="remains unresolved"):
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert controller.actions == []
 
@@ -355,7 +385,11 @@ def test_permission_recovery_stops_when_the_requester_changes_after_grant(
     )
     with pytest.raises(device.UnresolvedPermissionError, match="remains unresolved"):
         device.resolve_permission_prompt(
-            controller, device.AppLaunch("demo", "com.demo"), _PROMPT, lambda _event: None
+            controller,
+            device.AppLaunch("demo", "com.demo"),
+            _PROMPT,
+            lambda _event: None,
+            device.StartupRecovery(controller, 37, logging.getLogger("test")),
         )
     assert controller.actions == []
 

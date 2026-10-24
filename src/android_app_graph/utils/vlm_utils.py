@@ -25,6 +25,7 @@ from openrouter.components.costdetails import CostDetails
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
+from android_app_graph.checkpoint import APP_NAME_BYTES, CHECKPOINT_INPUT_BYTES
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _COORDINATE_AXES = 2
+_JSON_ESCAPE_BYTES = 6
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -1094,6 +1096,16 @@ def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItems
     ]
 
 
+def node_verification_context(settings: ModelSettings) -> dict[str, object]:
+    """Return the rule, output schema and resolved settings a member question uses."""
+    return {
+        "prompt": NODE_VERIFY_PROMPT,
+        "schema": _NODE_VERIFICATION_SCHEMA,
+        "settings": settings._asdict(),
+        "timeout": settings.timeout("node_verify"),
+    }
+
+
 def verify_same_node(
     client: OpenRouter,
     *,
@@ -1540,18 +1552,46 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
 }
 
 
+def node_merge_context(settings: ModelSettings) -> dict[str, object]:
+    """Return the duplicate-proposal rule, schema and resolved request settings."""
+    return {
+        "prompt": NODE_MERGE_AUDIT_PROMPT,
+        "schema": _NODE_MERGE_AUDIT_SCHEMA,
+        "settings": settings._asdict(),
+        "timeout": settings.timeout("node_merge_audit"),
+    }
+
+
+def node_merge_prompt(graph_summary: str, app_name: str) -> str:
+    """Render the duplicate-proposal request's text for sending and size reporting."""
+    return NODE_MERGE_AUDIT_PROMPT.format(app_name=app_name, graph_description=graph_summary)
+
+
+def node_merge_request_bound(settings: ModelSettings) -> int:
+    """Bound the request's JSON bytes, including schema, settings and escaped content."""
+    fixed: dict[str, object] = {
+        "model": settings.model,
+        "temperature": settings.temperature,
+        "stream": False,
+        "messages": [{"role": "user", "content": ""}],
+        "plugins": [{"id": "response-healing"}],
+        "response_format": _structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
+    }
+    text_bound = (
+        CHECKPOINT_INPUT_BYTES + APP_NAME_BYTES + len(node_merge_prompt("", "").encode("utf-8"))
+    )
+    return len(json.dumps(fixed).encode("utf-8")) + _JSON_ESCAPE_BYTES * text_bound
+
+
 def audit_merge_nodes(
     client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
     *,
     settings: ModelSettings,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Ask a model only for duplicate-node merge candidates."""
-    prompt = NODE_MERGE_AUDIT_PROMPT.format(
-        app_name=app_name,
-        graph_description=graph_summary,
-    )
+    prompt = node_merge_prompt(graph_summary, app_name)
     try:
         resp = send_chat(
             client,
@@ -1561,18 +1601,23 @@ def audit_merge_nodes(
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
         )
     except TruncatedReplyError, httpx.TimeoutException:
-        return {"issues": [], "summary": "reply truncated"}
+        return {"issues": [], "summary": "reply truncated", "answered": False}
     raw = strip_json_fences(message_text(resp))
     try:
-        result = json.loads(raw)
+        result = as_object_dict(json.loads(raw))
     except json.JSONDecodeError:
         logger.warning("Failed to parse node merge audit JSON. Raw:\n%s", raw)
-        return {"issues": [], "summary": "parse error"}
+        return {"issues": [], "summary": "parse error", "answered": False}
 
-    issues = [issue for issue in result.get("issues", []) if issue.get("type") == "merge_nodes"]
+    listed = result.get("issues")
+    if not isinstance(listed, list):
+        return {"issues": [], "summary": "missing issues", "answered": False}
+    issues = [
+        issue for item in listed if (issue := as_object_dict(item)).get("type") == "merge_nodes"
+    ]
     return {
         "issues": issues,
-        "summary": result.get("summary", ""),
+        "summary": as_str(result.get("summary"), ""),
     }
 
 
