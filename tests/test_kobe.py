@@ -3144,10 +3144,8 @@ def test_after_15_self_loops_on_a_screen_its_next_step_continues_from_a_ranked_t
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Fifteen steps in a row on the start screen each stay on it, so the sixteenth plans
-    nothing there: it continues from a ranked target, as a Back that leaves the app does,
-    and counts as a ``continue`` step. The continuation ends the start screen's run of
-    self-loops, so the next step there plans again."""
+    """A full window of self-loops continues from a ranked target in one counted step.
+    Its source starts a fresh window when exploration returns to it."""
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
@@ -3177,7 +3175,7 @@ def test_after_15_self_loops_on_a_screen_its_next_step_continues_from_a_ranked_t
     tap = device_log[0]
     assert device_log == [*[tap] * 15, *_FIRST_RESTART, _OPEN_LIST, tap]
     assert (
-        "The last 15 steps on s0_home stayed on it; continuing from ranked target s1_list "
+        "15 of the last 15 outcomes on s0_home stayed on it; continuing from ranked target s1_list "
         "instead." in caplog.text
     )
     assert _numbered_steps(caplog.messages)[14:] == [
@@ -3215,12 +3213,15 @@ def test_after_15_self_loops_on_a_screen_with_no_other_node_ranked_its_next_step
 
     assert planned_from == ["s0_home"] * 16
     assert _requested_models(router_requests) == ["provider/action"] * 16
-    assert "The last 15 steps on s0_home stayed on it, but no other node is ranked." in caplog.text
+    assert (
+        "15 of the last 15 outcomes on s0_home stayed on it, but no other node is ranked."
+        in caplog.text
+    )
     assert _numbered_steps(caplog.messages)[-1] == "Step 16/16: s0_home --[tap]--> s0_home"
 
 
 @pytest.mark.usefixtures("no_sleep", "device_log")
-def test_a_step_to_another_screen_starts_the_count_of_self_loops_again(
+def test_twelve_of_fifteen_source_outcomes_continue_despite_departures(
     tmp_path: Path,
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -3230,25 +3231,206 @@ def test_a_step_to_another_screen_starts_the_count_of_self_loops_again(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Seven self-loops on the start screen, a step to the list and back, and eight more
-    self-loops make fifteen, but a step that left the start screen ends the first seven's
-    run, so the next step there plans."""
+    """Three runs of four loops and a departure saturate the source across return steps.
+    The continuation counts once and clears that source's history."""
     explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
     _list_reached_from_home(explorer)
     explorer.graph.add_edge("s0_home", "s1_list", action=[_OPEN_LIST])
-    _identifying(explorer, monkeypatch, *["s0_home"] * 8, "s1_list", *["s0_home"] * 9)
+    visits = [*["s0_home"] * 4, "s1_list", "s0_home"] * 3
+    _identifying(explorer, monkeypatch, "s0_home", *visits, "s0_home", "s1_list", "s0_home")
     planned_from: list[object] = []
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Toggle", planned_from))
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
-    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(17))
-    router_responses.append(chat_response(content=_WAIT_REPLY))
+    _without_templates(monkeypatch)
+    router_responses.extend(chat_response(content=_TAP_REPLY) for _ in range(18))
+    router_responses.extend(
+        [
+            chat_response(content='{"node_id":"s1_list","reason":"unexplored"}'),
+            chat_response(content=_TAP_REPLY),
+            chat_response(content=_WAIT_REPLY),
+        ]
+    )
     caplog.set_level(logging.INFO, logger="test")
 
-    explorer.explore(max_steps=18)
+    explorer.explore(max_steps=21)
 
-    assert planned_from == [*["s0_home"] * 8, "s1_list", *["s0_home"] * 9]
-    assert _requested_models(router_requests) == ["provider/action"] * 18
-    assert _numbered_steps(caplog.messages)[-1] == "Step 18/18: s0_home --[wait]--> s0_home"
+    assert planned_from == ([*["s0_home"] * 5, "s1_list"] * 3) + ["s1_list", "s0_home"]
+    assert _requested_models(router_requests) == [
+        *["provider/action"] * 18,
+        "provider/page_detail",
+        "provider/action",
+        "provider/action",
+    ]
+    assert "12 of the last 15 outcomes on s0_home stayed on it" in caplog.text
+    assert _numbered_steps(caplog.messages)[-3:] == [
+        "Step 19/21: s0_home --[continue]--> s1_list",
+        "Step 20/21: s1_list --[tap]--> s0_home",
+        "Step 21/21: s0_home --[wait]--> s0_home",
+    ]
+    assert json.loads(explorer.graph_path.read_text())["total_steps_completed"] == 21
+
+
+def _explore_recorded_outcomes(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    destinations: Sequence[str],
+) -> Kobe:
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    _identifying(explorer, monkeypatch, "s0_home", *destinations)
+    _without_templates(monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Toggle", []))
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (_OPEN_LIST, {})
+    )
+    monkeypatch.setattr(explorer, "_choose_continuation_target", lambda _node: None)
+    explorer.explore(max_steps=len(destinations))
+    return explorer
+
+
+def _asks_for_saturation_target(explorer: Kobe, node: str, monkeypatch: pytest.MonkeyPatch) -> bool:
+    choices: list[str] = []
+
+    def no_target(source: str) -> None:
+        choices.append(source)
+
+    _identifying(explorer, monkeypatch, node)
+    _without_templates(monkeypatch)
+    monkeypatch.setattr(explorer, "_choose_continuation_target", no_target)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", []))
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: ({"action": "wait"}, {})
+    )
+    explorer.explore(max_steps=explorer.graph.total_steps_completed + 1)
+    return choices == [node]
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "saturated"),
+    [
+        pytest.param(([True] * 4 + [False]) * 3, True, id="twelve-with-three-departures"),
+        pytest.param([True] * 11 + [False] * 4, False, id="eleven-below-threshold"),
+        pytest.param([True] * 14, False, id="full-window-required"),
+        pytest.param([True] * 15, True, id="full-window-all-loops"),
+        pytest.param([True] * 12 + [False] * 4, False, id="oldest-loop-expires"),
+        pytest.param([False] * 4 + [True] * 12, True, id="oldest-departure-expires"),
+    ],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_saturation_uses_the_newest_fifteen_outcomes_planned_on_each_node(
+    outcomes: list[bool],
+    saturated: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destinations = [
+        node for stayed in outcomes for node in (["s0_home"] if stayed else ["s1_list", "s0_home"])
+    ]
+    explorer = _explore_recorded_outcomes(tmp_path, router_client, monkeypatch, destinations)
+
+    assert explorer.graph.total_steps_completed == len(destinations)
+    assert _asks_for_saturation_target(explorer, "s0_home", monkeypatch) is saturated
+    assert not _asks_for_saturation_target(explorer, "s1_list", monkeypatch)
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["wait", "interrupted"])
+@pytest.mark.usefixtures("no_sleep")
+def test_waits_and_interrupted_steps_preserve_recent_node_outcomes(
+    interrupted: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    explorer = _explore_recorded_outcomes(tmp_path, router_client, monkeypatch, ["s0_home"] * 15)
+    _identifying(explorer, monkeypatch, "s0_home")
+
+    def action(**_kwargs: object) -> tuple[dict[str, str], dict[str, str]]:
+        if interrupted:
+            raise subprocess.TimeoutExpired(["adb", "shell", "input"], 15)
+        return {"action": "wait"}, {}
+
+    monkeypatch.setattr("android_app_graph.kobe.predict_next_action", action)
+    monkeypatch.setattr(
+        explorer,
+        "_recover_from_outage",
+        lambda _timeout: ("s0_home", explorer.controller.get_state()),
+    )
+    caplog.set_level(logging.INFO, logger="test")
+    explorer.explore(max_steps=16)
+
+    event = "interrupted" if interrupted else "wait"
+    assert _numbered_steps(caplog.messages)[-1] == f"Step 16/16: s0_home --[{event}]--> s0_home"
+    assert explorer.graph.total_steps_completed == 16
+    assert _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_checkpoint_replay_preserves_histories_and_continuation_clears_only_its_source(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    explorer = _explore_recorded_outcomes(
+        tmp_path, router_client, monkeypatch, [*["s0_home"] * 15, *["s1_list"] * 16]
+    )
+    assert _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+    assert _asks_for_saturation_target(explorer, "s1_list", monkeypatch)
+    monkeypatch.setattr(explorer, "_choose_continuation_target", lambda _node: "s1_list")
+    monkeypatch.setattr(
+        explorer.graph, "run_node_merge_audit", lambda **_kwargs: {"merged_count": 0}
+    )
+    _identifying(explorer, monkeypatch, "s0_home", "s1_list")
+
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_list"
+    assert explorer.graph.total_steps_completed == 33
+    assert _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+    assert _asks_for_saturation_target(explorer, "s1_list", monkeypatch)
+
+    monkeypatch.setattr(explorer, "_choose_continuation_target", lambda _node: "s1_list")
+    _identifying(explorer, monkeypatch, "s0_home", "s0_home", "s1_list")
+    caplog.set_level(logging.INFO, logger="test")
+    explorer.explore(max_steps=36)
+
+    assert _numbered_steps(caplog.messages)[-1] == "Step 36/36: s0_home --[continue]--> s1_list"
+    assert explorer.graph.total_steps_completed == 36
+    assert not _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+    assert _asks_for_saturation_target(explorer, "s1_list", monkeypatch)
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_a_resumed_explorer_keeps_completed_steps_and_starts_recent_history_empty(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    write_graph_file: Callable[..., None],
+    write_image_vectors: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph_path = tmp_path / "demo" / "demo.json"
+    graph_path.parent.mkdir()
+    write_graph_file(
+        graph_path,
+        {
+            "total_steps_completed": 30,
+            "nodes": [{"id": "s0_home"}],
+            "edges": [{"source": "s0_home", "target": "s0_home", "actions": [[_OPEN_LIST]] * 30}],
+        },
+        embedding_model="provider/embedding",
+    )
+    write_image_vectors(
+        graph_path.parent / "steps", ["s0_home-observation"], model="provider/embedding"
+    )
+
+    explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
+
+    assert explorer.graph.total_steps_completed == 30
+    assert not _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+    assert explorer.graph.total_steps_completed == 31
 
 
 def test_exploration_embeds_the_members_a_loaded_graph_has_no_image_vector_for(

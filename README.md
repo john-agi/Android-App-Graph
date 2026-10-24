@@ -472,13 +472,16 @@ where they led, and then how many more were tried. However many actions the
 self-loop collects, the prompt grows only with the actions of edges to other nodes.
 `app-graph-audit --re-explore` plans with the same prompt.
 
-When the last 15 steps planned on a node were all self-loops on it, the next step
-there plans nothing: it [continues from a ranked target](#replaying-to-a-node), as a
-step that plans Back where Back leaves the app does. A step to another node and such
-a continuation start the count again, and a step that waits leaves it as it is. The
-count is kept in memory, so a resumed run starts it at zero. Both bounds are
-`SELF_LOOP_INSTRUCTIONS_LISTED` and `SATURATING_SELF_LOOP_STEPS` in
-`src/android_app_graph/utils/vlm_utils.py`.
+When at least 12 of a node's last 15 recorded exploration outcomes are self-loops,
+the next step there [continues from a ranked target](#replaying-to-a-node), as a
+step that plans Back where Back leaves the app does. Each node keeps its own
+15-outcome window, including departures; outcomes planned on other nodes leave it
+unchanged. A full window is required. A chosen continuation clears its source's
+window. Waits, interrupted steps without a recorded edge, and checkpoint replays
+leave these histories unchanged. The histories live in memory, so a resumed
+explorer starts with empty windows and keeps its saved completed-step count.
+`SELF_LOOP_INSTRUCTIONS_LISTED`, `SATURATION_WINDOW` and `SATURATING_SELF_LOOPS` in
+`src/android_app_graph/utils/vlm_utils.py` define the prompt and saturation bounds.
 
 Every step that counts toward `--max-steps` logs a `Step N/M: <from> --[<action>]--> <to>`
 line and then the tokens it used. `<to>` is `ext_<package>` for a step into another
@@ -581,7 +584,7 @@ the step's screen but without the checkpoint's merge audit, replays to it and
 continues from it. The step counts toward `max_steps`, and its log line names the
 node. In the step log, the replay's records have the `source` `navigation_replay` and
 the screen read after it `coverage_checkpoint`. When no other node is ranked, Back is
-pressed. A step on a node whose last 15 steps were all self-loops continues from a
+pressed. A step on a node with at least 12 self-loops in its last 15 outcomes continues from a
 ranked target the same way, before it plans (see [Explore an App](#explore-an-app)),
 and plans as usual when no other node is ranked.
 
