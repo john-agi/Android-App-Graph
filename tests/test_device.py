@@ -653,6 +653,105 @@ def test_adb_controller_raises_when_wm_size_reports_no_size(adb: _FakeAdb) -> No
 # PNG's signature contains CR LF, so any newline translation would change the base64.
 _PNG = b"\x89PNG\r\n\x1a\n"
 
+_BUTTON_NAVIGATION = (
+    "  WindowInsetsStateController\n"
+    "    InsetsState\n"
+    "      mDisplayFrame=Rect(0, 0 - 720, 1280)\n"
+    "        InsetsSource id=1 type=navigationBars frame=[0,1184][720,1280] visible=true\n"
+    "        InsetsSource id=6 type=tappableElement frame=[0,1184][720,1280] visible=true\n"
+    "        InsetsSource id=5 type=mandatorySystemGestures frame=[0,1184][720,1280] visible=true\n"
+)
+_GESTURE_NAVIGATION = (
+    "  WindowInsetsStateController\n"
+    "    InsetsState\n"
+    "      mDisplayFrame=Rect(0, 0 - 1080, 2424)\n"
+    "        InsetsSource id=1 type=navigationBars frame=[0,2361][1080,2424] visible=true\n"
+    "        InsetsSource id=6 type=tappableElement frame=[0,0][0,0] visible=true\n"
+    "        InsetsSource id=4 type=systemGestures frame=[0,0][78,2424] visible=true\n"
+    "        InsetsSource id=24 type=systemGestures frame=[1002,0][1080,2424] visible=true\n"
+    "        InsetsSource id=5 type=mandatorySystemGestures frame=[0,2340][1080,2424] visible=true\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("window", "action", "reason"),
+    [
+        (_BUTTON_NAVIGATION, {"action": "tap", "x": 299, "y": 1227}, "system touch region"),
+        (_BUTTON_NAVIGATION, {"action": "tap", "x": 257, "y": 1190}, "system touch region"),
+        (_BUTTON_NAVIGATION, {"action": "long_press", "x": 360, "y": 1250}, "system touch region"),
+        (
+            _GESTURE_NAVIGATION,
+            {"action": "swipe", "x1": 54, "y1": 800, "x2": 700, "y2": 800},
+            "system gesture region",
+        ),
+        (
+            _GESTURE_NAVIGATION,
+            {"action": "swipe", "x1": 500, "y1": 2400, "x2": 500, "y2": 900},
+            "system gesture region",
+        ),
+        (
+            (
+                "  WindowInsetsStateController\n    InsetsState\n"
+                "      mDisplayFrame=Rect(0, 0 - 1280, 720)\n"
+            ),
+            {"action": "tap", "x": 331, "y": 1002},
+            "outside the display",
+        ),
+    ],
+    ids=[
+        "music preview",
+        "obscured row",
+        "held button",
+        "back gesture",
+        "home gesture",
+        "rotation",
+    ],
+)
+def test_app_coordinate_inputs_reject_system_regions_without_dispatching(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    window: str,
+    action: dict[str, object],
+    reason: str,
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, window.encode())
+
+    with pytest.raises(ValueError, match=reason):
+        controller.exe_action(action)
+
+    assert not any(isinstance(event, list) and event[:5] == _INPUT for event in adb.events)
+
+
+@pytest.mark.parametrize(
+    ("window", "action"),
+    [
+        (_BUTTON_NAVIGATION, {"action": "tap", "x": 257, "y": 1183}),
+        (_GESTURE_NAVIGATION, {"action": "tap", "x": 20, "y": 2380}),
+        (_GESTURE_NAVIGATION, {"action": "long_press", "x": 20, "y": 800}),
+        (
+            _GESTURE_NAVIGATION,
+            {"action": "swipe", "x1": 100, "y1": 900, "x2": 900, "y2": 900},
+        ),
+        (
+            _BUTTON_NAVIGATION,
+            {"action": "swipe", "x1": 20, "y1": 700, "x2": 500, "y2": 700},
+        ),
+    ],
+    ids=["revealed row", "near-bottom tap", "edge hold", "interior swipe", "button-mode drawer"],
+)
+def test_app_inputs_preserve_valid_content_coordinates(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    window: str,
+    action: dict[str, object],
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, window.encode())
+    controller.exe_action(action)
+    dispatched = [event for event in adb.events if isinstance(event, list) and event[:5] == _INPUT]
+    assert len(dispatched) == 1
+    if action["action"] == "tap":
+        assert dispatched[0][-2:] == [str(action["x"]), str(action["y"])]
+
 
 @pytest.mark.parametrize(
     ("dumpsys_window", "package", "activity"),

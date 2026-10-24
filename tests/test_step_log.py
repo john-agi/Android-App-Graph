@@ -91,6 +91,17 @@ def test_the_recorder_stands_in_for_the_controller_it_wraps(device: _Device, ste
     assert recorder.config is device.config
 
 
+def test_action_grounding_uses_the_current_native_screenshot_dimensions(steps: Path) -> None:
+    controller = _Device(_png((720, 1280), "white"))
+    recorder = _recorder(controller, steps)
+    recorder.get_state()
+    assert (recorder.w, recorder.h) == (720, 1280)
+
+    controller.screenshot = _png((1280, 720), "white")
+    recorder.get_state()
+    assert (recorder.w, recorder.h) == (1280, 720)
+
+
 def test_get_state_records_one_webp_image_and_one_observation(device: _Device, steps: Path) -> None:
     recorder = _recorder(device, steps)
 
