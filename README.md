@@ -100,9 +100,10 @@ graph TD;
   `pyproject.toml` enforces the range `>=0.12.9,<0.13` with `required-version`;
   run `uv self update 0.12.9` if yours is outside it.
 - Android SDK with `adb` on `PATH`
-- A running emulator, Android container such as Redroid, or USB-debugging device on
-  `adb devices`, with the target app installed. `device.udid` in the config is its
-  serial. `device.avd_name` is read only when `adb devices` lists nothing:
+- A device running Android 16 (API 36) or later, listed by `adb devices` with the
+  target app installed. This can be an emulator, an Android container such as
+  Redroid, or a device with USB debugging enabled. `device.udid` in the config is
+  its serial. `device.avd_name` is read only when `adb devices` lists nothing:
   exploration then copies that AVD to `<avd_name>_dup` and starts the copy with
   `emulator`, which must be on `PATH`. When `adb devices` fails or times out, adb cannot reach its server, and
   `app-graph` copies and starts nothing: it exits with status 1 and an error naming
@@ -727,9 +728,9 @@ started from.
 The status bar's clock and icons change on their own, so `pixel_hash` leaves them
 out. It is the SHA-256 of the image's decoded pixels, mode and size below its top
 `status_bar_rows` rows. Those rows cover `status_bar`, `[left, top, right, bottom]`
-in screen pixels, which every capture reads from the `statusBars` (`ITYPE_STATUS_BAR`
-before Android 14) `InsetsSource` of the `dumpsys window` output it already reads
-for the package and activity: `ceil(bottom * image height / screenshot height)`, and
+in screen pixels, which every capture reads from the `statusBars` `InsetsSource`
+of the `dumpsys window` output it already reads for the package and activity:
+`ceil(bottom * image height / screenshot height)`, and
 3 rows more when encoding shrank the image, because shrinking with LANCZOS blends
 each row into the 3 rows on either side of it. The frame follows the display cutout and the rotation; on a Pixel 9
 emulator it is 142 of 2424 rows in portrait. A bar that is hidden, as in immersive
