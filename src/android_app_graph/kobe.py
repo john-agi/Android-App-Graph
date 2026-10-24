@@ -403,10 +403,7 @@ class Kobe:
         )
 
         try:
-            for i, (node_id, action, setup) in enumerate(path):
-                if i == 0:
-                    continue  # the first entry is the node the replay starts on and carries no action
-
+            for i, (node_id, action, setup) in enumerate(path[1:], start=1):
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
                 if isinstance(action, list):
                     self.logger.info(
@@ -722,7 +719,8 @@ class Kobe:
         The planner is given the description of the screen the device was last identified
         on, the node's latest member.
         """
-        screenshot = Observation.from_state(position.device_state).app_image
+        observation = Observation.from_state(position.device_state)
+        screenshot = observation.app_image
         node_data = self._require_node(position.node)
 
         detail_before = dict(node_data.get("last_detail_snapshot", {}))
@@ -748,7 +746,7 @@ class Kobe:
                 unexplored_elements=unexplored_elements,
                 input_status=input_status,
                 back_leaves_app=self.graph.back_leaves_app(position.node),
-                system_feedback=bool(Observation.from_state(position.device_state).system_overlays),
+                system_feedback=bool(observation.system_overlays),
             ),
             settings=self.instruction,
         )
@@ -761,7 +759,7 @@ class Kobe:
                 screen_w=self.controller.w,
                 screen_h=self.controller.h,
                 action_history=[],
-                system_feedback=bool(Observation.from_state(position.device_state).system_overlays),
+                system_feedback=bool(observation.system_overlays),
             ),
             settings=self.action,
         )
@@ -780,7 +778,7 @@ class Kobe:
         return _Move(
             source=position.node,
             start=self.controller.last_match,
-            before=Observation.from_state(position.device_state),
+            before=observation,
             action=action,
             instruction=recorded_instruction,
             planned_instruction=instruction,
