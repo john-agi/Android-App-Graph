@@ -49,6 +49,8 @@ from android_app_graph.device import (
     AdbDisplayAccess,
     AppLaunch,
     DeviceController,
+    DeviceUnreachableError,
+    StartupRecovery,
     grant_runtime_permissions,
     is_outside_app,
     keyboard_status,
@@ -85,6 +87,7 @@ from android_app_graph.utils import (
     resolve_audit_timeout,
     resolve_matching_settings,
     resolve_model_settings,
+    resolve_unreachable_limit,
 )
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
@@ -900,7 +903,7 @@ def re_explore_issues(
 
 
 class ReExploreSession(NamedTuple):
-    """Device controller, role settings and step budget needed by ``--re-explore``.
+    """Device controller, role settings and limits needed by ``--re-explore``.
 
     Built as a unit so ``re_explore_issues`` takes non-optional arguments: the
     audit-only path never constructs one and never touches a device.
@@ -909,6 +912,7 @@ class ReExploreSession(NamedTuple):
     controller: DeviceController
     instruction: ModelSettings
     action: ModelSettings
+    unreachable_limit: float
     steps_per_issue: int = 5
 
 
@@ -916,12 +920,15 @@ def _open_re_explore_session(
     config: dict[str, Any],
     settings: dict[str, ModelSettings],
     steps_per_issue: int,
+    *,
+    unreachable_limit: float,
 ) -> ReExploreSession:
     """Build the device session for ``--re-explore``."""
     return ReExploreSession(
-        controller=AdbController(config, logger),
+        controller=AdbController(config, logger, unreachable_limit=unreachable_limit),
         instruction=settings["instruction"],
         action=settings["action"],
+        unreachable_limit=unreachable_limit,
         steps_per_issue=steps_per_issue,
     )
 
@@ -1063,8 +1070,9 @@ def _re_explore_app(
         session = session._replace(controller=managed)
         launch_activity = None
         if executable:
-            grant_runtime_permissions(run.config["device"]["udid"], package_name)
-            launch_activity = launch_app(run.config, app, logger)
+            recovery = StartupRecovery(session.controller, session.unreachable_limit, logger)
+            grant_runtime_permissions(run.config["device"]["udid"], package_name, recovery)
+            launch_activity = launch_app(run.config, app, logger, recovery)
             time.sleep(4)
 
         target = ReExploreTarget(
@@ -1159,6 +1167,14 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except DeviceUnreachableError as exc:
+        sys.stderr.write(f"app-graph-audit: error: {exc}\n")
+        return 1
+
+
+def _main(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1189,6 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
             vlm_config, roles=RE_EXPLORE_ROLES if args.re_explore else AUDIT_ROLES
         )
         matching = resolve_matching_settings(vlm_config)
+        unreachable_limit = resolve_unreachable_limit(config) if args.re_explore else None
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
@@ -1198,8 +1215,10 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(level=logging.INFO)
 
     session = (
-        _open_re_explore_session(config, settings, args.steps_per_issue)
-        if args.re_explore
+        _open_re_explore_session(
+            config, settings, args.steps_per_issue, unreachable_limit=unreachable_limit
+        )
+        if unreachable_limit is not None
         else None
     )
 

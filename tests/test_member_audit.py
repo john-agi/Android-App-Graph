@@ -430,7 +430,7 @@ def test_the_coverage_checkpoint_verifies_the_model_s_pairs_on_closest_members_a
     monkeypatch.setattr(
         graph_manager,
         "audit_merge_nodes",
-        lambda *_args, **_kwargs: {"issues": [{"node_a": "s2_list", "node_b": "s0_home"}]},
+        lambda *_args, **_kwargs: {"issues": [{"node_a": "n2", "node_b": "n0"}]},
     )
 
     result = graph.run_node_merge_audit()
@@ -1444,7 +1444,7 @@ def test_every_merge_and_member_check_asks_the_verifier_to_tell_navigation_desti
     monkeypatch.setattr(
         graph_manager,
         "audit_merge_nodes",
-        lambda *_args, **_kwargs: {"issues": [{"node_a": "s0_home", "node_b": "s1_home"}]},
+        lambda *_args, **_kwargs: {"issues": [{"node_a": "n0", "node_b": "n1"}]},
     )
     router_responses.extend(
         chat_response(content='{"same":false,"reason":"another destination"}')

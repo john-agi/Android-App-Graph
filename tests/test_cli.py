@@ -80,10 +80,12 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     launch_activities: list[str | None] = []
 
     class Device:
-        def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
+        def __init__(
+            self, _config: dict[str, object], _logger: logging.Logger, **_kwargs: object
+        ) -> None:
             events.append("device")
 
-        def terminate_all_apps(self) -> None:
+        def terminate_all_apps(self, _recovery: device.StartupRecovery) -> None:
             events.append("terminate")
 
     class Explorer:
@@ -126,13 +128,18 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     monkeypatch.setattr(cli, "check_avd", check_avd)
     grants: list[tuple[str, str]] = []
 
-    def grant(udid: str, package_name: str) -> None:
+    def grant(udid: str, package_name: str, _recovery: device.StartupRecovery) -> None:
         grants.append((udid, package_name))
         events.append("grant")
 
     monkeypatch.setattr(cli, "grant_runtime_permissions", grant)
 
-    def launch(_config: dict[str, object], app: dict[str, str], _logger: logging.Logger) -> str:
+    def launch(
+        _config: dict[str, object],
+        app: dict[str, str],
+        _logger: logging.Logger,
+        _recovery: device.StartupRecovery,
+    ) -> str:
         events.append("launch")
         return app.get("launch_activity", f"{app['package_name']}/.Home")
 
@@ -263,10 +270,10 @@ def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
             raise server
 
     class Device:
-        def __init__(self, *_args: object) -> None:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def terminate_all_apps(self) -> None:
+        def terminate_all_apps(self, _recovery: device.StartupRecovery) -> None:
             pass
 
     class Explorer:

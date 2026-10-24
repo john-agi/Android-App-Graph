@@ -77,7 +77,7 @@ class _Controller:
         self.config: dict[str, object] = {"device": {"udid": "fake"}}
         self.script = script
 
-    def terminate_all_apps(self) -> None:
+    def terminate_all_apps(self, _recovery: device.StartupRecovery) -> None:
         if self.script.failure == "startup":
             self.script.mutate("startup")
 
@@ -123,7 +123,7 @@ def _configure_cli(monkeypatch: pytest.MonkeyPatch, root: Path, script: _Script)
     monkeypatch.setattr(cli, "EmulatorManager", lambda *_args: object())
     monkeypatch.setattr(cli, "grant_runtime_permissions", lambda *_args: None)
     monkeypatch.setattr(device, "run_adb", script.adb)
-    monkeypatch.setattr(cli, "AdbController", lambda *_args: _Controller(script))
+    monkeypatch.setattr(cli, "AdbController", lambda *_args, **_kwargs: _Controller(script))
     monkeypatch.setattr(cli, "Kobe", lambda *_args, **_kwargs: _Explorer(script))
     monkeypatch.setattr(cli, "launch_app", lambda *_args: "com.demo/.Main")
 
