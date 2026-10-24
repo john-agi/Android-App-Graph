@@ -556,6 +556,24 @@ def test_a_native_tool_call_without_text_content_is_still_read(
     assert history == "{'action': 'click', 'coordinate': [500, 500]}"
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_menu_tool_calls_convert_to_the_menu_device_action(
+    native: bool, chat_response: Callable[..., httpx.Response]
+) -> None:
+    arguments = '{"action": "system_button", "button": "Menu"}'
+    reply = ChatResult.model_validate(
+        chat_response(
+            content="" if native else f"<tool_call>{arguments}</tool_call>",
+            tool_arguments=arguments if native else None,
+        ).json()
+    )
+
+    args, _, _ = vlm.parse_agent_response(reply)
+
+    assert args is not None
+    assert vlm.tool_call_to_action(args) == {"action": "menu"}
+
+
 def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
@@ -579,6 +597,7 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     assert "The screen's resolution is 999x999." in prompt
     assert "32x32" not in prompt
     assert "1080" not in prompt
+    assert "application options menu" in prompt
 
 
 @pytest.mark.parametrize(
@@ -1894,26 +1913,34 @@ def test_the_planner_keeps_every_quote_in_its_instruction(
     ],
     ids=["quotes kept", "blank", "not an object", "not JSON"],
 )
+@pytest.mark.parametrize(
+    "action",
+    [
+        [{"action": "swipe", "x1": 540, "y1": 1500, "x2": 540, "y2": 500}],
+        {"action": "menu"},
+    ],
+)
 def test_an_executed_action_is_described_from_its_screen_or_not_at_all(
     reply: str,
     instruction: str | None,
+    action: dict[str, object] | list[dict[str, object]],
     router_client: OpenRouter,
     router_responses: list[httpx.Response],
     router_requests: list[httpx.Request],
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    swipe = [{"action": "swipe", "x1": 540, "y1": 1500, "x2": 540, "y2": 500}]
     router_responses.append(chat_response(content=reply))
 
     described = vlm.describe_executed_action(
-        router_client, png_screenshot, swipe, (1080, 1920), settings=PAGE_DETAIL
+        router_client, png_screenshot, action, (1080, 1920), settings=PAGE_DETAIL
     )
 
     assert described == instruction
     prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
     assert "1080x1920 screen" in prompt
-    assert json.dumps(swipe) in prompt
+    assert json.dumps(action) in prompt
+    assert '"menu" opens the application options menu' in prompt
 
 
 @pytest.mark.parametrize("multipart", [False, True])
@@ -2020,7 +2047,7 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
     [
         ({"action": "swipe", "direction": "north"}, "Swipe requires a supported direction"),
         ({"action": "type"}, "Type requires a text string"),
-        ({"action": "system_button", "button": "Power"}, "Back, Home or Enter"),
+        ({"action": "system_button", "button": "Power"}, "Back, Home, Menu or Enter"),
         ({"action": "invented"}, "Unknown action"),
         ({"action": "click"}, "two finite numbers"),
         ({"action": "click", "coordinate": [500]}, "two finite numbers"),
@@ -2030,7 +2057,7 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
         ({"action": "swipe", "direction": "north", "coordinate": [500]}, "two finite numbers"),
         ({"action": ["click"]}, "Unknown action"),
         ({"action": "swipe", "direction": ["up"]}, "Swipe requires a supported direction"),
-        ({"action": "system_button", "button": ["Back"]}, "Back, Home or Enter"),
+        ({"action": "system_button", "button": ["Back"]}, "Back, Home, Menu or Enter"),
     ],
 )
 def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message: str) -> None:
@@ -2076,6 +2103,7 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
         ({"action": "type", "text": "milk"}, {"action": "type", "text": "milk"}),
         ({"action": "system_button", "button": "Back"}, {"action": "back"}),
         ({"action": "system_button", "button": "Home"}, {"action": "home"}),
+        ({"action": "system_button", "button": "Menu"}, {"action": "menu"}),
         ({"action": "system_button", "button": "Enter"}, {"action": "enter"}),
         ({"action": "answer", "text": "9 EUR"}, {"action": "end"}),
         ({"action": "error"}, {"action": "end"}),

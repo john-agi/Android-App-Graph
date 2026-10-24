@@ -205,20 +205,21 @@ def test_a_controller_without_a_usable_status_bar_has_the_whole_image_hashed(
     )
 
 
+@pytest.mark.parametrize("action", [{"action": "back"}, {"action": "menu"}])
 def test_exe_action_records_the_action_with_the_observation_it_was_taken_from(
-    device: _Device, steps: Path
+    device: _Device, steps: Path, action: dict[str, str]
 ) -> None:
     recorder = _recorder(device, steps)
     recorder.get_state()
     observation_id = recorder.get_state()["observation_id"]
 
-    recorder.exe_action({"action": "back"})
+    recorder.exe_action(action)
 
-    assert device.actions == [{"action": "back"}]
+    assert device.actions == [action]
     record = _record(steps, "000002")
     assert record["kind"] == "action"
     assert record["observation"] == observation_id == "000001"
-    assert record["action"] == {"action": "back"}
+    assert record["action"] == action
     assert (record["activity"], record["package"]) == (HOME["activity"], HOME["package"])
     assert not (steps / "000002.webp").exists()
 

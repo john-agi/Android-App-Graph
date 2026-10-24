@@ -435,17 +435,30 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
 
 
 @pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("action", [{"action": "tap", "coordinate": [30, 40]}, {"action": "menu"}])
 def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
-    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    action: dict[str, object],
+    write_graph_file: Callable[..., None],
 ) -> None:
-    """An edge action stored as one dict, not a list of steps, reaches the device as it is."""
-    open_detail = {"action": "tap", "coordinate": [30, 40]}
-    replaying_kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
-    replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=open_detail)
+    """An edge action saved as one dict reaches the device as it is."""
+    graph_file = tmp_path / "saved.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_detail")]},
+        embedding_model="provider/embedding",
+    )
+    replaying_kobe.graph.load_graph(graph_file)
+    replaying_kobe.graph.add_edge("s0_home", "s1_detail", action=action)
+    replaying_kobe.graph.save_graph(graph_file)
+    replaying_kobe.graph.load_graph(graph_file)
     _identifying(replaying_kobe, monkeypatch, "s0_home", "s1_detail")
 
     assert replaying_kobe.navigate_to_node("s1_detail") == "s1_detail"
-    assert device_log == [*_FIRST_RESTART, open_detail]
+    assert device_log == [*_FIRST_RESTART, action]
 
 
 def _explore_sending(
