@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -44,7 +45,8 @@ from android_app_graph.utils.graph_manager import (
     target_observation,
 )
 from android_app_graph.utils.vlm_utils import (
-    SATURATING_SELF_LOOP_STEPS,
+    SATURATING_SELF_LOOPS,
+    SATURATION_WINDOW,
     ActionRequest,
     PlanRequest,
     plan_next_action,
@@ -186,7 +188,7 @@ class Kobe:
             controller, steps_dir, run_kind="explore", source="main_loop"
         )
         self._setup_trail = SetupTrail(self.graph.resolve_node_id)
-        self._self_loops_in_a_row: dict[str, int] = {}
+        self._recent_outcomes: dict[str, deque[bool]] = {}
 
     def maybe_continue_from_coverage_checkpoint(
         self,
@@ -613,7 +615,8 @@ class Kobe:
                 tokens_before,
                 max_steps,
                 reason=(
-                    f"The last {SATURATING_SELF_LOOP_STEPS} steps on {position.node} stayed on it"
+                    f"{sum(self._recent_outcomes[position.node])} of the last "
+                    f"{SATURATION_WINDOW} outcomes on {position.node} stayed on it"
                 ),
             )
             if continued is not None:
@@ -651,16 +654,11 @@ class Kobe:
         return self._record_in_app_step(move, new_node, device_state, max_steps)
 
     def _saturated(self, node: str) -> bool:
-        """Return whether the last ``SATURATING_SELF_LOOP_STEPS`` steps planned on ``node``
-        were all self-loops on it, so that the next step there continues from a ranked
-        target instead of planning: on a screen such as an alarm list, whose actions only
-        change what it shows, the planner can otherwise spend most of a run there.
-
-        A step to another node and a continuation start the count again; a step that
-        waits leaves it as it is. The count lives in memory, so a resumed run starts it
-        at zero.
+        """Keep brief departures in the window so intermittent navigation still exposes
+        sustained looping. Chosen continuations and fresh processes begin empty windows.
         """
-        return self._self_loops_in_a_row.get(node, 0) >= SATURATING_SELF_LOOP_STEPS
+        outcomes = self._recent_outcomes.get(node, ())
+        return len(outcomes) == SATURATION_WINDOW and sum(outcomes) >= SATURATING_SELF_LOOPS
 
     def _continue_from_ranked_target(
         self, position: _Position, tokens_before: dict[str, int], max_steps: int, *, reason: str
@@ -681,7 +679,7 @@ class Kobe:
                 self.logger.info("  %s, but no other node is ranked.", reason)
                 return None
             self.logger.info("  %s; continuing from ranked target %s instead.", reason, target)
-            self._self_loops_in_a_row.pop(position.node, None)
+            self._recent_outcomes.pop(position.node, None)
             reached = self._navigate_to_continuation(target, position.node)
             next_position = position
             if reached is not None:
@@ -769,9 +767,8 @@ class Kobe:
     ) -> None:
         """Add the edge ``move`` took to ``target``, with its setup and open menu,
         record its transition, and count whether it stayed on its node."""
-        self._self_loops_in_a_row[move.source] = (
-            self._self_loops_in_a_row.get(move.source, 0) + 1 if target == move.source else 0
-        )
+        outcomes = self._recent_outcomes.setdefault(move.source, deque(maxlen=SATURATION_WINDOW))
+        outcomes.append(target == move.source)
         self.graph.add_edge(
             move.source,
             target,

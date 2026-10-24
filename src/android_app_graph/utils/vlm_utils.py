@@ -1910,8 +1910,8 @@ _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
 # A self-loop gains an action for every state its screen can be put in, such as each day an
 # alarm repeats on, and each of them leads back to the screen the planner already sees.
 SELF_LOOP_INSTRUCTIONS_LISTED = 30
-# Steps in a row that each stay on one node change only its screen's state and find no new screen.
-SATURATING_SELF_LOOP_STEPS = 15
+SATURATION_WINDOW = 15
+SATURATING_SELF_LOOPS = 12
 
 
 def text_input_status(visibility: str, state: Mapping[str, object]) -> str:
