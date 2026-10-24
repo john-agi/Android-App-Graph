@@ -1252,9 +1252,11 @@ The complete pair coverage has quadratic cold work. For a single package:
 | 1,000 | 136 |
 | 3,000 | 1,128 |
 
-A graph manager keeps complete proposal replies keyed by batch membership, full
-member-image and description evidence, navigation context, rule/schema and model
-settings. A matching batch reuses its proposals. Separately, answered member questions
+A graph manager keeps complete proposal replies keyed by ordered node IDs, the exact
+batch text, app label, rule/schema and model settings. A matching request reuses its
+proposals, including after revisits that preserve its displayed descriptions and
+navigation context. Cache misses run concurrently, up to 16 requests at a time;
+cache writes and report results follow batch order. Separately, answered member questions
 are keyed by both members' IDs, image bytes and descriptions and the verifier's
 rule/schema and resolved settings. A matching question reuses its answer while rounds
 retain their deductions. Changes make the affected evidence eligible again. Timeouts,

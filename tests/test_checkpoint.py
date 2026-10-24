@@ -138,6 +138,7 @@ def test_independent_proposal_misses_run_concurrently_and_keep_batch_order(
     tmp_path: Path,
     write_member_graph: Callable[..., None],
     router_client: OpenRouter,
+    checkpoint_models: CheckpointModels,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "concurrent" / "graph.json"
@@ -151,7 +152,10 @@ def test_independent_proposal_misses_run_concurrently_and_keep_batch_order(
             cross_started.set()
         else:
             assert cross_started.wait(5), "Independent cross-block request starts concurrently"
-        return {"issues": [], "summary": "cross" if cross else "within"}
+        return {
+            "issues": [{"node_a": "n0", "node_b": "n64" if cross else "n1"}],
+            "summary": "cross" if cross else "within",
+        }
 
     monkeypatch.setattr(graph_manager, "audit_merge_nodes", propose)
     result = graph.run_node_merge_audit()
@@ -160,6 +164,12 @@ def test_independent_proposal_misses_run_concurrently_and_keep_batch_order(
     assert result["summary"] == reused["summary"] == "within\ncross"
     assert (result["proposal_requests"], result["proposal_reused"]) == (2, 0)
     assert (reused["proposal_requests"], reused["proposal_reused"]) == (0, 2)
+    assert [(issue["node_a"], issue["node_b"]) for issue in result["issues"]] == [
+        ("s0", "s1"),
+        ("s0", "s64"),
+    ]
+    assert result["issues"] == reused["issues"]
+    assert len(checkpoint_models.comparisons) == 2
 
 
 @pytest.mark.parametrize(
@@ -447,7 +457,7 @@ def test_unicode_and_json_escaping_obey_the_full_request_bound(
 
 def test_an_oversized_manually_constructed_batch_is_rejected() -> None:
     node = IdentityNode(
-        "id", "package", (), ("x" * 1000,) * 3, ("y" * 1000,) * 2, ("z" * 1000,) * 2, "evidence"
+        "id", "package", (), ("x" * 1000,) * 3, ("y" * 1000,) * 2, ("z" * 1000,) * 2
     )
     batch = IdentityBatch((node,) * 300, 0)
 
@@ -459,7 +469,7 @@ def test_an_oversized_manually_constructed_batch_is_rejected() -> None:
     "alias", ["", "s0", "n-1", "n01", "n\N{ARABIC-INDIC DIGIT ONE}", "n1000", "n" + "9" * 5000]
 )
 def test_only_declared_bounded_ascii_aliases_resolve(alias: str) -> None:
-    node = IdentityNode("original-node", "package", (), ("Home",), (), (), "evidence")
+    node = IdentityNode("original-node", "package", (), ("Home",), (), ())
     batch = IdentityBatch((node,), 0)
 
     assert batch.node(alias) is None

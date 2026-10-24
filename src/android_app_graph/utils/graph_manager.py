@@ -3728,16 +3728,6 @@ class GraphManager:
         outgoing = neighbors(self.graph.successors(node_id))
         activities = data.get("activities", [data.get("activity", "")])
         named_activities = tuple(sorted(value for value in activities if isinstance(value, str)))
-        member_evidence = [
-            _shown_member_key(
-                member,
-                DescribedScreenshot(
-                    observation_image_b64(self._require_steps_dir(), member),
-                    self.description(member) or "",
-                ),
-            )
-            for member in members
-        ]
         package = as_str(data.get("package"), "")
         return IdentityNode(
             node_id,
@@ -3746,7 +3736,6 @@ class GraphManager:
             descriptions,
             incoming,
             outgoing,
-            evidence_key([package, named_activities, member_evidence, incoming, outgoing]),
         )
 
     def _checkpoint_groups(self) -> dict[str, list[str]]:
@@ -3791,24 +3780,42 @@ class GraphManager:
             )
         return ProposalReply(tuple(hints), as_str(value.get("summary"), ""), answered)
 
-    def _checkpoint_proposal_reply(
+    def _checkpoint_proposal_replies(
         self,
-        batch: IdentityBatch,
+        batches: Sequence[IdentityBatch],
         client: OpenRouter,
         settings: ModelSettings,
         app_name: str,
-    ) -> tuple[ProposalReply, bool]:
-        key = evidence_key([node_merge_context(settings), app_name, batch.evidence])
-        if key in self._checkpoint_proposals:
-            return self._checkpoint_proposals[key], True
-        reply = self._checkpoint_reply(
-            audit_merge_nodes(client, batch.text, app_name=app_name, settings=settings)
+    ) -> list[tuple[ProposalReply, bool]]:
+        context = node_merge_context(settings)
+        keys = [evidence_key([context, app_name, batch.evidence]) for batch in batches]
+        replies = {
+            index: (self._checkpoint_proposals[key], True)
+            for index, key in enumerate(keys)
+            if key in self._checkpoint_proposals
+        }
+
+        def call(index: int) -> ProposalReply:
+            batch = batches[index]
+            reply = self._checkpoint_reply(
+                audit_merge_nodes(client, batch.text, app_name=app_name, settings=settings)
+            )
+            if any(not batch.permits(hint.first, hint.second) for hint in reply.hints):
+                reply = replace(reply, answered=False)
+            return reply
+
+        def keep(index: int, reply: ProposalReply) -> None:
+            replies[index] = reply, False
+            if reply.answered:
+                self._checkpoint_proposals[keys[index]] = reply
+
+        call_concurrently(
+            "node_merge_audit",
+            call,
+            [index for index in range(len(batches)) if index not in replies],
+            keep,
         )
-        if any(not batch.permits(hint.first, hint.second) for hint in reply.hints):
-            reply = replace(reply, answered=False)
-        if reply.answered:
-            self._checkpoint_proposals[key] = reply
-        return reply, False
+        return [replies[index] for index in range(len(batches))]
 
     def run_node_merge_audit(self, app_name: str = "") -> CheckpointReport:
         """Propose duplicates in bounded complete batches and reuse unchanged evidence."""
@@ -3836,9 +3843,10 @@ class GraphManager:
             node_merge_request_bound(settings),
         )
         pairs = requests = reused = unanswered = input_bytes = largest = 0
-        for index, batch in enumerate(self.checkpoint_batches()):
+        batches = list(self.checkpoint_batches())
+        replies = self._checkpoint_proposal_replies(batches, client, settings, app_name)
+        for index, (batch, (reply, known)) in enumerate(zip(batches, replies, strict=True)):
             size = len(node_merge_prompt(batch.text, app_name).encode("utf-8"))
-            reply, known = self._checkpoint_proposal_reply(batch, client, settings, app_name)
             pairs += batch.pair_count
             requests += not known
             reused += known

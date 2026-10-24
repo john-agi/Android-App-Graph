@@ -57,7 +57,6 @@ class IdentityNode:
     descriptions: tuple[str, ...]
     incoming: tuple[str, ...]
     outgoing: tuple[str, ...]
-    evidence: str
 
     def line(self, alias: str) -> str:
         descriptions = "; ".join(
@@ -113,9 +112,7 @@ class IdentityBatch:
 
     @property
     def evidence(self) -> str:
-        return evidence_key(
-            [self.left_size, [(node.node_id, node.evidence) for node in self.nodes], self.text]
-        )
+        return evidence_key([[node.node_id for node in self.nodes], self.text])
 
     def node(self, alias: str) -> str | None:
         matched = re.fullmatch(r"n(0|[1-9][0-9]{0,2})", alias)
