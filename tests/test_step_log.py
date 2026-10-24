@@ -102,6 +102,14 @@ def test_action_grounding_uses_the_current_native_screenshot_dimensions(steps: P
     assert (recorder.w, recorder.h) == (1280, 720)
 
 
+def test_grounding_keeps_native_dimensions_when_the_model_image_is_scaled(steps: Path) -> None:
+    recorder = _recorder(_Device(_png((1250, 1000), "white")), steps)
+    recorder.get_state()
+    assert (recorder.w, recorder.h) == (1250, 1000)
+    record = _record(steps, "000000")
+    assert (record["width"], record["height"]) == (1118, 894)
+
+
 def test_rejected_input_records_its_request_geometry_and_reason(
     device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
