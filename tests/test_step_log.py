@@ -678,3 +678,25 @@ def test_a_recorded_unresolved_capture_stops_before_its_image_enters_matching(st
     record = {**_ownership_record(), "system_overlay_error": "Unknown clipboard geometry"}
     with pytest.raises(UnresolvedSystemOverlayError, match="Unknown clipboard geometry"):
         recorded_observation(steps, record)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("system_surface", "unknown_surface"),
+        ("system_overlays", [[0, 0, 10]]),
+        ("system_overlay_error", {}),
+    ],
+)
+def test_capture_preserves_and_rejects_malformed_owner_metadata_before_matching(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    monkeypatch.setattr(
+        device,
+        "get_state",
+        lambda **_kwargs: {**HOME, "screenshot": device.screenshot, field: value},
+    )
+    with pytest.raises(ValueError, match=field):
+        _recorder(device, steps).get_state()
+    assert _record(steps, "000000")[field] == value
+    assert (steps / "000000.webp").is_file()

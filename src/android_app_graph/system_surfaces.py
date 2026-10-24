@@ -16,6 +16,15 @@ _WINDOW = re.compile(r"^\s*Window #\d+ Window\{(\S+) u\d+ ([^}]+)\}:\s*$", re.MU
 _CURRENT = re.compile(r"mCurrentFocus=Window\{(\S+) u\d+ ([^}]+)\}")
 _COMPONENT = re.compile(r"([\w.]+)/([\w.]+)")
 _TOUCH_REGION = re.compile(r"\((-?\d+),(-?\d+),(-?\d+),(-?\d+)\)")
+_IME_PACKAGES = frozenset(
+    {
+        "com.android.inputmethod.latin",
+        "com.google.android.inputmethod.latin",
+        "com.samsung.android.honeyboard",
+        "com.swiftkey.swiftkey",
+        "com.touchtype.swiftkey",
+    }
+)
 _PERMISSION_PACKAGES = frozenset(
     {"com.android.permissioncontroller", "com.google.android.permissioncontroller"}
 )
@@ -39,12 +48,6 @@ def _component(text: str) -> tuple[str, str]:
         return "unknown", "unknown"
     package, activity = as_str(match.group(1), ""), as_str(match.group(2), "")
     return package, package + activity if activity.startswith(".") else activity
-
-
-def _keyboard_package(package: str) -> bool:
-    return any(
-        word in package.casefold() for word in ("inputmethod", "keyboard", "honeyboard", "swiftkey")
-    )
 
 
 def _visible(block: str) -> bool:
@@ -85,11 +88,10 @@ def window_ownership(dump: str, package: str, activity: str) -> WindowOwnership:
                 tuple(int(value) for value in rectangle)
                 for rectangle in _TOUCH_REGION.findall(region_line)
             ]
-            if not regions:
+            valid = [(r[0], r[1], r[2], r[3]) for r in regions if r[0] < r[2] and r[1] < r[3]]
+            if not valid:
                 overlay_error = "Visible ClipboardOverlay has no reported touchable region"
-            overlays.extend(
-                (r[0], r[1], r[2], r[3]) for r in regions if r[0] < r[2] and r[1] < r[3]
-            )
+            overlays.extend(valid)
         if match.group(1) != focus_id:
             continue
         if "ty=NOTIFICATION_SHADE" in block:
@@ -102,7 +104,7 @@ def window_ownership(dump: str, package: str, activity: str) -> WindowOwnership:
             package, activity = underlying, underlying_activity
     if package in _PERMISSION_PACKAGES and "GrantPermissionsActivity" in activity:
         surface = "permission"
-    elif _keyboard_package(package):
+    elif package in _IME_PACKAGES:
         surface = "ime_settings"
     return WindowOwnership(package, activity, underlying, surface, tuple(overlays), overlay_error)
 

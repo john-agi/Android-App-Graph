@@ -365,3 +365,22 @@ def test_clipboard_without_reported_geometry_has_an_explicit_capture_error() -> 
     assert observed.overlay_error == "Visible ClipboardOverlay has no reported touchable region"
     assert observed.package == "com.demo"
     assert observed.system_overlays == ()
+
+
+def test_invalid_clipboard_rectangles_keep_the_geometry_explicitly_unresolved() -> None:
+    dump = (
+        "  Window #0 Window{clip u0 ClipboardOverlay}:\n"
+        "    mDisplayId=0 package=com.android.systemui ty=SCREENSHOT\n"
+        "    touchable region=SkRegion((10,0,0,20))\n"
+        "    mHasSurface=true isVisible=true\n"
+    )
+    ownership = window_ownership(dump, "com.demo", "Home")
+    assert ownership.system_overlays == ()
+    assert ownership.overlay_error is not None
+
+
+def test_an_app_name_containing_keyboard_preserves_its_app_identity() -> None:
+    package = "com.example.keyboard"
+    observed = window_ownership("", package, package + ".Home")
+    assert observed.package == package
+    assert observed.system_surface is None

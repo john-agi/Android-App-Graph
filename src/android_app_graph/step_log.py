@@ -396,6 +396,14 @@ class StepRecorder:
             }
         )
         write_bytes_atomically(observation_image_path(self.steps, observation.observation_id), webp)
+        ownership_fields: dict[str, object] = {
+            "native_size": list(native_size),
+            "system_surface": state.get("system_surface"),
+            "system_overlays": state.get("system_overlays", []),
+            "underlying_package": state.get("underlying_package"),
+            "permission_requester": state.get("permission_requester"),
+            "system_overlay_error": state.get("system_overlay_error"),
+        }
         self._write_record(
             observation.observation_id,
             "observation",
@@ -407,17 +415,13 @@ class StepRecorder:
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
                 "black": observation.black,
-                "native_size": list(native_size),
-                "system_surface": observation.system_surface,
-                "system_overlays": [list(region) for region in observation.system_overlays],
-                "underlying_package": state.get("underlying_package"),
-                "permission_requester": state.get("permission_requester"),
-                "system_overlay_error": state.get("system_overlay_error"),
+                **ownership_fields,
             },
         )
         self._last_observation = observation
-        if error := as_str(state.get("system_overlay_error"), ""):
-            raise UnresolvedSystemOverlayError(error)
+        ownership = observation_ownership({"id": observation.observation_id, **ownership_fields})
+        if ownership.error is not None:
+            raise UnresolvedSystemOverlayError(ownership.error)
         return {
             **state,
             "screenshot": observation.screenshot_b64,
