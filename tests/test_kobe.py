@@ -19,7 +19,12 @@ from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 from PIL import Image
 
-from android_app_graph.device import DeviceController, DeviceUnreachableError, StillOutsideAppError
+from android_app_graph.device import (
+    DeviceController,
+    DeviceUnreachableError,
+    PermissionGrants,
+    StillOutsideAppError,
+)
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
 from android_app_graph.screen_image import encode_screenshot
@@ -2202,8 +2207,26 @@ def _explore_into_a_permission_dialog(
         "activity": _DIALOG_ACTIVITY,
         "screenshot": png_screenshot,
         "package": "com.google.android.permissioncontroller",
+        "system_surface": "permission",
+        "permission_requester": "com.demo",
+        "xml": '<hierarchy><node resource-id="com.google.android.permissioncontroller:id/permission_allow_button" enabled="true" bounds="[0,0][100,100]"/></hierarchy>',
     }
     device = _ScriptedDevice(home, dialog, home)
+    monkeypatch.setattr(
+        "android_app_graph.device.grant_runtime_permissions",
+        lambda *_args: PermissionGrants(
+            ("android.permission.CAMERA",), ("android.permission.CAMERA",)
+        ),
+    )
+    monkeypatch.setattr(
+        "android_app_graph.device.run_adb",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            "  Permission [android.permission.CAMERA] (1):\n    sourcePackage=android prot=dangerous\n",
+            "",
+        ),
+    )
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
     router_responses.extend(
         [
@@ -2212,9 +2235,6 @@ def _explore_into_a_permission_dialog(
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap Take photo"}'),
             chat_response(content='{"action":"click","coordinate":[500,500]}'),
-            # The dialog shows home's pixels, but of another package: no exact match.
-            httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"camera permission dialog"}'),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -2224,7 +2244,7 @@ def _explore_into_a_permission_dialog(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+def test_a_target_permission_is_resolved_without_app_coverage(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
@@ -2232,25 +2252,25 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pressing back on a permission dialog would deny the permission."""
+    """The existing target grant policy resolves the prompt without a denial."""
     device = _explore_into_a_permission_dialog(
         kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
     )
 
     tap = {"action": "tap", "x": 50, "y": 100}
-    assert device.actions == [tap]
+    assert device.actions == [tap, {"action": "tap", "x": 50, "y": 50}]
     graph = kobe.graph.graph
     nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
     assert set(nodes) == {"com.demo.Home", _DIALOG_ACTIVITY}
     dialog_node = graph.nodes[nodes[_DIALOG_ACTIVITY]]
-    assert kobe.graph.latest_description(nodes[_DIALOG_ACTIVITY]) == "camera permission dialog"
-    assert "is_external" not in dialog_node
+    assert dialog_node["is_external"] is True
+    assert dialog_node["system_surface"] == "permission"
     edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
     assert edge["actions"] == [[tap]]
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
+def test_a_permission_boundary_is_excluded_from_all_app_targets(
     kobe: Kobe,
     png_screenshot: str,
     router_requests: list[httpx.Request],
@@ -2266,10 +2286,10 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
     )
 
     graph = kobe.graph
-    nodes = {data["package"]: node for node, data in graph.graph.nodes(data=True)}
-    assert set(nodes) == {"com.demo", "com.google.android.permissioncontroller"}
+    nodes = {data.get("package"): node for node, data in graph.graph.nodes(data=True)}
+    assert set(nodes) == {"com.demo", None}
     home = nodes["com.demo"]
-    assert graph.get_resume_target() == nodes["com.google.android.permissioncontroller"]
+    assert graph.get_resume_target() == home
     assert graph.get_resume_target(package_name="com.demo") == home
     checkpoint = graph.get_exploration_target_candidates(package_name="com.demo")
     assert [candidate["node_id"] for candidate in checkpoint] == [home]
@@ -2278,12 +2298,11 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
         for request in router_requests
         if b"No known-screen descriptions are supplied" in request.content
     ]
-    assert len(described_without_known_screens) == 2
+    assert len(described_without_known_screens) == 1
 
 
 _SEARCH = "com.google.android.settings.intelligence"
 _SEARCH_SCREEN = {**_screen(f"{_SEARCH}.SearchActivity", "orange"), "package": _SEARCH}
-_KEYBOARD = "com.google.android.inputmethod.latin"
 _TAP = {"action": "tap", "x": 50, "y": 100}
 
 
@@ -2438,7 +2457,7 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
     screens_by_log: Callable[..., DeviceController],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    keyboard = {**_screen("com.demo.Home", "gray"), "package": _KEYBOARD}
+    keyboard = {**_screen("com.demo.Home", "gray"), "package": "com.demo"}
     explorer = _explorer(
         screens_by_log(HOME_SCREEN, _SEARCH_SCREEN, keyboard), tmp_path, router_client
     )
@@ -2452,13 +2471,13 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
         httpx.Response(200, json=embedding_body),
         chat_response(content='{"page_description":"home with the keyboard shown"}'),
         httpx.Response(200, json=embedding_body),
+        chat_response(content='{"same":true}'),
     )
 
     assert device_log == [_TAP, _BACK]
     assert _node_packages(explorer) == {
         "s0": "com.demo",
         f"ext_{_SEARCH}": None,
-        "s1": _KEYBOARD,
     }
 
 
@@ -4058,3 +4077,144 @@ def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
     assert device.actions == actions
     assert explorer.graph.total_steps_completed == 3
     assert explorer.graph.graph.nodes["s0"]["state_schema"]["focused_field"][0] == "Name"
+
+
+class _TimedFeedbackDevice(_ScriptedDevice):
+    def __init__(self, *screens: dict[str, object]) -> None:
+        super().__init__(*screens)
+        self.reads = 0
+
+    @override
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
+        state = self._screens[min(self.reads, len(self._screens) - 1)]
+        self.reads += 1
+        return state
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("max_steps", [1, 2])
+def test_system_feedback_defers_a_covered_action_within_the_step_budget(
+    kobe: Kobe, png_screenshot: str, monkeypatch: pytest.MonkeyPatch, max_steps: int
+) -> None:
+    app: dict[str, object] = {
+        "package": "com.demo",
+        "activity": "Home",
+        "screenshot": png_screenshot,
+    }
+    feedback = {**app, "system_overlays": [[0, 100, 100, 150]]}
+    device = _TimedFeedbackDevice(feedback, app, app)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    kobe.graph.graph.add_node(
+        "s0",
+        package="com.demo",
+        activity="Home",
+        state_schema={},
+        last_detail_snapshot={},
+        observations=[],
+        visit_count=1,
+        replay_misses=0,
+        interactable_elements=[{"description": "App Share", "position": "top", "explored": False}],
+    )
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0")
+    monkeypatch.setattr(kobe.graph, "latest_description", lambda _node: "Calculator")
+    monkeypatch.setattr(kobe.graph, "normalize_all_edges", lambda: 0)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    pending: list[bool] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int]:
+        pending.append(
+            request.unexplored_elements[0]["explored"] if request.unexplored_elements else True
+        )
+        return "Tap app Share", 1
+
+    actions = iter([{"action": "tap", "x": 50, "y": 125}, {"action": "tap", "x": 10, "y": 20}])
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (next(actions), "")
+    )
+    kobe.explore(max_steps=max_steps)
+    assert kobe.graph.total_steps_completed == max_steps
+    assert pending == [False] * max_steps
+    assert device.actions == ([] if max_steps == 1 else [{"action": "tap", "x": 10, "y": 20}])
+    assert kobe.graph.graph.number_of_edges() == max_steps - 1
+    assert kobe.graph.graph.nodes["s0"]["interactable_elements"][0]["explored"] is (max_steps == 2)
+    records = [json.loads(path.read_text()) for path in kobe.controller.steps.glob("*.json")]
+    skipped = [
+        r for r in records if r["kind"] == "system_event" and r.get("status") == "action_skipped"
+    ]
+    assert len(skipped) == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_replay_stops_before_a_system_feedback_target_and_records_its_actual_node(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    _settings_and_detail(kobe)
+    screen = {**HOME_SCREEN, "system_overlays": [[0, 0, 100, 100]]}
+    device = _TimedFeedbackDevice(screen, screen)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    assert kobe.navigate_to_node("s2_detail") == "s0_home"
+    assert kobe.graph.graph.nodes["s2_detail"]["replay_misses"] == 1
+    assert device.actions == []
+    assert device_log == _FIRST_RESTART
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_startup_dismisses_a_focused_shade_and_retains_its_boundary_identity(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = HOME_SCREEN
+    shade = {
+        **app,
+        "package": "com.android.systemui",
+        "activity": "NotificationShade",
+        "system_surface": "notification_shade",
+    }
+    device = _TimedFeedbackDevice(shade, app)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    kobe.graph.graph.add_node(
+        "s0",
+        package="com.demo",
+        activity="Home",
+        observations=[],
+        state_schema={},
+        last_detail_snapshot={},
+        visit_count=1,
+        replay_misses=0,
+    )
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0")
+    monkeypatch.setattr(kobe.graph, "latest_description", lambda _node: "Home")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", lambda **_kwargs: ("Wait", None))
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: ({"action": "wait"}, "")
+    )
+    kobe.explore(max_steps=1)
+    boundary = kobe.graph.graph.nodes["ext_com.android.systemui"]
+    assert boundary["system_surface"] == "notification_shade"
+    assert boundary["is_external"] is True
+    assert kobe.graph.get_resume_target() == "s0"
+    assert device.actions == [{"action": "back"}]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_an_unresolved_startup_permission_saves_its_boundary_before_stopping(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.device import UnresolvedPermissionError
+
+    prompt = {
+        **HOME_SCREEN,
+        "package": "com.android.permissioncontroller",
+        "activity": "GrantPermissionsActivity",
+        "system_surface": "permission",
+        "permission_requester": "com.android.inputmethod.latin",
+    }
+    device = _TimedFeedbackDevice(prompt)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    with pytest.raises(UnresolvedPermissionError, match="not verified as target"):
+        kobe.explore(max_steps=1)
+    assert kobe.graph_path.is_file()
+    assert device.actions == []
+    assert list(kobe.graph.graph) == ["ext_com.android.permissioncontroller"]
