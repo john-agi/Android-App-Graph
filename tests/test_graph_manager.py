@@ -1928,8 +1928,8 @@ def test_a_graph_loads_with_black_members_that_have_no_describe_output_or_descri
     assert loaded.graph.nodes[pattern_node]["observations"] == [pattern.observation_id]
 
 
-def _merge_audit_proposes(monkeypatch: pytest.MonkeyPatch, node_a: str, node_b: str) -> None:
-    proposal = FakeAudit(result={"issues": [{"node_a": node_a, "node_b": node_b}]})
+def _merge_audit_proposes(monkeypatch: pytest.MonkeyPatch) -> None:
+    proposal = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n1"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", proposal)
 
 
@@ -1942,7 +1942,7 @@ def test_the_merge_audit_keeps_black_nodes_of_different_activities_apart_unverif
     pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PIN))
     gm = make_manager(steps_dir)
     pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
-    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+    _merge_audit_proposes(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger=gm_module.logger.name):
         result = gm.run_node_merge_audit()
@@ -1970,10 +1970,11 @@ def test_the_merge_audit_verifies_a_black_node_and_one_not_all_black_or_sharing_
     steps_dir = tmp_path / "steps"
     pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), pin_screen)
     gm = make_manager(steps_dir)
-    pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
+    gm.identify_state(pattern)
+    pin_node = gm.identify_state(pin)
     if not shown:
         gm.graph.nodes[pin_node]["observations"].append(pattern.observation_id)
-    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+    _merge_audit_proposes(monkeypatch)
     vlm.calls.clear()
 
     result = gm.run_node_merge_audit()
@@ -5420,10 +5421,15 @@ def test_audits_send_their_own_timeout(
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    write_member_graph: Callable[..., None],
 ) -> None:
     manager = GraphManager(
         client=router_client, page_detail=PAGE_DETAIL, embedding=EMBEDDING, audit_timeout=120
     )
+    path = tmp_path / "graph.json"
+    write_member_graph(path, {"s0": [("000001", [1.0, 0.0])], "s1": [("000002", [0.0, 1.0])]})
+    manager.load_graph(path)
     router_responses.append(chat_response(content='{"issues": [], "summary": "fine"}'))
     if operation == "audit":
         assert manager.run_audit()["summary"] == "fine"
@@ -5438,34 +5444,38 @@ def test_run_node_merge_audit_without_a_client_reports_no_merges() -> None:
     assert result == {"issues": [], "results": [], "merged_count": 0}
 
 
-def test_run_node_merge_audit_skips_a_missing_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s9_missing"}]})
+def test_run_node_merge_audit_skips_a_missing_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n99"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
+    add_screen(gm, "s1_other", "Other screen", **members(tmp_path / "steps"))
 
     result = gm.run_node_merge_audit(app_name="Example")
 
     assert result["merged_count"] == 0
     assert result["results"][0]["status"] == "skipped"
-    assert result["results"][0]["reason"] == "node missing"
+    assert result["results"][0]["reason"] == "pair outside request scope"
 
 
 def test_run_node_merge_audit_skips_a_self_pair(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
     """An auditor naming one node twice keeps the node."""
-    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n0"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", visit_count=3)
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", visit_count=3, **members(tmp_path / "steps"))
+    add_screen(gm, "s1_other", "Other screen", **members(tmp_path / "steps"))
 
     result = gm.run_node_merge_audit()
 
     assert result["merged_count"] == 0
     assert result["results"][0]["status"] == "skipped"
     assert result["results"][0]["reason"] == "same node"
-    assert list(gm.graph.nodes) == ["s0_home"]
+    assert list(gm.graph.nodes) == ["s0_home", "s1_other"]
     assert gm.graph.nodes["s0_home"]["visit_count"] == 3
     assert vlm.kinds() == []
 
@@ -5484,7 +5494,8 @@ def test_run_node_merge_audit_skips_a_node_without_members(
 
     result = gm.run_node_merge_audit()
 
-    assert result["results"][0]["reason"] == "missing screenshot"
+    assert result["results"] == []
+    assert fake.calls == []
     assert vlm.kinds() == []
 
 
@@ -5504,8 +5515,8 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
 
     result = gm.run_node_merge_audit()
 
-    assert result["results"][0]["status"] == "skipped"
-    assert result["results"][0]["reason"] == "external node"
+    assert result["results"] == []
+    assert fake.calls == []
     assert result["merged_count"] == 0
     assert vlm.kinds() == []
 
@@ -5513,9 +5524,7 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
 def test_run_node_merge_audit_merges_a_confirmed_duplicate(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
-    fake = FakeAudit(
-        result={"issues": [{"node_a": "s2_home_two", "node_b": "s0_home"}], "summary": "one pair"}
-    )
+    fake = FakeAudit(result={"issues": [{"node_a": "n1", "node_b": "n0"}], "summary": "one pair"})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": True, "reason": "same screen"})
     steps_dir = tmp_path / "steps"
@@ -5559,7 +5568,7 @@ def test_a_merge_proposal_names_the_lower_numbered_node_first() -> None:
 def test_run_node_merge_audit_orders_non_numeric_ids_last(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, other: str
 ) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": other, "node_b": "s0"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": "n1", "node_b": "n0"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": True, "reason": "same screen"})
     gm = make_manager(steps_dir=tmp_path / "steps")
@@ -5576,7 +5585,7 @@ def test_run_node_merge_audit_orders_non_numeric_ids_last(
 def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s1_home_two"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n1"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": False, "reason": "different banner"})
     gm = make_manager(steps_dir=tmp_path / "steps")
