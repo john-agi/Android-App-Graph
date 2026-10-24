@@ -90,6 +90,7 @@ from android_app_graph.utils.vlm_utils import (
     describe_executed_action,
     plan_next_action,
     predict_next_action,
+    text_input_status,
     token_tracker,
 )
 
@@ -421,7 +422,9 @@ def _plan_and_act(
 
     # Check before planning so the planner can choose type vs tap.
     keyboard_hint = soft_keyboard_hint(run.recorder.config["device"]["udid"])
-    input_status = keyboard_status(keyboard_hint)
+    input_status = text_input_status(
+        keyboard_status(keyboard_hint), run.graph.observation_state(before)
+    )
 
     planned_instruction, element = plan_next_action(
         client=run.client,
@@ -441,7 +444,7 @@ def _plan_and_act(
         client=run.client,
         request=ActionRequest(
             screenshot_b64=before.screenshot_b64,
-            instruction=planned_instruction + keyboard_hint,
+            instruction=f"{planned_instruction}\n{input_status}",
             screen_w=run.recorder.w,
             screen_h=run.recorder.h,
             action_history=[],

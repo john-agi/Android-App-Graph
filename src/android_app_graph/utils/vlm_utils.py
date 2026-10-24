@@ -7,7 +7,7 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -621,15 +621,17 @@ app, maximizing screen diversity with minimal effort.
 field, title field, add-item field, etc.) AND no text input action has been tried \
 yet (check the explored instructions list), your action should involve that text field. \
 IMPORTANT: give only ONE atomic action at a time:
-   - If the text field is NOT yet focused/active: instruct to TAP it first. \
-     (e.g. "Tap on the search bar", "Tap on the title field")
-   - If a text field IS focused/active, instruct to TYPE the value. Treat any \
-     of these as active/focused: a visible keyboard, a blinking cursor, or a \
-     bottom-of-screen keyboard/input bar indicating the keyboard has been activated \
-     even if the full keyboard is not visible. (e.g. "Type 'stewed beef'", "Type 'Lunch'")
-     Minimize-keyboard buttons, keyboard-switcher buttons, and keyboard controls at \
-     the bottom of the screen are NOT app elements to explore; they only indicate \
-     that the keyboard/input field is active, so you can directly type strings.
+   - Name the intended visible editable field. Use the current screenshot description \
+and a current caret or field highlight as focus evidence. The description is model \
+judgment; verify its field against the current image.
+   - When the intended field's current focus is unclear, including after a tab or page \
+change, tap the intended field as a separate action, then observe before typing. \
+(e.g. "Tap on the Note field")
+   - When current evidence identifies the intended field as active, TYPE its value \
+without a redundant field tap. (e.g. "Type 'stewed beef' into Search")
+   - Keyboard visibility alone establishes no field identity or focus. Keyboard controls \
+report keyboard state only; choose the app's editable field for text input. A missing \
+OS keyboard signal leaves visibility unknown; a visible current caret can still establish focus.
    - If text has been typed and needs submission: instruct to tap the submit/search \
      button or press enter. (e.g. "Tap the search button", "Press enter")
    Pick relevant sample values for the app's domain.
@@ -1912,6 +1914,17 @@ SELF_LOOP_INSTRUCTIONS_LISTED = 30
 SATURATING_SELF_LOOP_STEPS = 15
 
 
+def text_input_status(visibility: str, state: Mapping[str, object]) -> str:
+    """Keep the OS visibility signal separate from the current description's focus report."""
+    focused = state.get("focused_field")
+    reported = (
+        json.dumps(focused)
+        if "focused_field" in state and (focused is None or isinstance(focused, str))
+        else "unknown (not reported)"
+    )
+    return f"{visibility}\nCurrent screenshot description reports focused_field: {reported}."
+
+
 @dataclass(frozen=True, kw_only=True)
 class PlanRequest:
     """The screen ``plan_next_action`` plans the next instruction for.
@@ -1923,7 +1936,7 @@ class PlanRequest:
             each with its "target", its "actions" and, one entry per action, their
             "instructions" and "target_observations".
         unexplored_elements: List of element dicts not yet interacted with.
-        input_status: Runtime hint about whether a text field/keyboard is active.
+        input_status: OS keyboard visibility and current screenshot focus evidence.
         back_leaves_app: Whether Back on this screen leaves the app, which the prompt
             then says.
     """
@@ -1934,7 +1947,7 @@ class PlanRequest:
     explored_edges: list[dict[str, Any]]
     app_name: str = ""
     unexplored_elements: list[dict[str, Any]] | None = None
-    input_status: str = "unknown from screenshot"
+    input_status: str = "Keyboard visibility and focused field are unknown."
     back_leaves_app: bool = False
 
 

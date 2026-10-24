@@ -758,6 +758,17 @@ included, so treat a graph directory like the app's data. Run one exploration or
 re-exploration of an app at a time: two runs writing one step log reuse each
 other's numbers.
 
+### Text input planning
+
+Exploration and audit planning receive the current screenshot description's focused
+field separately from OS keyboard visibility. The focus report distinguishes a named
+field, `null` (no field identified), and an absent report. It comes from the current
+observation or an exact image match.
+The planner uses that report and the current caret or field highlight to identify
+where text goes. When the intended field's focus is unclear, it taps that field as
+one step and observes the result before typing. An already identified active field
+can receive text directly. Type clears and enters text as one recorded action.
+
 ### Graph nodes
 
 A node is a screen by its purpose. What changes on a screen without changing its

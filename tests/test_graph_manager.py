@@ -5871,3 +5871,31 @@ def test_load_graph_rejects_a_non_object_document_naming_the_path(tmp_path: Path
     with pytest.raises(ValueError, match="must be an object") as excinfo:
         gm.load_graph(path)
     assert str(path) in str(excinfo.value)
+
+
+def test_observation_focus_comes_from_its_image_and_preserves_unknown(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    """Current images carry their own focus even when several visits share a node."""
+    vlm.descriptions.extend(
+        [
+            ("Home screen", {"focused_field": "Name"}, []),
+            ("Home screen", {"focused_field": None}, []),
+        ]
+    )
+    vlm.verdicts.append({"same": True, "reason": "one editor"})
+    graph = make_manager(screen.steps_dir)
+    focused = screen(HOME, SHOT_A, PACKAGE)
+    node = graph.identify_state(focused)
+    options = screen(HOME, SHOT_B, PACKAGE)
+    assert graph.identify_state(options) == node
+    assert graph.graph.nodes[node]["last_detail_snapshot"] == {"focused_field": None}
+    calls = len(vlm.calls)
+
+    assert graph.observation_state(focused) == {"focused_field": "Name"}
+    assert graph.observation_state(options) == {"focused_field": None}
+    assert graph.observation_state(screen(HOME, SHOT_A, PACKAGE)) == {"focused_field": "Name"}
+    assert graph.observation_state(screen(HOME, SHOT_A, OTHER_PACKAGE)) == {}
+    unknown = dataclasses.replace(screen(HOME, SHOT_B, PACKAGE), pixel_hash="unobserved-image")
+    assert graph.observation_state(unknown) == {}
+    assert len(vlm.calls) == calls
