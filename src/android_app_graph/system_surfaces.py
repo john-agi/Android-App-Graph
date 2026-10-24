@@ -57,8 +57,7 @@ def _visible(block: str) -> bool:
 def window_ownership(dump: str, package: str, activity: str) -> WindowOwnership:
     """Use focused and visible display-zero windows, preserving clipboard touch regions.
 
-    A clipboard window covers the display but only its explicit touchable region owns
-    input; using its frame would hide the app beneath it.
+    Clipboard input follows explicit touchable regions within its display-sized window.
     """
     app_line = next((line for line in dump.splitlines() if "mFocusedApp=" in line), "")
     underlying, underlying_activity = _component(app_line)
@@ -144,7 +143,7 @@ class UnresolvedSystemOverlayError(RuntimeError):
 
 
 class SystemOverlayActionError(RuntimeError):
-    """An app action targets an observed system feedback region."""
+    """App input waits for usable ownership of system feedback."""
 
 
 def check_overlay_action(action: Mapping[str, object], regions: Sequence[Region]) -> None:
