@@ -2209,7 +2209,7 @@ def _explore_into_a_permission_dialog(
         "package": "com.google.android.permissioncontroller",
         "system_surface": "permission",
         "permission_requester": "com.demo",
-        "xml": '<hierarchy><node resource-id="com.google.android.permissioncontroller:id/permission_allow_button" enabled="true" bounds="[0,0][100,100]"/></hierarchy>',
+        "xml": '<hierarchy><node resource-id="com.android.permissioncontroller:id/permission_allow_button" enabled="true" bounds="[0,0][100,100]"/></hierarchy>',
     }
     device = _ScriptedDevice(home, dialog, home)
     monkeypatch.setattr(
@@ -4218,3 +4218,92 @@ def test_an_unresolved_startup_permission_saves_its_boundary_before_stopping(
     assert kobe.graph_path.is_file()
     assert device.actions == []
     assert list(kobe.graph.graph) == ["ext_com.android.permissioncontroller"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("surface", ["notification_shade", "permission"])
+def test_system_recovery_preserves_the_replay_expectation(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    app = {**HOME_SCREEN, "activity": "com.demo.Detail"}
+    boundary = {**app, "package": "com.android.systemui", "system_surface": surface}
+    device = _TimedFeedbackDevice(HOME_SCREEN, boundary, app)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
+    kobe.graph.add_edge("s0_home", "s1_detail", action=[{"action": "tap", "x": 1, "y": 2}])
+    monkeypatch.setattr("android_app_graph.kobe.restart_app", lambda *_args: None)
+    monkeypatch.setattr(
+        kobe.graph,
+        "identify_state",
+        lambda observation, **_kwargs: (
+            "s1_detail" if observation.activity == "com.demo.Detail" else "s0_home"
+        ),
+    )
+    monkeypatch.setattr(kobe.graph, "earliest_member", lambda node: node + "-observation")
+    if surface == "permission":
+        monkeypatch.setattr(
+            "android_app_graph.kobe.resolve_permission_prompt",
+            lambda controller, *_args: controller.get_state(),
+        )
+    assert kobe.navigate_to_node("s1_detail") == "s1_detail"
+    matches = [json.loads(p.read_text()) for p in sorted(kobe.controller.steps.glob("*.json"))]
+    assert [r["expected_observation"] for r in matches if r["kind"] == "match"] == [
+        "s0_home-observation",
+        "s1_detail-observation",
+    ]
+
+
+@pytest.mark.parametrize("phase", ["replay", "capture"])
+@pytest.mark.parametrize("failure", ["permission", "overlay"])
+def test_resume_preserves_graph_evidence_when_system_recovery_stops(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, phase: str, failure: str
+) -> None:
+    from android_app_graph.device import UnresolvedPermissionError
+    from android_app_graph.system_surfaces import UnresolvedSystemOverlayError
+
+    error = UnresolvedPermissionError if failure == "permission" else UnresolvedSystemOverlayError
+    kobe.graph.graph.add_node("s0")
+
+    def stop(*_args: object, **_kwargs: object) -> NoReturn:
+        kobe.graph.graph.add_node("ext_boundary", is_external=True)
+        msg = "unresolved boundary"
+        raise error(msg)
+
+    monkeypatch.setattr(kobe, "navigate_to_node", stop if phase == "replay" else lambda _node: "s0")
+    if phase == "capture":
+        monkeypatch.setattr(kobe.controller, "get_state", stop)
+    with pytest.raises(error, match="unresolved boundary"):
+        kobe.explore(max_steps=1, resume_from="s0")
+    assert kobe.graph_path.is_file()
+    assert "ext_boundary" in kobe.graph_path.read_text()
+
+
+def test_an_ime_target_records_its_own_settings_as_app_coverage(
+    tmp_path: Path, png_screenshot: str, router_client: OpenRouter
+) -> None:
+    package = "com.touchtype.swiftkey"
+    device = _Device(
+        {
+            "activity": package + ".Settings",
+            "screenshot": png_screenshot,
+            "package": package,
+            "system_surface": "ime_settings",
+        }
+    )
+    explorer = Kobe(
+        device,
+        ExplorerConfig(
+            app_name="keyboard",
+            package_name=package,
+            graph_dir=tmp_path,
+            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ),
+        client=router_client,
+        logger=logging.getLogger("test"),
+    )
+    state = explorer.controller.get_state()
+    assert state["system_surface"] is None
+    assert Observation.from_state(state).system_surface is None
+    record = json.loads((explorer.controller.steps / "000000.json").read_text())
+    assert record["package"] == package
+    assert record["system_surface"] is None

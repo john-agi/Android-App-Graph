@@ -1496,3 +1496,22 @@ def test_dispatch_checks_new_system_feedback_before_sending_coordinates(
     with pytest.raises(SystemOverlayActionError):
         controller.exe_action({"action": "tap", "x": 10, "y": 20})
     assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
+
+
+@pytest.mark.parametrize("stalls", [1, 2])
+def test_coordinate_dispatch_retries_its_window_read_once_before_any_input(
+    controller: device.AdbController, adb: _FakeAdb, stalls: int
+) -> None:
+    adb.stalls[_DUMPSYS_WINDOW] = stalls
+    action = {"action": "tap", "x": 10, "y": 20}
+    if stalls == 2:
+        with pytest.raises(subprocess.TimeoutExpired):
+            controller.exe_action(action)
+        assert adb.events == [["adb", *_DUMPSYS_WINDOW]] * 2
+    else:
+        controller.exe_action(action)
+        assert adb.events == [
+            ["adb", *_DUMPSYS_WINDOW],
+            ["adb", *_DUMPSYS_WINDOW],
+            ["adb", "-s", _UDID, "shell", "input", "tap", "10", "20"],
+        ]

@@ -95,13 +95,18 @@ def _allow_xml(button: str = "permission_allow_button", *, enabled: str = "true"
 
 
 @pytest.mark.parametrize(
+    "package", ["com.android.permissioncontroller", "com.google.android.permissioncontroller"]
+)
+@pytest.mark.parametrize(
     "button", ["permission_allow_button", "permission_allow_foreground_only_button"]
 )
 def test_a_verified_target_prompt_uses_existing_grants_and_its_supported_button(
-    button: str, monkeypatch: pytest.MonkeyPatch
+    button: str, package: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _authorized_policy(monkeypatch)
-    controller = _PermissionDevice([{**_PROMPT, "xml": _allow_xml(button)}, _APP])
+    controller = _PermissionDevice(
+        [{**_PROMPT, "package": package, "xml": _allow_xml(button)}, _APP]
+    )
     events: list[Mapping[str, object]] = []
     state = device.resolve_permission_prompt(
         controller, device.AppLaunch("demo", "com.demo"), _PROMPT, events.append

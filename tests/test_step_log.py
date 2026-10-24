@@ -700,3 +700,28 @@ def test_capture_preserves_and_rejects_malformed_owner_metadata_before_matching(
         _recorder(device, steps).get_state()
     assert _record(steps, "000000")[field] == value
     assert (steps / "000000.webp").is_file()
+
+
+def test_captured_feedback_keeps_the_request_and_skipped_event(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.system_surfaces import SystemOverlayActionError
+
+    monkeypatch.setattr(
+        device,
+        "get_state",
+        lambda **_kwargs: {
+            **HOME,
+            "screenshot": device.screenshot,
+            "system_overlays": [[0, 0, 20, 20]],
+        },
+    )
+    recorder = _recorder(device, steps)
+    recorder.get_state()
+    action = {"action": "tap", "x": 10, "y": 10}
+    with pytest.raises(SystemOverlayActionError):
+        recorder.exe_action(action)
+    assert _record(steps, "000001")["kind"] == "action"
+    assert _record(steps, "000001")["action"] == action
+    assert _record(steps, "000002")["status"] == "action_skipped"
+    assert device.actions == []
