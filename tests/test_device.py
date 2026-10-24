@@ -1373,3 +1373,93 @@ def test_recovery_probe_is_bounded_by_its_remaining_time(
 
     assert timeouts == [2]
     assert adb.events == []
+
+
+@pytest.mark.parametrize(
+    ("focus", "window", "package", "surface"),
+    [
+        (
+            "NotificationShade",
+            "ty=NOTIFICATION_SHADE package=com.android.systemui",
+            "com.android.systemui",
+            "notification_shade",
+        ),
+        (
+            "com.android.permissioncontroller/.permission.ui.GrantPermissionsActivity",
+            "ty=BASE_APPLICATION package=com.android.permissioncontroller",
+            "com.android.permissioncontroller",
+            "permission",
+        ),
+        ("InputMethod", "ty=INPUT_METHOD package=com.android.inputmethod.latin", "com.demo", None),
+        (
+            "com.android.inputmethod.latin/.settings.SettingsActivity",
+            "ty=BASE_APPLICATION package=com.android.inputmethod.latin",
+            "com.android.inputmethod.latin",
+            "ime_settings",
+        ),
+        (
+            "com.android.settings/.Settings",
+            "ty=BASE_APPLICATION package=com.android.settings",
+            "com.android.settings",
+            None,
+        ),
+    ],
+    ids=["shade", "permission", "attached keyboard", "keyboard settings", "Settings app"],
+)
+def test_capture_keeps_system_window_ownership_separate_from_the_focused_app(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    focus: str,
+    window: str,
+    package: str,
+    surface: str | None,
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            f"  mCurrentFocus=Window{{focus u0 {focus}}}\n"
+            "  mFocusedApp=ActivityRecord{app u0 com.demo/.Home t1}\n"
+            f"  Window #0 Window{{focus u0 {focus}}}:\n"
+            f"    mDisplayId=0 mOwnerUid=1000 {window}\n"
+            "    mHasSurface=true isOnScreen=true isVisible=true\n"
+        ).encode(),
+    )
+
+    state = controller.get_state()
+
+    assert state["package"] == package
+    assert state["underlying_package"] == "com.demo"
+    assert state["system_surface"] == surface
+
+
+def test_clipboard_feedback_retains_app_focus_and_records_its_touch_regions(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            b"  mCurrentFocus=Window{app u0 com.demo/.Home}\n"
+            b"  mFocusedApp=ActivityRecord{app u0 com.demo/.Home t1}\n"
+            b"  Window #0 Window{clip u0 ClipboardOverlay}:\n"
+            b"    mDisplayId=0 package=com.android.systemui\n"
+            b"    mAttrs={ty=SCREENSHOT fl=NOT_FOCUSABLE NOT_TOUCH_MODAL}\n"
+            b"    mTouchableInsets=3\n"
+            b"    touchable region=SkRegion((-16,1040,176,1180)(200,1050,340,1180))\n"
+            b"    Frames: frame=[0,0][720,1280]\n"
+            b"    mHasSurface=true isVisible=true\n"
+        ),
+    )
+
+    state = controller.get_state()
+
+    assert state["package"] == "com.demo"
+    assert state["system_surface"] is None
+    assert state["system_overlays"] == [[-16, 1040, 176, 1180], [200, 1050, 340, 1180]]
+
+
+@pytest.mark.parametrize(
+    "package",
+    ["com.android.systemui", "com.android.permissioncontroller", "com.android.inputmethod.latin"],
+)
+def test_an_independent_system_destination_is_outside_the_app(package: str) -> None:
+    assert device.is_outside_app(package, "com.demo")
