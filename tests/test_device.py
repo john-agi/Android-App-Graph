@@ -112,6 +112,28 @@ def test_restart_app_starts_the_first_of_several_launcher_activities_and_names_t
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_restart_app_starts_the_single_queried_launcher_with_an_empty_warning_log(
+    monkeypatch: pytest.MonkeyPatch, device_log: list[object], caplog: pytest.LogCaptureFixture
+) -> None:
+    _answer_pm(
+        monkeypatch,
+        device_log,
+        resolved=_SYSTEM_CHOOSER,
+        listed="1 activities found:\n  Activity #0:\n    com.demo/.Home\n",
+    )
+    app = device.AppLaunch("demo", "com.demo")
+    with caplog.at_level(logging.WARNING, logger="test"):
+        device.restart_app(_Device(), app, logging.getLogger("test"))
+    assert device_log == [
+        _FORCE_STOP,
+        _RESOLVE_LAUNCHER,
+        _QUERY_LAUNCHERS,
+        _clear_task_start("com.demo/.Home"),
+    ]
+    assert caplog.messages == []
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_restart_app_without_a_launcher_activity_asks_for_a_launch_activity_and_starts_nothing(
     monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
