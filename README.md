@@ -643,12 +643,14 @@ takes about 12 seconds.
 Every read of the screen, in exploration and in the audit, runs three adb commands:
 the UI dump, the screenshot and `dumpsys window`. Each one that times out is run
 once more, with a warning naming the command (`adb ... timed out after 30 s;
-retrying once`). An input that times out is not sent again: it may have reached the
-device, and sending it again could act twice.
+retrying once`). An exploration input that times out is sent once: it may have
+reached the device. Startup checks the recovered screen before continuing an
+uncertain input.
 
 When a read times out the second time, or an input or another adb command of an
-exploration step times out, the explorer logs the command and starts one recovery
-deadline: `device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
+exploration step times out, or a startup device phase times out, the explorer logs
+the phase, serial and command and starts one recovery deadline:
+`device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
 checks the shell with `adb shell true`, then captures the complete UI dump,
 screenshot and window state. A successful shell check leaves that deadline in
 force. Each probe, observation read, retry and 30-second interval uses the time
@@ -664,7 +666,17 @@ in the same episode stops. The recovery log names the device, read phase, comman
 and exit status, with up to 1024 characters of error diagnostics or `diagnostics
 absent`. Screenshot bytes and successful observation payloads stay out of that log.
 
-The interrupted step counts toward `--max-steps`, and
+Startup covers the screen-size read, clearing recent apps, reading requested
+permissions, each permission grant, launcher resolution, app launch, and the initial
+or resume-position observation. Each completed phase stays complete. A timed-out
+grant retries only that permission; an ordinary refused grant is logged and skipped.
+An uncertain recent-app tap or swipe is followed by a fresh observation; a clear-all
+tap uses the button's current position if it still appears. An uncertain launch
+checks whether the app is in front. Interrupted resume navigation continues from
+the recovered app screen. Startup recovery counts no exploration action, adds no
+edge, and retains the loaded graph and its counters.
+
+The interrupted exploration step counts toward `--max-steps`, and
 its `Step N/M` line shows `interrupted` as its action. What its action did is
 unknown, so a step interrupted before it recorded its edge records none, and the
 [setup](#graph-edges) of the next action is unknown. An outage after the step was
@@ -676,9 +688,11 @@ Past the limit, exploration saves the graph and logs `Device <udid> unreachable 
 <N> minutes. Exploration stopped at step <n>. Graph saved. Re-run to resume.`, and
 `app-graph` exits with status 1 and `app-graph: error: Device <udid> unreachable for
 <N> minutes`, without a traceback; `scripts/run_explore.sh` then starts it again,
-resuming from the saved graph. Only the exploration loop waits: an adb command that
-times out as a run starts, or in `app-graph-audit`, stops the command with its
-error. The explorer never restarts the adb server, which other runs can share.
+resuming from the saved graph. A startup outage before the graph loads leaves its
+saved files intact. `app-graph-audit --re-explore` uses the same startup recovery for
+its device initialization, permission grants and launch; its action recovery follows
+the audit error policy. The explorer never restarts the adb server, which other runs
+can share.
 
 ### Step log
 

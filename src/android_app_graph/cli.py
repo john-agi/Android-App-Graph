@@ -15,6 +15,7 @@ from android_app_graph.device import (
     AvdManager,
     DeviceUnreachableError,
     EmulatorManager,
+    StartupRecovery,
     grant_runtime_permissions,
     launch_app,
 )
@@ -116,7 +117,8 @@ def _explore() -> None:
     logger = logging.getLogger("android_app_graph.explorer")
 
     check_avd(EmulatorManager(logger), config, logger)
-    controller = AdbController(config, logger)
+    controller = AdbController(config, logger, unreachable_limit=unreachable_limit)
+    recovery = StartupRecovery(controller, unreachable_limit, logger)
 
     exp_config = config.get("experiment", {})
     graph_dir = exp_config.get("graph_dir", "graphs")
@@ -132,11 +134,11 @@ def _explore() -> None:
             package_name = app["package_name"]
 
             logger.info("Terminating all running apps...")
-            controller.terminate_all_apps()
+            controller.terminate_all_apps(recovery)
             time.sleep(1)
 
-            grant_runtime_permissions(config["device"]["udid"], package_name)
-            launch_activity = launch_app(config, app, logger)
+            grant_runtime_permissions(config["device"]["udid"], package_name, recovery)
+            launch_activity = launch_app(config, app, logger, recovery)
             time.sleep(4)
 
             explorer_config = ExplorerConfig(
