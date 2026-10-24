@@ -768,7 +768,17 @@ observation or an exact image match.
 The planner uses that report and the current caret or field highlight to identify
 where text goes. When the intended field's focus is unclear, it taps that field as
 one step and observes the result before typing. An already identified active field
-can receive text directly. Type clears and enters text as one recorded action.
+can receive text directly.
+
+Type replaces the complete focused value as one recorded action. It targets standard
+editable fields that handle Android Select All and delete keyboard editing: a keyboard
+Ctrl+A combination selects the value, one Delete removes it, and the requested text
+is entered with the existing shell quoting and virtual keyboard character support.
+Replacement is independent of the previous value's length, caret position and selection.
+Custom widgets, intercepted shortcuts and other IMEs are outside the validated support.
+An adb command's successful exit confirms delivery, without acknowledging the widget's
+selection or resulting value. A clearing-command error or timeout stops Type before
+text entry. Input is never retried because it may already have reached the field.
 
 ### Graph nodes
 
