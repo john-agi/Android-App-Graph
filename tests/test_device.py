@@ -630,6 +630,14 @@ def controller(adb: _FakeAdb) -> device.AdbController:
     built = device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
     adb.events.clear()
     adb.timeouts.clear()
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            b"  WindowInsetsStateController\n    InsetsState\n"
+            b"      mDisplayFrame=Rect(0, 0 - 1080, 2400)\n"
+            b"      InsetsSource type=tappableElement frame=[0,0][0,0] visible=true\n"
+        ),
+    )
     return built
 
 
@@ -652,6 +660,137 @@ def test_adb_controller_raises_when_wm_size_reports_no_size(adb: _FakeAdb) -> No
 
 # PNG's signature contains CR LF, so any newline translation would change the base64.
 _PNG = b"\x89PNG\r\n\x1a\n"
+
+_BUTTON_NAVIGATION = (
+    "  WindowInsetsStateController\n"
+    "    InsetsState\n"
+    "      mDisplayFrame=Rect(0, 0 - 720, 1280)\n"
+    "        InsetsSource id=1 type=navigationBars frame=[0,1184][720,1280] visible=true\n"
+    "        InsetsSource id=6 type=tappableElement frame=[0,1184][720,1280] visible=true\n"
+    "        InsetsSource id=5 type=mandatorySystemGestures frame=[0,1184][720,1280] visible=true\n"
+)
+_GESTURE_NAVIGATION = (
+    "  WindowInsetsStateController\n"
+    "    InsetsState\n"
+    "      mDisplayFrame=Rect(0, 0 - 1080, 2424)\n"
+    "        InsetsSource id=1 type=navigationBars frame=[0,2361][1080,2424] visible=true\n"
+    "        InsetsSource id=6 type=tappableElement frame=[0,0][0,0] visible=true\n"
+    "        InsetsSource id=4 type=systemGestures frame=[0,0][78,2424] visible=true\n"
+    "        InsetsSource id=24 type=systemGestures frame=[1002,0][1080,2424] visible=true\n"
+    "        InsetsSource id=5 type=mandatorySystemGestures frame=[0,2340][1080,2424] visible=true\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("window", "action", "reason"),
+    [
+        (_BUTTON_NAVIGATION, {"action": "tap", "x": 299, "y": 1227}, "system touch region"),
+        (_BUTTON_NAVIGATION, {"action": "tap", "x": 257, "y": 1190}, "system touch region"),
+        (_BUTTON_NAVIGATION, {"action": "long_press", "x": 360, "y": 1250}, "system touch region"),
+        (
+            _GESTURE_NAVIGATION,
+            {"action": "swipe", "x1": 54, "y1": 800, "x2": 700, "y2": 800},
+            "system gesture region",
+        ),
+        (
+            _GESTURE_NAVIGATION,
+            {"action": "swipe", "x1": 500, "y1": 2400, "x2": 500, "y2": 900},
+            "system gesture region",
+        ),
+        (
+            (
+                "  WindowInsetsStateController\n    InsetsState\n"
+                "      mDisplayFrame=Rect(0, 0 - 1280, 720)\n"
+                "      InsetsSource type=tappableElement frame=[0,0][0,0] visible=true\n"
+            ),
+            {"action": "tap", "x": 331, "y": 1002},
+            "outside the display",
+        ),
+    ],
+    ids=[
+        "music preview",
+        "obscured row",
+        "held button",
+        "back gesture",
+        "home gesture",
+        "rotation",
+    ],
+)
+def test_app_coordinate_inputs_reject_system_regions_without_dispatching(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    window: str,
+    action: dict[str, object],
+    reason: str,
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, window.encode())
+
+    with pytest.raises(ValueError, match=reason):
+        controller.exe_action(action)
+
+    assert not any(isinstance(event, list) and event[:5] == _INPUT for event in adb.events)
+
+
+@pytest.mark.parametrize(
+    ("window", "action"),
+    [
+        (_BUTTON_NAVIGATION, {"action": "tap", "x": 257, "y": 1183}),
+        (_GESTURE_NAVIGATION, {"action": "tap", "x": 20, "y": 2380}),
+        (_GESTURE_NAVIGATION, {"action": "long_press", "x": 20, "y": 800}),
+        (
+            _GESTURE_NAVIGATION,
+            {"action": "swipe", "x1": 100, "y1": 900, "x2": 900, "y2": 900},
+        ),
+        (
+            _BUTTON_NAVIGATION,
+            {"action": "swipe", "x1": 20, "y1": 700, "x2": 500, "y2": 700},
+        ),
+    ],
+    ids=["revealed row", "near-bottom tap", "edge hold", "interior swipe", "button-mode drawer"],
+)
+def test_app_inputs_preserve_valid_content_coordinates(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    window: str,
+    action: dict[str, object],
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, window.encode())
+    controller.exe_action(action)
+    dispatched = [event for event in adb.events if isinstance(event, list) and event[:5] == _INPUT]
+    assert len(dispatched) == 1
+    if action["action"] == "tap":
+        assert dispatched[0][-2:] == [str(action["x"]), str(action["y"])]
+
+
+def test_coordinate_input_defers_when_current_geometry_is_unavailable(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, b"mCurrentFocus=null\n")
+    with pytest.raises(device.InputRejectedError, match="regions are unavailable") as error:
+        controller.exe_action({"action": "tap", "x": 10, "y": 20})
+    assert error.value.regions is None
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
+
+
+def test_a_rotation_between_observation_and_dispatch_defers_the_input(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, _BUTTON_NAVIGATION.encode())
+    state = controller.get_state()
+    assert state["input_regions"]["display"] == [0, 0, 720, 1280]
+    assert (controller.w, controller.h) == (720, 1280)
+    adb.events.clear()
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            b"WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 1280, 720)\n"
+            b"InsetsSource type=tappableElement frame=[0,0][0,0] visible=true\n"
+        ),
+    )
+    with pytest.raises(device.InputRejectedError, match="Display geometry changes") as error:
+        controller.exe_action({"action": "tap", "x": 100, "y": 200})
+    assert error.value.regions == {"display": [0, 0, 1280, 720], "tap": [], "gesture": []}
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
 
 
 @pytest.mark.parametrize(
@@ -699,6 +838,7 @@ def test_get_state_returns_the_xml_screenshot_package_and_activity(
         "package": package,
         "activity": activity,
         "status_bar": None,
+        "input_regions": None,
     }
     assert adb.events == [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
 
@@ -810,6 +950,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
         "package": "com.demo",
         "activity": "com.demo.Main",
         "status_bar": None,
+        "input_regions": None,
     }
     retried = _STATE_READS.index(["adb", *stalled])
     assert adb.events == [*_STATE_READS[: retried + 1], *_STATE_READS[retried:]]
@@ -868,7 +1009,10 @@ def test_each_action_sends_its_adb_command_and_pause(
     events: list[list[str] | float],
 ) -> None:
     controller.exe_action(action)
-    assert adb.events == events
+    reads = (
+        [["adb", *_DUMPSYS_WINDOW]] if action["action"] in {"tap", "long_press", "swipe"} else []
+    )
+    assert adb.events == [*reads, *events]
 
 
 @pytest.mark.parametrize(
@@ -887,7 +1031,13 @@ def test_every_input_command_gives_adb_15_seconds(
 ) -> None:
     controller.exe_action(action)
     assert adb.timeouts
-    assert set(adb.timeouts) == {15}
+    input_timeouts = [
+        timeout
+        for event, timeout in zip(adb.events, adb.timeouts, strict=False)
+        if isinstance(event, list) and event[:5] == _INPUT
+    ]
+    assert input_timeouts
+    assert set(input_timeouts) == {15}
 
 
 def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again(
@@ -901,7 +1051,7 @@ def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again
         controller.exe_action({"action": "tap", "x": 10, "y": 20})
 
     assert (raised.value.cmd, raised.value.timeout) == (tap, 15)
-    assert adb.events == [tap]
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW], tap]
 
 
 _CLEAR_FIELD = [[*_INPUT, "keyevent", "KEYCODE_DEL"], 0.2] * 20
