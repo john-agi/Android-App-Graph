@@ -2847,3 +2847,63 @@ def test_re_exploration_reports_unsafe_display_replay_as_skipped(
             "reason": "Recorded display differs",
         }
     ]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_a_display_rejected_return_replay_retains_the_applied_edge_correction(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s2_settings")
+    replays = 0
+
+    def replay(_run: object, target: str) -> str:
+        nonlocal replays
+        replays += 1
+        if replays == 2:
+            message = "Recorded display differs"
+            raise UnsafeReplayError(message)
+        return target
+
+    monkeypatch.setattr(audit, "_replay_to", replay)
+    (result,) = _re_explore(
+        graph, [_retry()], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
+    )
+    assert result["status"] == "moved"
+    assert result["moved_to"] == "s2_settings"
+    assert result["steps"] == []
+    assert result["reason"] == "Recorded display differs"
+    assert graph.graph["s0_home"]["s2_settings"]["instructions"][-1] == _FLAGGED
+    assert not graph.graph.has_edge("s0_home", "s1_detail")
+    assert device_log == [_DETAIL_TAP]
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
+def test_re_explore_reports_a_missing_run_baseline_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install_fake_adb(monkeypatch, FakeController("com.demo"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    (graph_dir / "demo").mkdir(parents=True)
+    graph_path = graph_dir / "demo" / "demo.json"
+    graph_path.write_text(
+        json.dumps({"matching": DEFAULT_MATCHING._asdict(), "nodes": [], "edges": []})
+    )
+    config = tmp_path / "audit.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "device": {"udid": "test-device"},
+                "experiment": {"graph_dir": str(graph_dir)},
+                "apps": [{"name": "demo", "package_name": "com.demo"}],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        audit, "run_audit", lambda *_args: {"issues": [{"type": "explore_node", "node": "s0"}]}
+    )
+    assert audit.main(["--config", str(config), "--re-explore"]) == 1
+    assert "original run baseline" in caplog.text
+    assert "Traceback" not in caplog.text
+    assert not graph_path.with_name("demo_run.json").exists()

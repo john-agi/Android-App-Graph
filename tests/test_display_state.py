@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
 import subprocess
 import time
@@ -215,3 +216,83 @@ def test_retry_commands_include_only_mismatched_owned_values(baseline: DisplaySt
         night_settings=dict.fromkeys(NIGHT_KEYS, "0"),
     )
     assert baseline.changed_restoration_commands(current) == baseline.restoration_commands()
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+def test_display_reads_retry_one_timeout_within_the_original_deadline(
+    adb: _Adb, monkeypatch: pytest.MonkeyPatch, failures: int
+) -> None:
+    attempts: list[float] = []
+    now = 10.0
+
+    def run(
+        args: list[str], *, timeout: float, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal now
+        attempts.append(timeout)
+        if len(attempts) <= failures:
+            now += 2
+            raise subprocess.TimeoutExpired(args, timeout)
+        return adb.run(args, output="capture", check=True, timeout=timeout, **kwargs)
+
+    def adapter(
+        args: list[str], *, output: str, check: bool, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        del output, check
+        return run(args, timeout=timeout)
+
+    monkeypatch.setattr(device.time, "monotonic", lambda: now)
+    monkeypatch.setattr(device, "run_adb", adapter)
+    if failures == 1:
+        assert device.AdbDisplayAccess("fake").capture(deadline=14).physical_size == (720, 1280)
+        assert attempts[:2] == [3, 2]
+    else:
+        with pytest.raises(subprocess.TimeoutExpired):
+            device.AdbDisplayAccess("fake").capture(deadline=14)
+        assert attempts == [3, 2]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("wm", "size"),
+        ("wm", "density"),
+        ("dumpsys", "uimode"),
+        ("cmd", "uimode", "night"),
+        ("settings", "get", "system", "font_scale"),
+        *(("settings", "get", "secure", key) for key in NIGHT_KEYS),
+    ],
+)
+def test_display_transport_failures_recover_the_complete_observation(
+    adb: _Adb, monkeypatch: pytest.MonkeyPatch, command: tuple[str, ...]
+) -> None:
+    failed = False
+
+    def run(
+        args: list[str], *, output: str, check: bool, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal failed
+        if tuple(args[3:]) == command and not failed:
+            failed = True
+            raise subprocess.CalledProcessError(1, ["adb", *args], stderr="error: device offline")
+        return adb.run(args, output=output, check=check, timeout=timeout)
+
+    class ObservedDisplay:
+        w = 720
+        h = 1280
+
+        def __init__(self) -> None:
+            self.config: dict[str, object] = {"device": {"udid": "fake"}}
+
+        def get_state(self, *, deadline: float | None = None) -> dict[str, object]:
+            return {"display": device.AdbDisplayAccess("fake").capture(deadline=deadline).to_dict()}
+
+        def exe_action(self, action: dict[str, object]) -> None:
+            pytest.fail(f"recovery sent an input: {action}")
+
+    monkeypatch.setattr(device, "run_adb", run)
+    monkeypatch.setattr(device, "_answers", lambda *_args: True)
+    state = device.wait_for_device_state(ObservedDisplay(), 5, logging.getLogger("test"))
+    assert failed
+    assert state["display"]["physical_size"] == [720, 1280]

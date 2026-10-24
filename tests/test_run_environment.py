@@ -662,3 +662,17 @@ def test_resumed_seed_reporting_keeps_the_public_scope_boundary(
         pass
     assert all(root == "/sdcard/seed" for root in access.seed_reads)
     assert "public-storage" in json.loads(environment.path.read_text())["cleanup"][-1]["seed_error"]
+
+
+@pytest.mark.usefixtures("no_sleep", "opened_clients")
+def test_cli_reports_a_missing_baseline_as_an_operator_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = _Script(tmp_path, None)
+    _configure_cli(monkeypatch, tmp_path, script)
+    script.graph.parent.mkdir(parents=True)
+    script.graph.write_text("{}")
+    with pytest.raises(SystemExit, match=r"app-graph: error:.*original run baseline"):
+        cli.main()
+    assert not script.graph.with_name("demo_run.json").exists()
+    assert script.graph.read_text() == "{}"

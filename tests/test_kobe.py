@@ -22,6 +22,7 @@ from PIL import Image
 from android_app_graph.device import DeviceController, DeviceUnreachableError, StillOutsideAppError
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
@@ -4058,3 +4059,37 @@ def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
     assert device.actions == actions
     assert explorer.graph.total_steps_completed == 3
     assert explorer.graph.graph.nodes["s0"]["state_schema"]["focused_field"][0] == "Name"
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("resume_from", ["auto", "s1_settings"])
+def test_display_rejected_resume_identifies_the_current_screen_and_explores(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    resume_from: str,
+) -> None:
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
+    kobe.graph.graph.add_node("s1_settings", replay_misses=0)
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> NoReturn:
+        replayed.append(node_id)
+        message = "Coordinate replay requires its recorded display state or fresh grounding"
+        raise UnsafeReplayError(message)
+
+    monkeypatch.setattr(kobe, "navigate_to_node", replay)
+    monkeypatch.setattr(kobe.graph, "get_resume_target", lambda **_kwargs: "s1_settings")
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(kobe, monkeypatch)
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from=resume_from)
+
+    assert replayed == ["s1_settings"]
+    assert planned_from == ["s0_home"]
+    assert kobe.graph.total_steps_completed == 1
