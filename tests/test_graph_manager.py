@@ -63,6 +63,7 @@ from android_app_graph.utils.graph_manager import (
 from android_app_graph.utils.vlm_utils import (
     MAX_REQUESTS_IN_FLIGHT,
     DescribedScreenshot,
+    DescribeRequest,
     TokenTracker,
 )
 
@@ -158,7 +159,17 @@ def write_member_record(steps_dir: Path, observation_id: str) -> None:
     hash in ``steps_dir``, and its describe output in the identify file of
     ``graph_beside(steps_dir)``, which describes it as ``Screen <observation_id>``."""
     steps_dir.mkdir(parents=True, exist_ok=True)
-    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"member-{observation_id}"}
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "native_size": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "underlying_package": None,
+        "permission_requester": None,
+        "system_overlay_error": None,
+        "pixel_hash": f"member-{observation_id}",
+    }
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     write_describe(steps_dir, observation_id, described_as_screen(observation_id))
 
@@ -211,6 +222,12 @@ class Screens:
         record = {
             "id": observation_id,
             "kind": "observation",
+            "native_size": None,
+            "system_surface": None,
+            "system_overlays": [],
+            "underlying_package": None,
+            "permission_requester": None,
+            "system_overlay_error": None,
             "package": package,
             "pixel_hash": pixel_hash,
         }
@@ -331,13 +348,14 @@ class FakeVlm:
     def describe_page_and_state(
         self,
         client: OpenRouter | None,
-        screenshot_b64: str,
-        known_descriptions: list[str] | None = None,
-        existing_keys: list[str] | None = None,
+        request: DescribeRequest,
+        *,
         settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool]:
-        call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
-        call.update(known_descriptions=known_descriptions, existing_keys=existing_keys)
+        call = {"client": client, "screenshot": request.screenshot_b64, "settings": settings}
+        call.update(
+            known_descriptions=request.known_descriptions, existing_keys=request.existing_keys
+        )
         self.calls.append(("describe", call))
         description, state, elements = self.descriptions.pop(0)
         return description, state, elements, description in self.external_web
@@ -1489,6 +1507,7 @@ def test_a_screen_that_differs_only_inside_the_status_bar_is_an_exact_match(
         tmp_path / "steps",
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(recorder.steps)
     vlm.descriptions.extend([("Home screen", {}, [])] * 2)
@@ -1508,6 +1527,7 @@ def test_a_reloaded_graph_matches_its_members_exactly(vlm: FakeVlm, tmp_path: Pa
         steps_dir,
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(steps_dir)
     vlm.descriptions.append(("Home screen", {"tab": "home"}, []))
@@ -1637,7 +1657,7 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     """Exact matching and member checks read both from every member of an in-app node,
     the pixel hash from its record in the step log and the describe output from the
     identify file, except a black one, whose description comes from its activity; a
-    member of an ``ext_`` node needs neither."""
+    member of an ``ext_`` node retains ownership metadata without either."""
     steps_dir = tmp_path / "steps"
     home = members(steps_dir, b"home", b"home-2")
     undescribed = home["observations"][1]
@@ -1645,13 +1665,20 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     if record is None:
         step_record.unlink()
     else:
-        step_record.write_text(json.dumps(record), "utf-8")
+        ownership = json.loads(step_record.read_text())
+        for field in ("pixel_hash", "black", "activity"):
+            ownership.pop(field, None)
+        step_record.write_text(json.dumps({**ownership, **record}), "utf-8")
     line = {"observation": undescribed}
     append_json_line(
         identify_file_path(graph_beside(steps_dir)),
         line if describe is None else {**line, "describe": describe},
     )
     browser = write_observation_image(steps_dir, b"browser")
+    browser_record = json.loads((steps_dir / f"{home['observations'][0]}.json").read_text())
+    browser_record.update(id=browser)
+    browser_record.pop("pixel_hash")
+    (steps_dir / f"{browser}.json").write_text(json.dumps(browser_record))
     path = tmp_path / "graph.json"
     write_graph(
         path,
@@ -1662,13 +1689,17 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     )
 
     with pytest.raises(
-        ValueError, match="no pixel hash, or that have no describe output"
+        ValueError,
+        match="has no observation record"
+        if record is None
+        else "no pixel hash, or that have no describe output",
     ) as excinfo:
         make_manager().load_graph(path)
 
     message = str(excinfo.value)
-    assert f"in {identify_file_path(path)} and are not of a black screenshot" in message
-    assert f"[{undescribed!r}]" in message
+    if record is not None:
+        assert f"in {identify_file_path(path)} and are not of a black screenshot" in message
+    assert undescribed in message
     assert str(path) in message
     assert "Explore the app again into a new graph directory" in message
 
@@ -1711,7 +1742,11 @@ def _secure(activity: str, package: str = PACKAGE) -> tuple[str, Image.Image, st
 def _captures(steps_dir: Path, *screens: tuple[str, Image.Image, str]) -> list[Observation]:
     """Observations of ``screens`` as a StepRecorder on ``steps_dir`` captures them."""
     recorder = StepRecorder(
-        _ActivityDevice(*screens), steps_dir, run_kind="explore", source="main_loop"
+        _ActivityDevice(*screens),
+        steps_dir,
+        run_kind="explore",
+        source="main_loop",
+        target_package="com.demo",
     )
     return [Observation.from_state(recorder.get_state()) for _ in screens]
 
@@ -1867,6 +1902,7 @@ def test_a_screen_black_below_the_status_bar_alone_is_described_not_copied_from_
         tmp_path / "steps",
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(recorder.steps)
     black_screen = Observation.from_state(recorder.get_state())
@@ -5919,3 +5955,62 @@ def test_observation_focus_comes_from_its_image_and_preserves_unknown(
     unknown = dataclasses.replace(screen(HOME, SHOT_B, PACKAGE), pixel_hash="unobserved-image")
     assert graph.observation_state(unknown) == {}
     assert len(vlm.calls) == calls
+
+
+def test_missing_ownership_record_stops_member_image_processing_before_model_calls(
+    tmp_path: Path, vlm: FakeVlm
+) -> None:
+    manager = make_manager(tmp_path)
+    manager.graph.add_node("s0", package=PACKAGE, observations=["000000"])
+    with pytest.raises(ValueError, match="Observation 000000 has no record"):
+        manager.embed_missing_members()
+    assert vlm.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("system_surface", "permission"), ("system_overlay_error", "Unknown clipboard geometry")],
+)
+def test_graph_loading_rejects_unsupported_ownership_on_app_members(
+    field: str, value: str, tmp_path: Path, vlm: FakeVlm
+) -> None:
+    steps = tmp_path / "steps"
+    membership = members(steps, b"app")
+    member = membership["observations"][0]
+    record_path = steps / f"{member}.json"
+    record = json.loads(record_path.read_text())
+    record[field] = value
+    record_path.write_text(json.dumps(record))
+    path = graph_beside(steps)
+    write_graph(path, [{"id": "s0", "replay_misses": 0, **membership}])
+    with pytest.raises(ValueError, match="unsupported ownership"):
+        make_manager().load_graph(path)
+    assert vlm.calls == []
+
+
+def test_persisted_system_boundaries_keep_their_external_ownership(
+    tmp_path: Path, vlm: FakeVlm
+) -> None:
+    steps = tmp_path / "steps"
+    membership = members(steps, b"permission")
+    member = membership["observations"][0]
+    record_path = steps / f"{member}.json"
+    record = json.loads(record_path.read_text())
+    record["system_surface"] = "permission"
+    record_path.write_text(json.dumps(record))
+    path = graph_beside(steps)
+    write_graph(
+        path,
+        [
+            {
+                "id": "ext_com.android.permissioncontroller",
+                "replay_misses": 0,
+                "system_surface": "permission",
+                **membership,
+            }
+        ],
+    )
+    manager = make_manager()
+    manager.load_graph(path)
+    assert manager.get_resume_target() is None
+    assert vlm.calls == []

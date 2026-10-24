@@ -20,7 +20,7 @@ from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from PIL import Image
 
@@ -39,8 +39,16 @@ from android_app_graph.payloads import as_int_list, as_object_dict, as_str
 from android_app_graph.screen_image import (
     encode_screenshot,
     is_black,
+    mask_regions,
     pixel_hash,
     status_bar_rows,
+)
+from android_app_graph.system_surfaces import (
+    Region,
+    SystemOverlayActionError,
+    UnresolvedSystemOverlayError,
+    check_overlay_action,
+    overlay_regions,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +58,18 @@ if TYPE_CHECKING:
 
 
 _FRAME_COORDINATES = 4
+_SIZE_COORDINATES = 2
+_OWNERSHIP_FIELDS = frozenset(
+    {
+        "native_size",
+        "system_surface",
+        "system_overlays",
+        "underlying_package",
+        "permission_requester",
+        "system_overlay_error",
+    }
+)
+_SYSTEM_SURFACES = frozenset({"notification_shade", "permission", "ime_settings"})
 
 type RunKind = Literal["explore", "audit"]
 type StepSource = Literal[
@@ -59,6 +79,7 @@ type StepSource = Literal[
     "external_app_recovery",
     "external_web_recovery",
     "device_recovery",
+    "system_surface_recovery",
     "re_explore",
     "edge_retry",
 ]
@@ -76,6 +97,18 @@ class Observation:
     package: str
     pixel_hash: str
     black: bool
+    system_surface: str | None = None
+    system_overlays: tuple[Region, ...] = ()
+    native_size: tuple[int, int] | None = None
+
+    @property
+    def app_image(self) -> str:
+        """The app view for model input, with observed system feedback unavailable."""
+        return (
+            mask_regions(self.screenshot_b64, self.system_overlays, self.native_size)
+            if self.native_size is not None
+            else self.screenshot_b64
+        )
 
     @classmethod
     def from_state(cls, state: Mapping[str, object]) -> Observation:
@@ -93,6 +126,9 @@ class Observation:
             package=as_str(state.get("package"), ""),
             pixel_hash=as_str(state.get("pixel_hash"), ""),
             black=state.get("black") is True,
+            system_surface=as_str(state.get("system_surface"), "") or None,
+            system_overlays=overlay_regions(state.get("system_overlays")),
+            native_size=_native_size(state.get("native_size")),
         )
 
 
@@ -141,9 +177,71 @@ def read_records(steps: Path) -> list[dict[str, object]]:
     ]
 
 
+class ObservationOwnership(NamedTuple):
+    """Validated ownership and native geometry of a persisted observation."""
+
+    surface: str | None
+    overlays: tuple[Region, ...]
+    native_size: tuple[int, int] | None
+    error: str | None
+
+
+def observation_ownership(record: Mapping[str, object]) -> ObservationOwnership:
+    """Require explicit ownership fields before persisted evidence enters graph matching."""
+    observation_id = record.get("id")
+    missing = _OWNERSHIP_FIELDS.difference(record)
+    if missing:
+        msg = f"Observation {observation_id!r} lacks ownership metadata: {sorted(missing)}"
+        raise ValueError(msg)
+    for name in (
+        "system_surface",
+        "underlying_package",
+        "permission_requester",
+        "system_overlay_error",
+    ):
+        value = record[name]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            msg = f"Observation {observation_id!r} has malformed {name}: expected nonempty text or null"
+            raise ValueError(msg)
+    surface = as_str(record["system_surface"], "") or None
+    if surface is not None and surface not in _SYSTEM_SURFACES:
+        msg = f"Observation {observation_id!r} has unsupported system_surface {surface!r}"
+        raise ValueError(msg)
+    raw_regions = record["system_overlays"]
+    regions = overlay_regions(raw_regions)
+    if (
+        not isinstance(raw_regions, list)
+        or len(regions) != len(raw_regions)
+        or any(
+            not isinstance(region, list) or any(type(value) is not int for value in region)
+            for region in raw_regions
+        )
+    ):
+        msg = f"Observation {observation_id!r} has malformed system_overlays: expected native rectangles"
+        raise ValueError(msg)
+    raw_size = record["native_size"]
+    size = _native_size(raw_size)
+    if raw_size is not None and (
+        size is None
+        or not isinstance(raw_size, list)
+        or any(type(value) is not int for value in raw_size)
+    ):
+        msg = f"Observation {observation_id!r} has malformed native_size: expected positive width and height or null"
+        raise ValueError(msg)
+    if regions and size is None:
+        msg = f"Observation {observation_id!r} has system_overlays without native_size"
+        raise ValueError(msg)
+    return ObservationOwnership(
+        surface, regions, size, as_str(record["system_overlay_error"], "") or None
+    )
+
+
 def recorded_observation(steps: Path, record: Mapping[str, object]) -> Observation:
     """Return the observation the record ``record`` of the step log ``steps`` keeps, with
     its image as base64."""
+    ownership = observation_ownership(record)
+    if ownership.error is not None:
+        raise UnresolvedSystemOverlayError(ownership.error)
     observation_id = as_str(record.get("id"), "")
     return Observation(
         observation_id=observation_id,
@@ -152,6 +250,9 @@ def recorded_observation(steps: Path, record: Mapping[str, object]) -> Observati
         package=as_str(record.get("package"), ""),
         pixel_hash=as_str(record.get("pixel_hash"), ""),
         black=record.get("black") is True,
+        system_surface=ownership.surface,
+        system_overlays=ownership.overlays,
+        native_size=ownership.native_size,
     )
 
 
@@ -199,6 +300,13 @@ def save_image_embeddings(
     save_embeddings(image_embeddings_path(steps), embeddings, model=model)
 
 
+def _native_size(value: object) -> tuple[int, int] | None:
+    values = as_int_list(value)
+    if len(values) == _SIZE_COORDINATES and all(v > 0 for v in values):
+        return values[0], values[1]
+    return None
+
+
 def _status_bar(state: Mapping[str, object]) -> list[int] | None:
     frame = as_int_list(state.get("status_bar"))
     return frame if len(frame) == _FRAME_COORDINATES else None
@@ -235,8 +343,10 @@ class StepRecorder:
         *,
         run_kind: RunKind,
         source: StepSource,
+        target_package: str,
     ) -> None:
         self._controller = controller
+        self._target_package = target_package
         self.steps = steps
         self.w = controller.w
         self.h = controller.h
@@ -270,6 +380,13 @@ class StepRecorder:
         controller that reports none has the whole image hashed.
         """
         state = self._controller.get_state(deadline=deadline)
+        if state.get("package") == self._target_package and state.get("system_surface") in {
+            "notification_shade",
+            "permission",
+            "ime_settings",
+        }:
+            state = state.copy()
+            state["system_surface"] = None
         png = base64.b64decode(state["screenshot"], validate=True)
         with Image.open(io.BytesIO(png)) as native_image:
             self.w, self.h = native_image.size
@@ -280,15 +397,26 @@ class StepRecorder:
         band_rows = status_bar_rows(
             status_bar, screenshot_height=_image_height(png), image_height=height
         )
-        observation = Observation(
-            observation_id=self._take_step_id(),
-            screenshot_b64=base64.b64encode(webp).decode("ascii"),
-            activity=as_str(state.get("activity"), ""),
-            package=as_str(state.get("package"), ""),
-            pixel_hash=pixel_hash(webp, band_rows),
-            black=is_black(webp),
+        native_size = (self.w, self.h)
+        observation = Observation.from_state(
+            {
+                **state,
+                "observation_id": self._take_step_id(),
+                "screenshot": base64.b64encode(webp).decode("ascii"),
+                "pixel_hash": pixel_hash(webp, band_rows),
+                "black": is_black(webp),
+                "native_size": list(native_size),
+            }
         )
         write_bytes_atomically(observation_image_path(self.steps, observation.observation_id), webp)
+        ownership_fields: dict[str, object] = {
+            "native_size": list(native_size),
+            "system_surface": state.get("system_surface"),
+            "system_overlays": state.get("system_overlays", []),
+            "underlying_package": state.get("underlying_package"),
+            "permission_requester": state.get("permission_requester"),
+            "system_overlay_error": state.get("system_overlay_error"),
+        }
         self._write_record(
             observation.observation_id,
             "observation",
@@ -300,6 +428,7 @@ class StepRecorder:
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
                 "black": observation.black,
+                **ownership_fields,
                 **({"input_regions": state["input_regions"]} if "input_regions" in state else {}),
             },
         )
@@ -312,6 +441,9 @@ class StepRecorder:
         ):
             self.input_rejection_hint = ""
         self._last_observation = observation
+        ownership = observation_ownership({"id": observation.observation_id, **ownership_fields})
+        if ownership.error is not None:
+            raise UnresolvedSystemOverlayError(ownership.error)
         self._last_input_regions = state.get("input_regions")
         return {
             **state,
@@ -319,13 +451,14 @@ class StepRecorder:
             "observation_id": observation.observation_id,
             "pixel_hash": observation.pixel_hash,
             "black": observation.black,
+            "native_size": list(native_size),
         }
 
     def exe_action(self, action: dict[str, Any]) -> None:
-        """Record ``action`` with the latest observation of this run, then send it.
+        """Record the action request and forward it within the observed ownership policy.
 
-        The latest observation is the screen the action was taken from, except in a
-        replay, which acts without looking; ``source`` says which.
+        The latest observation identifies the request's screen; ``source`` distinguishes
+        replay from planning. A rejected request records the policy decision and its reason.
         """
         last = self._last_observation
         action_id = self._take_step_id()
@@ -336,7 +469,13 @@ class StepRecorder:
             {"observation": last.observation_id if last else None, "action": action},
         )
         try:
+            check_overlay_action(action, last.system_overlays if last else ())
             self._controller.exe_action(action)
+        except SystemOverlayActionError as exc:
+            self.record_system_event(
+                {"status": "action_skipped", "action": action, "reason": str(exc)}
+            )
+            raise
         except InputRejectedError as error:
             self.input_rejection_hint = (
                 f"\nPrevious {action['action']} was rejected: {error}. "
@@ -355,6 +494,16 @@ class StepRecorder:
             )
             raise
         self.input_rejection_hint = ""
+
+    def record_system_event(self, fields: Mapping[str, object]) -> None:
+        """Keep ownership recovery and skipped-input evidence outside app transitions."""
+        last = self._last_observation
+        self._write_record(
+            self._take_step_id(),
+            "system_event",
+            last,
+            {"observation": last.observation_id if last else None, **fields},
+        )
 
     def record_match(self, observation: Observation, expected_observation: str | None) -> None:
         """Record that the run asks for the node of ``observation``, expecting the node
@@ -395,7 +544,9 @@ class StepRecorder:
     def _write_record(
         self,
         step_id: str,
-        kind: Literal["observation", "action", "action_rejected", "match", "transition"],
+        kind: Literal[
+            "observation", "action", "action_rejected", "match", "transition", "system_event"
+        ],
         screen: Observation | None,
         fields: Mapping[str, object],
     ) -> None:

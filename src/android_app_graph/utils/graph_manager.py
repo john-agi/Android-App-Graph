@@ -68,7 +68,6 @@ from android_app_graph.graph_files import (
     identify_file_path,
     load_embeddings,
     member_problems,
-    observation_image_b64,
     read_json_lines,
     require_known_edge_endpoints,
     save_embeddings,
@@ -97,7 +96,9 @@ from android_app_graph.step_log import (
     Observation,
     TransitionRecord,
     load_image_embeddings,
+    observation_ownership,
     read_observation_record,
+    recorded_observation,
     save_image_embeddings,
     step_order,
 )
@@ -109,6 +110,7 @@ from android_app_graph.utils import (
 )
 from android_app_graph.utils.vlm_utils import (
     DescribedScreenshot,
+    DescribeRequest,
     audit_graph,
     audit_merge_nodes,
     call_concurrently,
@@ -525,7 +527,7 @@ class _MemberReply(NamedTuple):
 
 
 def _shown_member_key(member: str, shown: DescribedScreenshot) -> str:
-    return evidence_key([member, shown.description, shown.screenshot_b64])
+    return evidence_key([member, shown.description, shown.screenshot_b64, shown.system_feedback])
 
 
 class ShownMembers(NamedTuple):
@@ -979,6 +981,18 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(f"no matching settings, a whole number for each of {settings}")
     if problems:
         raise unloadable_graph(path, problems)
+    for node in graph["nodes"]:
+        for member in node["observations"]:
+            record = read_observation_record(steps_dir, member)
+            if record is None:
+                msg = f"member {member!r} has no observation record"
+                raise unloadable_graph(path, [msg])
+            ownership = observation_ownership(record)
+            if ownership.error is not None or (
+                ownership.surface is not None and not str(node["id"]).startswith("ext_")
+            ):
+                msg = f"member {member!r} has unsupported ownership for node {node['id']!r}"
+                raise unloadable_graph(path, [msg])
 
 
 def _raise_for_members_without(vector: str, without: Mapping[str, Sequence[str]]) -> None:
@@ -1468,14 +1482,29 @@ class GraphManager:
         cost_before = token_tracker.summary().get(usage_key, {}).get("cost", 0.0)
         try:
             for member in missing:
-                self._image_vectors[member] = self._embed_image(
-                    observation_image_b64(steps_dir, member)
-                )
+                self._image_vectors[member] = self._embed_image(self._app_member_image(member))
         finally:
             save_image_embeddings(steps_dir, self._image_vectors, model=image_embedding.model)
         cost = token_tracker.summary().get(usage_key, {}).get("cost", 0.0) - cost_before
         logger.info("Embedded %d member image(s) for $%.6f", len(missing), cost)
         return len(missing)
+
+    def _member_observation(self, member: str) -> Observation:
+        steps = self._require_steps_dir()
+        record = read_observation_record(steps, member)
+        if record is None:
+            msg = f"Observation {member} has no record"
+            raise ValueError(msg)
+        return recorded_observation(steps, record)
+
+    def _app_member_image(self, member: str) -> str:
+        return self._member_observation(member).app_image
+
+    def _described_app_member(self, member: str, description: str) -> DescribedScreenshot:
+        observed = self._member_observation(member)
+        return DescribedScreenshot(
+            observed.app_image, description, system_feedback=bool(observed.system_overlays)
+        )
 
     def identify_state(
         self, observation: Observation, *, expected_observation: str | None = None
@@ -1511,6 +1540,8 @@ class GraphManager:
         takes no describe output and has no description vector, so the ``text`` source
         never ranks a node by it.
         """
+        if observation.system_surface is not None:
+            return self.record_external_app_visit(observation)
         client, page_detail = self._require_page_detail()
         self._require_embedding()
         self._require_steps_dir()
@@ -1519,7 +1550,7 @@ class GraphManager:
         same_package = self._same_package_nodes(observation.package)
         image_vector = self._image_vectors.get(observation.observation_id)
         if image_vector is None:
-            image_vector = self._embed_image(observation.screenshot_b64)
+            image_vector = self._embed_image(observation.app_image)
             self._image_vectors[observation.observation_id] = image_vector
         if observation.black:
             return self._record_black_screen(observation, same_package.node_ids, decision)
@@ -1530,12 +1561,15 @@ class GraphManager:
         described = _Described(
             *describe_page_and_state(
                 client,
-                observation.screenshot_b64,
-                known_descriptions=self._package_descriptions(
-                    same_package.node_ids, image_vector, decision.expected_node
-                )
-                or None,
-                existing_keys=same_package.keys or None,
+                DescribeRequest(
+                    screenshot_b64=observation.app_image,
+                    known_descriptions=self._package_descriptions(
+                        same_package.node_ids, image_vector, decision.expected_node
+                    )
+                    or None,
+                    existing_keys=same_package.keys or None,
+                    system_feedback=bool(observation.system_overlays),
+                ),
                 settings=page_detail,
             )
         )
@@ -1754,6 +1788,8 @@ class GraphManager:
                 is_external=True,
             )
         node_data = self.graph.nodes[node_id]
+        if observation.system_surface is not None:
+            node_data["system_surface"] = observation.system_surface
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         _add_member(node_data, observation.observation_id)
         return node_id
@@ -1890,11 +1926,11 @@ class GraphManager:
         (description,) = self._member_descriptions(node_id, [member])
         return verify_same_node(
             client,
-            existing=DescribedScreenshot(
-                observation_image_b64(self._require_steps_dir(), member), description
-            ),
+            existing=self._described_app_member(member, description),
             new=DescribedScreenshot(
-                identification.observation.screenshot_b64, identification.screen.description
+                identification.observation.app_image,
+                identification.screen.description,
+                system_feedback=bool(identification.observation.system_overlays),
             ),
             settings=page_detail,
         )
@@ -1955,7 +1991,6 @@ class GraphManager:
         before any question is asked.
         """
         client, page_detail = self._require_page_detail()
-        steps_dir = self._require_steps_dir()
         descriptions: dict[str, str] = {}
         undescribed: list[str] = []
         for question in questions:
@@ -1972,9 +2007,7 @@ class GraphManager:
         replies: dict[frozenset[str], MemberVerdict] = {}
 
         def described(member: str) -> DescribedScreenshot:
-            return DescribedScreenshot(
-                observation_image_b64(steps_dir, member), descriptions[member]
-            )
+            return self._described_app_member(member, descriptions[member])
 
         def ask(question: MemberQuestion) -> _MemberReply:
             existing, new = described(question.existing), described(question.new)
@@ -2036,10 +2069,7 @@ class GraphManager:
             current = None
             if all(isinstance(description, str) for description in descriptions):
                 shown = [
-                    DescribedScreenshot(
-                        observation_image_b64(self._require_steps_dir(), member),
-                        as_str(description, ""),
-                    )
+                    self._described_app_member(member, as_str(description, ""))
                     for member, description in zip(question, descriptions, strict=True)
                 ]
                 current = self._checkpoint_question_key(question, shown[0], shown[1], settings)
@@ -2514,12 +2544,9 @@ class GraphManager:
     def _stored_identification(
         self, node_id: str, member: str, verdicts: MemberVerdicts
     ) -> _Identification:
-        steps_dir = self._require_steps_dir()
         stored = self._stored_screens[member]
-        observation = Observation(
-            observation_id=member,
-            screenshot_b64=observation_image_b64(steps_dir, member),
-            activity=self._member_activity(member),
+        observation = replace(
+            self._member_observation(member),
             package=as_str(self.graph.nodes[node_id].get("package"), ""),
             pixel_hash=stored.pixel_hash,
             black=stored.black_activity is not None,

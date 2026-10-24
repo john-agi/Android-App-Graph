@@ -95,3 +95,27 @@ def is_black(image: bytes) -> bool:
     with Image.open(io.BytesIO(image)) as decoded:
         extrema = ImageStat.Stat(decoded.convert("RGB")).extrema
     return all(highest <= BLACK_LEVEL for _, highest in extrema)
+
+
+def mask_regions(
+    screenshot_b64: str, regions: Sequence[Sequence[int]], native_size: tuple[int, int]
+) -> str:
+    """Hide system-owned feedback from model input while retaining the raw screenshot.
+
+    The mask follows native input coordinates even when the model image is shrunk.
+    """
+    if not regions:
+        return screenshot_b64
+    with Image.open(io.BytesIO(base64.b64decode(screenshot_b64, validate=True))) as image:
+        masked = image.convert("RGB")
+        for left, top, right, bottom in regions:
+            box = (
+                math.floor(left * image.width / native_size[0]),
+                math.floor(top * image.height / native_size[1]),
+                math.ceil(right * image.width / native_size[0]),
+                math.ceil(bottom * image.height / native_size[1]),
+            )
+            masked.paste((128, 128, 128), box)
+        buffer = io.BytesIO()
+        masked.save(buffer, format="WEBP", lossless=True)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")

@@ -534,7 +534,17 @@ def _write_member(graph_path: Path, node_id: str) -> None:
     steps_dir.mkdir(exist_ok=True)
     observation_id = f"{node_id}-observation"
     observation_image_path(steps_dir, observation_id).write_bytes(encode_screenshot(_png(0)))
-    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"hash-{observation_id}"}
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "native_size": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "underlying_package": None,
+        "permission_requester": None,
+        "system_overlay_error": None,
+        "pixel_hash": f"hash-{observation_id}",
+    }
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), encoding="utf-8")
     describe = {
         "page_description": f"{node_id} screen",
@@ -929,7 +939,11 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
     graph.steps_dir = tmp_path / "steps"
     graph.identify_file = identify_file_path(tmp_path / "demo_audited.json")
     recorder = StepRecorder(
-        two_screen_device, graph.steps_dir, run_kind="audit", source="re_explore"
+        two_screen_device,
+        graph.steps_dir,
+        run_kind="audit",
+        source="re_explore",
+        target_package="com.demo",
     )
     start = graph.identify_state(Observation.from_state(recorder.get_state()))
     verdict = {
@@ -1040,7 +1054,9 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
             httpx.Response(200, json=embedding_body),
         ]
     )
-    recorder = StepRecorder(device, graph.steps_dir, run_kind="audit", source="re_explore")
+    recorder = StepRecorder(
+        device, graph.steps_dir, run_kind="audit", source="re_explore", target_package="com.demo"
+    )
     start = graph.identify_state(Observation.from_state(recorder.get_state()))
     same = '{"same":true,"reason":"one screen","new_description":null}'
     router_responses.extend(
@@ -1347,50 +1363,42 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
     assert device_log == [*first_restart, replay, explore_step, *restart, replay, explore_step]
 
 
+class _UnverifiedPermissionController(_LoggingController):
+    @override
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
+        state = super().get_state()
+        if len(self.actions) >= 2:
+            return {
+                **state,
+                "package": "com.android.permissioncontroller",
+                "system_surface": "permission",
+                "permission_requester": "com.android.inputmethod.latin",
+            }
+        return state
+
+
 @pytest.mark.usefixtures("_fake_device")
-def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
-    client: OpenRouter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    device_log: list[object],
+def test_re_explore_stops_at_an_unverified_permission_request_without_denying_it(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
     graph, _graph_path = _two_node_graph(tmp_path)
-    graph.graph.add_node("s2_camera_permission", replay_misses=0)
-    reached = iter(["s0_home", "s1_detail", "s2_camera_permission"])
+    reached = iter(["s0_home", "s1_detail"])
     monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: next(reached))
     _describing_by_node_id(graph, monkeypatch)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     tap = {"action": "tap", "x": 1, "y": 2}
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
-
-    (result,) = audit.re_explore_issues(
-        graph,
-        [{**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}],
-        target=audit.ReExploreTarget(
-            app_name="demo",
-            package_name="com.demo",
-            graph_path=tmp_path / "demo" / "demo_audited.json",
-        ),
-        session=audit.ReExploreSession(
-            _LoggingController("com.google.android.permissioncontroller", device_log),
-            ModelSettings("instruction-model"),
-            ModelSettings("action-model"),
+    with pytest.raises(audit.UnresolvedPermissionError, match="not verified as target"):
+        _re_explore(
+            graph,
+            [{**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+            _UnverifiedPermissionController("com.demo", device_log),
+            client,
+            tmp_path,
             steps_per_issue=1,
-            unreachable_limit=37,
-        ),
-        client=client,
-    )
-
-    assert result["steps"] == [
-        {
-            "step": 1,
-            "from": "s1_detail",
-            "to": "s2_camera_permission",
-            "instruction": "tap the first button",
-            "action": tap,
-        }
-    ]
-    assert graph.graph.has_edge("s1_detail", "s2_camera_permission")
+        )
+    assert graph.graph.nodes["ext_com.android.permissioncontroller"]["is_external"] is True
+    assert graph.graph.has_edge("s1_detail", "ext_com.android.permissioncontroller")
     replay = {"action": "tap", "coordinate": [10, 20]}
     assert device_log == [*_FIRST_RESTART, replay, tap]
 
@@ -1715,10 +1723,9 @@ def test_re_explore_takes_a_flagged_action_that_leaves_the_app_to_that_app_s_nod
 def test_re_explore_identifies_the_screen_a_flagged_action_reaches_by_the_device_s_package(
     client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
-    """A system dialog on top of the app is a screen of its own package, not an ext_ node."""
+    """An independently owned system destination remains an external boundary."""
     graph = _flagged_graph()
-    graph.graph.add_node("s3_camera_permission", replay_misses=0)
-    reached = iter(["s0_home", "s3_camera_permission", "s0_home"])
+    reached = iter(["s0_home", "s0_home"])
     identified: list[tuple[str, str, str]] = []
 
     def identify(observation: Observation, **_kwargs: object) -> str:
@@ -1733,11 +1740,9 @@ def test_re_explore_identifies_the_screen_a_flagged_action_reaches_by_the_device
         graph, [_retry()], _ReplayController(device_log, dialog), client, tmp_path
     )
 
-    assert (result["status"], result["moved_to"]) == ("moved", "s3_camera_permission")
-    assert identified[:2] == [
-        ("MainActivity", _webp(_png(0)), "com.demo"),
-        ("MainActivity", _webp(_png(1)), dialog),
-    ]
+    assert (result["status"], result["reached"]) == ("unverified", f"ext_{dialog}")
+    assert identified[0] == ("MainActivity", _webp(_png(0)), "com.demo")
+    assert all(package != dialog for _activity, _image, package in identified)
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -2928,6 +2933,172 @@ def test_audit_startup_unreachable_device_exits_nonzero_with_a_clear_error(
     assert capsys.readouterr().err == (
         "app-graph-audit: error: Device test-device unreachable for 0.75 minutes\n"
     )
+
+
+class _FeedbackController(_LoggingController):
+    @override
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
+        return {**super().get_state(), "system_overlays": [[0, 0, 100, 100]]}
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_retry_skips_a_recorded_action_covered_by_system_feedback(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _FeedbackController("com.demo", device_log)
+    (result,) = _re_explore(graph, [_retry()], controller, client, tmp_path)
+    assert result["status"] == "skipped"
+    assert "system clipboard feedback" in result["reason"]
+    assert controller.actions == []
+    assert graph.graph.has_edge("s0_home", "s1_detail")
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_feedback_waits_consume_its_fixed_iteration_budget(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _FeedbackController("com.demo", device_log)
+    attempts: list[int] = []
+
+    def action(**_kwargs: object) -> tuple[dict[str, object], str]:
+        attempts.append(1)
+        return {"action": "tap", "x": 10, "y": 20}, ""
+
+    monkeypatch.setattr(audit, "predict_next_action", action)
+    (result,) = _re_explore(
+        graph,
+        [{**_inspection(), "type": "explore_node", "node": "s0_home", "expected_pages": []}],
+        controller,
+        client,
+        tmp_path,
+        steps_per_issue=3,
+    )
+    assert result["steps"] == []
+    assert len(attempts) == 3
+    assert controller.actions == []
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_replay_stops_at_feedback_and_uses_the_node_actually_reached(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, "s0_home", "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _FeedbackController("com.demo", device_log)
+    (result,) = _re_explore(
+        graph,
+        [{**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        controller,
+        client,
+        tmp_path,
+    )
+    assert result["navigated_to"] == "s0_home"
+    assert controller.actions == []
+
+
+class _ObservedBoundaryController(_LoggingController):
+    def __init__(self, log: list[object], surface: str, after_actions: int) -> None:
+        super().__init__("com.demo", log)
+        self.surface = surface
+        self.after_actions = after_actions
+        self.resolved = False
+
+    @override
+    def get_state(self, **_kwargs: float | None) -> dict[str, Any]:
+        state = super().get_state()
+        if len(self.actions) == self.after_actions and not self.resolved:
+            package = (
+                "com.android.permissioncontroller"
+                if self.surface == "permission"
+                else "com.android.systemui"
+            )
+            return {
+                **state,
+                "package": package,
+                "system_surface": self.surface,
+                "permission_requester": "com.demo",
+            }
+        return state
+
+
+def _resolve_observed_permission(
+    controller: _ObservedBoundaryController,
+) -> Callable[..., dict[str, Any]]:
+    def resolve(
+        recorder: StepRecorder,
+        _app: object,
+        _state: object,
+        on_event: Callable[..., None],
+        _recovery: object,
+    ) -> dict[str, Any]:
+        controller.resolved = True
+        on_event({"status": "permission_resolved", "package": "com.demo"})
+        return recorder.get_state()
+
+    return resolve
+
+
+@pytest.mark.usefixtures("_fake_device")
+@pytest.mark.parametrize("surface", ["permission", "notification_shade"])
+def test_audit_exploration_records_system_boundaries_and_the_recovered_app(
+    surface: str,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph, _path = _two_node_graph(tmp_path)
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail", "s1_detail")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _ObservedBoundaryController(device_log, surface, 2)
+    monkeypatch.setattr(
+        audit, "resolve_permission_prompt", _resolve_observed_permission(controller)
+    )
+    tap = {"action": "tap", "x": 1, "y": 2}
+    monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: (tap, ""))
+    (result,) = _re_explore(
+        graph,
+        [{**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}],
+        controller,
+        client,
+        tmp_path,
+        steps_per_issue=1,
+    )
+    (step,) = result["steps"]
+    assert step["status"] == "system_boundary"
+    assert step["recovered_to"] == "s1_detail"
+    assert graph.graph.nodes[step["to"]]["system_surface"] == surface
+    assert graph.graph.has_edge("s1_detail", step["to"])
+    assert len([node for node in graph.graph if not node.startswith("ext_")]) == 2
+
+
+@pytest.mark.usefixtures("_fake_device")
+@pytest.mark.parametrize("surface", ["permission", "notification_shade"])
+def test_audit_retry_records_and_recovers_a_system_destination(
+    surface: str,
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    graph = _flagged_graph()
+    _identifying(graph, monkeypatch, "s0_home", "s0_home")
+    _describing_by_node_id(graph, monkeypatch)
+    controller = _ObservedBoundaryController(device_log, surface, 1)
+    monkeypatch.setattr(
+        audit, "resolve_permission_prompt", _resolve_observed_permission(controller)
+    )
+    (result,) = _re_explore(graph, [_retry()], controller, client, tmp_path)
+    assert result["status"] == "moved"
+    assert graph.graph.nodes[result["moved_to"]]["system_surface"] == surface
+    assert result["moved_to"].startswith("ext_")
 
 
 def _reject_inputs(controller: FakeController, monkeypatch: pytest.MonkeyPatch) -> None:

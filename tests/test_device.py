@@ -466,31 +466,12 @@ def test_keyboard_status_when_the_keyboard_is_hidden() -> None:
 
 
 @pytest.mark.parametrize(
-    "package",
-    [
-        "com.google.android.permissioncontroller",
-        "com.android.permissioncontroller",
-        "org.example.inputmethod.pinyin",
-        "com.example.keyboard",
-    ],
-)
-def test_a_system_overlay_package_is_recognised(package: str) -> None:
-    assert device.is_system_overlay(package)
-
-
-@pytest.mark.parametrize("package", ["com.amazon.primevideo", "com.example.timetracker"])
-def test_an_app_package_is_not_a_system_overlay(package: str) -> None:
-    """Both contain "ime" without being keyboards."""
-    assert not device.is_system_overlay(package)
-
-
-@pytest.mark.parametrize(
     ("package", "outside"),
     [
         ("com.android.chrome", True),
         ("com.demo", False),
-        ("com.google.android.inputmethod.latin", False),
-        ("com.google.android.permissioncontroller", False),
+        ("com.google.android.inputmethod.latin", True),
+        ("com.google.android.permissioncontroller", True),
         ("", False),
     ],
 )
@@ -587,7 +568,7 @@ _INPUT = [*_ADB, "shell", "input"]
 _WM_SIZE = ("-s", _UDID, "shell", "wm", "size")
 _UI_DUMP = ("-s", _UDID, "exec-out", "uiautomator dump /dev/stdout")
 _SCREENCAP = ("-s", _UDID, "exec-out", "screencap -p")
-_DUMPSYS_WINDOW = ("-s", _UDID, "shell", "dumpsys", "window")
+_DUMPSYS_WINDOW = ("-s", _UDID, "shell", "dumpsys", "window", "-a")
 
 
 class _FakeAdb:
@@ -870,9 +851,19 @@ def test_get_state_returns_the_xml_screenshot_package_and_activity(
         "package": package,
         "activity": activity,
         "status_bar": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "permission_requester": None,
+        "underlying_package": (
+            "com.other.app"
+            if "com.other.app" in dumpsys_window
+            else "com.supercook.app"
+            if "mFocusedApp" in dumpsys_window
+            else "unknown"
+        ),
         "input_regions": None,
     }
-    assert adb.events == [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+    assert adb.events == [["adb", *_UI_DUMP], ["adb", *_DUMPSYS_WINDOW], ["adb", *_SCREENCAP]]
 
 
 def _dumpsys_window(name: str) -> str:
@@ -939,11 +930,11 @@ def test_get_state_raises_when_a_read_fails(
         controller.get_state()
 
 
-_STATE_READS = [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
+_STATE_READS = [["adb", *_UI_DUMP], ["adb", *_DUMPSYS_WINDOW], ["adb", *_SCREENCAP]]
 _EACH_STATE_READ = [
     pytest.param(_UI_DUMP, "-s emulator-5554 exec-out 'uiautomator dump /dev/stdout'", id="dump"),
     pytest.param(_SCREENCAP, "-s emulator-5554 exec-out 'screencap -p'", id="screenshot"),
-    pytest.param(_DUMPSYS_WINDOW, "-s emulator-5554 shell dumpsys window", id="dumpsys window"),
+    pytest.param(_DUMPSYS_WINDOW, "-s emulator-5554 shell dumpsys window -a", id="dumpsys window"),
 ]
 
 
@@ -977,6 +968,10 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
         "package": "com.demo",
         "activity": "com.demo.Main",
         "status_bar": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "permission_requester": None,
+        "underlying_package": "unknown",
         "input_regions": None,
     }
     retried = _STATE_READS.index(["adb", *stalled])
@@ -1036,10 +1031,12 @@ def test_each_action_sends_its_adb_command_and_pause(
     events: list[list[str] | float],
 ) -> None:
     controller.exe_action(action)
-    reads = (
-        [["adb", *_DUMPSYS_WINDOW]] if action["action"] in {"tap", "long_press", "swipe"} else []
+    observed = (
+        [["adb", *_DUMPSYS_WINDOW], *events]
+        if action["action"] in {"tap", "long_press", "swipe"}
+        else events
     )
-    assert adb.events == [*reads, *events]
+    assert adb.events == observed
 
 
 @pytest.mark.parametrize(
@@ -1058,13 +1055,20 @@ def test_every_input_command_gives_adb_15_seconds(
 ) -> None:
     controller.exe_action(action)
     assert adb.timeouts
-    input_timeouts = [
-        timeout
-        for event, timeout in zip(adb.events, adb.timeouts, strict=False)
-        if isinstance(event, list) and event[:5] == _INPUT
-    ]
-    assert input_timeouts
-    assert set(input_timeouts) == {15}
+    assert all(
+        timeout == 15
+        for event, timeout in zip(
+            (event for event in adb.events if isinstance(event, list)), adb.timeouts, strict=True
+        )
+        if isinstance(event, list) and "input" in event
+    )
+    assert all(
+        timeout == 30
+        for event, timeout in zip(
+            (event for event in adb.events if isinstance(event, list)), adb.timeouts, strict=True
+        )
+        if isinstance(event, list) and "dumpsys" in event
+    )
 
 
 def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again(
@@ -1733,6 +1737,135 @@ def test_startup_grants_resume_at_the_timed_out_permission(
     ]
 
 
+@pytest.mark.parametrize(
+    ("focus", "window", "package", "surface"),
+    [
+        (
+            "NotificationShade",
+            "ty=NOTIFICATION_SHADE package=com.android.systemui",
+            "com.android.systemui",
+            "notification_shade",
+        ),
+        (
+            "com.android.permissioncontroller/.permission.ui.GrantPermissionsActivity",
+            "ty=BASE_APPLICATION package=com.android.permissioncontroller",
+            "com.android.permissioncontroller",
+            "permission",
+        ),
+        ("InputMethod", "ty=INPUT_METHOD package=com.android.inputmethod.latin", "com.demo", None),
+        (
+            "com.android.inputmethod.latin/.settings.SettingsActivity",
+            "ty=BASE_APPLICATION package=com.android.inputmethod.latin",
+            "com.android.inputmethod.latin",
+            "ime_settings",
+        ),
+        (
+            "com.android.settings/.Settings",
+            "ty=BASE_APPLICATION package=com.android.settings",
+            "com.android.settings",
+            None,
+        ),
+    ],
+    ids=["shade", "permission", "attached keyboard", "keyboard settings", "Settings app"],
+)
+def test_capture_keeps_system_window_ownership_separate_from_the_focused_app(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    focus: str,
+    window: str,
+    package: str,
+    surface: str | None,
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            f"  mCurrentFocus=Window{{focus u0 {focus}}}\n"
+            "  mFocusedApp=ActivityRecord{app u0 com.demo/.Home t1}\n"
+            f"  Window #0 Window{{focus u0 {focus}}}:\n"
+            f"    mDisplayId=0 mOwnerUid=1000 {window}\n"
+            "    mHasSurface=true isOnScreen=true isVisible=true\n"
+        ).encode(),
+    )
+
+    state = controller.get_state()
+
+    assert state["package"] == package
+    assert state["underlying_package"] == "com.demo"
+    assert state["system_surface"] == surface
+
+
+def test_clipboard_feedback_retains_app_focus_and_records_its_touch_regions(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            b"  mCurrentFocus=Window{app u0 com.demo/.Home}\n"
+            b"  mFocusedApp=ActivityRecord{app u0 com.demo/.Home t1}\n"
+            b"  Window #0 Window{clip u0 ClipboardOverlay}:\n"
+            b"    mDisplayId=0 package=com.android.systemui\n"
+            b"    mAttrs={ty=SCREENSHOT fl=NOT_FOCUSABLE NOT_TOUCH_MODAL}\n"
+            b"    mTouchableInsets=3\n"
+            b"    touchable region=SkRegion((-16,1040,176,1180)(200,1050,340,1180))\n"
+            b"    Frames: frame=[0,0][720,1280]\n"
+            b"    mHasSurface=true isVisible=true\n"
+        ),
+    )
+
+    state = controller.get_state()
+
+    assert state["package"] == "com.demo"
+    assert state["system_surface"] is None
+    assert state["system_overlays"] == [[-16, 1040, 176, 1180], [200, 1050, 340, 1180]]
+
+
+@pytest.mark.parametrize(
+    "package",
+    ["com.android.systemui", "com.android.permissioncontroller", "com.android.inputmethod.latin"],
+)
+def test_an_independent_system_destination_is_outside_the_app(package: str) -> None:
+    assert device.is_outside_app(package, "com.demo")
+
+
+@pytest.mark.parametrize("geometry", ["    touchable region=SkRegion((0,0,100,100))\n", ""])
+def test_dispatch_checks_new_system_feedback_before_sending_coordinates(
+    controller: device.AdbController, adb: _FakeAdb, geometry: str
+) -> None:
+    from android_app_graph.system_surfaces import SystemOverlayActionError
+
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            "  Window #0 Window{clip u0 ClipboardOverlay}:\n"
+            "    mDisplayId=0 package=com.android.systemui ty=SCREENSHOT\n"
+            + geometry
+            + "    mHasSurface=true isVisible=true\n"
+        ).encode(),
+    )
+    with pytest.raises(SystemOverlayActionError):
+        controller.exe_action({"action": "tap", "x": 10, "y": 20})
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
+
+
+@pytest.mark.parametrize("stalls", [1, 2])
+def test_coordinate_dispatch_retries_its_window_read_once_before_any_input(
+    controller: device.AdbController, adb: _FakeAdb, stalls: int
+) -> None:
+    adb.stalls[_DUMPSYS_WINDOW] = stalls
+    action = {"action": "tap", "x": 10, "y": 20}
+    if stalls == 2:
+        with pytest.raises(subprocess.TimeoutExpired):
+            controller.exe_action(action)
+        assert adb.events == [["adb", *_DUMPSYS_WINDOW]] * 2
+    else:
+        controller.exe_action(action)
+        assert adb.events == [
+            ["adb", *_DUMPSYS_WINDOW],
+            ["adb", *_DUMPSYS_WINDOW],
+            ["adb", "-s", _UDID, "shell", "input", "tap", "10", "20"],
+        ]
+
+
 @pytest.mark.parametrize("first", [{"action": "tap", "x": 100, "y": 200}, {"action": "back"}])
 def test_replay_checks_each_inputs_current_regions_after_a_rotating_action(
     controller: device.AdbController, adb: _FakeAdb, first: dict[str, object]
@@ -1751,3 +1884,39 @@ def test_replay_checks_each_inputs_current_regions_after_a_rotating_action(
     with pytest.raises(device.InputRejectedError, match="outside the display"):
         controller.exe_action({"action": "tap", "x": 100, "y": 900})
     assert [*_INPUT, "tap", "1100", "300"] in adb.events
+
+
+@pytest.mark.parametrize(
+    ("action", "error"),
+    [
+        ({"action": "tap", "x": 50, "y": 50}, "clipboard"),
+        ({"action": "tap", "x": 360, "y": 1250}, "navigation"),
+        ({"action": "tap", "x": 360, "y": 500}, None),
+    ],
+)
+def test_dispatch_applies_feedback_and_navigation_policy_from_one_window_read(
+    controller: device.AdbController,
+    adb: _FakeAdb,
+    action: dict[str, object],
+    error: str | None,
+) -> None:
+    from android_app_graph.system_surfaces import SystemOverlayActionError
+
+    window = (
+        "  Window #0 Window{clip u0 ClipboardOverlay}:\n"
+        "    mDisplayId=0 package=com.android.systemui ty=SCREENSHOT\n"
+        "    touchable region=SkRegion((0,0,100,100))\n"
+        "    mHasSurface=true isVisible=true\n" + _BUTTON_NAVIGATION
+    )
+    adb.replies[_DUMPSYS_WINDOW] = (0, window.encode())
+    if error is None:
+        controller.exe_action(action)
+        assert adb.events == [
+            ["adb", *_DUMPSYS_WINDOW],
+            [*_INPUT, "tap", "360", "500"],
+        ]
+    else:
+        failure = SystemOverlayActionError if error == "clipboard" else device.InputRejectedError
+        with pytest.raises(failure):
+            controller.exe_action(action)
+        assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
