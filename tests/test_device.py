@@ -112,6 +112,28 @@ def test_restart_app_starts_the_first_of_several_launcher_activities_and_names_t
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_restart_app_starts_the_single_queried_launcher_with_an_empty_warning_log(
+    monkeypatch: pytest.MonkeyPatch, device_log: list[object], caplog: pytest.LogCaptureFixture
+) -> None:
+    _answer_pm(
+        monkeypatch,
+        device_log,
+        resolved=_SYSTEM_CHOOSER,
+        listed="1 activities found:\n  Activity #0:\n    com.demo/.Home\n",
+    )
+    app = device.AppLaunch("demo", "com.demo")
+    with caplog.at_level(logging.WARNING, logger="test"):
+        device.restart_app(_Device(), app, logging.getLogger("test"))
+    assert device_log == [
+        _FORCE_STOP,
+        _RESOLVE_LAUNCHER,
+        _QUERY_LAUNCHERS,
+        _clear_task_start("com.demo/.Home"),
+    ]
+    assert caplog.messages == []
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_restart_app_without_a_launcher_activity_asks_for_a_launch_activity_and_starts_nothing(
     monkeypatch: pytest.MonkeyPatch, device_log: list[object]
 ) -> None:
@@ -712,22 +734,21 @@ def _dumpsys_window(name: str) -> str:
 def test_get_state_reads_the_status_bar_from_the_dump_it_reads_the_activity_from(
     controller: device.AdbController, adb: _FakeAdb
 ) -> None:
-    adb.replies[_DUMPSYS_WINDOW] = (0, _dumpsys_window("api37_pixel_9").encode())
+    adb.replies[_DUMPSYS_WINDOW] = (0, _dumpsys_window("api36_redroid").encode())
 
     state = controller.get_state()
 
-    assert (state["package"], state["status_bar"]) == ("com.android.settings", [0, 0, 1080, 142])
+    assert (state["package"], state["status_bar"]) == ("com.android.settings", [0, 0, 720, 48])
     assert adb.events.count(["adb", *_DUMPSYS_WINDOW]) == 1
 
 
-# Trimmed from `adb shell dumpsys window`: pixel_9 and pixel_8a on API 37 emulators.
-# api33 is hand-written in the layout Android 13's InsetsSource.dump() prints.
+# Trimmed device captures: Redroid on API 36, pixel_9 and pixel_8a on API 37 emulators.
 @pytest.mark.parametrize(
     ("fixture", "frame"),
     [
+        ("api36_redroid", [0, 0, 720, 48]),
         ("api37_pixel_9", [0, 0, 1080, 142]),
         ("api37_pixel_8a", [0, 0, 1080, 121]),
-        ("api33", [0, 0, 1080, 121]),
     ],
 )
 def test_the_status_bar_frame_is_the_first_status_bar_insets_source(
@@ -743,10 +764,6 @@ def test_the_status_bar_frame_is_the_first_status_bar_insets_source(
             "        InsetsSource id=bf360000 type=statusBars frame=[0,0][1080,121] "
             "visible=false flags= sideHint=TOP\n",
             id="hidden",
-        ),
-        pytest.param(
-            "        InsetsSource type=ITYPE_STATUS_BAR frame=[0,0][1080,121] visible=false\n",
-            id="hidden before API 34",
         ),
         pytest.param(
             "        InsetsSource id=1 type=statusBars frame=[0,2300][1080,2400] visible=true\n",
@@ -1178,6 +1195,7 @@ def _write_avd(avd_root_dir: Path, *, avd_ini: str) -> None:
     (avd_dir / "userdata-qemu.img").write_bytes(b"\x00data")
 
 
+@pytest.mark.parametrize("target", ["android-36", "android-37"])
 @pytest.mark.parametrize(
     ("system", "sdk_parts", "abi", "cpu_arch"),
     [
@@ -1193,11 +1211,12 @@ def test_duplicate_avd_copies_the_avd_and_points_its_files_at_the_copy_and_the_s
     sdk_parts: tuple[str, ...],
     abi: str,
     cpu_arch: str,
+    target: str,
 ) -> None:
     monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(device.platform, "system", lambda: system)
     root = tmp_path / ".android" / "avd"
-    avd_ini = "avd.ini.encoding=UTF-8\npath=/elsewhere/Pixel.avd\ntarget=android-34\n"
+    avd_ini = f"avd.ini.encoding=UTF-8\npath=/elsewhere/Pixel.avd\ntarget={target}\n"
     _write_avd(root, avd_ini=avd_ini)
     original_config = (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8")
 
@@ -1207,7 +1226,7 @@ def test_duplicate_avd_copies_the_avd_and_points_its_files_at_the_copy_and_the_s
     dup = root / "Pixel_dup.avd"
     via_parent = root / ".." / "avd" / "Pixel_dup.avd"
     assert (root / "Pixel_dup.ini").read_text(encoding="utf-8") == (
-        f"avd.ini.encoding=UTF-8\npath={dup}\npath.rel=avd/Pixel_dup.avd\ntarget=android-34"
+        f"avd.ini.encoding=UTF-8\npath={dup}\npath.rel=avd/Pixel_dup.avd\ntarget={target}"
     )
     assert (dup / "config.ini").read_text(encoding="utf-8") == (
         "AvdId=Pixel_dup\n"
@@ -1231,17 +1250,31 @@ def test_duplicate_avd_copies_the_avd_and_points_its_files_at_the_copy_and_the_s
     assert (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8") == original_config
 
 
-def test_duplicate_avd_targets_android_35_when_the_avd_names_no_target(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "avd_ini",
+    [
+        pytest.param("avd.ini.encoding=UTF-8\n", id="missing target"),
+        pytest.param("target=\n", id="empty target"),
+        pytest.param("target= \t\n", id="blank target"),
+    ],
+)
+def test_duplicate_avd_requires_a_nonempty_target_to_create_the_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, avd_ini: str
 ) -> None:
     monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(device.platform, "system", lambda: "Linux")
     root = tmp_path / ".android" / "avd"
-    _write_avd(root, avd_ini="avd.ini.encoding=UTF-8\n")
+    _write_avd(root, avd_ini=avd_ini)
+    original_config = (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8")
 
-    device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
+    message = re.escape(f"AVD metadata '{root / 'Pixel.ini'}' requires a non-empty target.")
+    with pytest.raises(ValueError, match=rf"^{message}$"):
+        device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
 
-    assert (root / "Pixel_dup.ini").read_text(encoding="utf-8").endswith("\ntarget=android-35")
+    assert not (root / "Pixel_dup.ini").exists()
+    assert not (root / "Pixel_dup.avd").exists()
+    assert (root / "Pixel.ini").read_text(encoding="utf-8") == avd_ini
+    assert (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8") == original_config
 
 
 def test_emulator_manager_needs_the_avd_directory_only_to_duplicate(
@@ -1260,7 +1293,7 @@ def test_duplicate_avd_raises_value_error_on_an_unsupported_os(
     monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(device.platform, "system", lambda: "FreeBSD")
     root = tmp_path / ".android" / "avd"
-    _write_avd(root, avd_ini="target=android-34\n")
+    _write_avd(root, avd_ini="target=android-36\n")
     with pytest.raises(ValueError, match=r"^Unsupported OS: FreeBSD$"):
         device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
     assert not (root / "Pixel_dup.avd").exists()

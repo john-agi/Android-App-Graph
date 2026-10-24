@@ -105,8 +105,10 @@ graph TD;
   Redroid, or a device with USB debugging enabled. `device.udid` in the config is
   its serial. `device.avd_name` is read only when `adb devices` lists nothing:
   exploration then copies that AVD to `<avd_name>_dup` and starts the copy with
-  `emulator`, which must be on `PATH`. When `adb devices` fails or times out, adb cannot reach its server, and
-  `app-graph` copies and starts nothing: it exits with status 1 and an error naming
+  `emulator`, which must be on `PATH`. The source AVD's `.ini` file must declare a
+  non-empty `target`; the copy preserves that target. When `adb devices` fails or
+  times out, adb cannot reach its server, and `app-graph` copies and starts nothing:
+  it exits with status 1 and an error naming
   the server's address, `ADB_SERVER_SOCKET` or else
   `tcp:<ANDROID_ADB_SERVER_ADDRESS>:<ANDROID_ADB_SERVER_PORT>`, by default
   `tcp:localhost:5037`, and adb's error or the timeout. `device.unreachable_limit`

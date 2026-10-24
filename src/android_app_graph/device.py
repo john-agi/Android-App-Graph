@@ -130,9 +130,8 @@ def _focused_package_activity(dumpsys_window: str) -> tuple[str, str]:
     return "unknown", "unknown"
 
 
-# AOSP's InsetsSource.dump(): the type is "statusBars" from API 34, "ITYPE_STATUS_BAR" before.
 _STATUS_BAR_SOURCE = re.compile(
-    r"InsetsSource\b.*?\btype=(?:statusBars|ITYPE_STATUS_BAR)\b"
+    r"InsetsSource\b.*?\btype=statusBars\b"
     r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"
     r".*?\bvisible=(true|false)\b"
 )
@@ -466,24 +465,27 @@ class EmulatorManager:
         itself and at this machine's SDK.
         """
         host = _avd_host()
+        avd_ini = host.avd_root_dir / f"{avd_name}.ini"
+        with avd_ini.open(encoding="utf-8") as f:
+            target = next(
+                (line.removeprefix("target=").strip() for line in f if line.startswith("target=")),
+                "",
+            )
+        if not target:
+            msg = f"AVD metadata '{avd_ini}' requires a non-empty target."
+            raise ValueError(msg)
         dup_name = f"{avd_name}_dup"
         shutil.copytree(
             host.avd_root_dir / f"{avd_name}.avd",
             host.avd_root_dir / f"{dup_name}.avd",
             dirs_exist_ok=True,
         )
-        shutil.copy(host.avd_root_dir / f"{avd_name}.ini", host.avd_root_dir / f"{dup_name}.ini")
-        self._rewrite_avd_ini(host, dup_name)
+        self._rewrite_avd_ini(host, dup_name, target)
         self._rewrite_config_ini(host, dup_name)
         self._rewrite_hardware_qemu_ini(host, dup_name)
 
-    def _rewrite_avd_ini(self, host: _AvdHost, avd_name: str) -> None:
+    def _rewrite_avd_ini(self, host: _AvdHost, avd_name: str, target: str) -> None:
         avd_ini = host.avd_root_dir / f"{avd_name}.ini"
-        with avd_ini.open(encoding="utf-8") as f:
-            target = next(
-                (line.removeprefix("target=").strip() for line in f if line.startswith("target=")),
-                "android-35",
-            )
         avd_ini.write_text(
             f"avd.ini.encoding=UTF-8\npath={host.avd_root_dir / f'{avd_name}.avd'}\n"
             f"path.rel=avd/{avd_name}.avd\ntarget={target}",
