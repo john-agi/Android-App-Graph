@@ -2736,7 +2736,9 @@ def test_re_exploration_resolves_one_outage_limit_for_the_device_and_each_app(
     monkeypatch.setattr(audit, "grant_runtime_permissions", grant)
     monkeypatch.setattr(audit, "launch_app", lambda *_args: "com.demo/.Home")
     monkeypatch.setattr(
-        audit, "run_audit", lambda *_args: {"issues": [{"type": "explore_node", "node": "s0"}]}
+        audit,
+        "run_audit",
+        lambda *_args: {"issues": [{**_inspection(), "type": "explore_node", "node": "s0"}]},
     )
     monkeypatch.setattr(audit, "re_explore_issues", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
