@@ -1231,17 +1231,31 @@ def test_duplicate_avd_copies_the_avd_and_points_its_files_at_the_copy_and_the_s
     assert (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8") == original_config
 
 
-def test_duplicate_avd_targets_android_35_when_the_avd_names_no_target(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "avd_ini",
+    [
+        pytest.param("avd.ini.encoding=UTF-8\n", id="missing target"),
+        pytest.param("target=\n", id="empty target"),
+        pytest.param("target= \t\n", id="blank target"),
+    ],
+)
+def test_duplicate_avd_requires_a_nonempty_target_to_create_the_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, avd_ini: str
 ) -> None:
     monkeypatch.setattr(device.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(device.platform, "system", lambda: "Linux")
     root = tmp_path / ".android" / "avd"
-    _write_avd(root, avd_ini="avd.ini.encoding=UTF-8\n")
+    _write_avd(root, avd_ini=avd_ini)
+    original_config = (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8")
 
-    device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
+    message = re.escape(f"AVD metadata '{root / 'Pixel.ini'}' requires a non-empty target.")
+    with pytest.raises(ValueError, match=rf"^{message}$"):
+        device.EmulatorManager(logging.getLogger("test")).duplicate_avd("Pixel")
 
-    assert (root / "Pixel_dup.ini").read_text(encoding="utf-8").endswith("\ntarget=android-35")
+    assert not (root / "Pixel_dup.ini").exists()
+    assert not (root / "Pixel_dup.avd").exists()
+    assert (root / "Pixel.ini").read_text(encoding="utf-8") == avd_ini
+    assert (root / "Pixel.avd" / "config.ini").read_text(encoding="utf-8") == original_config
 
 
 def test_emulator_manager_needs_the_avd_directory_only_to_duplicate(
