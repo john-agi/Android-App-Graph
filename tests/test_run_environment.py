@@ -150,6 +150,7 @@ def test_cli_restores_original_display_values_on_each_exit(
     report = json.loads(script.graph.with_name("demo_run.json").read_text())
     assert report["baseline"]["font_scale"] is None
     assert report["cleanup"][-1]["status"] == "restored"
+    assert report["cleanup"][-1]["before"]["font_scale"] == "1.5"
     if failure != "startup":
         assert script.graph.is_file()
 
@@ -172,6 +173,7 @@ class _Access:
         self.commands: list[tuple[str, ...]] = []
         self.unreachable = False
         self.hashes: dict[str, str] = {"/sdcard/seed/a.txt": "a" * 64}
+        self.seed_reads: list[str] = []
 
     def capture(self, *, deadline: float | None = None) -> DisplayState:
         del deadline
@@ -189,7 +191,8 @@ class _Access:
         self.current = self.original
 
     def seed_hashes(self, root: str, *, deadline: float | None = None) -> dict[str, str]:
-        del root, deadline
+        del deadline
+        self.seed_reads.append(root)
         if self.unreachable:
             msg = "device is offline"
             raise OSError(msg)
@@ -587,3 +590,75 @@ def test_cleanup_restores_absence_after_a_late_configuration_write(
     assert access.current == access.original
     report = json.loads(environment.path.read_text())
     assert report["cleanup"][-1]["status"] == "restored"
+
+
+class _RetryFailure(_LateFontWrite):
+    def __init__(self, fail_verification: bool) -> None:
+        super().__init__()
+        self.fail_verification = fail_verification
+
+    @override
+    def execute(self, command: tuple[str, ...], *, deadline: float) -> None:
+        if self.late_write:
+            message = "retry input unavailable"
+            raise OSError(message)
+        super().execute(command, deadline=deadline)
+
+    @override
+    def capture(self, *, deadline: float | None = None) -> DisplayState:
+        if self.late_write and self.fail_verification:
+            message = "retry verification unavailable"
+            raise OSError(message)
+        return super().capture(deadline=deadline)
+
+
+@pytest.mark.parametrize("fail_verification", [False, True])
+def test_retry_failure_keeps_pending_commands(
+    tmp_path: Path, png_screenshot: str, fail_verification: bool
+) -> None:
+    access = _RetryFailure(fail_verification)
+    environment = _environment(tmp_path, png_screenshot, access)
+    with environment:
+        access.current = replace(access.current, font_scale="1.25")
+    cleanup = json.loads(environment.path.read_text())["cleanup"][-1]
+    assert cleanup["status"] == "pending"
+    assert cleanup["pending_commands"]
+    assert any(failure.get("attempt") == 2 for failure in cleanup["failures"])
+
+
+class _UnrestorableFlags(_Access):
+    @override
+    def capture(self, *, deadline: float | None = None) -> DisplayState:
+        state = super().capture(deadline=deadline)
+        return replace(state, night_overrides=(True, False)) if self.commands else state
+
+
+def test_unsupported_temporary_activation_remains_pending(
+    tmp_path: Path, png_screenshot: str
+) -> None:
+    access = _UnrestorableFlags()
+    environment = _environment(tmp_path, png_screenshot, access)
+    with environment:
+        pass
+    cleanup = json.loads(environment.path.read_text())["cleanup"][-1]
+    assert cleanup["status"] == "pending"
+    assert not any(operation.get("attempt") == 2 for operation in cleanup["operations"])
+    assert cleanup["verification"]["night_overrides"]["status"] == "pending"
+
+
+def test_resumed_seed_reporting_keeps_the_public_scope_boundary(
+    tmp_path: Path, png_screenshot: str
+) -> None:
+    access = _Access()
+    specification = tmp_path / "seed.json"
+    specification.write_text(json.dumps({"root": "/sdcard/seed", "files": access.hashes}))
+    environment = _environment(tmp_path, png_screenshot, access, seed_manifest=str(specification))
+    with environment:
+        pass
+    report = json.loads(environment.path.read_text())
+    report["seed"]["root"] = "/data/user/0/private"
+    environment.path.write_text(json.dumps(report))
+    with environment:
+        pass
+    assert all(root == "/sdcard/seed" for root in access.seed_reads)
+    assert "public-storage" in json.loads(environment.path.read_text())["cleanup"][-1]["seed_error"]

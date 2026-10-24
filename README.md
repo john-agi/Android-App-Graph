@@ -66,6 +66,17 @@ graph TD;
     cli["android_app_graph.cli"] --> dev;
     cli --> kobe;
     cli --> logging;
+    cli --> gf;
+    cli --> pay;
+    cli --> env["android_app_graph.run_environment"];
+    cmd --> env;
+    steps --> env;
+    env --> dev;
+    env --> display["android_app_graph.display_state"];
+    env --> gf;
+    env --> pay;
+    dev --> display;
+    display --> pay;
     kobe --> dev;
     kobe --> gf;
     kobe --> steps;
@@ -542,7 +553,9 @@ state or fresh grounding. Fresh app actions continue under the current display
 configuration.
 
 On completion, interruption or handled failure, cleanup attempts only supported
-display restoration within one bounded deadline. Its per-command results,
+display restoration within one bounded deadline. Verification allows one selective
+retry for remaining differences, including late default-font writes after a
+display reset. Its per-command results,
 verified final state and remaining commands are written to the sidecar.
 `lifecycle: active` retains pending restoration instructions while the run is
 open; `restored` describes supported display settings, and `pending` records
