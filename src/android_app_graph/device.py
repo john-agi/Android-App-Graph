@@ -158,7 +158,6 @@ def status_bar_frame(dumpsys_window: str) -> list[int] | None:
 
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
-_CLEAR_KEY_PRESSES = 20
 
 _CLEAR_ALL_ID = "com.android.launcher3:id/clear_all"
 # Each swipe moves the recent apps by one app, so Clear all is reached past at most this
@@ -352,9 +351,8 @@ class AdbController:
         time.sleep(1)
 
     def _clear(self) -> None:
-        for _ in range(_CLEAR_KEY_PRESSES):
-            self._input("keyevent", "KEYCODE_DEL")
-            time.sleep(0.2)
+        self._input("keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A", check=True)
+        self._input("keyboard", "keyevent", "KEYCODE_DEL", check=True)
 
     def _type(self, text: str) -> None:
         """Type ``text`` with ``input text``, which turns each character into key events
