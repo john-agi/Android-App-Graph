@@ -48,9 +48,11 @@ from android_app_graph.device import (
     AppLaunch,
     DeviceController,
     DeviceUnreachableError,
+    InputRejectedError,
     StartupRecovery,
     UnresolvedPermissionError,
     grant_runtime_permissions,
+    input_region_hint,
     is_outside_app,
     keyboard_status,
     launch_app,
@@ -445,8 +447,8 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
                 for setup_action in step.setup:
                     _execute(run.recorder, setup_action)
                 _execute(run.recorder, step.action)
-        except SystemOverlayActionError as exc:
-            logger.info("Audit replay stops at system feedback: %s", exc)
+        except (InputRejectedError, SystemOverlayActionError) as error:
+            logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
         actual = _identify(
             run,
             run.recorder.get_state(),
@@ -505,6 +507,9 @@ def _plan_and_act(
         keyboard_status(keyboard_hint), run.graph.observation_state(before)
     )
 
+    input_status += input_region_hint(device_state)
+    input_status += run.recorder.input_rejection_hint
+
     planned_instruction, element = plan_next_action(
         client=run.client,
         request=PlanRequest(
@@ -550,8 +555,8 @@ def _plan_and_act(
         return None
     try:
         run.recorder.exe_action(action)
-    except SystemOverlayActionError as exc:
-        logger.info("Audit action waits for system feedback: %s", exc)
+    except (InputRejectedError, SystemOverlayActionError) as error:
+        logger.warning("App input is unreachable: %s; counting a wait", error)
         return None
     return _Step(
         start=run.recorder.last_match,
@@ -825,6 +830,17 @@ def _correct_flagged_edge(
     return {"status": "relabelled", "instruction": label}
 
 
+def _guarded_correction(
+    run: _ReExploreRun, source: str, target: str, instruction: str
+) -> dict[str, Any]:
+    """Correct a reachable flagged action, retaining why an input is skipped."""
+    try:
+        with run.recorder.source("edge_retry"):
+            return _correct_flagged_edge(run, source, target, instruction)
+    except (InputRejectedError, SystemOverlayActionError) as error:
+        return {"status": "skipped", "reason": str(error)}
+
+
 def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     source = run.graph.resolve_node_id(issue.get("source_node", ""))
     target = run.graph.resolve_node_id(issue.get("target_node", ""))
@@ -845,11 +861,7 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     if reached != source:
         return {"issue": issue, "status": "unverified", "reached": reached}
 
-    try:
-        with run.recorder.source("edge_retry"):
-            outcome = _correct_flagged_edge(run, source, target, instruction)
-    except SystemOverlayActionError as exc:
-        outcome = {"status": "skipped", "reason": str(exc)}
+    outcome = _guarded_correction(run, source, target, instruction)
     logger.info("Flagged edge %s → %s: %s", source, target, outcome)
     if outcome["status"] in {"unverified", "skipped"}:
         return {"issue": issue, **outcome}

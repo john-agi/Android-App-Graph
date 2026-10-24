@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from PIL import Image, ImageDraw
 
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, InputRegions, InputRejectedError
 from android_app_graph.screen_image import encode_screenshot, pixel_hash
 from android_app_graph.step_log import (
     Observation,
@@ -91,6 +91,51 @@ def test_the_recorder_stands_in_for_the_controller_it_wraps(device: _Device, ste
 
     assert (recorder.w, recorder.h) == (1080, 1920)
     assert recorder.config is device.config
+
+
+def test_action_grounding_uses_the_current_native_screenshot_dimensions(steps: Path) -> None:
+    controller = _Device(_png((720, 1280), "white"))
+    recorder = _recorder(controller, steps)
+    recorder.get_state()
+    assert (recorder.w, recorder.h) == (720, 1280)
+
+    controller.screenshot = _png((1280, 720), "white")
+    recorder.get_state()
+    assert (recorder.w, recorder.h) == (1280, 720)
+
+
+def test_grounding_keeps_native_dimensions_when_the_model_image_is_scaled(steps: Path) -> None:
+    recorder = _recorder(_Device(_png((1250, 1000), "white")), steps)
+    recorder.get_state()
+    assert (recorder.w, recorder.h) == (1250, 1000)
+    record = _record(steps, "000000")
+    assert (record["width"], record["height"]) == (1118, 894)
+
+
+def test_rejected_input_records_its_request_geometry_and_reason(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = _recorder(device, steps)
+    recorder.get_state()
+    regions = InputRegions((0, 0, 720, 1280), ((0, 1184, 720, 1280),), ())
+    reason = "App input targets a system touch region"
+
+    def reject(_action: dict[str, object]) -> None:
+        raise InputRejectedError(reason, regions)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    action = {"action": "tap", "x": 257, "y": 1190}
+    with pytest.raises(InputRejectedError, match=reason):
+        recorder.exe_action(action)
+    assert device.actions == []
+    assert _record(steps, "000001")["action"] == action
+    rejected = _record(steps, "000002")
+    assert (rejected["kind"], rejected["action_record"], rejected["action"]) == (
+        "action_rejected",
+        "000001",
+        action,
+    )
+    assert (rejected["reason"], rejected["input_regions"]) == (reason, regions.as_dict())
 
 
 def test_get_state_records_one_webp_image_and_one_observation(device: _Device, steps: Path) -> None:
@@ -731,3 +776,42 @@ def test_captured_feedback_keeps_the_request_and_skipped_event(
     assert _record(steps, "000001")["action"] == action
     assert _record(steps, "000002")["status"] == "action_skipped"
     assert device.actions == []
+
+
+@pytest.mark.parametrize(
+    "changed", ["image", "package", "activity", "input_regions", "accepted_input"]
+)
+def test_input_rejection_feedback_belongs_to_the_current_unchanged_screen(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    recorder = _recorder(device, steps)
+    recorder.get_state()
+    original = device.exe_action
+
+    def reject(_action: dict[str, object]) -> None:
+        reason = "System input regions are unavailable"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    with pytest.raises(InputRejectedError):
+        recorder.exe_action({"action": "tap", "x": 10, "y": 20})
+    recorder.get_state()
+    assert "Previous tap was rejected" in recorder.input_rejection_hint
+    assert "System input regions are unavailable" in recorder.input_rejection_hint
+    if changed == "accepted_input":
+        monkeypatch.setattr(device, "exe_action", original)
+        recorder.exe_action({"action": "back"})
+    elif changed == "image":
+        device.screenshot = _png((40, 30), "black")
+    else:
+        read = device.get_state
+        value: object = {"display": [0, 0, 40, 30], "tap": [], "gesture": []}
+        if changed != "input_regions":
+            value = "another"
+
+        def state(*, deadline: float | None = None) -> dict[str, object]:
+            return {**read(deadline=deadline), changed: value}
+
+        monkeypatch.setattr(device, "get_state", state)
+    recorder.get_state()
+    assert recorder.input_rejection_hint == ""

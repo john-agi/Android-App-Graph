@@ -22,6 +22,7 @@ from PIL import Image
 from android_app_graph.device import (
     DeviceController,
     DeviceUnreachableError,
+    InputRejectedError,
     PermissionGrants,
     StillOutsideAppError,
 )
@@ -54,7 +55,7 @@ _TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
 
 def _screen(activity: str, color: str) -> dict[str, object]:
     buffer = io.BytesIO()
-    Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+    Image.new("RGB", (100, 200), color).save(buffer, format="PNG")
     screenshot = base64.b64encode(buffer.getvalue()).decode("ascii")
     return {"activity": activity, "screenshot": screenshot, "package": "com.demo"}
 
@@ -2252,7 +2253,7 @@ def test_a_target_permission_is_resolved_without_app_coverage(
         kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
     )
 
-    tap = {"action": "tap", "x": 50, "y": 100}
+    tap = {"action": "tap", "x": 16, "y": 16}
     assert device.actions == [tap, {"action": "tap", "x": 50, "y": 50}]
     graph = kobe.graph.graph
     nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
@@ -4316,3 +4317,87 @@ def test_an_ime_target_records_its_own_settings_as_app_coverage(
     record = json.loads((explorer.controller.steps / "000000.json").read_text())
     assert record["package"] == package
     assert record["system_surface"] is None
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_unreachable_planned_inputs_consume_steps_and_preserve_unexplored_targets(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    regions = {"display": [0, 0, 720, 1280], "tap": [[0, 1184, 720, 1280]], "gesture": []}
+    device = _Screens({**HOME_SCREEN, "input_regions": regions})
+    explorer = _explorer(device, tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.graph.nodes["s0_home"]["interactable_elements"] = [
+        {"description": "Import & Export", "explored": False}
+    ]
+    _identifying(explorer, monkeypatch, "s0_home")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    planning_hints: list[str] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int]:
+        planning_hints.append(request.input_status)
+        return "Open Import & Export", 1
+
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
+    action = {"action": "tap", "x": 257, "y": 1190}
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (action, "")
+    )
+
+    def reject(_action: dict[str, object]) -> None:
+        reason = "App input targets a system touch region"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    explorer.explore(max_steps=2)
+
+    assert explorer.graph.total_steps_completed == 2
+    assert len(planning_hints) == 2
+    assert all("1184" not in hint for hint in planning_hints)
+    assert "rejected" not in planning_hints[0]
+    assert "Previous tap was rejected: App input targets a system touch region" in planning_hints[1]
+    assert device.actions == []
+    assert list(explorer.graph.graph.edges) == []
+    assert explorer.graph.get_unexplored_elements("s0_home") == [
+        {"description": "Import & Export", "explored": False}
+    ]
+    records = step_records(explorer.controller.steps)
+    assert len([record for record in records if record["kind"] == "action_rejected"]) == 2
+    assert not any(record["kind"] == "transition" for record in records)
+    assert records[0]["input_regions"] == regions
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("in_setup", [False, True])
+def test_a_replay_stops_at_an_unreachable_input_and_identifies_its_actual_arrival(
+    in_setup: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    device = _Screens(HOME_SCREEN)
+    explorer = _explorer(device, tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    blocked = {"action": "tap", "x": 257, "y": 1190}
+    later = {"action": "tap", "x": 50, "y": 100}
+    explorer.graph.add_edge(
+        "s0_home",
+        "s1_list",
+        action=[later] if in_setup else [blocked, later],
+        details=EdgeDetails(setup=[blocked] if in_setup else []),
+    )
+    _identifying(explorer, monkeypatch, "s0_home", "s0_home")
+
+    def reject(_action: dict[str, object]) -> None:
+        reason = "App input targets a system touch region"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    assert explorer.navigate_to_node("s1_list") == "s0_home"
+    assert device.actions == []
+    assert device_log == _FIRST_RESTART
+    assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 1

@@ -17,8 +17,10 @@ from android_app_graph.device import (
     DeviceController,
     DeviceUnreachableError,
     ForceStopRefusedError,
+    InputRejectedError,
     StartupRecovery,
     UnresolvedPermissionError,
+    input_region_hint,
     is_outside_app,
     keyboard_status,
     resolve_permission_prompt,
@@ -433,8 +435,10 @@ class Kobe:
                     )
                     self.controller.exe_action(action)
                 time.sleep(1)  # brief pause for the UI to settle
-        except SystemOverlayActionError as exc:
-            self.logger.info("Replay stops at system feedback: %s", exc)
+        except (InputRejectedError, SystemOverlayActionError) as error:
+            self.logger.warning(
+                "Replay input is unreachable: %s; identifying the current screen", error
+            )
 
         actual_node, _ = self._identify(
             self.controller.get_state(),
@@ -637,14 +641,7 @@ class Kobe:
                 return continued
         move = self._plan_move(position, tokens_before)
         if move is None:
-            time.sleep(1)
-            device_state = self.controller.get_state()
-            self._count_step(
-                position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
-            )
-            self.save_graph()
-            return _Position(position.node, device_state)
-
+            return self._wait_at(position, tokens_before, max_steps)
         if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
             continued = self._continue_from_ranked_target(
                 position,
@@ -654,16 +651,23 @@ class Kobe:
             )
             if continued is not None:
                 return continued
-        return self._execute_move(move, tokens_before, max_steps)
+        return self._execute_move(move, position, tokens_before, max_steps)
 
     def _execute_move(
-        self, move: _Move, tokens_before: dict[str, int], max_steps: int
+        self,
+        move: _Move,
+        position: _Position,
+        tokens_before: dict[str, int],
+        max_steps: int,
     ) -> _Position:
-        """Execute a planned app input, counting a deferred system-covered input as a wait."""
+        """Execute a reachable input and count a deferred input as a bounded wait."""
         try:
             self.controller.exe_action(move.action)
-        except SystemOverlayActionError as exc:
-            self.logger.info("App action waits for system feedback: %s", exc)
+        except InputRejectedError as error:
+            self.logger.warning("App input is unreachable: %s; counting a wait", error)
+            return self._wait_at(position, tokens_before, max_steps)
+        except SystemOverlayActionError as error:
+            self.logger.info("App action waits for system feedback: %s", error)
             node, state = self._identify(self.controller.get_state())
             self._count_step(move.source, [{"action": "wait"}], node, tokens_before, max_steps)
             self.save_graph()
@@ -679,6 +683,18 @@ class Kobe:
         if new_node == EXTERNAL_WEB_NODE:
             return self._record_external_web_step(move, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
+
+    def _wait_at(
+        self, position: _Position, tokens_before: dict[str, int], max_steps: int
+    ) -> _Position:
+        """Spend one bounded step waiting, preserving the target's unexplored status."""
+        time.sleep(1)
+        device_state = self.controller.get_state()
+        self._count_step(
+            position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
+        )
+        self.save_graph()
+        return _Position(position.node, device_state)
 
     def _saturated(self, node: str) -> bool:
         """Return whether the last ``SATURATING_SELF_LOOP_STEPS`` steps planned on ``node``
@@ -743,6 +759,9 @@ class Kobe:
             keyboard_status(keyboard_hint),
             self.graph.observation_state(Observation.from_state(position.device_state)),
         )
+
+        input_status += input_region_hint(position.device_state)
+        input_status += self.controller.input_rejection_hint
 
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(
