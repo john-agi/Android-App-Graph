@@ -236,9 +236,9 @@ with each request:
 
 A role's positive, finite `request_timeout` (or `timeout`) in seconds replaces these
 for every call of the role. A screenshot embedding takes the `embedding` block's
-timeout when the `image_embedding` block sets none. The graph audit and node-merge
-audit send the whole graph in one prompt, so they take
-`page_detail.audit_request_timeout` instead, default 300 seconds.
+timeout when the `image_embedding` block sets none. The graph audit and each
+checkpoint duplicate-proposal request take `page_detail.audit_request_timeout`,
+default 300 seconds.
 
 Each attempt ends at that timeout by the wall clock, counted from when the
 request is sent, so connecting and the response headers count too. httpx's own
@@ -572,7 +572,8 @@ screen can reach, and favours nodes with many unexplored elements, few outgoing
 edges and few visits. Each checkpoint lets the model choose among the
 `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also offers the
 app's start screen while it has unexplored elements, in the last of those places
-when it ranks below them.
+when it ranks below them. Its duplicate-node pass uses
+[bounded checkpoint evidence](#checkpoint-evidence).
 
 Back on the start screen leaves the app for the home screen, as does Back on the
 screen an app opens on instead, and exploration then restarts the app onto the same
@@ -648,12 +649,14 @@ takes about 12 seconds.
 Every read of the screen, in exploration and in the audit, runs three adb commands:
 the UI dump, the screenshot and `dumpsys window`. Each one that times out is run
 once more, with a warning naming the command (`adb ... timed out after 30 s;
-retrying once`). An input that times out is not sent again: it may have reached the
-device, and sending it again could act twice.
+retrying once`). An exploration input that times out is sent once: it may have
+reached the device. Startup checks the recovered screen before continuing an
+uncertain input.
 
 When a read times out the second time, or an input or another adb command of an
-exploration step times out, the explorer logs the command and starts one recovery
-deadline: `device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
+exploration step times out, or a startup device phase times out, the explorer logs
+the phase, serial and command and starts one recovery deadline:
+`device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
 checks the shell with `adb shell true`, then captures the complete UI dump,
 screenshot and window state. A successful shell check leaves that deadline in
 force. Each probe, observation read, retry and 30-second interval uses the time
@@ -669,7 +672,20 @@ in the same episode stops. The recovery log names the device, read phase, comman
 and exit status, with up to 1024 characters of error diagnostics or `diagnostics
 absent`. Screenshot bytes and successful observation payloads stay out of that log.
 
-The interrupted step counts toward `--max-steps`, and
+Startup covers the screen-size read, clearing recent apps, reading requested
+permissions, each permission grant, launcher resolution, app launch, and the initial
+or resume-position observation. Each completed phase stays complete. A timed-out
+grant retries only that permission; an ordinary refused grant is logged and skipped.
+An uncertain recent-app tap or swipe is followed by a fresh observation; a clear-all
+tap uses the button's current position if it still appears. An uncertain launch
+checks whether the app is in front. Interrupted resume navigation continues from
+the recovered app screen. Startup recovery counts no exploration action, adds no
+edge, and retains the loaded graph and its counters.
+
+`app-graph-audit --re-explore` uses the same outage limit during device startup.
+A basic audit runs without validating or using `device.unreachable_limit`.
+
+The interrupted exploration step counts toward `--max-steps`, and
 its `Step N/M` line shows `interrupted` as its action. What its action did is
 unknown, so a step interrupted before it recorded its edge records none, and the
 [setup](#graph-edges) of the next action is unknown. An outage after the step was
@@ -681,9 +697,11 @@ Past the limit, exploration saves the graph and logs `Device <udid> unreachable 
 <N> minutes. Exploration stopped at step <n>. Graph saved. Re-run to resume.`, and
 `app-graph` exits with status 1 and `app-graph: error: Device <udid> unreachable for
 <N> minutes`, without a traceback; `scripts/run_explore.sh` then starts it again,
-resuming from the saved graph. Only the exploration loop waits: an adb command that
-times out as a run starts, or in `app-graph-audit`, stops the command with its
-error. The explorer never restarts the adb server, which other runs can share.
+resuming from the saved graph. A startup outage before the graph loads leaves its
+saved files intact. `app-graph-audit --re-explore` uses the same startup recovery for
+its device initialization, permission grants and launch; its action recovery follows
+the audit error policy. The explorer never restarts the adb server, which other runs
+can share.
 
 ### App input boundaries
 
@@ -1236,9 +1254,8 @@ stay apart unless "same" answers on other pairs join them.
 
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage
-checkpoint's merge audit verifies the model's pairs the same way and proposes none
-from images or descriptions, since every checkpoint would otherwise propose again each
-pair an earlier one kept apart.
+checkpoint verifies its model-proposed pairs with these rounds and keeps its
+[checkpoint evidence caches](#checkpoint-evidence) on the graph manager.
 
 `<app_name>_merge.json` holds:
 
@@ -1252,6 +1269,50 @@ pair an earlier one kept apart.
   the verifier's `reason` and `reused` for an asked pair or the asked pairs it is
   `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
   `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
+
+#### Checkpoint evidence
+
+A checkpoint considers every unordered pair of in-app nodes with members in the same
+package. Nodes are ordered by their numeric ID, then name, and divided into blocks of
+64. Each block has one within-block request when it has at least two nodes; each pair
+of blocks has one cross-block request. Cross-block requests consider pairs with one
+node in each block. The model uses local IDs whose mapping is owned by that request.
+Proposals outside its scope are reported as skipped.
+
+Each request contains at most 128 nodes and 128 KiB of graph evidence in UTF-8 bytes.
+A node supplies up to three distinct member descriptions, 128 bytes each, its package
+and activities, and up to two incoming and two outgoing neighbor descriptions, 64
+bytes each. Descriptions are ordered lexically; repeated edge actions leave this
+input unchanged. The app label uses at most 128 UTF-8 bytes. The logged full JSON-body
+bound includes the fixed prompt, response schema, model settings, response-healing
+plugin and JSON framing, with up to six encoded bytes per content byte for escaping.
+Returned usage supplies the actual prompt-token count.
+
+The complete pair coverage has quadratic cold work. For a single package:
+
+| Nodes | Proposal requests with a cold cache |
+|---:|---:|
+| 64 | 1 |
+| 100 | 3 |
+| 1,000 | 136 |
+| 3,000 | 1,128 |
+
+A graph manager keeps complete proposal replies keyed by ordered node IDs, the exact
+batch text, app label, rule/schema and model settings. A matching request reuses its
+proposals, including after revisits that preserve its displayed descriptions and
+navigation context. Cache misses run concurrently, up to 16 requests at a time;
+cache writes and report results follow batch order. Separately, answered member questions
+are keyed by both members' IDs, image bytes and descriptions and the verifier's
+rule/schema and resolved settings. A matching question reuses its answer while rounds
+retain their deductions. Changes make the affected evidence eligible again. Timeouts,
+malformed replies and out-of-scope proposal replies remain eligible for a fresh
+request. Saving keeps these in-memory caches; loading a graph and a new process start
+with empty caches.
+
+Checkpoint logs report eligible and excluded nodes/pairs, each batch's size and input
+bytes, skipped proposals, unanswered batches, proposal requests/cache hits and member
+verifier requests/cache hits. Those request counts describe invocations; transport
+attempts and their usage follow [Requests and recovery](#requests-and-recovery).
 
 #### Member checks
 

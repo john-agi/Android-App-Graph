@@ -17,7 +17,7 @@ from openrouter import OpenRouter
 from PIL import Image
 
 from android_app_graph.commands import audit
-from android_app_graph.device import DeviceController, InputRejectedError
+from android_app_graph.device import DeviceController, InputRejectedError, StartupRecovery
 from android_app_graph.graph_files import (
     append_json_line,
     graph_steps_dir,
@@ -145,7 +145,10 @@ def test_audit_execution_policy_skips_commitments_before_navigation(
             app_name="demo", package_name="com.demo", graph_path=graph_path
         ),
         session=audit.ReExploreSession(
-            controller, ModelSettings("instruction-model"), ModelSettings("action-model")
+            controller,
+            ModelSettings("instruction-model"),
+            ModelSettings("action-model"),
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -605,6 +608,7 @@ def test_re_explore_issues_retries_explores_and_skips(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -651,6 +655,7 @@ def test_re_explore_issues_records_an_action_model_end_as_press_back(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -776,6 +781,7 @@ def test_re_explore_issues_skips_unreachable_nodes(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -811,6 +817,7 @@ def test_re_explore_records_an_edge_to_an_external_web_page_and_presses_back(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=2,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -869,6 +876,7 @@ def test_re_explore_presses_back_until_it_leaves_an_external_web_page(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=2,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -961,6 +969,7 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
                 ModelSettings("provider/instruction"),
                 ModelSettings("provider/action"),
                 steps_per_issue=1,
+                unreachable_limit=37,
             ),
             client=router_client,
         )
@@ -1067,6 +1076,7 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
             ModelSettings("provider/instruction"),
             ModelSettings("provider/action"),
             steps_per_issue=2,
+            unreachable_limit=37,
         ),
         client=router_client,
     )
@@ -1266,6 +1276,7 @@ def test_re_explore_issues_returns_early_for_an_empty_graph(
                 FakeController("com.demo"),
                 ModelSettings("instruction-model"),
                 ModelSettings("action-model"),
+                unreachable_limit=37,
             ),
             client=client,
         )
@@ -1325,6 +1336,7 @@ def test_re_explore_issues_restarts_the_app_before_each_replay(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -1364,6 +1376,7 @@ def test_re_explore_records_a_permission_dialog_instead_of_pressing_back(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=1,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -1456,6 +1469,7 @@ def _re_explore(
             ModelSettings("instruction-model"),
             ModelSettings("action-model"),
             steps_per_issue=steps_per_issue,
+            unreachable_limit=37,
         ),
         client=client,
     )
@@ -2195,7 +2209,7 @@ def test_re_explore_skips_a_missing_node_and_ignores_an_issue_of_another_type(
 
 
 def _install_fake_adb(monkeypatch: pytest.MonkeyPatch, controller: DeviceController) -> None:
-    monkeypatch.setattr(audit, "AdbController", lambda _config, _logger: controller)
+    monkeypatch.setattr(audit, "AdbController", lambda _config, _logger, **_kwargs: controller)
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep", "device_log")
@@ -2646,6 +2660,94 @@ def test_re_explore_session_shares_the_audit_client(
     assert opened_clients[0].sdk_configuration.client is None
 
 
+@pytest.mark.parametrize("re_explore", [False, True])
+@pytest.mark.usefixtures("model_environment")
+def test_audit_validates_the_device_outage_limit_only_for_re_exploration(
+    re_explore: bool,
+    tmp_path: Path,
+    opened_clients: list[OpenRouter],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A basic audit uses no device settings; re-exploration validates them first."""
+    _deny_device_work(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\ndevice:\n  unreachable_limit: invalid\n", encoding="utf-8")
+    args = ["--config", str(config)]
+
+    if re_explore:
+        with pytest.raises(SystemExit) as caught:
+            audit.main([*args, "--re-explore"])
+        assert caught.value.code == 2
+        assert "device.unreachable_limit" in capsys.readouterr().err
+        assert opened_clients == []
+    else:
+        assert audit.main(args) == 0
+        assert len(opened_clients) == 1
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
+def test_re_exploration_resolves_one_outage_limit_for_the_device_and_each_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Controller initialization and each app's startup share the resolved limit."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    for name in ("demo", "other"):
+        app_dir = graph_dir / name
+        app_dir.mkdir(parents=True)
+        document = {"matching": DEFAULT_MATCHING._asdict(), "nodes": [], "edges": []}
+        (app_dir / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    config = tmp_path / "audit.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "device": {"udid": "test-device", "unreachable_limit": 37},
+                "experiment": {"graph_dir": str(graph_dir)},
+                "apps": [
+                    {"name": "demo", "package_name": "com.demo"},
+                    {"name": "other", "package_name": "com.other"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    resolutions: list[float] = []
+    startup_limits: list[tuple[str, float]] = []
+    resolve = audit.resolve_unreachable_limit
+
+    def resolve_limit(config: Mapping[str, object]) -> float:
+        limit = resolve(config)
+        resolutions.append(limit)
+        return limit
+
+    def controller(
+        _config: dict[str, object], _logger: logging.Logger, *, unreachable_limit: float
+    ) -> DeviceController:
+        startup_limits.append(("device", unreachable_limit))
+        return FakeController("com.demo")
+
+    def grant(_udid: str, package: str, recovery: StartupRecovery) -> None:
+        startup_limits.append((package, recovery.limit))
+
+    monkeypatch.setattr(audit, "resolve_unreachable_limit", resolve_limit)
+    monkeypatch.setattr(audit, "AdbController", controller)
+    monkeypatch.setattr(audit, "grant_runtime_permissions", grant)
+    monkeypatch.setattr(audit, "launch_app", lambda *_args: "com.demo/.Home")
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda *_args: {"issues": [{**_inspection(), "type": "explore_node", "node": "s0"}]},
+    )
+    monkeypatch.setattr(audit, "re_explore_issues", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(audit, "normalize_and_save_audited_graph", lambda *_args: 0)
+
+    assert audit.main(["--config", str(config), "--re-explore"]) == 0
+    assert resolutions == [37]
+    assert startup_limits == [("device", 37), ("com.demo", 37), ("com.other", 37)]
+
+
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
 def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2685,7 +2787,9 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
         lambda *_args: {"issues": [{**_inspection(), "type": "explore_node", "node": "s0"}]},
     )
     monkeypatch.setattr(
-        audit, "grant_runtime_permissions", lambda *args: events.append(("grant", *args))
+        audit,
+        "grant_runtime_permissions",
+        lambda udid, package, _recovery: events.append(("grant", udid, package)),
     )
     monkeypatch.setattr(audit, "launch_app", launch)
     monkeypatch.setattr(audit, "re_explore_issues", re_explore)
@@ -2802,6 +2906,28 @@ def test_recorded_confirmation_uses_the_source_screen_context(
     assert "policy" in result["reason"]
     assert _DETAIL_TAP not in device_log
     assert device_log == []
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_startup_unreachable_device_exits_nonzero_with_a_clear_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.device import DeviceUnreachableError
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\n", encoding="utf-8")
+
+    def unavailable(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "Device test-device unreachable for 0.75 minutes"
+        raise DeviceUnreachableError(msg)
+
+    monkeypatch.setattr(audit, "_open_re_explore_session", unavailable)
+
+    assert audit.main(["--config", str(config), "--re-explore"]) == 1
+    assert capsys.readouterr().err == (
+        "app-graph-audit: error: Device test-device unreachable for 0.75 minutes\n"
+    )
 
 
 def _reject_inputs(controller: FakeController, monkeypatch: pytest.MonkeyPatch) -> None:

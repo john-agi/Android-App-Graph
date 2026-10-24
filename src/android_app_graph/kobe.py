@@ -490,7 +490,7 @@ class Kobe:
                   - "auto": the top-ranked exploration target, chosen without a model call.
 
         The graph is auto-saved after every step so crashes lose at most one step. A
-        device that stops answering during a step is waited for, up to
+        device that stops answering during startup or a step is waited for, up to
         ``unreachable_limit`` seconds; past it ``DeviceUnreachableError`` is raised.
         """
         max_steps = max_steps if max_steps is not None else self.max_steps
@@ -507,9 +507,13 @@ class Kobe:
             self.save_graph()
             return
 
-        position = self._starting_position(resume_from, start_step, max_steps)
-
         try:
+            try:
+                position = self._starting_position(resume_from, start_step, max_steps)
+            except subprocess.TimeoutExpired as timeout:
+                phase = "startup resume position" if resume_from else "startup initial observation"
+                node, state = self._recover_from_outage(timeout, phase=phase)
+                position = _Position(node, state)
             while self.graph.total_steps_completed < max_steps:
                 position = self._explore_step_through_outage(position, max_steps)
         except KeyboardInterrupt:
@@ -596,13 +600,14 @@ class Kobe:
         return _Position(node, device_state)
 
     def _recover_from_outage(
-        self, timeout: subprocess.TimeoutExpired
+        self, timeout: subprocess.TimeoutExpired, *, phase: str = "exploration step"
     ) -> tuple[str, dict[str, Any]]:
         """Recover an observation and identify it with an unknown action setup."""
         udid = self.controller.config["device"]["udid"]
         self.logger.warning(
-            "Device %s is unreachable: %s. Waiting up to %g minutes for a complete observation.",
+            "Device %s is unreachable during %s: %s. Waiting up to %g minutes for a complete observation.",
             udid,
+            phase,
             timeout,
             self.unreachable_limit / 60,
         )
