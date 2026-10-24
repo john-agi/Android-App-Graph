@@ -21,6 +21,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
 
+from android_app_graph.payloads import as_int
+
 logger = logging.getLogger(__name__)
 
 # How long each kind of adb call may run. About one adb call in a hundred stalls between
@@ -157,6 +159,107 @@ def status_bar_frame(dumpsys_window: str) -> list[int] | None:
     return None
 
 
+_DISPLAY_FRAME = re.compile(r"mDisplayFrame=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)")
+_INPUT_SOURCE = re.compile(
+    r"^\s*InsetsSource\b.*?\btype=(tappableElement|systemGestures|mandatorySystemGestures)\b"
+    r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\].*?\bvisible=(true|false)\b"
+)
+
+
+class InputRegions(NamedTuple):
+    """Display coordinates and the visible system touch and gesture-start regions."""
+
+    display: tuple[int, int, int, int]
+    tap: tuple[tuple[int, int, int, int], ...]
+    gesture: tuple[tuple[int, int, int, int], ...]
+
+    def as_dict(self) -> dict[str, list[int] | list[list[int]]]:
+        """Return the geometry carried by observations and rejected-action records."""
+        return {
+            "display": list(self.display),
+            "tap": [list(frame) for frame in self.tap],
+            "gesture": [list(frame) for frame in self.gesture],
+        }
+
+    def reject_reason(self, action: Mapping[str, object]) -> str | None:
+        """Return why an app input is unreachable at its coordinates, or ``None``."""
+        swipe = action["action"] == "swipe"
+        start = _input_point(action, "x1", "y1") if swipe else _input_point(action, "x", "y")
+        end = _input_point(action, "x2", "y2") if swipe else start
+        if start is None or end is None:
+            return "App input has invalid coordinates"
+        points = (start, end)
+        if any(not _contains(self.display, point) for point in points):
+            return "App input is outside the display"
+        if any(_contains(frame, start) for frame in self.tap):
+            return "App input targets a system touch region; reveal the control or choose an unobscured point"
+        if swipe and any(_contains(frame, start) for frame in self.gesture):
+            return "App swipe starts in a system gesture region; use an interior app control"
+        return None
+
+
+def _input_point(action: Mapping[str, object], x_name: str, y_name: str) -> tuple[int, int] | None:
+    x, y = as_int(action.get(x_name)), as_int(action.get(y_name))
+    return (x, y) if x is not None and y is not None else None
+
+
+def _contains(frame: tuple[int, int, int, int], point: tuple[int, int]) -> bool:
+    left, top, right, bottom = frame
+    return left <= point[0] < right and top <= point[1] < bottom
+
+
+def input_regions(dumpsys_window: str) -> InputRegions | None:
+    """Read the first display's authoritative InsetsState, excluding provider copies.
+
+    Tappable-element sources identify touch-consuming bars; gesture sources identify
+    where swipes enter system navigation. A gesture-navigation bar can be transparent
+    to ordinary app taps, so its visual navigation-bar frame is not a tap exclusion.
+    """
+    _, found, block = dumpsys_window.partition("WindowInsetsStateController")
+    if not found:
+        return None
+    block = block.partition("InsetsSourceProviders:")[0]
+    display = _DISPLAY_FRAME.search(block)
+    if display is None:
+        return None
+    left, top, right, bottom = (int(value) for value in display.groups())
+    taps: list[tuple[int, int, int, int]] = []
+    gestures: list[tuple[int, int, int, int]] = []
+    for line in block.splitlines():
+        source = _INPUT_SOURCE.search(line)
+        if source is None or source.group(6) != "true":
+            continue
+        x1, y1, x2, y2 = (int(value) for value in source.groups()[1:5])
+        if x1 >= x2 or y1 >= y2:
+            continue
+        frames = taps if source.group(1) == "tappableElement" else gestures
+        frame = (x1, y1, x2, y2)
+        if frame not in frames:
+            frames.append(frame)
+    return InputRegions((left, top, right, bottom), tuple(taps), tuple(gestures))
+
+
+class InputRejectedError(ValueError):
+    """An app input has no reachable target at its requested display coordinates."""
+
+    def __init__(self, reason: str, regions: InputRegions | None) -> None:
+        super().__init__(reason)
+        self.regions = regions.as_dict() if regions is not None else None
+
+
+def input_region_hint(state: Mapping[str, object]) -> str:
+    """Give planning the captured system input boundaries and reachable-target policy."""
+    regions = state.get("input_regions")
+    if regions is None:
+        return ""
+    return (
+        f"\nSystem input regions in native display pixels: {regions}. "
+        "App taps and holds stay outside tap regions; app swipes start outside gesture regions. "
+        "Reveal an obscured control or use an unobscured point on that same control. "
+        "When it cannot be reached, choose another app control or wait."
+    )
+
+
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
 _CLEAR_KEY_PRESSES = 20
@@ -225,6 +328,7 @@ class AdbController:
             raise ValueError(msg)
         self.w = int(match.group(1))
         self.h = int(match.group(2))
+        self._observed_display: tuple[int, int, int, int] | None = None
 
     def get_state(self, *, deadline: float | None = None) -> dict[str, Any]:
         """Return the UI hierarchy XML, a base64 PNG screenshot, the focused package and
@@ -238,12 +342,18 @@ class AdbController:
             _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"], deadline
         )
         package, activity = _focused_package_activity(dumpsys)
+        regions = input_regions(dumpsys)
+        if regions is not None:
+            self._observed_display = regions.display
+            left, top, right, bottom = regions.display
+            self.w, self.h = right - left, bottom - top
         return {
             "xml": xml,
             "screenshot": base64.b64encode(png).decode("ascii"),
             "package": package,
             "activity": activity,
             "status_bar": status_bar_frame(dumpsys),
+            "input_regions": regions.as_dict() if regions is not None else None,
         }
 
     def _ui_dump(self, deadline: float | None = None) -> str:
@@ -269,6 +379,8 @@ class AdbController:
 
         A ``long_press`` is held for ``_GESTURE_MS`` whatever its ``duration`` says.
         """
+        if action["action"] in {"tap", "long_press", "swipe"}:
+            self._check_input(action)
         match action["action"]:
             case "tap":
                 self._tap(action["x"], action["y"])
@@ -290,6 +402,20 @@ class AdbController:
             case unknown:
                 msg = f"Unknown device action: {unknown!r}"
                 raise ValueError(msg)
+
+    def _check_input(self, action: Mapping[str, object]) -> None:
+        """Check current system input geometry once, immediately before coordinate input."""
+        dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"], None)
+        regions = input_regions(dumpsys)
+        if regions is None:
+            reason = "System input regions are unavailable; app input is deferred"
+            raise InputRejectedError(reason, None)
+        if self._observed_display is not None and self._observed_display != regions.display:
+            reason = "Display geometry changes after the observation; capture it again"
+            raise InputRejectedError(reason, regions)
+        reason = regions.reject_reason(action)
+        if reason is not None:
+            raise InputRejectedError(reason, regions)
 
     def terminate_all_apps(self) -> None:
         """Open recent apps and tap their Clear all button, which ``_scroll_to_clear_all``

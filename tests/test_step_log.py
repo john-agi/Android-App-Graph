@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from PIL import Image, ImageDraw
 
-from android_app_graph.device import DeviceController
+from android_app_graph.device import DeviceController, InputRegions, InputRejectedError
 from android_app_graph.screen_image import encode_screenshot, pixel_hash
 from android_app_graph.step_log import (
     Observation,
@@ -100,6 +100,32 @@ def test_action_grounding_uses_the_current_native_screenshot_dimensions(steps: P
     controller.screenshot = _png((1280, 720), "white")
     recorder.get_state()
     assert (recorder.w, recorder.h) == (1280, 720)
+
+
+def test_rejected_input_records_its_request_geometry_and_reason(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = _recorder(device, steps)
+    recorder.get_state()
+    regions = InputRegions((0, 0, 720, 1280), ((0, 1184, 720, 1280),), ())
+    reason = "App input targets a system touch region"
+
+    def reject(_action: dict[str, object]) -> None:
+        raise InputRejectedError(reason, regions)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    action = {"action": "tap", "x": 257, "y": 1190}
+    with pytest.raises(InputRejectedError, match=reason):
+        recorder.exe_action(action)
+    assert device.actions == []
+    assert _record(steps, "000001")["action"] == action
+    rejected = _record(steps, "000002")
+    assert (rejected["kind"], rejected["action_record"], rejected["action"]) == (
+        "action_rejected",
+        "000001",
+        action,
+    )
+    assert (rejected["reason"], rejected["input_regions"]) == (reason, regions.as_dict())
 
 
 def test_get_state_records_one_webp_image_and_one_observation(device: _Device, steps: Path) -> None:

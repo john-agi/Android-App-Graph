@@ -630,6 +630,13 @@ def controller(adb: _FakeAdb) -> device.AdbController:
     built = device.AdbController({"device": {"udid": _UDID}}, logging.getLogger("test"))
     adb.events.clear()
     adb.timeouts.clear()
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        (
+            b"  WindowInsetsStateController\n    InsetsState\n"
+            b"      mDisplayFrame=Rect(0, 0 - 1080, 2400)\n"
+        ),
+    )
     return built
 
 
@@ -753,6 +760,34 @@ def test_app_inputs_preserve_valid_content_coordinates(
         assert dispatched[0][-2:] == [str(action["x"]), str(action["y"])]
 
 
+def test_coordinate_input_defers_when_current_geometry_is_unavailable(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, b"mCurrentFocus=null\n")
+    with pytest.raises(device.InputRejectedError, match="regions are unavailable") as error:
+        controller.exe_action({"action": "tap", "x": 10, "y": 20})
+    assert error.value.regions is None
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
+
+
+def test_a_rotation_between_observation_and_dispatch_defers_the_input(
+    controller: device.AdbController, adb: _FakeAdb
+) -> None:
+    adb.replies[_DUMPSYS_WINDOW] = (0, _BUTTON_NAVIGATION.encode())
+    state = controller.get_state()
+    assert state["input_regions"]["display"] == [0, 0, 720, 1280]
+    assert (controller.w, controller.h) == (720, 1280)
+    adb.events.clear()
+    adb.replies[_DUMPSYS_WINDOW] = (
+        0,
+        b"WindowInsetsStateController\nInsetsState\nmDisplayFrame=Rect(0, 0 - 1280, 720)\n",
+    )
+    with pytest.raises(device.InputRejectedError, match="Display geometry changes") as error:
+        controller.exe_action({"action": "tap", "x": 100, "y": 200})
+    assert error.value.regions == {"display": [0, 0, 1280, 720], "tap": [], "gesture": []}
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
+
+
 @pytest.mark.parametrize(
     ("dumpsys_window", "package", "activity"),
     [
@@ -798,6 +833,7 @@ def test_get_state_returns_the_xml_screenshot_package_and_activity(
         "package": package,
         "activity": activity,
         "status_bar": None,
+        "input_regions": None,
     }
     assert adb.events == [["adb", *_UI_DUMP], ["adb", *_SCREENCAP], ["adb", *_DUMPSYS_WINDOW]]
 
@@ -909,6 +945,7 @@ def test_get_state_runs_a_read_that_times_out_once_more_and_logs_it(
         "package": "com.demo",
         "activity": "com.demo.Main",
         "status_bar": None,
+        "input_regions": None,
     }
     retried = _STATE_READS.index(["adb", *stalled])
     assert adb.events == [*_STATE_READS[: retried + 1], *_STATE_READS[retried:]]
@@ -967,7 +1004,10 @@ def test_each_action_sends_its_adb_command_and_pause(
     events: list[list[str] | float],
 ) -> None:
     controller.exe_action(action)
-    assert adb.events == events
+    reads = (
+        [["adb", *_DUMPSYS_WINDOW]] if action["action"] in {"tap", "long_press", "swipe"} else []
+    )
+    assert adb.events == [*reads, *events]
 
 
 @pytest.mark.parametrize(
@@ -986,7 +1026,13 @@ def test_every_input_command_gives_adb_15_seconds(
 ) -> None:
     controller.exe_action(action)
     assert adb.timeouts
-    assert set(adb.timeouts) == {15}
+    input_timeouts = [
+        timeout
+        for event, timeout in zip(adb.events, adb.timeouts, strict=False)
+        if isinstance(event, list) and event[:5] == _INPUT
+    ]
+    assert input_timeouts
+    assert set(input_timeouts) == {15}
 
 
 def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again(
@@ -1000,7 +1046,7 @@ def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again
         controller.exe_action({"action": "tap", "x": 10, "y": 20})
 
     assert (raised.value.cmd, raised.value.timeout) == (tap, 15)
-    assert adb.events == [tap]
+    assert adb.events == [["adb", *_DUMPSYS_WINDOW], tap]
 
 
 _CLEAR_FIELD = [[*_INPUT, "keyevent", "KEYCODE_DEL"], 0.2] * 20
