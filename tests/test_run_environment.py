@@ -265,7 +265,11 @@ def test_recorded_coordinates_are_rejected_for_display_drift(
     )
     with environment:
         recorder = StepRecorder(
-            environment, tmp_path / "steps", run_kind="explore", source="main_loop"
+            environment,
+            tmp_path / "steps",
+            run_kind="explore",
+            source="main_loop",
+            target_package="com.demo",
         )
         recorder.get_state()
         action: dict[str, object] = {"action": "tap", "x": 1, "y": 2}
@@ -297,7 +301,11 @@ def test_fresh_inputs_and_display_changes_have_observation_attribution(
     environment = _environment(tmp_path, png_screenshot, access)
     with environment:
         recorder = StepRecorder(
-            environment, tmp_path / "steps", run_kind="explore", source="main_loop"
+            environment,
+            tmp_path / "steps",
+            run_kind="explore",
+            source="main_loop",
+            target_package="com.demo",
         )
         before = recorder.get_state()
         access.current = replace(access.current, font_scale="1.5")
@@ -324,7 +332,11 @@ def test_missing_replay_evidence_never_dispatches_a_coordinate(
     )
     with environment:
         recorder = StepRecorder(
-            environment, tmp_path / "steps", run_kind="audit", source="edge_retry"
+            environment,
+            tmp_path / "steps",
+            run_kind="audit",
+            source="edge_retry",
+            target_package="com.demo",
         )
         with pytest.raises(UnsafeReplayError, match="recorded display evidence"):
             recorder.exe_action({"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4})
@@ -522,7 +534,11 @@ def test_matching_coordinate_replay_preserves_inputs_and_stable_observation_hist
     )
     with environment:
         recorder = StepRecorder(
-            environment, tmp_path / "steps", run_kind="explore", source="main_loop"
+            environment,
+            tmp_path / "steps",
+            run_kind="explore",
+            source="main_loop",
+            target_package="com.demo",
         )
         recorder.get_state()
         recorder.get_state()
@@ -546,7 +562,11 @@ def test_native_frame_rotation_is_attributed_without_a_settings_override(
     )
     with environment:
         recorder = StepRecorder(
-            environment, tmp_path / "steps", run_kind="explore", source="main_loop"
+            environment,
+            tmp_path / "steps",
+            run_kind="explore",
+            source="main_loop",
+            target_package="com.demo",
         )
         recorder.get_state()
         buffer = io.BytesIO()
@@ -706,7 +726,11 @@ def test_recorded_display_and_current_input_regions_guard_the_same_replay(
     )
     with environment:
         recorder = StepRecorder(
-            environment, tmp_path / "steps", run_kind="explore", source="main_loop"
+            environment,
+            tmp_path / "steps",
+            run_kind="explore",
+            source="main_loop",
+            target_package="com.demo",
         )
         observed = recorder.get_state()
         original: dict[str, object] = {"action": "tap", "x": 20, "y": 20}

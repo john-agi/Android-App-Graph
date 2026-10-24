@@ -132,7 +132,11 @@ def test_type_replacement_is_one_recorded_action(
 ) -> None:
     buffer = _EditableBuffer("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (13, 13))
     recorder = StepRecorder(
-        _controller(buffer, monkeypatch), tmp_path, run_kind="explore", source="main_loop"
+        _controller(buffer, monkeypatch),
+        tmp_path,
+        run_kind="explore",
+        source="main_loop",
+        target_package="com.demo",
     )
 
     recorder.exe_action({"action": "type", "text": "New"})

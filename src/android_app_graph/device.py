@@ -24,6 +24,12 @@ from typing import Any, Literal, NamedTuple, Protocol
 
 from android_app_graph.display_state import NIGHT_KEYS, DisplayState
 from android_app_graph.payloads import as_int
+from android_app_graph.system_surfaces import (
+    SystemOverlayActionError,
+    check_overlay_action,
+    permission_requester,
+    window_ownership,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -349,16 +355,26 @@ class AdbController:
 
     def get_state(self, *, deadline: float | None = None) -> dict[str, Any]:
         """Return the UI hierarchy XML, a base64 PNG screenshot, the focused package and
-        activity, both ``"unknown"`` when ``dumpsys window`` names none, and the
-        ``status_bar`` frame that ``status_bar_frame`` reads from the same dump.
+        activity, explicit system-boundary ownership, clipboard touch regions and the
+        ``status_bar`` frame from WindowManager. The window read precedes the image so
+        observed feedback ownership survives its dismissal during capture.
         ``deadline`` bounds every read and retry by the remaining monotonic time.
         """
         xml = self._ui_dump(deadline)
-        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"], deadline)
         dumpsys = self._read(
-            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"], deadline
+            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window", "-a"], deadline
         )
+        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"], deadline)
         package, activity = _focused_package_activity(dumpsys)
+        ownership = window_ownership(dumpsys, package, activity)
+        requester = None
+        if ownership.system_surface == "permission":
+            activities = self._read(
+                _adb_stdout_text,
+                [*self._serial, "shell", "dumpsys", "activity", "activities"],
+                deadline,
+            )
+            requester = permission_requester(activities, dumpsys)
         regions = input_regions(dumpsys)
         if regions is not None:
             self._observed_display = regions.display
@@ -367,9 +383,16 @@ class AdbController:
         return {
             "xml": xml,
             "screenshot": base64.b64encode(png).decode("ascii"),
-            "package": package,
-            "activity": activity,
+            "package": ownership.package,
+            "activity": ownership.activity,
+            "underlying_package": ownership.underlying_package,
+            "system_surface": ownership.system_surface,
+            "system_overlays": [list(region) for region in ownership.system_overlays],
+            "permission_requester": requester,
             "status_bar": status_bar_frame(dumpsys),
+            **(
+                {"system_overlay_error": ownership.overlay_error} if ownership.overlay_error else {}
+            ),
             "input_regions": regions.as_dict() if regions is not None else None,
         }
 
@@ -425,7 +448,14 @@ class AdbController:
 
     def _check_input(self, action: Mapping[str, object]) -> None:
         """Check current system input geometry once, immediately before coordinate input."""
-        dumpsys = self._read(_adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"], None)
+        dumpsys = self._read(
+            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window", "-a"], None
+        )
+        package, activity = _focused_package_activity(dumpsys)
+        ownership = window_ownership(dumpsys, package, activity)
+        if ownership.overlay_error is not None:
+            raise SystemOverlayActionError(ownership.overlay_error)
+        check_overlay_action(action, ownership.system_overlays)
         regions = input_regions(dumpsys)
         if regions is None:
             reason = "System input regions are unavailable; app input is deferred"
@@ -1222,42 +1252,13 @@ def _recovery_read_failure(
     return "confirm"
 
 
-_SYSTEM_OVERLAY_PACKAGES = frozenset(
-    {
-        "com.google.android.inputmethod.latin",
-        "com.android.inputmethod.latin",
-        "com.samsung.android.honeyboard",
-        "com.swiftkey.swiftkey",
-        "com.touchtype.swiftkey",
-        "com.android.systemui",
-        "com.android.permissioncontroller",
-        "com.google.android.permissioncontroller",
-        "com.android.packageinstaller",
-        "android",
-    }
-)
-
-
-def is_system_overlay(package: str) -> bool:
-    """Return whether ``package`` is a keyboard, the status bar or a system dialog.
-
-    These take focus on top of the app without navigating away from it, so the
-    explorer records their screens, such as a permission prompt, as part of the app.
-    """
-    if package in _SYSTEM_OVERLAY_PACKAGES:
-        return True
-    lower = package.lower()
-    return "inputmethod" in lower or "keyboard" in lower
-
-
 def is_outside_app(package: str, app_package: str) -> bool:
-    """Return whether ``package``, the package the device reports in front, belongs to
-    an app other than ``app_package``.
+    """Return whether the observed owner belongs to a destination outside the target app.
 
-    A system overlay sits on top of the app without leaving it, and an empty package
-    names no app.
+    Attached keyboards retain the underlying app owner at capture; independently
+    navigable system windows have their own owner.
     """
-    return bool(package) and package != app_package and not is_system_overlay(package)
+    return bool(package) and package != app_package
 
 
 class StillOutsideAppError(RuntimeError):
@@ -1283,10 +1284,16 @@ def restart_into_app(
 
 
 def return_to_app(
-    controller: DeviceController, app: AppLaunch, logger: logging.Logger
+    controller: DeviceController,
+    app: AppLaunch,
+    logger: logging.Logger,
+    *,
+    on_restart: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Press Back after a step opened another app and return the state of the app's
     screen, restarting the app with ``restart_into_app`` when Back does not return to it.
+
+    ``on_restart`` runs before the restart so callers can reset their expected screen.
 
     Back pops only the top activity, so the other app can stay in front, for example
     when Back only closed its keyboard. A launch would then resume the app's task with
@@ -1301,23 +1308,128 @@ def return_to_app(
     logger.warning(
         "Back left %s in front of %s. Restarting %s.", package, app.package_name, app.name
     )
+    if on_restart is not None:
+        on_restart()
     return restart_into_app(controller, app, logger)
 
 
-def grant_runtime_permissions(udid: str, package_name: str, recovery: StartupRecovery) -> None:
+class PermissionGrants(NamedTuple):
+    """The target package's declared permissions and successful authorized grants."""
+
+    requested: tuple[str, ...]
+    granted: tuple[str, ...]
+
+
+class UnresolvedPermissionError(RuntimeError):
+    """A permission request needs a decision outside the run's verified grant policy."""
+
+
+def resolve_permission_prompt(
+    controller: DeviceController,
+    app: AppLaunch,
+    state: dict[str, Any],
+    on_event: Callable[[Mapping[str, object]], None],
+    recovery: StartupRecovery,
+) -> dict[str, Any]:
+    """Resolve one standard target-app runtime prompt under its existing grant policy.
+
+    Caller identity comes from the focused permission activity's launch record. The
+    standard Allow button only closes a request whose declared runtime permissions
+    the existing policy already grants. Unknown requests stop with evidence.
+    """
+    requester = state.get("permission_requester")
+    on_event({"status": "permission_observed", "requester": requester, "target": app.package_name})
+    if requester != app.package_name:
+        msg = f"Permission requester {requester!r} is not verified as target {app.package_name}"
+        on_event({"status": "permission_unresolved", "reason": msg})
+        raise UnresolvedPermissionError(msg)
+    grants = grant_runtime_permissions(
+        controller.config["device"]["udid"], app.package_name, recovery
+    )
+    result = run_adb(
+        ["-s", controller.config["device"]["udid"], "shell", "dumpsys", "package", "permissions"],
+        output="capture",
+        check=True,
+    )
+    permission_records = re.split(r"(?=^  Permission \[)", result.stdout, flags=re.MULTILINE)
+    runtime = {
+        match.group(1)
+        for record in permission_records
+        if re.search(r"\bprot=dangerous(?:\W|$)", record)
+        and (match := re.search(r"Permission \[([\w.]+)\]", record)) is not None
+    }
+    requested = runtime.intersection(grants.requested)
+    on_event(
+        {
+            "status": "permission_grants",
+            "requested": list(grants.requested),
+            "runtime_requested": sorted(requested),
+            "granted": list(grants.granted),
+        }
+    )
+    if not requested or not requested.issubset(grants.granted):
+        msg = (
+            "Target runtime permission request is not fully covered by successful authorized grants"
+        )
+        on_event({"status": "permission_unresolved", "reason": msg})
+        raise UnresolvedPermissionError(msg)
+    state = controller.get_state()
+    if state.get("system_surface") != "permission":
+        return _resolved_permission_state(state, app.package_name, on_event)
+    if state.get("permission_requester") == app.package_name:
+        for node in _ui_nodes(state.get("xml", "")):
+            resource = node.get("resource-id", "").partition(":id/")[2]
+            if not node.get("resource-id", "").startswith(
+                "com.android.permissioncontroller:id/"
+            ) or resource not in {
+                "permission_allow_button",
+                "permission_allow_foreground_only_button",
+            }:
+                continue
+            bounds = _BOUNDS.fullmatch(node.get("bounds", ""))
+            if bounds is None or node.get("enabled") != "true":
+                continue
+            left, top, right, bottom = (int(v) for v in bounds.groups())
+            if left >= right or top >= bottom:
+                continue
+            controller.exe_action(
+                {"action": "tap", "x": (left + right) // 2, "y": (top + bottom) // 2}
+            )
+            state = controller.get_state()
+            if state.get("system_surface") != "permission":
+                return _resolved_permission_state(state, app.package_name, on_event)
+            break
+    msg = "Target permission dialog remains unresolved after its authorized grants"
+    on_event({"status": "permission_unresolved", "reason": msg})
+    raise UnresolvedPermissionError(msg)
+
+
+def _resolved_permission_state(
+    state: dict[str, Any], target: str, on_event: Callable[[Mapping[str, object]], None]
+) -> dict[str, Any]:
+    if state.get("package") != target:
+        msg = f"Permission recovery reached {state.get('package')!r} instead of target {target}"
+        on_event({"status": "permission_unresolved", "reason": msg})
+        raise UnresolvedPermissionError(msg)
+    on_event({"status": "permission_resolved", "package": target})
+    return state
+
+
+def grant_runtime_permissions(
+    udid: str, package_name: str, recovery: StartupRecovery
+) -> PermissionGrants:
     """Grant ``package_name`` every permission it requests.
 
-    A permission prompt that appears during exploration would be dismissed, which
-    denies the permission and leaves the feature behind it unexplored. ``pm grant``
-    refuses permissions that are not runtime permissions, such as ``INTERNET``, so
-    a refusal is only logged.
+    Startup and target-prompt recovery use the same declared-permission policy.
+    ``pm grant`` refuses permissions such as ``INTERNET`` that require no runtime
+    grant; each refusal is logged, and the result retains the successful grants.
     """
     shell = ["-s", udid, "shell"]
     dumpsys = recovery.command(
         "requested permissions", [*shell, "dumpsys", "package", package_name], check=True
     )
     permissions = _requested_permissions(dumpsys.stdout)
-    granted = 0
+    granted: list[str] = []
     for permission in permissions:
         grant = recovery.command(
             f"permission grant {permission}",
@@ -1325,12 +1437,13 @@ def grant_runtime_permissions(udid: str, package_name: str, recovery: StartupRec
             check=False,
         )
         if grant.returncode == 0:
-            granted += 1
+            granted.append(permission)
         else:
             logger.info("Could not grant %s to %s: %s", permission, package_name, _adb_error(grant))
     logger.info(
-        "Granted %d of %d requested permissions to %s", granted, len(permissions), package_name
+        "Granted %d of %d requested permissions to %s", len(granted), len(permissions), package_name
     )
+    return PermissionGrants(tuple(permissions), tuple(granted))
 
 
 def _requested_permissions(dumpsys_output: str) -> list[str]:

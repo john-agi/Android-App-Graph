@@ -515,8 +515,8 @@ apps left. When the switcher shows no app, its overview panel without an app car
 explorer presses Home at once.
 
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
-every permission it requests with `adb shell pm grant`, so no permission prompt
-interrupts exploration. The grants stay on the device. Permissions that
+every permission it requests with `adb shell pm grant`. The grants stay on the
+device. Permissions that
 `pm grant` refuses, such as `INTERNET`, are logged and skipped.
 
 The app is then launched with `adb shell am start -n <component>`. The component is
@@ -693,21 +693,45 @@ example when it only closed that app's keyboard. The explorer then restarts the
 app the same way, force-stopping it before the launch, because a launch alone
 resumes the app's task with the other app's screen still on top. If another app
 is still in front after the restart, exploration stops with an error naming its
-package. No screen of another app gets a node: whenever another app is in front
-when the explorer identifies a screen, such as at the end of a replay, it restarts
-the app first, and stops with the same error if the app does not come back. It
+package. When another app is in front during screen identification, such as at
+the end of a replay, the explorer restarts the app first, and stops with the same error if the app does not come back. It
 never records an edge out of an `ext_` node, so a replay never passes through one.
 The screen-description model decides what
 counts as external web, so the app's own screens get regular nodes even when they
-run in a web view or mention a privacy policy. A permission prompt or system dialog
-belongs to another package but sits on top of the app, so it gets a regular node
-and no back press. The keyboard also belongs to another package; a page with the
-keyboard shown shares the page's node, and the keyboard's visibility is recorded
-in the node's state.
-`app-graph-audit --re-explore` records external web pages and these dialogs the
-same way. A re-explore step that opens another app records nothing; the audit
-presses back, restarts the app if another app is still in front, and stops with
-the same error if the restart does not bring the app back.
+run in a web view or mention a privacy policy.
+
+Independently navigable system surfaces have explicit external identities: the
+notification shade, runtime permission controller and keyboard settings do not
+count as app coverage or become checkpoint, replay or resume targets. The visible
+shade window takes precedence over the underlying focused app. An attached
+keyboard preserves that app's identity and its visibility is page state. The target
+package's own pages remain app coverage, including Settings and keyboard settings
+when their package is the target.
+
+A standard runtime permission prompt is resolved only when its activity's launch
+record identifies the target as its requester and the target's declared dangerous
+permissions receive the run's existing grants. Its standard Allow button can then
+close the prompt. The step log keeps the requester, grant results and recovery
+input separately from app transitions. An unknown requester, unsupported button
+or repeated prompt saves the evidence and stops for an explicit permission decision.
+
+Android clipboard feedback retains its SystemUI ownership while the underlying
+app remains eligible. Captures read its visible window's explicit touchable region
+before the screenshot; raw images and native region coordinates remain in the step
+log. Model images mask those regions, and app coordinate inputs covered by current
+or captured feedback are deferred. Normal exploration counts that deferral as a
+wait without marking the target explored; audit exploration consumes an iteration,
+and replay stops its path. App Copy/Share and unobscured controls remain available.
+No automatic Back press dismisses a clipboard preview. A visible clipboard window
+with unavailable region geometry saves its raw capture and stops with an explicit
+ownership error. Window metadata and screenshots are consecutive device reads. The step log records their observed ownership.
+Persisted observations require explicit native size and ownership fields; graph
+loading and building report missing or malformed metadata before model calls.
+An explicit null represents unavailable evidence under the supported boundary policy.
+
+`app-graph-audit --re-explore` applies the same ownership and permission boundaries.
+A re-explore step that opens another app presses Back, restarts the app if another
+app remains in front, and stops if the target does not return.
 
 Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
@@ -831,10 +855,15 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 | `kind` | Written for | Also holds |
 |---|---|---|
 | `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash`, `black` and captured `input_regions` |
-| `action` | each requested device action, written before dispatch | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `action` | each input request, before ownership checks and device dispatch | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
 | `action_rejected` | each unreachable app coordinate input, with no input dispatched | `action_record`, the rejected request's ID, its `action`, the `reason` and current `input_regions` |
+| `system_event` | ownership recovery or rejected input | `observation`, `status`, and event-specific evidence; statuses are `action_skipped`, `boundary_recovery`, `boundary_resolved`, `permission_observed`, `permission_grants`, `permission_resolved` and `permission_unresolved` |
 | `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, and `expected_observation`, a screenshot of the screen the run expects it to show, or `null` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
+
+An `action` record preserves a request, not proof of dispatch. Both captured-feedback
+and dispatch-time rejection add an `action_skipped` system event and produce no app
+transition.
 
 An action, match or transition record takes `activity` and `package` from the
 screenshot it was taken from. A replay acts without looking, so a replayed action
@@ -1379,8 +1408,9 @@ batch text, app label, rule/schema and model settings. A matching request reuses
 proposals, including after revisits that preserve its displayed descriptions and
 navigation context. Cache misses run concurrently, up to 16 requests at a time;
 cache writes and report results follow batch order. Separately, answered member questions
-are keyed by both members' IDs, image bytes and descriptions and the verifier's
-rule/schema and resolved settings. A matching question reuses its answer while rounds
+are keyed by both members' IDs, masked image bytes, system feedback context and
+descriptions, and by the verifier's rule/schema and resolved settings. A matching
+question reuses its answer while rounds
 retain their deductions. Changes make the affected evidence eligible again. Timeouts,
 malformed replies and out-of-scope proposal replies remain eligible for a fresh
 request. Saving keeps these in-memory caches; loading a graph and a new process start
