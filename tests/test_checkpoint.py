@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import re
 import threading
 from collections.abc import Callable
@@ -12,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 from openrouter import OpenRouter
+from PIL import Image
 
 from android_app_graph.checkpoint import CHECKPOINT_INPUT_BYTES, IdentityBatch, IdentityNode
 from android_app_graph.utils import ModelSettings, graph_manager, vlm_utils
@@ -536,3 +538,45 @@ def test_a_missing_boolean_answer_is_unanswered_and_remains_eligible(
     assert first["results"][0]["same"] is None
     assert len(checkpoint_models.comparisons) == 2
     assert third["verifier_reused"] == 1
+
+
+def _set_member_feedback(graph: GraphManager, *, shown: bool, color: int) -> None:
+    assert graph.steps_dir is not None
+    path = graph.steps_dir / "000001.json"
+    record = json.loads(path.read_text())
+    record["native_size"] = [8, 8]
+    record["system_overlays"] = [[0, 0, 4, 4]] if shown else []
+    path.write_text(json.dumps(record))
+    Image.new("RGB", (8, 8), (color, color, color)).save(
+        graph.steps_dir / "000001.webp", format="WEBP", lossless=True
+    )
+
+
+def test_checkpoint_reuses_the_masked_member_evidence_sent_to_the_verifier(
+    checkpoint_graph: GraphManager, checkpoint_models: CheckpointModels
+) -> None:
+    _set_member_feedback(checkpoint_graph, shown=True, color=255)
+
+    first = checkpoint_graph.run_node_merge_audit()
+    second = checkpoint_graph.run_node_merge_audit()
+
+    assert first["verifier_requests"] == 1
+    assert (second["verifier_requests"], second["verifier_reused"]) == (0, 1)
+    assert len(checkpoint_models.comparisons) == 1
+    assert checkpoint_models.comparisons[0][0].system_feedback is True
+
+
+def test_checkpoint_feedback_context_changes_refresh_an_identical_image_question(
+    checkpoint_graph: GraphManager, checkpoint_models: CheckpointModels
+) -> None:
+    _set_member_feedback(checkpoint_graph, shown=True, color=128)
+    checkpoint_graph.run_node_merge_audit()
+    _set_member_feedback(checkpoint_graph, shown=False, color=128)
+
+    result = checkpoint_graph.run_node_merge_audit()
+
+    assert result["verifier_requests"] == 1
+    assert len(checkpoint_models.comparisons) == 2
+    before, after = [pair[0] for pair in checkpoint_models.comparisons]
+    assert before.screenshot_b64 == after.screenshot_b64
+    assert (before.system_feedback, after.system_feedback) == (True, False)
