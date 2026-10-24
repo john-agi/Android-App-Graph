@@ -811,6 +811,7 @@ def test_get_state_raises_naming_the_command_when_a_read_times_out_twice(
         ({"action": "enter"}, [[*_INPUT, "keyevent", "KEYCODE_ENTER"], 1]),
         ({"action": "back"}, [[*_INPUT, "keyevent", "KEYCODE_BACK"], 1]),
         ({"action": "home"}, [[*_INPUT, "keyevent", "KEYCODE_HOME"], 1]),
+        ({"action": "menu"}, [[*_INPUT, "keyevent", "KEYCODE_MENU"], 1]),
         ({"action": "wait", "duration": 2}, [2]),
         ({"action": "wait", "time": 5}, [5]),
         ({"action": "wait"}, [3]),
@@ -834,6 +835,7 @@ def test_each_action_sends_its_adb_command_and_pause(
         {"action": "long_press", "x": 10, "y": 20},
         {"action": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4},
         {"action": "back"},
+        {"action": "menu"},
         {"action": "type", "text": "Hi"},
     ],
 )
