@@ -2195,7 +2195,7 @@ def test_re_explore_skips_a_missing_node_and_ignores_an_issue_of_another_type(
 
 
 def _install_fake_adb(monkeypatch: pytest.MonkeyPatch, controller: DeviceController) -> None:
-    monkeypatch.setattr(audit, "AdbController", lambda _config, _logger: controller)
+    monkeypatch.setattr(audit, "AdbController", lambda _config, _logger, **_kwargs: controller)
 
 
 @pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep", "device_log")
@@ -2685,7 +2685,9 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
         lambda *_args: {"issues": [{**_inspection(), "type": "explore_node", "node": "s0"}]},
     )
     monkeypatch.setattr(
-        audit, "grant_runtime_permissions", lambda *args: events.append(("grant", *args))
+        audit,
+        "grant_runtime_permissions",
+        lambda udid, package, _recovery: events.append(("grant", udid, package)),
     )
     monkeypatch.setattr(audit, "launch_app", launch)
     monkeypatch.setattr(audit, "re_explore_issues", re_explore)
@@ -2802,3 +2804,25 @@ def test_recorded_confirmation_uses_the_source_screen_context(
     assert "policy" in result["reason"]
     assert _DETAIL_TAP not in device_log
     assert device_log == []
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients")
+def test_audit_startup_unreachable_device_exits_nonzero_with_a_clear_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.device import DeviceUnreachableError
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    config = tmp_path / "audit.yaml"
+    config.write_text("apps: []\n", encoding="utf-8")
+
+    def unavailable(*_args: object, **_kwargs: object) -> NoReturn:
+        msg = "Device test-device unreachable for 0.75 minutes"
+        raise DeviceUnreachableError(msg)
+
+    monkeypatch.setattr(audit, "_open_re_explore_session", unavailable)
+
+    assert audit.main(["--config", str(config), "--re-explore"]) == 1
+    assert capsys.readouterr().err == (
+        "app-graph-audit: error: Device test-device unreachable for 0.75 minutes\n"
+    )
