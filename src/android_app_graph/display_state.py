@@ -163,7 +163,10 @@ class DisplayState:
             ("cmd", "uimode", "time", "end", self.custom_end),
             ("cmd", "uimode", "night", self.night_mode),
         ]
-        values = {"font_scale": self.font_scale, **self.night_settings}
+        values = {
+            "font_scale": self.font_scale,
+            **{key: self.night_settings[key] for key in NIGHT_KEYS},
+        }
         for key, value in values.items():
             namespace = "system" if key == "font_scale" else "secure"
             commands.append(
@@ -172,3 +175,21 @@ class DisplayState:
                 else ("settings", "put", namespace, key, value)
             )
         return commands
+
+    def changed_restoration_commands(self, current: DisplayState) -> list[tuple[str, ...]]:
+        commands = self.restoration_commands()
+        changes = [
+            (self.size_override != current.size_override, commands[0]),
+            (self.density_override != current.density_override, commands[1]),
+            (self.custom_start != current.custom_start, commands[2]),
+            (self.custom_end != current.custom_end, commands[3]),
+            (self.night_mode != current.night_mode, commands[4]),
+        ]
+        values = {
+            "font_scale": self.font_scale,
+            **{key: self.night_settings[key] for key in NIGHT_KEYS},
+        }
+        for index, (key, value) in enumerate(values.items(), start=5):
+            actual = current.font_scale if key == "font_scale" else current.night_settings[key]
+            changes.append((value != actual, commands[index]))
+        return [command for changed, command in changes if changed]

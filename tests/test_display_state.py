@@ -198,3 +198,20 @@ def test_seed_directory_loss_and_read_failure_are_distinct(adb: _Adb, stderr: st
     else:
         with pytest.raises(subprocess.CalledProcessError):
             device.AdbDisplayAccess("fake").seed_hashes("/sdcard/seed")
+
+
+def test_retry_commands_include_only_mismatched_owned_values(baseline: DisplayState) -> None:
+    current = replace(baseline, font_scale="1.0")
+    assert baseline.changed_restoration_commands(current) == [
+        ("settings", "delete", "system", "font_scale")
+    ]
+    current = replace(
+        current,
+        size_override=(1080, 1920),
+        density_override=400,
+        night_mode="yes",
+        custom_start="21:00",
+        custom_end="05:30",
+        night_settings=dict.fromkeys(NIGHT_KEYS, "0"),
+    )
+    assert baseline.changed_restoration_commands(current) == baseline.restoration_commands()

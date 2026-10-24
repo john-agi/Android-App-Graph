@@ -285,6 +285,13 @@ class RunEnvironment:
         commands = baseline.restoration_commands()
         failures: list[dict[str, object]] = []
         operations: list[dict[str, object]] = []
+        before: DisplayState | None = None
+        before_time = datetime.now(UTC).isoformat()
+        try:
+            before = self._access.capture(deadline=deadline)
+        except Exception as exc:
+            self._logger.exception("Display cleanup initial capture failed")
+            failures.append({"initial_capture_error": str(exc)})
         for command in commands:
             try:
                 self._access.execute(command, deadline=deadline)
@@ -300,16 +307,31 @@ class RunEnvironment:
         except Exception as exc:
             self._logger.exception("Display cleanup verification failed")
             failures.append({"verification_error": str(exc)})
+        if final is not None and final != baseline and time.monotonic() < deadline:
+            final = self._retry_restoration(baseline, final, deadline, operations, failures)
         cleanup: dict[str, object] = {
             "timestamp": datetime.now(UTC).isoformat(),
             "status": "restored" if final == baseline else "pending",
             "original_error": None if error is None else type(error).__name__,
             "scope": "supported_display_settings",
+            "before": None if before is None else before.to_dict(),
+            "before_captured_at": before_time,
+            "last_observation": self._observation,
             "app_data_cleanup": "operator_recipe_or_authorized_device_reset",
             "operations": operations,
             "failures": failures,
             "pending_commands": [] if final == baseline else [list(c) for c in commands],
             "actual": None if final is None else final.to_dict(),
+            "verification": {
+                key: {
+                    "expected": expected,
+                    "actual": None if final is None else final.to_dict()[key],
+                    "status": "restored"
+                    if final is not None and final.to_dict()[key] == expected
+                    else "pending",
+                }
+                for key, expected in baseline.to_dict().items()
+            },
         }
         seed = self._report.get("seed")
         if isinstance(seed, dict):
@@ -319,11 +341,42 @@ class RunEnvironment:
         self._report["pending_restoration"] = cleanup["pending_commands"]
         self._save()
 
+    def _retry_restoration(
+        self,
+        baseline: DisplayState,
+        current: DisplayState,
+        deadline: float,
+        operations: list[dict[str, object]],
+        failures: list[dict[str, object]],
+    ) -> DisplayState | None:
+        commands = baseline.changed_restoration_commands(current)
+        if not commands:
+            return current
+        for command in commands:
+            try:
+                self._access.execute(command, deadline=deadline)
+                operations.append({"command": list(command), "status": "applied", "attempt": 2})
+            except Exception as exc:
+                self._logger.exception("Display cleanup retry failed: %s", command)
+                failure: dict[str, object] = {
+                    "command": list(command),
+                    "error": str(exc),
+                    "attempt": 2,
+                }
+                failures.append(failure)
+                operations.append({**failure, "status": "failed"})
+        try:
+            return self._access.capture(deadline=deadline)
+        except Exception as exc:
+            self._logger.exception("Display cleanup retry verification failed")
+            failures.append({"verification_error": str(exc), "attempt": 2})
+            return None
+
     def _report_seed(
         self, seed: dict[str, object], cleanup: dict[str, object], deadline: float
     ) -> None:
         try:
-            final = self._access.seed_hashes(as_str(seed["root"], ""), deadline=deadline)
+            final = self._access.seed_hashes(_seed_root(seed["root"]), deadline=deadline)
             before = as_object_dict(seed["baseline"])
             cleanup["seed_changes"] = {
                 "added": sorted(set(final) - set(before)),
