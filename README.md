@@ -234,9 +234,9 @@ with each request:
 
 A role's positive, finite `request_timeout` (or `timeout`) in seconds replaces these
 for every call of the role. A screenshot embedding takes the `embedding` block's
-timeout when the `image_embedding` block sets none. The graph audit and node-merge
-audit send the whole graph in one prompt, so they take
-`page_detail.audit_request_timeout` instead, default 300 seconds.
+timeout when the `image_embedding` block sets none. The graph audit and each
+checkpoint duplicate-proposal request take `page_detail.audit_request_timeout`,
+default 300 seconds.
 
 Each attempt ends at that timeout by the wall clock, counted from when the
 request is sent, so connecting and the response headers count too. httpx's own
@@ -570,7 +570,8 @@ screen can reach, and favours nodes with many unexplored elements, few outgoing
 edges and few visits. Each checkpoint lets the model choose among the
 `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also offers the
 app's start screen while it has unexplored elements, in the last of those places
-when it ranks below them.
+when it ranks below them. Its duplicate-node pass uses
+[bounded checkpoint evidence](#checkpoint-evidence).
 
 Back on the start screen leaves the app for the home screen, as does Back on the
 screen an app opens on instead, and exploration then restarts the app onto the same
@@ -1208,9 +1209,8 @@ stay apart unless "same" answers on other pairs join them.
 
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage
-checkpoint's merge audit verifies the model's pairs the same way and proposes none
-from images or descriptions, since every checkpoint would otherwise propose again each
-pair an earlier one kept apart.
+checkpoint verifies its model-proposed pairs with these rounds and keeps its
+[checkpoint evidence caches](#checkpoint-evidence) on the graph manager.
 
 `<app_name>_merge.json` holds:
 
@@ -1224,6 +1224,48 @@ pair an earlier one kept apart.
   the verifier's `reason` and `reused` for an asked pair or the asked pairs it is
   `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
   `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
+
+#### Checkpoint evidence
+
+A checkpoint considers every unordered pair of in-app nodes with members in the same
+package. Nodes are ordered by their numeric ID, then name, and divided into blocks of
+64. Each block has one within-block request when it has at least two nodes; each pair
+of blocks has one cross-block request. Cross-block requests consider pairs with one
+node in each block. The model uses local IDs whose mapping is owned by that request.
+Proposals outside its scope are reported as skipped.
+
+Each request contains at most 128 nodes and 128 KiB of graph evidence in UTF-8 bytes.
+A node supplies up to three distinct member descriptions, 128 bytes each, its package
+and activities, and up to two incoming and two outgoing neighbor descriptions, 64
+bytes each. Descriptions are ordered lexically; repeated edge actions leave this
+input unchanged. The app label uses at most 128 UTF-8 bytes. The logged full JSON-body
+bound includes the fixed prompt, response schema, model settings, response-healing
+plugin and JSON framing, with up to six encoded bytes per content byte for escaping.
+Returned usage supplies the actual prompt-token count.
+
+The complete pair coverage has quadratic cold work. For a single package:
+
+| Nodes | Proposal requests with a cold cache |
+|---:|---:|
+| 64 | 1 |
+| 100 | 3 |
+| 1,000 | 136 |
+| 3,000 | 1,128 |
+
+A graph manager keeps complete proposal replies keyed by batch membership, full
+member-image and description evidence, navigation context, rule/schema and model
+settings. A matching batch reuses its proposals. Separately, answered member questions
+are keyed by both members' IDs, image bytes and descriptions and the verifier's
+rule/schema and resolved settings. A matching question reuses its answer while rounds
+retain their deductions. Changes make the affected evidence eligible again. Timeouts,
+malformed replies and out-of-scope proposal replies remain eligible for a fresh
+request. Saving keeps these in-memory caches; loading a graph and a new process start
+with empty caches.
+
+Checkpoint logs report eligible and excluded nodes/pairs, each batch's size and input
+bytes, skipped proposals, unanswered batches, proposal requests/cache hits and member
+verifier requests/cache hits. Those request counts describe invocations; transport
+attempts and their usage follow [Requests and recovery](#requests-and-recovery).
 
 #### Member checks
 
