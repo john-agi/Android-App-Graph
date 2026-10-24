@@ -747,6 +747,35 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
     assert '"is_external_web"' in body["messages"][0]["content"][0]["text"]
 
 
+def test_graph_audit_assesses_the_effect_of_both_kinds_of_device_proposal(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"issues":[],"summary":"Inspection complete"}'))
+    vlm.audit_graph(router_client, "Phone keypad and deletion confirmation", settings=PAGE_DETAIL)
+    [request] = [json.loads(request.content) for request in router_requests]
+    variants = request["response_format"]["json_schema"]["schema"]["properties"]["issues"]["items"][
+        "anyOf"
+    ]
+    for variant in variants:
+        if variant["properties"]["type"]["enum"][0] == "merge_nodes":
+            continue
+        assert "execution" in variant["required"]
+        assessment = variant["properties"]["execution"]
+        assert assessment["properties"]["effect"]["enum"] == [
+            "inspection",
+            "side_effect",
+            "uncertain",
+        ]
+        assert assessment["required"] == ["effect", "reason"]
+    prompt = request["messages"][0]["content"]
+    assert "controlled test number" in prompt
+    assert "confirmation dialog followed" in prompt
+    assert "A recorded action is" in prompt
+
+
 def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
