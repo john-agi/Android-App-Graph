@@ -848,6 +848,65 @@ def described_with(vlm: FakeVlm) -> list[object]:
     return [call["known_descriptions"] for kind, call in vlm.calls if kind == "describe"]
 
 
+def context_manager(steps_dir: Path, descriptions: list[str]) -> GraphManager:
+    """Load a package with one member per description and tied image scores."""
+    gm = make_manager(steps_dir)
+    for index, description in enumerate(descriptions):
+        add_screen(
+            gm,
+            f"s{index}",
+            description,
+            **members(steps_dir, f"member-{index}".encode()),
+        )
+    gm.use_image_vectors({f"{index:06d}": ANY_IMAGE for index in range(len(descriptions))})
+    return with_text_vectors(gm, steps_dir)
+
+
+def test_describe_context_bounds_entries_and_keeps_relevant_competing_purposes(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    descriptions = [f"Settings section {index}" for index in range(40)]
+    descriptions[-2:] = ["Schedule start time picker", "Schedule end time picker"]
+    gm = context_manager(screen.steps_dir, descriptions)
+    gm.use_image_vectors({f"{index:06d}": [0.0, 1.0, 0.0] for index in range(38)})
+    vlm.descriptions.append(("Schedule end time picker", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "the same picker"})
+
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    assert described_with(vlm) == [descriptions[:14] + descriptions[-2:]]
+    assert [gm.description(f"{index:06d}") for index in range(40)] == descriptions
+    assert all(gm.text_vector(f"{index:06d}") == UNKNOWN_EMBEDDING for index in range(40))
+
+
+def test_describe_context_reserves_the_expected_nodes_closest_purpose(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    descriptions = [f"Settings section {index}" for index in range(20)]
+    gm = context_manager(screen.steps_dir, descriptions)
+    gm.use_image_vectors({"000019": [0.0, 1.0, 0.0]})
+    vlm.descriptions.append(("Expected destination", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "the expected destination"})
+
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE), expected_observation="000019")
+
+    assert described_with(vlm) == [descriptions[:15] + descriptions[-1:]]
+
+
+def test_describe_context_bounds_utf8_text_and_keeps_whole_unique_descriptions(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    descriptions = ["Very long description " * 200, "界" * 300, "語" * 300, "字" * 300, "Short"]
+    gm = context_manager(screen.steps_dir, [*descriptions, "Short"])
+    vlm.descriptions.append(("Short", {}, []))
+    vlm.verdicts.append({"same": True, "reason": "the same page"})
+
+    gm.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    assert described_with(vlm) == [[descriptions[1], descriptions[2], "Short"]]
+    assert [gm.description(f"{index:06d}") for index in range(5)] == descriptions
+
+
 SHOT_D, SHOT_E, SHOT_F = (b64(f"screenshot-{name}".encode()) for name in "def")
 SHOT_TOOL, SHOT_WEB = b64(b"screenshot-tool"), b64(b"screenshot-web")
 
