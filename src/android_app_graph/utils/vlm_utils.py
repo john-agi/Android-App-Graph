@@ -748,7 +748,7 @@ You may call one or more functions to assist with the user query.
 
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
-{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is 999x999.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application background menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}}}
+{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is 999x999.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application options menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}}}
 </tools>
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
@@ -1842,14 +1842,14 @@ def _type(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, 
     raise ValueError(msg)
 
 
-_SYSTEM_BUTTONS: dict[str, str] = {"Back": "back", "Home": "home", "Enter": "enter"}
+_SYSTEM_BUTTONS: dict[str, str] = {"Back": "back", "Home": "home", "Menu": "menu", "Enter": "enter"}
 
 
 def _system_button(args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, object]:
     button = args.get("button", "")
     if isinstance(button, str) and button in _SYSTEM_BUTTONS:
         return {"action": _SYSTEM_BUTTONS[button]}
-    msg = "System button must be Back, Home or Enter"
+    msg = "System button must be Back, Home, Menu or Enter"
     raise ValueError(msg)
 
 
@@ -2036,7 +2036,7 @@ screen before the step. The step performed this action, with coordinates in pixe
 
 "tap" and "long_press" act on the element at x, y; "swipe" moves from x1, y1 to x2, y2; \
 "type" enters its text into the focused field; "back", "home" and "enter" press that \
-button. A list is a sequence of such actions.
+button; "menu" opens the application options menu. A list is a sequence of such actions.
 
 Write the instruction this step carried out, as one atomic action that names the element \
 it acts on. If you refer to text visible on the screenshot, wrap the exact text in quotes, \

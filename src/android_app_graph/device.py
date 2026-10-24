@@ -233,7 +233,7 @@ class AdbController:
             case "type":
                 self._clear()
                 self._type(action["text"])
-            case "enter" | "back" | "home" as key:
+            case "enter" | "back" | "home" | "menu" as key:
                 self._press(f"KEYCODE_{key.upper()}")
             case "wait":
                 time.sleep(action.get("duration", action.get("time", _DEFAULT_WAIT_SECONDS)))

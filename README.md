@@ -410,6 +410,9 @@ provided; otherwise `up`, `down`, `left` or `right` works with omitted, null or
 one valid coordinate pair. Supplied malformed coordinates still trigger
 [action recovery](#requests-and-recovery). For swipes and long presses, a
 numeric `time` takes precedence over `duration`; the default is 1000 milliseconds.
+System buttons `Back`, `Home`, `Menu` and `Enter` become `back`, `home`, `menu` and
+`enter` actions. Menu opens the application's options menu with `KEYCODE_MENU`;
+graph actions, step logs and replay preserve the `menu` action.
 Unsupported swipe directions, unknown actions or system buttons, and type
 actions without a text string trigger the same bounded action recovery.
 Explicit `end` and `terminate` become an `end` action, which exploration and the
