@@ -913,7 +913,7 @@ _CLEAR_FIELD = [
 @pytest.mark.parametrize("command_index", [0, 1], ids=["select-all", "delete-selection"])
 @pytest.mark.parametrize("failure", ["exit", "timeout"])
 def test_clearing_failure_stops_type_without_retrying_input(
-    controller: device.AdbController, adb: _FakeAdb, command_index: int, failure: str
+    controller: device.DeviceController, adb: _FakeAdb, command_index: int, failure: str
 ) -> None:
     command = _CLEAR_FIELD[command_index]
     args = tuple(command[1:])
