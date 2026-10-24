@@ -17,6 +17,8 @@ from android_app_graph.device import (
     DeviceController,
     DeviceUnreachableError,
     ForceStopRefusedError,
+    InputRejectedError,
+    input_region_hint,
     is_outside_app,
     keyboard_status,
     restart_app,
@@ -400,34 +402,40 @@ class Kobe:
             target_node,
         )
 
-        for i, (node_id, action, setup) in enumerate(path):
-            if i == 0:
-                continue  # the first entry is the node the replay starts on and carries no action
+        try:
+            for i, (node_id, action, setup) in enumerate(path):
+                if i == 0:
+                    continue  # the first entry is the node the replay starts on and carries no action
 
-            self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
-            if isinstance(action, list):
-                self.logger.info(
-                    "  Replay %d/%d: %s --> %s via %d compound actions",
-                    i,
-                    len(path) - 1,
-                    path[i - 1][0],
-                    node_id,
-                    len(action),
-                )
-                for sub_action in action:
-                    self.controller.exe_action(sub_action)
-                    time.sleep(0.5)
-            else:
-                self.logger.info(
-                    "  Replay %d/%d: %s --> %s via %s",
-                    i,
-                    len(path) - 1,
-                    path[i - 1][0],
-                    node_id,
-                    action.get("action", "?"),
-                )
-                self.controller.exe_action(action)
-            time.sleep(1)  # brief pause for the UI to settle
+                self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
+                if isinstance(action, list):
+                    self.logger.info(
+                        "  Replay %d/%d: %s --> %s via %d compound actions",
+                        i,
+                        len(path) - 1,
+                        path[i - 1][0],
+                        node_id,
+                        len(action),
+                    )
+                    for sub_action in action:
+                        self.controller.exe_action(sub_action)
+                        time.sleep(0.5)
+                else:
+                    self.logger.info(
+                        "  Replay %d/%d: %s --> %s via %s",
+                        i,
+                        len(path) - 1,
+                        path[i - 1][0],
+                        node_id,
+                        action.get("action", "?"),
+                    )
+                    self.controller.exe_action(action)
+                time.sleep(1)  # brief pause for the UI to settle
+
+        except InputRejectedError as error:
+            self.logger.warning(
+                "Replay input is unreachable: %s; identifying the current screen", error
+            )
 
         actual_node, _ = self._identify(
             self.controller.get_state(),
@@ -632,25 +640,23 @@ class Kobe:
             if continued is not None:
                 return continued
         move = self._plan_move(position, tokens_before)
+        if move is not None:
+            if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
+                continued = self._continue_from_ranked_target(
+                    position,
+                    tokens_before,
+                    max_steps,
+                    reason=f"Back on {position.node} leaves the app",
+                )
+                if continued is not None:
+                    return continued
+            try:
+                self.controller.exe_action(move.action)
+            except InputRejectedError as error:
+                self.logger.warning("App input is unreachable: %s; counting a wait", error)
+                move = None
         if move is None:
-            time.sleep(1)
-            device_state = self.controller.get_state()
-            self._count_step(
-                position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
-            )
-            self.save_graph()
-            return _Position(position.node, device_state)
-
-        if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
-            continued = self._continue_from_ranked_target(
-                position,
-                tokens_before,
-                max_steps,
-                reason=f"Back on {position.node} leaves the app",
-            )
-            if continued is not None:
-                return continued
-        self.controller.exe_action(move.action)
+            return self._wait_at(position, tokens_before, max_steps)
         time.sleep(0.5)
         device_state = self.controller.get_state()
         package = device_state.get("package", "").strip()
@@ -662,6 +668,18 @@ class Kobe:
         if new_node == EXTERNAL_WEB_NODE:
             return self._record_external_web_step(move, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
+
+    def _wait_at(
+        self, position: _Position, tokens_before: dict[str, int], max_steps: int
+    ) -> _Position:
+        """Spend one bounded step waiting, preserving the target's unexplored status."""
+        time.sleep(1)
+        device_state = self.controller.get_state()
+        self._count_step(
+            position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
+        )
+        self.save_graph()
+        return _Position(position.node, device_state)
 
     def _saturated(self, node: str) -> bool:
         """Return whether the last ``SATURATING_SELF_LOOP_STEPS`` steps planned on ``node``
@@ -725,6 +743,9 @@ class Kobe:
             keyboard_status(keyboard_hint),
             self.graph.observation_state(Observation.from_state(position.device_state)),
         )
+
+        input_status += input_region_hint(position.device_state)
+        input_status += self.controller.input_rejection_hint
 
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(

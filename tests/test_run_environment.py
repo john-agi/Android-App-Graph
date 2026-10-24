@@ -19,7 +19,7 @@ from PIL import Image
 from android_app_graph import cli, device, run_environment
 from android_app_graph.display_state import NIGHT_KEYS, DisplayState
 from android_app_graph.run_environment import RunEnvironment, UnsafeReplayError, mutation_config
-from android_app_graph.step_log import StepRecorder, StepSource
+from android_app_graph.step_log import StepRecorder, StepSource, read_records
 
 
 class _Script:
@@ -676,3 +676,70 @@ def test_cli_reports_a_missing_baseline_as_an_operator_error(
         cli.main()
     assert not script.graph.with_name("demo_run.json").exists()
     assert script.graph.read_text() == "{}"
+
+
+@pytest.mark.parametrize("display_drift", [False, True])
+@pytest.mark.parametrize("blocked_input", [False, True])
+def test_recorded_display_and_current_input_regions_guard_the_same_replay(
+    tmp_path: Path, png_screenshot: str, *, display_drift: bool, blocked_input: bool
+) -> None:
+    access = _Access()
+    regions = device.InputRegions((0, 0, 720, 1280), ((0, 0, 10, 10),), ())
+
+    class GuardedDevice(_ScreenDevice):
+        checks = 0
+
+        @override
+        def get_state(self, *, deadline: float | None = None) -> dict[str, object]:
+            return {**super().get_state(deadline=deadline), "input_regions": regions.as_dict()}
+
+        @override
+        def exe_action(self, action: dict[str, object]) -> None:
+            self.checks += 1
+            if reason := regions.reject_reason(action):
+                raise device.InputRejectedError(reason, regions)
+            super().exe_action(action)
+
+    controller = GuardedDevice(png_screenshot)
+    environment = RunEnvironment(
+        controller, access, tmp_path / "demo.json", mutation={}, logger=logging.getLogger("test")
+    )
+    with environment:
+        recorder = StepRecorder(
+            environment, tmp_path / "steps", run_kind="explore", source="main_loop"
+        )
+        observed = recorder.get_state()
+        original: dict[str, object] = {"action": "tap", "x": 20, "y": 20}
+        recorder.exe_action(original)
+        controller.actions.clear()
+        controller.checks = 0
+        replay = {**original, "x": 1 if blocked_input else 20, "y": 2 if blocked_input else 20}
+        if display_drift:
+            access.current = replace(access.current, font_scale="1.5")
+        with recorder.source("navigation_replay"):
+            if display_drift:
+                with pytest.raises(UnsafeReplayError, match="recorded display state"):
+                    recorder.exe_action(replay)
+            elif blocked_input:
+                with pytest.raises(device.InputRejectedError, match="system touch region"):
+                    recorder.exe_action(replay)
+            else:
+                recorder.exe_action(replay)
+        assert controller.checks == (0 if display_drift else 1)
+        assert len(controller.actions) == (0 if display_drift or blocked_input else 1)
+        records = read_records(recorder.steps)
+        observation = next(record for record in records if record["kind"] == "observation")
+        assert observation["input_regions"] == regions.as_dict()
+        assert observation["display_state"] == observed["display_state"]
+        rejected = [record for record in records if record["kind"] == "action_rejected"]
+        assert len(rejected) == int(display_drift or blocked_input)
+        if blocked_input and not display_drift:
+            assert rejected[0]["input_regions"] == regions.as_dict()
+            assert "system touch region" in recorder.input_rejection_hint
+        elif display_drift:
+            reason = rejected[0]["reason"]
+            assert isinstance(reason, str)
+            assert "recorded display state" in reason
+    report = json.loads(environment.path.read_text())
+    assert report["lifecycle"] == "restored"
+    assert report["changes"][0]["observation"] == observed["observation_id"]

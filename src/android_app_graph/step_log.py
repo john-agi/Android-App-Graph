@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from PIL import Image
 
+from android_app_graph.device import InputRejectedError
 from android_app_graph.graph_files import (
     image_embeddings_path,
     load_embeddings,
@@ -245,6 +246,8 @@ class StepRecorder:
         self._run_kind = run_kind
         self._source = source
         self._last_observation: Observation | None = None
+        self._last_input_regions: object = None
+        self.input_rejection_hint: str = ""
         self.last_match: str | None = None
         steps.mkdir(parents=True, exist_ok=True)
         self._next_number = _first_free_number(steps)
@@ -269,6 +272,8 @@ class StepRecorder:
         """
         state = self._controller.get_state(deadline=deadline)
         png = base64.b64decode(state["screenshot"], validate=True)
+        with Image.open(io.BytesIO(png)) as native_image:
+            self.w, self.h = native_image.size
         webp = encode_screenshot(png)
         with Image.open(io.BytesIO(webp)) as image:
             width, height = image.size
@@ -297,11 +302,21 @@ class StepRecorder:
                 "pixel_hash": observation.pixel_hash,
                 "black": observation.black,
                 "display_state": state.get("display_state"),
+                **({"input_regions": state["input_regions"]} if "input_regions" in state else {}),
             },
         )
         if isinstance(self._controller, RunRecording):
             self._controller.record_observation(observation.observation_id, self._source)
+        last = self._last_observation
+        if (
+            last is None
+            or (last.package, last.activity, last.pixel_hash)
+            != (observation.package, observation.activity, observation.pixel_hash)
+            or self._last_input_regions != state.get("input_regions")
+        ):
+            self.input_rejection_hint = ""
         self._last_observation = observation
+        self._last_input_regions = state.get("input_regions")
         return {
             **state,
             "screenshot": observation.screenshot_b64,
@@ -328,13 +343,33 @@ class StepRecorder:
                     {"action": action, "reason": str(error)},
                 )
                 raise
+        action_id = self._take_step_id()
         self._write_record(
-            self._take_step_id(),
+            action_id,
             "action",
             last,
             {"observation": last.observation_id if last else None, "action": action},
         )
-        self._controller.exe_action(action)
+        try:
+            self._controller.exe_action(action)
+        except InputRejectedError as error:
+            self.input_rejection_hint = (
+                f"\nPrevious {action['action']} was rejected: {error}. "
+                "Choose another reachable action or reveal the obscured control before trying it."
+            )
+            self._write_record(
+                self._take_step_id(),
+                "action_rejected",
+                last,
+                {
+                    "action_record": action_id,
+                    "action": action,
+                    "reason": str(error),
+                    "input_regions": error.regions,
+                },
+            )
+            raise
+        self.input_rejection_hint = ""
 
     def record_match(self, observation: Observation, expected_observation: str | None) -> None:
         """Record that the run asks for the node of ``observation``, expecting the node
@@ -375,7 +410,7 @@ class StepRecorder:
     def _write_record(
         self,
         step_id: str,
-        kind: Literal["observation", "action", "match", "transition", "action_rejected"],
+        kind: Literal["observation", "action", "action_rejected", "match", "transition"],
         screen: Observation | None,
         fields: Mapping[str, object],
     ) -> None:

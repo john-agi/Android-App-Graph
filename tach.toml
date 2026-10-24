@@ -53,6 +53,7 @@ depends_on = []
 path = "android_app_graph.step_log"
 depends_on = [
     "android_app_graph.run_environment",
+    "android_app_graph.device",
     "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.screen_image",
@@ -115,7 +116,7 @@ depends_on = []
 
 [[modules]]
 path = "android_app_graph.device"
-depends_on = ["android_app_graph.display_state"]
+depends_on = ["android_app_graph.display_state", "android_app_graph.payloads"]
 
 [[modules]]
 path = "android_app_graph.payloads"
