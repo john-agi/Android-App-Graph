@@ -3377,6 +3377,12 @@ def _dump_timed_out() -> subprocess.TimeoutExpired:
     return _timed_out("exec-out", "uiautomator dump /dev/stdout", timeout=30)
 
 
+def _read_failed(diagnostic: str) -> subprocess.CalledProcessError:
+    return subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window"], stderr=diagnostic
+    )
+
+
 class _StallingDevice:
     """A DeviceController that answers each read with the next of ``reads``, raising one
     that is an exception as adb does for a device that does not answer, and logs each
@@ -3438,6 +3444,16 @@ _DETAIL_SCREEN = _screen("com.demo.Detail", "blue")
 @pytest.mark.parametrize(
     ("reads", "stalled_actions", "probes", "sleeps"),
     [
+        *[
+            pytest.param(
+                [HOME_SCREEN, _LIST_SCREEN, _read_failed(diagnostic), _LIST_SCREEN, _DETAIL_SCREEN],
+                (2,),
+                ["answer"],
+                [0.5, 30, 0.5],
+                id=f"recovery read exits nonzero: {diagnostic or 'no diagnostics'}",
+            )
+            for diagnostic in ("error: device offline", "")
+        ],
         pytest.param(
             [HOME_SCREEN, _LIST_SCREEN, _dump_timed_out(), _LIST_SCREEN, _DETAIL_SCREEN],
             (),
@@ -3456,7 +3472,7 @@ _DETAIL_SCREEN = _screen("com.demo.Detail", "blue")
             [HOME_SCREEN, _LIST_SCREEN, _dump_timed_out(), _LIST_SCREEN, _DETAIL_SCREEN],
             (2,),
             ["answer"],
-            [0.5, 0.5],
+            [0.5, 30, 0.5],
             id="the read after the device answers times out",
         ),
     ],
@@ -3651,3 +3667,136 @@ def test_a_checkpoint_whose_navigation_times_out_reads_nothing_more_from_the_dev
         explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s2_detail")
 
     assert raised.value is stalled
+
+
+def _recovery_explorer(
+    log: list[object],
+    reads: Sequence[dict[str, object] | Exception],
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    limit: float = DEFAULT_UNREACHABLE_LIMIT,
+) -> Kobe:
+    explorer = _explorer(
+        _StallingDevice(log, [HOME_SCREEN, *reads]),
+        tmp_path,
+        router_client,
+        unreachable_limit=limit,
+    )
+    _list_reached_from_home(explorer)
+    _identifying(explorer, monkeypatch, "s0_home", "s1_list")
+
+    def stall(_position: object, _max_steps: int) -> NoReturn:
+        raise _dump_timed_out()
+
+    monkeypatch.setattr(explorer, "_explore_step", stall)
+    return explorer
+
+
+@pytest.mark.usefixtures("adb_on_path")
+@pytest.mark.parametrize(
+    "diagnostic", ["Permission denied", "invalid option -- bad", "Can't find service: window"]
+)
+def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
+    diagnostic: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    failure = _read_failed(diagnostic)
+    explorer = _recovery_explorer(log, [failure], tmp_path, router_client, monkeypatch)
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        explorer.explore(max_steps=1)
+
+    assert raised.value is failure
+    assert log == [_PROBE]
+    assert no_sleep == []
+    assert any(
+        "dumpsys window" in line and "exit 1" in line and diagnostic in line
+        for line in caplog.messages
+    )
+
+
+@pytest.mark.usefixtures("adb_on_path")
+def test_unknown_recovery_failures_share_one_confirmation_allowance(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    first = _read_failed("")
+    second = subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", "exec-out", "uiautomator dump /dev/stdout"]
+    )
+    explorer = _recovery_explorer(
+        log, [first, _dump_timed_out(), second], tmp_path, router_client, monkeypatch
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        explorer.explore(max_steps=1)
+
+    assert raised.value is second
+    assert log == [_PROBE] * 3
+    assert no_sleep == [30, 30]
+    assert any("diagnostics absent" in line for line in caplog.messages)
+
+
+@pytest.mark.usefixtures("adb_on_path")
+def test_shell_answers_and_read_timeouts_share_one_recovery_deadline(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    reads = [_dump_timed_out() for _ in range(4)]
+    explorer = _recovery_explorer(log, reads, tmp_path, router_client, monkeypatch, limit=45)
+
+    with pytest.raises(DeviceUnreachableError, match=r"unreachable for 0\.75 minutes"):
+        explorer.explore(max_steps=1)
+
+    assert no_sleep == [30, 15]
+    assert log == [_PROBE, _PROBE]
+
+
+@pytest.mark.usefixtures("adb_on_path")
+def test_recovery_identification_failure_is_outside_device_retry_policy(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    no_sleep: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[object] = []
+    monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
+    explorer = _recovery_explorer(log, [HOME_SCREEN], tmp_path, router_client, monkeypatch)
+    failure = subprocess.TimeoutExpired("model", 1)
+
+    identified: list[object] = []
+
+    def identify(state: dict[str, object]) -> tuple[str, dict[str, object]]:
+        identified.append(state)
+        if len(identified) == 1:
+            return "s0_home", state
+        raise failure
+
+    monkeypatch.setattr(explorer, "_identify", identify)
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        explorer.explore(max_steps=1)
+
+    assert raised.value is failure
+    assert log == [_PROBE]
+    assert no_sleep == []
