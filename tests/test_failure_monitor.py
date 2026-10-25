@@ -365,3 +365,20 @@ def test_failed_capture_keeps_counts_of_the_last_published_snapshot(
     assert report["collection_error"] == "OSError"
     assert report["latest_snapshot_target_process_name_counts"]["java_fatal"] == 0
     assert not (current.directory / "0001.json").exists()
+
+
+def test_package_identity_query_uses_the_captured_android_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(monitor, "adb_executable", lambda: "/adb")
+    monkeypatch.setattr(monitor.secrets, "token_hex", lambda _n: "token")
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"\nAPP_GRAPH_END_token:0\n")
+
+    monkeypatch.setattr(monitor.subprocess, "run", run)
+    AdbFailureReader("serial", "com.example").capture()
+    assert "app_graph_user=$(am get-current-user)" in commands[0][-1]
+    assert 'list packages -U --user "$app_graph_user" com.example' in commands[0][-1]
