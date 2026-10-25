@@ -2975,3 +2975,25 @@ def test_menu_context_has_no_answer_after_deadline_or_truncated_output(
     assert vlm.verify_replay_action(
         router_client, recorded="old", current="fresh", actions=(), settings=PAGE_DETAIL
     ) == (False, "action applicability unanswered")
+
+
+def test_menu_applicability_question_distinguishes_controls_from_selected_item_identity(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    png_screenshot: str,
+) -> None:
+    router_responses.append(
+        chat_response(content='{"applicable":true,"reason":"same current-selection operation"}')
+    )
+    vlm.verify_replay_action(
+        router_client,
+        recorded=png_screenshot,
+        current=png_screenshot,
+        actions=({"action": "tap", "x": 408, "y": 480},),
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    assert "Do not require the original selected items" in prompt
+    assert "different operation at the recorded coordinates" in prompt
