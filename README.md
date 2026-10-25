@@ -1041,8 +1041,12 @@ field.
 
 ### Graph nodes
 
-A node is a screen by its purpose. What changes on a screen without changing its
-purpose is the node's state, which the screen description model records on each
+A node is a screen by its purpose and observed navigation destination. Named tabs,
+drawer destinations and mutually exclusive named views have distinct nodes, even
+when they present the same data. Descriptions and verifier refinements preserve the
+observed destination; intended actions and expected replay targets do not establish
+arrival. Empty content, sorting, filters and week-start preferences within one
+destination are state. The screen description model also records state on each
 visit: whether the on-screen keyboard is shown (`keyboard_visible`), the focused
 field (`focused_field`), how far a list is scrolled (`first_visible_item` and
 `last_visible_item`), the anchored overflow menu, dropdown, popup or context menu
