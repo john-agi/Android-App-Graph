@@ -6289,3 +6289,38 @@ def test_unknown_modal_origin_stays_unresolved_and_cannot_bridge_known_destinati
         screen.decision(repeated_move)["identify"]["verifications"][0]["member"]
         == copy_sort.observation_id
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("surface", None),
+        ("surface", {"kind": [], "relation": "unknown", "return_depth": 0}),
+        ("modal_context", {}),
+    ],
+)
+def test_load_graph_names_invalid_modal_metadata_and_preserves_loaded_nodes(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """Invalid modal metadata produces the graph's actionable load diagnostic."""
+    path = tmp_path / "graph.json"
+    membership = members(tmp_path / "steps")
+    write_graph(path, [{"id": "s0_home", "replay_misses": 0, **membership}])
+    write_text_vectors(path, membership)
+    identify = identify_file_path(path)
+    lines = read_json_lines(identify)
+    for line in lines:
+        if field == "surface":
+            line["describe"] = {**as_object_dict(line["describe"]), field: value}
+        else:
+            line[field] = value
+    identify.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    manager = make_manager()
+    add_screen(manager, "s9_stale", "Stale screen")
+
+    with pytest.raises(ValueError, match="Explore the app again") as error:
+        manager.load_graph(path)
+
+    assert str(path) in str(error.value)
+    assert "Explore the app again into a new graph directory." in str(error.value)
+    assert list(manager.graph.nodes) == ["s9_stale"]
