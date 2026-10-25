@@ -2894,6 +2894,48 @@ def test_ranked_arrival_audit_stop_preserves_the_counted_continuation(
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_obeys_the_next_steps_saturation_rule(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retaining an arrival permits a fresh continuation on the following counted step."""
+    _list_reached_from_home(kobe)
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    monkeypatch.setattr(kobe, "_self_loops_in_a_row", {"s0_home": 15, "s1_list": 15})
+    monkeypatch.setattr(
+        kobe,
+        "_choose_continuation_target",
+        lambda node: "s1_list" if node == "s0_home" else "s0_home",
+    )
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda target: target)
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    audits: list[int] = []
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        assert app_name == "demo"
+        audits.append(kobe.graph.total_steps_completed)
+        return {"merged_count": 0}
+
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=52)
+
+    assert audits == [50]
+    assert planned_from == ["s0_home"]
+    assert _numbered_steps(caplog.messages) == [
+        "Step 50/52: s0_home --[continue]--> s1_list",
+        "Step 51/52: s1_list --[continue]--> s0_home",
+        "Step 52/52: s0_home --[wait]--> s0_home",
+    ]
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_ranked_arrival_audit_outage_resumes_from_the_recovered_screen(
     kobe: Kobe,
     router_responses: list[httpx.Response],

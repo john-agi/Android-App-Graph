@@ -670,8 +670,8 @@ and plans as usual when no other node is ranked.
 
 When a ranked continuation reaches its selected node on a checkpoint boundary,
 the due merge audit runs and exploration retains that arrival, resolving its node
-ID through any audit merge. The next step plans from there under the usual step
-limit and recovery rules. A failed continuation or an arrival at another node
+ID through any audit merge. The next step starts from there under the usual
+exploration, step-limit and recovery rules. A failed continuation or an arrival at another node
 keeps the checkpoint's target selection and replay. A continuation at `max_steps`
 ends the run, as other final steps do.
 
