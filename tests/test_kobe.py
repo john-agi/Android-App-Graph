@@ -3158,6 +3158,7 @@ def test_repeated_internal_route_informs_the_planner_without_replacing_its_next_
     ]
     assert all("Recent repeated route" not in prompt for prompt in prompts[:4])
     assert "Recent repeated route" in prompts[4]
+    assert "The executor supports at most 1 pointer" in prompts[4]
     assert "s1_form --back--> s2_dialog --back--> s1_form" in prompts[4]
     assert "Hidden state may still change" in prompts[4]
     assert device.actions == [*[{"action": "back"}] * 4, {"action": "tap", "x": 50, "y": 100}]
@@ -3166,7 +3167,7 @@ def test_repeated_internal_route_informs_the_planner_without_replacing_its_next_
     assert explorer.graph.graph.has_edge("s1_form", "s3_picker")
 
 
-@pytest.mark.parametrize("boundary", ["wait", "resume", "checkpoint"])
+@pytest.mark.parametrize("boundary", ["wait", "unsupported", "resume", "checkpoint"])
 @pytest.mark.usefixtures("no_sleep", "device_log")
 def test_ordinary_route_context_restarts_at_exploration_boundaries(
     boundary: str,
@@ -3179,11 +3180,8 @@ def test_ordinary_route_context_restarts_at_exploration_boundaries(
 ) -> None:
     """Waits, fresh exploration and checkpoint boundaries keep history contiguous."""
     dialog = _screen("com.demo.Home", "gray")
-    explorer = _explorer(
-        _Screens(HOME_SCREEN, dialog, HOME_SCREEN, dialog, HOME_SCREEN, dialog),
-        tmp_path,
-        router_client,
-    )
+    device = _Screens(HOME_SCREEN, dialog, HOME_SCREEN, dialog, HOME_SCREEN, dialog)
+    explorer = _explorer(device, tmp_path, router_client)
     for node in ("s0_seed", "s1_form", "s2_dialog"):
         explorer.graph.graph.add_node(node, package="com.demo", replay_misses=0)
     explorer.graph.add_edge("s1_form", "s2_dialog", action=[{"action": "back"}])
@@ -3217,6 +3215,12 @@ def test_ordinary_route_context_restarts_at_exploration_boundaries(
                 chat_response(content=_WAIT_REPLY),
             ]
         )
+    if boundary == "unsupported":
+        router_responses.append(
+            chat_response(
+                content='{"element":null,"instruction":"Pinch inward","required_pointers":2}'
+            )
+        )
     router_responses.extend(
         [
             chat_response(
@@ -3228,16 +3232,24 @@ def test_ordinary_route_context_restarts_at_exploration_boundaries(
 
     if boundary == "resume":
         explorer.explore(max_steps=4)
-    explorer.explore(max_steps=6 if boundary == "wait" else 5)
+    explorer.explore(max_steps=6 if boundary in {"wait", "unsupported"} else 5)
 
     prompts = [
         str(json.loads(request.content)["messages"][-1]["content"][0]["text"])
         for request in router_requests
         if json.loads(request.content)["model"] == "provider/instruction"
     ]
-    if boundary == "wait":
+    if boundary in {"wait", "unsupported"}:
         assert "Recent repeated route" in prompts[4]
     assert "Recent repeated route" not in prompts[-1]
+    assert device.actions == [{"action": "back"}] * 5
+    assert explorer.graph.total_steps_completed == (6 if boundary in {"wait", "unsupported"} else 5)
+    assert explorer.graph.graph.number_of_edges() == 2
+    if boundary == "unsupported":
+        records = [
+            json.loads(path.read_text()) for path in explorer.controller.steps.glob("[0-9]*.json")
+        ]
+        assert sum(record["kind"] == "unsupported_action" for record in records) == 1
 
 
 def _toggles(explorer: Kobe, *days: int) -> None:
