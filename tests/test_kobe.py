@@ -5203,7 +5203,7 @@ def test_navigation_checks_preparation_before_sending_any_recorded_input(
     graph_file = tmp_path / "saved.json"
     write_graph_file(
         graph_file,
-        {"nodes": [{"id": node} for node in ("s0_home", "s1_detail")]},
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_detail", "s2_changed")]},
         embedding_model="provider/embedding",
     )
     graph = replaying_kobe.graph
@@ -5216,13 +5216,15 @@ def test_navigation_checks_preparation_before_sending_any_recorded_input(
     graph.add_edge(
         "s0_home", "s1_detail", action, details=EdgeDetails(setup=[setup], setup_observation=anchor)
     )
-    _identifying(replaying_kobe, monkeypatch, "s0_home", "s1_detail" if applicable else "s0_home")
+    _identifying(
+        replaying_kobe, monkeypatch, "s0_home", "s1_detail" if applicable else "s2_changed"
+    )
     monkeypatch.setattr(
         "android_app_graph.utils.graph_manager.verify_replay_source",
         lambda *_args, **_kwargs: (applicable, "actual entry fixture"),
     )
     reached = replaying_kobe.navigate_to_node("s1_detail")
-    assert reached == ("s1_detail" if applicable else "s0_home")
+    assert reached == ("s1_detail" if applicable else "s2_changed")
     assert device_log == [*_FIRST_RESTART, *([setup, action] if applicable else [])]
     assert graph.graph.nodes["s1_detail"]["replay_misses"] == (0 if applicable else 1)
 

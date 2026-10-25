@@ -3382,7 +3382,7 @@ def test_audit_navigation_checks_the_preparation_before_input(
     device_log: list[object],
     applicable: bool,
 ) -> None:
-    graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}))
+    graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}), ("s2_changed", {}))
     _describing_by_node_id(graph, monkeypatch)
     graph.add_edge(
         "s0_home",
@@ -3391,12 +3391,12 @@ def test_audit_navigation_checks_the_preparation_before_input(
         details=EdgeDetails(setup=[_SWIPE], setup_observation="observed-entry"),
     )
     monkeypatch.setattr(graph, "can_replay", lambda *_args: applicable)
-    _identifying(graph, monkeypatch, "s0_home", "s1_detail" if applicable else "s0_home")
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail" if applicable else "s2_changed")
     issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
     (result,) = _re_explore(
         graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
     )
-    assert result["navigated_to"] == ("s1_detail" if applicable else "s0_home")
+    assert result["navigated_to"] == ("s1_detail" if applicable else "s2_changed")
     assert device_log == [*_FIRST_RESTART, *([_SWIPE, _DETAIL_TAP] if applicable else [])]
 
 
