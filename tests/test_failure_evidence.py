@@ -162,3 +162,8 @@ def test_exit_reason_preserves_android_nested_reason_labels() -> None:
       process=com.example reason=4 (APP CRASH(EXCEPTION)) subreason=0 (UNKNOWN) status=0
 """
     assert exit_evidence(text, "com.example")[0].reason == "4 (APP CRASH(EXCEPTION))"
+
+
+def test_custom_process_name_does_not_claim_unrelated_package_ownership() -> None:
+    text = java("shared.worker")
+    assert crash_evidence(text, "com.example")[0].attribution == "other_process_name"
