@@ -1913,7 +1913,8 @@ def test_re_explore_replays_from_the_node_the_app_opened_on(
     graph.add_edge(
         "s0_alarms", "s2_alarm", [_OPEN_ALARM], details=EdgeDetails(setup=[_SCROLL_ALARMS])
     )
-    expected = _identifying(graph, monkeypatch, opened_on, "s2_alarm")
+    intermediate = ["s1_clock", "s0_alarms"] if opened_on == "s1_clock" else []
+    expected = _identifying(graph, monkeypatch, opened_on, *intermediate, opened_on, "s2_alarm")
     caplog.set_level(logging.INFO, logger=audit.logger.name)
 
     (result,) = _re_explore(
@@ -1925,7 +1926,8 @@ def test_re_explore_replays_from_the_node_the_app_opened_on(
     )
 
     assert device_log == [*_FIRST_RESTART, *replayed]
-    assert expected == ["s0_alarms", "s2_alarm"]
+    intermediate_expected = [None, "s0_alarms"] if opened_on == "s1_clock" else []
+    assert expected == ["s0_alarms", *intermediate_expected, None, "s2_alarm"]
     assert result["navigated_to"] == "s2_alarm"
     opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms"
     assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
@@ -1938,7 +1940,7 @@ def test_re_explore_replays_each_action_after_its_setup(
     graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}))
     _describing_by_node_id(graph, monkeypatch)
     graph.add_edge("s0_home", "s1_detail", [_DETAIL_TAP], details=EdgeDetails(setup=[_SWIPE]))
-    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
+    _identifying(graph, monkeypatch, "s0_home", "s0_home", "s1_detail")
     issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
 
     (result,) = _re_explore(
@@ -1955,7 +1957,7 @@ def test_re_explore_sends_a_flagged_action_s_setup_before_it_and_moves_the_setup
 ) -> None:
     graph = _flagged_graph()
     graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
-    _identifying(graph, monkeypatch, "s0_home", "s2_settings", "s0_home")
+    _identifying(graph, monkeypatch, "s0_home", "s0_home", "s2_settings", "s0_home")
     _describing_by_node_id(graph, monkeypatch)
 
     (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
@@ -3397,7 +3399,7 @@ def test_audit_stops_after_menu_preparation_when_action_context_is_unverified(
         return False
 
     monkeypatch.setattr(graph, "can_replay_action", verify)
-    _identifying(graph, monkeypatch, "s0_home", "s0_home")
+    _identifying(graph, monkeypatch, "s0_home", "s0_home", "s0_home")
     issue = (
         _retry()
         if operation == "correct"

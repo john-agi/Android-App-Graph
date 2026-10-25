@@ -2741,7 +2741,7 @@ def test_screen_identity_policy_reaches_every_model_entry(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    """Descriptions, matching and audit proposals use one modal identity policy."""
+    """Descriptions, matching and audit proposals share observed destination identity."""
     router_responses.append(
         chat_response(
             content='{"page_description": "home", "same": true, "issues": [], "summary": "ok", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
@@ -2751,6 +2751,11 @@ def test_screen_identity_policy_reaches_every_model_entry(
     content = json.loads(router_requests[0].content)["messages"][0]["content"]
     prompt = content if isinstance(content, str) else content[0]["text"]
     for rule in (
+        "named view selector",
+        "Determine the observed navigation destination before comparing state",
+        "Preserve the observed destination in page descriptions and refinements",
+        "An intended action or expected replay target does not establish an observed destination",
+        "Empty content, keyboard visibility, scroll position and week-start preferences are state",
         "Modal dialogs, picker dialogs and modal bottom sheets are separate screens",
         "Anchored menus",
         "modal purpose and opening navigation destination",
@@ -2919,6 +2924,25 @@ def test_grounder_can_decline_a_supported_pointer_plan(action: str) -> None:
         {"action": action, "required_pointers": 0}, expected_pointers=1
     )
     assert result["action"] == action
+
+
+def test_verifier_cache_context_contains_the_complete_sent_policy(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """Cached verdicts are scoped to the full policy sent to the verifier."""
+    router_responses.append(chat_response(content='{"same":true,"reason":"same destination"}'))
+    vlm.verify_same_node(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Home"),
+        new=vlm.DescribedScreenshot(png_screenshot, "Home"),
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    assert vlm.node_verification_context(PAGE_DETAIL)["prompt"] == prompt
 
 
 @pytest.mark.parametrize(

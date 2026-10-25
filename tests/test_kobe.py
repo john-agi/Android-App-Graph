@@ -444,6 +444,52 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
 
 
 @pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("manual_resume", [False, True])
+@pytest.mark.parametrize("aliased", [False, True])
+@pytest.mark.parametrize("target", ["ext_com.foreign", EXTERNAL_WEB_NODE, "s1_boundary"])
+def test_external_replay_target_is_rejected_before_device_or_model_access(
+    kobe: Kobe,
+    device_log: list[object],
+    router_requests: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    *,
+    aliased: bool,
+    manual_resume: bool,
+) -> None:
+    """External destinations retain their recorded path and reject explicit replay."""
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
+    kobe.graph.graph.add_node(target, is_external=target == "s1_boundary", replay_misses=0)
+    kobe.graph.add_edge("s0_home", target, action={"action": "tap", "coordinate": [30, 40]})
+    requested = target
+    if aliased:
+        requested = "s2_alias"
+        kobe.graph.graph.add_node(requested)
+        assert kobe.graph.merge_nodes(target, requested)
+    path = kobe.graph.find_path("s0_home", target)
+    assert path is not None
+    before = kobe.graph.graph.copy()
+    monkeypatch.setattr(
+        kobe.controller,
+        "get_state",
+        lambda **_kwargs: pytest.fail("An external replay target requires no observation"),
+    )
+
+    if manual_resume:
+        with pytest.raises(ValueError, match="External replay target"):
+            kobe.explore(max_steps=1, resume_from=requested)
+    else:
+        with pytest.raises(ValueError, match="External replay target"):
+            kobe.navigate_to_node(requested)
+
+    assert device_log == []
+    assert router_requests == []
+    assert kobe.graph.find_path("s0_home", target) == path
+    assert dict(kobe.graph.graph.nodes(data=True)) == dict(before.nodes(data=True))
+    assert dict(kobe.graph.graph.edges) == dict(before.edges)
+
+
+@pytest.mark.usefixtures("no_sleep")
 @pytest.mark.parametrize("action", [{"action": "tap", "coordinate": [30, 40]}, {"action": "menu"}])
 def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     replaying_kobe: Kobe,
@@ -507,7 +553,8 @@ def test_a_replay_scrolls_a_list_as_exploration_did_before_tapping_a_row_on_it(
         replaying_kobe,
         monkeypatch,
         *("s0_home", ("s1_list", top), ("s1_list", scrolled), "s2_detail"),
-        *(("s1_list", scrolled), "s3_other_detail", "s0_home", "s3_other_detail"),
+        *(("s1_list", scrolled), "s3_other_detail", "s0_home"),
+        *(("s1_list", top), ("s1_list", scrolled), "s3_other_detail"),
     )
     _explore_sending(
         replaying_kobe, monkeypatch, open_list, scroll_down, open_row, back, open_other_row
@@ -590,7 +637,8 @@ def test_a_replay_opens_a_menu_on_a_form_filled_through_a_dialog_before_choosing
         replaying_kobe,
         monkeypatch,
         *("s0_home", (form, unsecured), dialog, (form, enterprise), (form, menu_open)),
-        *((form, enterprise), (form, menu_open), installer, "s0_home", installer),
+        *((form, enterprise), (form, menu_open), installer, "s0_home"),
+        *((form, unsecured), dialog, (form, enterprise), (form, menu_open), installer),
     )
     _explore_sending(
         replaying_kobe,
@@ -629,7 +677,7 @@ def test_a_replay_opens_the_drawer_before_tapping_a_drawer_row_whose_setup_is_un
         replaying_kobe,
         monkeypatch,
         *(("s0_home", _DRAWER_CLOSED), ("s0_home", _DRAWER_OPEN), "s2_recent"),
-        *("s0_home", "s2_recent"),
+        *("s0_home", ("s0_home", _DRAWER_OPEN), "s2_recent"),
     )
     _explore_sending(replaying_kobe, monkeypatch, _OPEN_DRAWER, _OPEN_RECENT)
     device_log.clear()
@@ -820,13 +868,17 @@ def test_a_replay_starts_from_the_node_the_app_opened_on(
     that node when a recorded path leads from it, from the start node otherwise, each
     action after its setup."""
     _clock_graph(replaying_kobe)
-    expected = _identifying(replaying_kobe, monkeypatch, opened_on, "s2_alarm")
+    intermediate = ["s1_clock", "s0_alarms"] if opened_on == "s1_clock" else []
+    expected = _identifying(
+        replaying_kobe, monkeypatch, opened_on, *intermediate, opened_on, "s2_alarm"
+    )
     caplog.set_level(logging.INFO, logger="test")
 
     reached = replaying_kobe.navigate_to_node("s2_alarm")
 
     assert device_log == [*_FIRST_RESTART, *replayed]
-    assert expected == ["s0_alarms", "s2_alarm"]
+    intermediate_expected = [None, "s0_alarms"] if opened_on == "s1_clock" else []
+    assert expected == ["s0_alarms", *intermediate_expected, None, "s2_alarm"]
     assert reached == "s2_alarm"
     opened_elsewhere = f"demo opened on {opened_on}, not on the start node s0_alarms."
     assert (opened_elsewhere in caplog.text) == (opened_on != "s0_alarms")
@@ -867,7 +919,7 @@ def test_a_replay_from_the_screen_the_app_opened_on_counts_a_miss_where_it_lands
     node. Unless it is the target, the target counts one miss, whether the replay started
     from that node, from the start node or sent nothing; no other node's count changes."""
     _clock_graph(replaying_kobe)
-    _identifying(replaying_kobe, monkeypatch, opened_on, opened_on)
+    _identifying(replaying_kobe, monkeypatch, *([opened_on] * (len(replayed) + 1)))
 
     reached = replaying_kobe.navigate_to_node(target)
 
@@ -1697,6 +1749,32 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_auto_resume_with_only_external_nodes_starts_from_the_current_screen(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kobe.graph.graph.add_node("ext_com.foreign", replay_misses=0)
+    assert kobe.graph.get_resume_target(package_name="com.demo") is None
+
+    def identify(_observation: Observation, **_kwargs: object) -> str:
+        kobe.graph.graph.add_node("s0_home", replay_misses=0)
+        return "s0_home"
+
+    planned_from: list[object] = []
+    monkeypatch.setattr(kobe.graph, "identify_state", identify)
+    _describing_by_node_id(kobe, monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from="auto")
+
+    assert planned_from == ["s0_home"]
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_screen(
     kobe: Kobe,
     router_responses: list[httpx.Response],
@@ -2098,14 +2176,13 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
     home, settings = _in_app("Home", "white"), _in_app("Settings", "gray")
     item_list, sort_menu = _in_app("List", "blue"), _in_app("Sort", "green")
-    # The app restarts onto home. The checkpoint reads the list screen once to identify it
-    # and once for the next step.
     device = _ReplayScript(
         device_log,
         home,
         settings,
         home,
         home,
+        item_list,
         item_list,
         item_list,
         item_list,
@@ -2166,6 +2243,8 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         ("match", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
+        ("observation", "navigation_replay"),
+        ("match", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "coverage_checkpoint"),
@@ -2233,6 +2312,7 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
         device_log,
         _in_app("Home", "white"),
         _in_app("Home", "white"),
+        web_page,
         web_page,
         web_page,
         item_list,
@@ -5129,7 +5209,7 @@ def test_reconstructed_menu_checks_operation_context_before_its_dependent_input(
     graph.add_edge("s0_home", "s1_picker", copy, details=EdgeDetails(open_menu="overflow"))
     graph.graph["s0_home"]["s1_picker"]["action_sources"] = ["selected-menu-observation"]
     monkeypatch.setattr(graph, "can_replay_action", lambda *_args, **_kwargs: False, raising=False)
-    _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home")
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home", "s0_home")
 
     reached = replaying_kobe.navigate_to_node("s1_picker")
 
@@ -5148,14 +5228,14 @@ def test_replay_never_sends_the_dependent_action_after_context_capture_or_verifi
     graph = replaying_kobe.graph
     graph.graph.add_nodes_from(["s0_home", "s1_picker"], replay_misses=0)
     graph.add_edge("s0_home", "s1_picker", _OPEN_RECENT, details=EdgeDetails(setup=[_OPEN_DRAWER]))
-    _identifying(replaying_kobe, monkeypatch, "s0_home")
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home")
     original = replaying_kobe.controller.get_state
     reads = 0
 
     def capture(*, deadline: float | None = None) -> dict[str, object]:
         nonlocal reads
         reads += 1
-        if reads == 2 and failure_at == "capture":
+        if reads == 3 and failure_at == "capture":
             message = "capture unavailable"
             raise RuntimeError(message)
         return as_object_dict(original(deadline=deadline))

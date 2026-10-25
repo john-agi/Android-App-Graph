@@ -1087,13 +1087,22 @@ def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again
 
 
 _CLEAR_FIELD = [
-    [*_INPUT, "keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"],
+    [*_INPUT, "keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_MOVE_END"],
+    ["adb", *_UI_DUMP],
+    [
+        *_INPUT,
+        "keyboard",
+        "keycombination",
+        "KEYCODE_CTRL_LEFT",
+        "KEYCODE_SHIFT_LEFT",
+        "KEYCODE_MOVE_HOME",
+    ],
     ["adb", *_UI_DUMP],
     [*_INPUT, "keyboard", "keyevent", "KEYCODE_DEL"],
 ]
 
 
-@pytest.mark.parametrize("command_index", [0, 2], ids=["select-all", "delete-selection"])
+@pytest.mark.parametrize("command_index", [0, 2, 4], ids=["move-end", "select-to-start", "delete"])
 @pytest.mark.parametrize("failure", ["exit", "timeout"])
 def test_clearing_failure_stops_type_without_retrying_input(
     controller: device.DeviceController, adb: _FakeAdb, command_index: int, failure: str
@@ -1935,15 +1944,17 @@ def test_dispatch_applies_feedback_and_navigation_policy_from_one_window_read(
         b"<hierarchy />ERROR: could not get idle state.\n",
     ],
 )
+@pytest.mark.parametrize("observation_index", [0, 1], ids=["caret", "selection"])
 def test_type_stops_before_deletion_when_idle_hierarchy_is_invalid(
-    controller: device.DeviceController, adb: _FakeAdb, dump: bytes
+    controller: device.DeviceController, adb: _FakeAdb, dump: bytes, observation_index: int
 ) -> None:
+    adb.queued[_UI_DUMP] = [(0, b"<hierarchy />")] * observation_index
     adb.replies[_UI_DUMP] = (0, dump)
 
     with pytest.raises(ValueError, match="Text replacement requires a valid idle UI hierarchy"):
         controller.exe_action({"action": "type", "text": "New"})
 
-    assert adb.events == _CLEAR_FIELD[:2]
+    assert adb.events == _CLEAR_FIELD[: 2 + 2 * observation_index]
 
 
 @pytest.mark.parametrize("failure", ["exit", "timeout"])
@@ -1980,8 +1991,8 @@ def test_type_retries_only_a_timed_out_selection_observation(
         _CLEAR_FIELD[0],
         ["adb", *_UI_DUMP],
         ["adb", *_UI_DUMP],
-        _CLEAR_FIELD[2],
+        *_CLEAR_FIELD[2:],
         [*_INPUT, "text", "New"],
         1,
     ]
-    assert adb.timeouts == [15, 30, 30, 15, 15]
+    assert adb.timeouts == [15, 30, 30, 15, 30, 15, 15]

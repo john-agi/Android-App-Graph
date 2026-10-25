@@ -635,6 +635,14 @@ baseline lifecycle and replay checks.
 
 ### Replaying to a node
 
+Explicit replay destinations belong to the target app. `Kobe.navigate_to_node` and
+manual `--resume-from` reject external boundary nodes (`ext_` IDs or nodes marked
+`is_external`) with `ValueError` before replay restarts the app or sends recorded
+input. The check follows stored aliases. External nodes and their incoming edges
+remain evidence of boundary visits in the graph. Automatic target selection also
+excludes these nodes. CLI startup performs its usual device setup before the resume
+decision.
+
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
 steps, a step that continues from a ranked target (below) and each issue that
 `app-graph-audit --re-explore` works on reach their node by replaying recorded actions
@@ -654,6 +662,16 @@ its task cleared. So after the launch the replay identifies the screen, expectin
 start screen. When it is another node and recorded actions lead from that node to the
 target, the replay starts there, and otherwise from the start screen; a log line names
 the node whenever it is not the start screen.
+
+Replay captures and identifies the screen after each input, including setup actions
+and inputs within a compound action. A modal's opening destination therefore comes
+from the observed intermediate screen, even if it differs from the planned route.
+These intermediate matches add screenshot embedding and, when needed, description
+and verification calls; they are retained in the step log without counting as new
+exploration steps. If an intermediate capture fails, remaining inputs are not sent.
+An observed external app or system surface stops the remaining replay after the
+normal recovery, if any, and reports the observed arrival. Existing modal
+provenance is preserved, not repaired by replay.
 
 The replay follows the path that sends the fewest device actions, each edge
 weighed by its cheapest action: the action's own steps and its
@@ -1033,25 +1051,31 @@ one step and observes the result before typing. An already identified active fie
 can receive text directly.
 
 On the [supported Android versions](#prerequisites), Type replaces the complete focused
-value as one recorded action. It targets standard editable fields that handle Android
-Select All and delete keyboard editing: a keyboard Ctrl+A combination selects the value,
-an idle UI hierarchy observation lets the field publish its selection, one Delete removes
-it, and the requested text is entered with shell quoting and virtual keyboard character
-support. The observation uses the current UI backend and adds its bounded idle-wait
-latency to each Type action.
+value as one recorded action. It targets standard editable fields that retain focus while
+clearing and handle Android cursor movement, selection and delete keyboard editing:
+Ctrl+End moves to the end of the
+complete value, Ctrl+Shift+Home selects back to its beginning, and one Delete removes it.
+An idle UI hierarchy observation after each combination lets the field publish the caret
+or selection before the next input. The requested text is then entered with shell quoting
+and virtual keyboard character support. These observations use the current UI backend and
+add their bounded idle-wait latency to each Type action.
 Replacement is independent of the previous value's length, caret position and selection.
-Custom widgets, intercepted shortcuts and other IMEs are outside the validated support.
+Custom widgets, intercepted movement keys and other IMEs are outside the validated support.
 An adb command's successful exit reports command acceptance, without acknowledging
 the widget's selection or resulting value. An idle hierarchy confirms an observation
-boundary, without proving that a widget handles the shortcut. A clearing-command error,
+boundary, without proving that a widget handles the movement keys. A clearing-command error,
 timeout or invalid idle hierarchy stops Type before text entry. A timed-out observation
 may be read once more; input is never retried because it may already have reached the
 field.
 
 ### Graph nodes
 
-A node is a screen by its purpose. What changes on a screen without changing its
-purpose is the node's state, which the screen description model records on each
+A node is a screen by its purpose and observed navigation destination. Named tabs,
+drawer destinations and mutually exclusive named views have distinct nodes, even
+when they present the same data. Descriptions and verifier refinements preserve the
+observed destination; intended actions and expected replay targets do not establish
+arrival. Empty content, sorting, filters and week-start preferences within one
+destination are state. The screen description model also records state on each
 visit: whether the on-screen keyboard is shown (`keyboard_visible`), the focused
 field (`focused_field`), how far a list is scrolled (`first_visible_item` and
 `last_visible_item`), the anchored overflow menu, dropdown, popup or context menu
@@ -1167,8 +1191,13 @@ both are described below the steps.
    described as a page: the screen
    copies that member's description, state, elements and description vector, so
    neither the description model nor the verifier runs. Members of two nodes with the
-   same hash decide nothing. A matching modal member takes the description and
-   verification path with its recorded opening evidence.
+   same hash decide nothing. When a usable actual preceding capture and input sequence
+   are available, unchanged pixels reuse that preceding member's output. Changed pixels
+   take the contextual description and verification path, which can rejoin the same
+   node. An empty input sequence is usable; a missing, broken or foreign predecessor
+   leaves the image-only shortcut in effect, with the copied member recorded as
+   `copied_from`. A matching modal member takes the description and verification path
+   with its recorded opening evidence.
 3. **Description.** The description model describes the screen, given a bounded selection of
    relevant descriptions, in the step
    order of the first member described so: a screen of a listed type takes that

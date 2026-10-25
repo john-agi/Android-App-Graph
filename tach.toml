@@ -84,6 +84,7 @@ depends_on = [
 path = "android_app_graph.kobe"
 depends_on = [
     "android_app_graph.navigation_history",
+    "android_app_graph.payloads",
     "android_app_graph.run_environment",
     "android_app_graph.device",
     "android_app_graph.graph_files",
