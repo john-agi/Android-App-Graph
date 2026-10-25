@@ -71,7 +71,7 @@ _OWNERSHIP_FIELDS = frozenset(
         "system_overlay_error",
     }
 )
-_SYSTEM_SURFACES = frozenset({"notification_shade", "permission", "ime_settings"})
+_SYSTEM_SURFACES = frozenset({"notification_shade", "system_dialog", "permission", "ime_settings"})
 
 type RunKind = Literal["explore", "audit"]
 type StepSource = Literal[
@@ -383,11 +383,10 @@ class StepRecorder:
         controller that reports none has the whole image hashed.
         """
         state = self._controller.get_state(deadline=deadline)
-        if state.get("package") == self._target_package and state.get("system_surface") in {
-            "notification_shade",
-            "permission",
-            "ime_settings",
-        }:
+        if (
+            state.get("package") == self._target_package
+            and state.get("system_surface") in _SYSTEM_SURFACES
+        ):
             state = state.copy()
             state["system_surface"] = None
         png = base64.b64decode(state["screenshot"], validate=True)
