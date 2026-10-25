@@ -243,9 +243,21 @@ class Kobe:
 
     def _merge_duplicate_nodes(self, step: int, current_node: str) -> str:
         """Run the checkpoint's merge audit and return the ID ``current_node`` has after it."""
+        nodes_before = [node for node, _data in self.graph.get_all_nodes()]
         merge_result = self.graph.run_node_merge_audit(app_name=self.app_name)
         merged_count = merge_result.get("merged_count", 0)
         if merged_count:
+            for node in nodes_before:
+                resolved = self.graph.resolve_node_id(node)
+                if resolved != node:
+                    # Separate windows do not retain the chronology of a combined identity.
+                    self._recent_outcomes.pop(node, None)
+                    self._recent_outcomes.pop(resolved, None)
+                    self.logger.info(
+                        "Saturation history for merged nodes %s and %s starts empty.",
+                        node,
+                        resolved,
+                    )
             self.logger.info(
                 "Coverage checkpoint at step %d: merged %d duplicate node(s).",
                 step,

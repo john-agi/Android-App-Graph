@@ -494,8 +494,11 @@ step that plans Back where Back leaves the app does. Each node keeps its own
 15-outcome window, including departures; outcomes planned on other nodes leave it
 unchanged. A full window is required. A chosen continuation clears its source's
 window. Waits, interrupted steps without a recorded edge, and checkpoint replays
-leave these histories unchanged. The histories live in memory, so a resumed
-explorer starts with empty windows and keeps its saved completed-step count.
+leave these histories unchanged. A checkpoint identity merge starts a fresh window
+for the combined node and preserves every unrelated node's history. The combined
+node requires 15 new recorded outcomes before saturation. The histories live in
+memory, so a resumed explorer starts with empty windows and keeps its saved
+completed-step count.
 `SELF_LOOP_INSTRUCTIONS_LISTED`, `SATURATION_WINDOW` and `SATURATING_SELF_LOOPS` in
 `src/android_app_graph/utils/vlm_utils.py` define the prompt and saturation bounds.
 
