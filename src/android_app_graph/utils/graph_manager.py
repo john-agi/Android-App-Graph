@@ -139,7 +139,6 @@ _FIXED_INSTRUCTION_MAX_WORDS = 6
 EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
 EXTERNAL_WEB_BACK_PRESSES = 3
-# A longer setup is an excursion, not a recipe for the state an action needs.
 _DESCRIBE_CONTEXT_ENTRIES = 16
 _DESCRIBE_CONTEXT_BYTES = 2048
 
@@ -902,8 +901,7 @@ def _count_repeat(
     setup_observation: str | None,
 ) -> bool:
     """Count one more visit when the edge already holds ``action``, and return whether it
-    does. A known ``setup`` replaces an unknown one, or a longer preparation from
-    the same observed arrival."""
+    does. Retain the first known preparation and strictly shorter observed arrivals."""
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
@@ -2494,9 +2492,10 @@ class GraphManager:
             details: What this traversal recorded next to its action; none by default.
 
         If an edge with the same action already exists, it is not duplicated.
-        Instead, a visit counter is incremented, and a known setup replaces the
-        action's recorded one when unknown, or longer from the same observed arrival. A new action from another
-        node clears the target's replay misses: it can give a replay another way there.
+        Instead, a visit counter is incremented. The first known preparation and
+        strictly shorter observed arrivals remain available for that action. A new
+        action from another node clears the target's replay misses: it can give a
+        replay another way there.
 
         A setup of more than ``MAX_SETUP_ACTIONS`` actions is logged as dropped and
         recorded as unknown.

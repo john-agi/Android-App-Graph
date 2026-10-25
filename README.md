@@ -674,8 +674,8 @@ owners or activities, black captures and system surfaces are rejected without a
 model call. If no retained entry is confirmed, replay sends none of that step's inputs
 and identifies where it stopped. The check adds one capture per anchored step and up
 to nine `replay_source` requests, trying retained preparations from shortest to
-longest. It cannot prove hidden state or guarantee that later coordinates remain valid. Audit navigation and flagged-action retries use the same
-check. Menu reconstruction retains the recorded opener's anchor when one is known.
+longest. It cannot prove hidden state or guarantee that later coordinates remain valid.
+Audit navigation and flagged-action retries use the same check. Menu reconstruction retains the recorded opener's anchor when one is known.
 
 An action whose setup is unknown was sent in a state the replay cannot rebuild,
 except for the menu open over the screen, which the action records (see
@@ -1336,7 +1336,7 @@ The entry is `null` when the setup is unknown or too long:
 The first observed entry of a new graph starts with a known empty setup. Each known
 arrival records its actual observation in `setup_observations`; an unknown or dropped
 setup has `null` there. A saved non-null anchor must name a graph member observation,
-including one an audit has reassigned to another node. Graph files without this
+including one an audit has reassigned to another node. Graph files without these
 aligned fields must be explored again into a new directory.
 
 An action recorded again retains its first known preparation and entry observation.

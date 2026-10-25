@@ -371,6 +371,7 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
     return graph
 
 
+# A longer setup is an excursion, not a recipe for the state an action needs.
 MAX_SETUP_ACTIONS = 8
 
 PER_ACTION_LISTS = (
