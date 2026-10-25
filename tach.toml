@@ -140,3 +140,7 @@ depends_on = ["android_app_graph.device", "android_app_graph.display_state", "an
 [[modules]]
 path = "android_app_graph.system_surfaces"
 depends_on = ["android_app_graph.payloads"]
+
+[[modules]]
+path = "android_app_graph.failure_evidence"
+depends_on = []
