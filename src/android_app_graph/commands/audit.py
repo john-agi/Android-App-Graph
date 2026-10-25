@@ -674,6 +674,7 @@ def _record_system_step(
         details=EdgeDetails(
             instruction=step.instruction,
             target_observation=f"[system surface: {after.system_surface}]",
+            action_source=step.before.observation_id,
         ),
     )
     run.recorder.record_transition(
