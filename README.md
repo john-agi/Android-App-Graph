@@ -447,6 +447,23 @@ actions without a text string trigger the same bounded action recovery.
 Explicit `end` and `terminate` become an `end` action, which exploration and the
 audit record as a back press.
 
+Planning declares a required nonnegative integer `required_pointers` independently
+of coordinates. The executor supports one pointer for taps, holds and straight
+swipes; keys, typing and waiting use zero. The grounder declares the same
+requirement and can return `unsupported` with a reason. A multi-pointer request,
+an invalid pointer declaration or a mismatch with the executable primitive sends
+no input. A declaration that differs from the plan also sends no input, except
+when the grounder waits or ends the task.
+
+Exploration records unsupported instructions, their source observation, pointer
+requirements and reason in an `unsupported_action` record. Each consumes one
+step and follows the normal save and checkpoint schedule, without an executed
+action, graph edge or element coverage credit. Audit re-exploration likewise
+counts unsupported attempts within its step budget. This check validates the
+models' structured declarations; it cannot establish that a declaration captures
+every requirement expressed in natural language. A model may report other
+unsupported gestures, including curved paths, without substituting another input.
+
 ## Explore an App
 
 Edit `configs/explore.yaml` for your emulator and target app:
