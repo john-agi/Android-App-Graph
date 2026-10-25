@@ -969,14 +969,18 @@ can receive text directly.
 On the [supported Android versions](#prerequisites), Type replaces the complete focused
 value as one recorded action. It targets standard editable fields that handle Android
 Select All and delete keyboard editing: a keyboard Ctrl+A combination selects the value,
-one Delete removes it, and the requested text is entered with shell quoting and virtual
-keyboard character support.
+an idle UI hierarchy observation lets the field publish its selection, one Delete removes
+it, and the requested text is entered with shell quoting and virtual keyboard character
+support. The observation uses the current UI backend and adds its bounded idle-wait
+latency to each Type action.
 Replacement is independent of the previous value's length, caret position and selection.
 Custom widgets, intercepted shortcuts and other IMEs are outside the validated support.
 An adb command's successful exit reports command acceptance, without acknowledging
-the widget's selection or resulting value. A clearing-command error or timeout stops
-Type before text entry. Input is never retried because it may already have reached
-the field.
+the widget's selection or resulting value. An idle hierarchy confirms an observation
+boundary, without proving that a widget handles the shortcut. A clearing-command error,
+timeout or invalid idle hierarchy stops Type before text entry. A timed-out observation
+may be read once more; input is never retried because it may already have reached the
+field.
 
 ### Graph nodes
 
