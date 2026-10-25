@@ -69,6 +69,7 @@ from android_app_graph.member_groups import (
     TEXT_GROUPING_FLOOR,
     MemberCheck,
 )
+from android_app_graph.payloads import as_str
 from android_app_graph.run_environment import (
     RunBaselineError,
     RunEnvironment,
@@ -346,6 +347,7 @@ class _Step:
 class _SkippedAction:
     instruction: str
     reason: str
+    status: str = "skipped"
 
 
 class _InspectionBlockedError(ValueError):
@@ -520,7 +522,7 @@ def _plan_and_act(
     input_status += input_region_hint(device_state)
     input_status += run.recorder.input_rejection_hint
 
-    planned_instruction, element = plan_next_action(
+    plan = plan_next_action(
         client=run.client,
         request=PlanRequest(
             screenshot_b64=before.app_image,
@@ -535,15 +537,16 @@ def _plan_and_act(
         settings=run.session.instruction,
     )
     context = f"{run.graph.latest_description(node)} {run.graph.observation_state(before)}"
-    blocked = inspection_block_reason(planned_instruction, context=context)
+    blocked = inspection_block_reason(plan.instruction, context=context)
     if blocked is not None:
-        return _SkippedAction(planned_instruction, blocked)
+        return _SkippedAction(plan.instruction, blocked)
 
     action, _history_entry = predict_next_action(
         client=run.client,
         request=ActionRequest(
             screenshot_b64=before.app_image,
-            instruction=f"{planned_instruction}\n{input_status}",
+            instruction=f"{plan.instruction}\n{input_status}",
+            required_pointers=plan.required_pointers,
             screen_w=run.recorder.w,
             screen_h=run.recorder.h,
             action_history=[],
@@ -552,7 +555,10 @@ def _plan_and_act(
         settings=run.session.action,
     )
 
-    instruction = planned_instruction
+    if action.get("action") == "unsupported":
+        run.recorder.record_unsupported_action(plan.instruction, plan.required_pointers, action)
+        return _SkippedAction(plan.instruction, as_str(action.get("reason"), ""), "unsupported")
+    instruction = plan.instruction
     if action.get("action") == "end":
         logger.info(
             '  Action agent said end for: "%s", recording as back',
@@ -572,8 +578,8 @@ def _plan_and_act(
         start=run.recorder.last_match,
         before=before,
         instruction=instruction,
-        planned_instruction=planned_instruction,
-        element=element,
+        planned_instruction=plan.instruction,
+        element=plan.element,
         action=action,
     )
 
@@ -714,7 +720,7 @@ def _explore_steps(
             f"{run.graph.latest_description(current_node)}\n[AUDIT HINT: {hint}]\n{INSPECTION_HINT}"
         )
         if skipped_instructions := excluded.get(current_node):
-            page_desc += "\nExcluded by the inspection policy:\n" + "\n".join(skipped_instructions)
+            page_desc += "\nInstructions already skipped:\n" + "\n".join(skipped_instructions)
         step = _plan_and_act(run, current_node, device_state, page_desc)
         if step is None:
             continue
@@ -725,7 +731,7 @@ def _explore_steps(
             step_results.append(
                 {
                     "step": step_i + 1,
-                    "status": "skipped",
+                    "status": step.status,
                     "instruction": step.instruction,
                     "reason": step.reason,
                 }

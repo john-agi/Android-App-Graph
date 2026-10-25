@@ -884,3 +884,33 @@ def test_input_timeout_keeps_requested_input_and_breaks_the_opening_chain(
     assert [record["action"] for record in records if record["kind"] == "action"] == [
         {"action": "back"}
     ]
+
+
+def test_unsupported_action_retains_intent_without_input_or_a_performed_record(
+    device: _Device, steps: Path
+) -> None:
+    recorder = _recorder(device, steps)
+    outcome = {"action": "unsupported", "required_pointers": 3, "reason": "Only one pointer"}
+    recorder.record_unsupported_action("Swipe with three fingers", 3, outcome)
+    assert device.actions == []
+    record = _record(steps, "000000")
+    assert record["kind"] == "unsupported_action"
+    assert record["observation"] is None
+    assert record["instruction"] == "Swipe with three fingers"
+    assert record["planned_required_pointers"] == 3
+    assert record["reason"] == "Only one pointer"
+    assert _files(steps) == ["000000.json"]
+
+
+def test_unsupported_intent_preserves_only_dispatched_input_in_modal_context(
+    device: _Device, steps: Path
+) -> None:
+    recorder = _recorder(device, steps)
+    first = Observation.from_state(recorder.get_state())
+    recorder.record_match(first, None)
+    recorder.exe_action({"action": "back"})
+    outcome = {"action": "unsupported", "required_pointers": 3, "reason": "Only one pointer"}
+    recorder.record_unsupported_action("Swipe with three fingers", 3, outcome)
+    context = recorder.record_match(Observation.from_state(recorder.get_state()), None)
+    assert context == MatchInput(first.observation_id, ({"action": "back"},))
+    assert device.actions == [{"action": "back"}]

@@ -519,6 +519,27 @@ class StepRecorder:
             if len(self._match_actions) > MAX_OPENING_ACTIONS:
                 self._match_actions = None
 
+    def record_unsupported_action(
+        self, instruction: str, required_pointers: int | None, outcome: Mapping[str, object]
+    ) -> None:
+        """Preserve unexecuted intent without an action or transition record."""
+        last = self._last_observation
+        self._write_record(
+            self._take_step_id(),
+            "unsupported_action",
+            last,
+            {
+                "observation": last.observation_id if last else None,
+                "instruction": instruction,
+                "planned_required_pointers": required_pointers,
+                **outcome,
+            },
+        )
+        self.input_rejection_hint = (
+            f"\nPrevious instruction was unsupported: {instruction}. {outcome['reason']}. "
+            "Choose a different supported action."
+        )
+
     def record_system_event(self, fields: Mapping[str, object]) -> None:
         """Keep ownership recovery and skipped-input evidence outside app transitions."""
         self._match_actions = None
@@ -579,7 +600,13 @@ class StepRecorder:
         self,
         step_id: str,
         kind: Literal[
-            "observation", "action", "action_rejected", "match", "transition", "system_event"
+            "observation",
+            "action",
+            "action_rejected",
+            "unsupported_action",
+            "match",
+            "transition",
+            "system_event",
         ],
         screen: Observation | None,
         fields: Mapping[str, object],
