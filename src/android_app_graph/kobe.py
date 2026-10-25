@@ -354,11 +354,21 @@ class Kobe:
         max_steps: int,
         current_node: str,
         device_state: dict[str, Any],
+        *,
+        preserve_arrival: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         """Apply periodic coverage continuation after any completed step."""
         if self._is_coverage_checkpoint(step, max_steps):
             self._navigation_history.clear()
         with self.controller.source("coverage_checkpoint"):
+            if preserve_arrival and self._is_coverage_checkpoint(step, max_steps):
+                current_node = self._merge_duplicate_nodes(step, current_node)
+                self.logger.info(
+                    "Coverage checkpoint at step %d: retaining ranked arrival %s after audit.",
+                    step,
+                    current_node,
+                )
+                return current_node, device_state
             checkpoint_node = self.maybe_continue_from_coverage_checkpoint(
                 step,
                 max_steps,
@@ -769,7 +779,15 @@ class Kobe:
             position.node, [{"action": "continue"}], next_position.node, tokens_before, max_steps
         )
         self.save_graph()
-        return self._continue_after(next_position.node, next_position.device_state, max_steps)
+        return self._continue_after(
+            next_position.node,
+            next_position.device_state,
+            max_steps,
+            preserve_arrival=(
+                reached is not None
+                and self.graph.resolve_node_id(reached) == self.graph.resolve_node_id(target)
+            ),
+        )
 
     def _plan_move(self, position: _Position, tokens_before: dict[str, int]) -> _Move | None:
         """Plan an action from ``position`` for the caller to execute; ``None`` when the action
@@ -1063,12 +1081,20 @@ class Kobe:
         )
         return node, device_state
 
-    def _continue_after(self, node: str, device_state: dict[str, Any], max_steps: int) -> _Position:
+    def _continue_after(
+        self,
+        node: str,
+        device_state: dict[str, Any],
+        max_steps: int,
+        *,
+        preserve_arrival: bool = False,
+    ) -> _Position:
         node, device_state = self._apply_coverage_checkpoint_after_step(
             self.graph.total_steps_completed,
             max_steps,
             node,
             device_state,
+            preserve_arrival=preserve_arrival,
         )
         return _Position(node, device_state)
 
