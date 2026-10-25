@@ -973,7 +973,10 @@ class Kobe:
         Exploration counts every step here and nowhere else, so a run's log has one
         ``Step N/M`` line for each step it took.
         """
-        if any(action.get("action") in {"wait", "continue", "interrupted"} for action in actions):
+        if any(
+            action.get("action") in {"wait", "continue", "interrupted", "unsupported"}
+            for action in actions
+        ):
             self._navigation_history.clear()
         self.graph.total_steps_completed += 1
         tokens_after = token_tracker.snapshot_by_type()

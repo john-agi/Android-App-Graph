@@ -514,8 +514,9 @@ so this context leaves the next action to the planner. Moving images can prevent
 an exact repeat from being recognized.
 
 This history holds at most eight ordinary transitions over known edges. New edges,
-missing observations, changed node identities, discontinuities, waits, outages,
-external transitions, replay, due checkpoints and fresh exploration clear it.
+missing observations, changed node identities, discontinuities, waits, unsupported
+instructions, outages, external transitions, replay, due checkpoints and fresh
+exploration clear it.
 Instruction paraphrases and description changes do not establish progress. The
 history stays in memory and adds no counted step or model request.
 
