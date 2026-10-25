@@ -31,6 +31,7 @@ from android_app_graph.device import (
     wait_for_device_state,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
+from android_app_graph.navigation_history import NavigationHistory, RouteState
 from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
@@ -70,6 +71,15 @@ _STEP_AGENT_NAMES = (
     "instruction",
     "action",
 )
+
+
+def _route_state(node: str, observation: Observation) -> RouteState:
+    return RouteState(
+        node,
+        ""
+        if observation.black or observation.system_surface or observation.system_overlays
+        else observation.pixel_hash,
+    )
 
 
 class NoPathError(ValueError):
@@ -198,6 +208,7 @@ class Kobe:
         )
         self._setup_trail = SetupTrail(self.graph.resolve_node_id)
         self._self_loops_in_a_row: dict[str, int] = {}
+        self._navigation_history = NavigationHistory(self.graph.resolve_node_id)
 
     def maybe_continue_from_coverage_checkpoint(
         self,
@@ -344,6 +355,8 @@ class Kobe:
         device_state: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         """Apply periodic coverage continuation after any completed step."""
+        if self._is_coverage_checkpoint(step, max_steps):
+            self._navigation_history.clear()
         with self.controller.source("coverage_checkpoint"):
             checkpoint_node = self.maybe_continue_from_coverage_checkpoint(
                 step,
@@ -369,6 +382,7 @@ class Kobe:
         Returns:
             The node ID actually reached (verified via identify_state).
         """
+        self._navigation_history.clear()
         with self.controller.source("navigation_replay"):
             reached = self._replay_to(target_node)
         arrival_state = None
@@ -561,6 +575,7 @@ class Kobe:
     def _starting_position(
         self, resume_from: str | None, start_step: int, max_steps: int
     ) -> _Position:
+        self._navigation_history.clear()
         if start_step > 0:
             self.logger.info(
                 "Resuming exploration from step %d (target: %d steps total)",
@@ -619,6 +634,7 @@ class Kobe:
         self, timeout: subprocess.TimeoutExpired, *, phase: str = "exploration step"
     ) -> tuple[str, dict[str, Any]]:
         """Recover an observation and identify it with an unknown action setup."""
+        self._navigation_history.clear()
         udid = self.controller.config["device"]["udid"]
         self.logger.warning(
             "Device %s is unreachable during %s: %s. Waiting up to %g minutes for a complete observation.",
@@ -784,6 +800,9 @@ class Kobe:
                 input_status=input_status,
                 back_leaves_app=self.graph.back_leaves_app(position.node),
                 system_feedback=bool(observation.system_overlays),
+                navigation_feedback=self._navigation_history.feedback(
+                    _route_state(position.node, observation)
+                ),
             ),
             settings=self.instruction,
         )
@@ -857,6 +876,7 @@ class Kobe:
     def _record_external_app_step(
         self, move: _Move, device_state: dict[str, Any], max_steps: int
     ) -> _Position:
+        self._navigation_history.clear()
         ext_node, device_state = self._handle_external_app(move, device_state)
         self._count_step(move.source, move.action_sequence, ext_node, move.tokens_before, max_steps)
         self.graph.maybe_normalize_node_edges(move.source)
@@ -868,6 +888,7 @@ class Kobe:
     def _record_external_web_step(
         self, move: _Move, device_state: dict[str, Any], max_steps: int
     ) -> _Position:
+        self._navigation_history.clear()
         self.logger.warning(
             "External web page opened from %s. Recording the edge and pressing back.",
             move.source,
@@ -893,6 +914,12 @@ class Kobe:
     def _record_in_app_step(
         self, move: _Move, new_node: str, device_state: dict[str, Any], max_steps: int
     ) -> _Position:
+        self._navigation_history.record(
+            _route_state(move.source, move.before),
+            _route_state(new_node, Observation.from_state(device_state)),
+            str(move.action.get("action", "")),
+            known_edge=self.graph.graph.has_edge(move.source, new_node),
+        )
         new_node_data = self._require_node(new_node)
         detail_after = new_node_data.get("last_detail_snapshot", {})
         delta = None
@@ -935,6 +962,8 @@ class Kobe:
         Exploration counts every step here and nowhere else, so a run's log has one
         ``Step N/M`` line for each step it took.
         """
+        if any(action.get("action") in {"wait", "continue", "interrupted"} for action in actions):
+            self._navigation_history.clear()
         self.graph.total_steps_completed += 1
         tokens_after = token_tracker.snapshot_by_type()
         step_tokens = {
@@ -983,6 +1012,7 @@ class Kobe:
 
         package = device_state.get("package", "")
         if is_outside_app(package, self.package_name):
+            self._navigation_history.clear()
             self.logger.warning(
                 "%s is in front of %s. Recovering %s.", package, self.package_name, self.app_name
             )

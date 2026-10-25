@@ -3075,7 +3075,11 @@ def test_repeated_internal_route_informs_the_planner_without_replacing_its_next_
         [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_TAP_REPLY)]
     )
 
-    explorer.explore(max_steps=5)
+    router_responses.extend(
+        [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_WAIT_REPLY)]
+    )
+
+    explorer.explore(max_steps=6)
 
     prompts = [
         str(json.loads(request.content)["messages"][-1]["content"][0]["text"])
@@ -3086,9 +3090,69 @@ def test_repeated_internal_route_informs_the_planner_without_replacing_its_next_
     assert "Recent repeated route" in prompts[4]
     assert "s1_form --back--> s2_dialog --back--> s1_form" in prompts[4]
     assert "Hidden state may still change" in prompts[4]
-    assert device.actions == [*[{"action": "back"}] * 4, {"action": "tap", "coordinate": [50, 100]}]
-    assert explorer.graph.total_steps_completed == 5
+    assert device.actions == [*[{"action": "back"}] * 4, {"action": "tap", "x": 50, "y": 100}]
+    assert "Recent repeated route" not in prompts[5]
+    assert explorer.graph.total_steps_completed == 6
     assert explorer.graph.graph.has_edge("s1_form", "s3_picker")
+
+
+@pytest.mark.parametrize("boundary", ["wait", "resume", "checkpoint"])
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_ordinary_route_context_restarts_at_exploration_boundaries(
+    boundary: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waits, fresh exploration and checkpoint boundaries keep history contiguous."""
+    dialog = _screen("com.demo.Home", "gray")
+    explorer = _explorer(
+        _Screens(HOME_SCREEN, dialog, HOME_SCREEN, dialog, HOME_SCREEN, dialog),
+        tmp_path,
+        router_client,
+    )
+    for node in ("s0_seed", "s1_form", "s2_dialog"):
+        explorer.graph.graph.add_node(node, package="com.demo", replay_misses=0)
+    explorer.graph.add_edge("s1_form", "s2_dialog", action=[{"action": "back"}])
+    explorer.graph.add_edge("s2_dialog", "s1_form", action=[{"action": "back"}])
+    visits = ["s1_form", "s2_dialog", "s1_form", "s2_dialog", "s1_form"]
+    if boundary == "resume":
+        visits.append("s1_form")
+    _identifying(explorer, monkeypatch, *visits, "s2_dialog")
+    _without_templates(monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    if boundary == "checkpoint":
+        explorer.coverage_checkpoint_steps = 4
+        monkeypatch.setattr(
+            explorer, "maybe_continue_from_coverage_checkpoint", lambda *_args: None
+        )
+    for _ in range(4):
+        router_responses.extend(
+            [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_BACK_REPLY)]
+        )
+    if boundary == "wait":
+        router_responses.extend(
+            [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_WAIT_REPLY)]
+        )
+    router_responses.extend(
+        [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_BACK_REPLY)]
+    )
+
+    if boundary == "resume":
+        explorer.explore(max_steps=4)
+    explorer.explore(max_steps=6 if boundary == "wait" else 5)
+
+    prompts = [
+        str(json.loads(request.content)["messages"][-1]["content"][0]["text"])
+        for request in router_requests
+        if json.loads(request.content)["model"] == "provider/instruction"
+    ]
+    if boundary == "wait":
+        assert "Recent repeated route" in prompts[4]
+    assert "Recent repeated route" not in prompts[-1]
 
 
 def _toggles(explorer: Kobe, *days: int) -> None:
