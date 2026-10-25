@@ -701,10 +701,16 @@ counts as external web, so the app's own screens get regular nodes even when the
 run in a web view or mention a privacy policy.
 
 Independently navigable system surfaces have explicit external identities: the
-notification shade, runtime permission controller and keyboard settings do not
-count as app coverage or become checkpoint, replay or resume targets. The visible
-shade window takes precedence over the underlying focused app. An attached
-keyboard preserves that app's identity and its visibility is page state. The target
+notification shade, SystemUI dialogs, runtime permission controller and keyboard
+settings do not count as app coverage or become checkpoint, replay or resume targets.
+A focused, visible display-zero `STATUS_BAR_SUB_PANEL` owned by `com.android.systemui`
+has the synthetic window identity `SystemUIDialog` and `system_surface: system_dialog`.
+Its native focus token, owner, type and visibility establish that boundary while the
+underlying focused app remains recorded separately. Ordinary app-owned dialogs and
+panels remain app state. The visible shade window also takes precedence over the
+underlying app. An attached keyboard preserves that app's identity and its visibility
+is page state. Window metadata, XML and screenshots are consecutive reads; UI changes
+can occur between them. The target
 package's own pages remain app coverage, including Settings and keyboard settings
 when their package is the target.
 
@@ -724,7 +730,7 @@ wait without marking the target explored; audit exploration consumes an iteratio
 and replay stops its path. App Copy/Share and unobscured controls remain available.
 No automatic Back press dismisses a clipboard preview. A visible clipboard window
 with unavailable region geometry saves its raw capture and stops with an explicit
-ownership error. Window metadata and screenshots are consecutive device reads. The step log records their observed ownership.
+ownership error. The step log records the observed ownership.
 Persisted observations require explicit native size and ownership fields; graph
 loading and building report missing or malformed metadata before model calls.
 An explicit null represents unavailable evidence under the supported boundary policy.
