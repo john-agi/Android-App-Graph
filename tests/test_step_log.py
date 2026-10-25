@@ -8,13 +8,16 @@ import base64
 import io
 import json
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 from PIL import Image, ImageDraw
 
+from android_app_graph import device as device_module
 from android_app_graph.device import DeviceController, InputRegions, InputRejectedError
+from android_app_graph.modal_context import MAX_OPENING_ACTIONS, MatchInput
 from android_app_graph.screen_image import encode_screenshot, pixel_hash
 from android_app_graph.step_log import (
     Observation,
@@ -494,6 +497,7 @@ def test_record_match_names_the_screenshot_asked_for_and_the_one_expected(
         **HOME,
         "observation": "000000",
         "expected_observation": "000042",
+        "match_input": {"previous": None, "actions": []},
     }
     assert recorder.last_match == "000000"
 
@@ -818,6 +822,70 @@ def test_input_rejection_feedback_belongs_to_the_current_unchanged_screen(
     assert recorder.input_rejection_hint == ""
 
 
+def test_match_input_records_actual_actions_and_explicit_task_boundaries(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = _recorder(device, steps)
+    first = Observation.from_state(recorder.get_state())
+    recorder.record_match(first, None)
+    recorder.exe_action({"action": "back"})
+    second = Observation.from_state(recorder.get_state())
+    context = recorder.record_match(second, None)
+    assert context == MatchInput(first.observation_id, ({"action": "back"},))
+    assert MatchInput.from_record(json.loads(json.dumps(context.as_record()))) == context
+
+    def adb(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args, 0, stdout=b"Starting: Intent")
+
+    monkeypatch.setattr(device_module, "run_adb", adb)
+    monkeypatch.setattr(device_module.time, "sleep", lambda _seconds: None)
+    device_module.restart_app(
+        recorder,
+        device_module.AppLaunch("demo", "com.demo", "com.demo/.Main"),
+        logging.getLogger(__name__),
+    )
+    third = Observation.from_state(recorder.get_state())
+    after_restart = recorder.record_match(third, None)
+    assert after_restart.previous == second.observation_id
+    assert after_restart.actions is None
+    records = [json.loads(path.read_text()) for path in steps.glob("*.json")]
+    assert any(record.get("status") == "task_restart" for record in records)
+
+
+def test_long_input_sequence_marks_modal_origin_unknown(device: _Device, steps: Path) -> None:
+    recorder = _recorder(device, steps)
+    recorder.record_match(Observation.from_state(recorder.get_state()), None)
+    for _ in range(MAX_OPENING_ACTIONS + 1):
+        recorder.exe_action({"action": "back"})
+    assert recorder.record_match(Observation.from_state(recorder.get_state()), None).actions is None
+    recorder.exe_action({"action": "back"})
+    assert recorder.record_match(Observation.from_state(recorder.get_state()), None).actions == (
+        {"action": "back"},
+    )
+
+
+def test_input_timeout_keeps_requested_input_and_breaks_the_opening_chain(
+    device: _Device, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = _recorder(device, steps)
+    recorder.record_match(Observation.from_state(recorder.get_state()), None)
+
+    def timed_out(action: dict[str, object]) -> None:
+        device.actions.append(dict(action))
+        command = "input"
+        raise subprocess.TimeoutExpired(command, 15)
+
+    monkeypatch.setattr(device, "exe_action", timed_out)
+    with pytest.raises(subprocess.TimeoutExpired):
+        recorder.exe_action({"action": "back"})
+    context = recorder.record_match(Observation.from_state(recorder.get_state()), None)
+    assert context.actions is None
+    records = [json.loads(path.read_text()) for path in steps.glob("*.json")]
+    assert [record["action"] for record in records if record["kind"] == "action"] == [
+        {"action": "back"}
+    ]
+
+
 def test_unsupported_action_retains_intent_without_input_or_a_performed_record(
     device: _Device, steps: Path
 ) -> None:
@@ -832,3 +900,17 @@ def test_unsupported_action_retains_intent_without_input_or_a_performed_record(
     assert record["planned_required_pointers"] == 3
     assert record["reason"] == "Only one pointer"
     assert _files(steps) == ["000000.json"]
+
+
+def test_unsupported_intent_preserves_only_dispatched_input_in_modal_context(
+    device: _Device, steps: Path
+) -> None:
+    recorder = _recorder(device, steps)
+    first = Observation.from_state(recorder.get_state())
+    recorder.record_match(first, None)
+    recorder.exe_action({"action": "back"})
+    outcome = {"action": "unsupported", "required_pointers": 3, "reason": "Only one pointer"}
+    recorder.record_unsupported_action("Swipe with three fingers", 3, outcome)
+    context = recorder.record_match(Observation.from_state(recorder.get_state()), None)
+    assert context == MatchInput(first.observation_id, ({"action": "back"},))
+    assert device.actions == [{"action": "back"}]

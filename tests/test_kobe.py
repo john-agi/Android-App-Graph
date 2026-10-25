@@ -349,7 +349,9 @@ def test_a_rejected_page_description_leaves_no_node(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             *(
                 response
@@ -389,7 +391,9 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             # The replay ends on the start node's own pixels: an exact match.
             httpx.Response(200, json=embedding_body),
@@ -883,7 +887,9 @@ def test_exploration_wait_recovery_respects_step_limit(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -927,7 +933,9 @@ def test_an_exploration_step_asks_the_explored_device_whether_its_keyboard_is_up
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"instruction":"Tap Search","element":null,"required_pointers":1}'
@@ -957,7 +965,9 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the About row","required_pointers":1}'
@@ -965,8 +975,7 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
             chat_response(
-                content='{"page_description":"About page with privacy policy link",'
-                '"is_external_web":false}'
+                content='{"page_description": "About page with privacy policy link", "is_external_web": false, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
             httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
             chat_response(content=_DIFFERENT),
@@ -1005,7 +1014,11 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
         tmp_path,
         router_client,
     )
-    home = {"page_description": "home", "elements": [{"description": "About", "position": "top"}]}
+    home = {
+        "page_description": "home",
+        "elements": [{"description": "About", "position": "top"}],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
+    }
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
@@ -1016,7 +1029,9 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
             ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"about"}'),
+            chat_response(
+                content='{"page_description": "about", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json={**embedding_body, "data": [_ORTHOGONAL]}),
             chat_response(content=_DIFFERENT),
         ]
@@ -1087,14 +1102,18 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
             ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"news article","is_external_web":true}'),
+            chat_response(
+                content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             # Back shows home again: an exact match.
             httpx.Response(200, json=embedding_body),
         ]
@@ -1148,14 +1167,18 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
             ),
             chat_response(content=action_reply),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"news article","is_external_web":true}'),
+            chat_response(
+                content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -1197,12 +1220,14 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     settings = _screen("com.demo.Settings", "gray")
     device = screens_by_log(HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings)
     explorer = _explorer(device, tmp_path, router_client)
-    external = '{"page_description":"news article","is_external_web":true}'
+    external = '{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
     orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
@@ -1223,7 +1248,9 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
             ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"settings"}'),
+            chat_response(
+                content='{"page_description": "settings", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
             chat_response(content=_DIFFERENT),
         ]
@@ -1357,6 +1384,7 @@ def _explore_one_step_the_action_model_ends(
             {"description": "Search box", "position": "top left"},
             {"description": "Settings icon", "position": "top right"},
         ],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     plan = {"required_pointers": 1, "element": 2, "instruction": "Tap the Settings icon"}
     router_responses.extend(
@@ -1486,7 +1514,11 @@ def test_a_step_that_leaves_the_app_records_its_screen_on_the_app_s_node(
         ("transition", "main_loop"),
         ("action", "external_app_recovery"),
         ("observation", "external_app_recovery"),
-        *([("observation", "external_app_recovery")] if relaunched else []),
+        *(
+            [("system_event", "external_app_recovery"), ("observation", "external_app_recovery")]
+            if relaunched
+            else []
+        ),
         ("match", "main_loop"),
     ]
     assert (records[4]["after"], records[4]["to_node"]) == ("000003", "ext_com.android.launcher3")
@@ -1528,6 +1560,7 @@ def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_reject
     search_page = {
         "page_description": "Chat search page",
         "elements": [{"description": "Search button", "position": "top"}],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     verdict = {
         "same": False,
@@ -1547,7 +1580,9 @@ def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_reject
                 tool_arguments='{"action":"click","coordinate":[500,500],"required_pointers":1}',
             ),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search results"}'),
+            chat_response(
+                content='{"page_description": "Chat search results", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(verdict)),
             *[httpx.Response(200, json=embedding_body) for _ in range(2)],
@@ -1601,11 +1636,15 @@ def test_the_planner_and_a_new_edge_take_the_screen_s_own_description(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search page"}'),
+            chat_response(
+                content='{"page_description": "Chat search page", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search results"}'),
+            chat_response(
+                content='{"page_description": "Chat search results", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=same),
             chat_response(content=_TAP_REPLY),
@@ -2107,6 +2146,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         ("observation", "main_loop"),
         ("match", "main_loop"),
         *step,
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
         ("action", "navigation_replay"),
@@ -2274,7 +2314,9 @@ def _explore_into_a_permission_dialog(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap Take photo","required_pointers":1}'
@@ -2371,7 +2413,9 @@ def _explore_from_home_into_another_app(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=_TAP_REPLY),
             *identifying,
@@ -2468,10 +2512,13 @@ def test_a_step_that_leaves_the_app_marks_the_element_the_planner_names(
             {"description": "Dark mode toggle", "position": "top"},
             {"description": "Search button", "position": "top right"},
         ],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     identifying_the_web_page = [
         httpx.Response(200, json=embedding_body),
-        chat_response(content='{"page_description":"news article","is_external_web":true}'),
+        chat_response(
+            content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        ),
     ]
     router_responses.extend(
         [
@@ -2518,7 +2565,9 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
         embedding_body,
         monkeypatch,
         httpx.Response(200, json=embedding_body),
-        chat_response(content='{"page_description":"home with the keyboard shown"}'),
+        chat_response(
+            content='{"page_description": "home with the keyboard shown", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        ),
         httpx.Response(200, json=embedding_body),
         chat_response(content='{"same":true}'),
     )
@@ -2594,7 +2643,9 @@ def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visi
     answers = iter(visits)
     answered: dict[str, str] = {}
 
-    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+    def identify(
+        observation: Observation, *, expected_observation: str | None = None, **_kwargs: object
+    ) -> str:
         known = answered.get(expected_observation or "")
         expected.append(known or explorer.graph.node_of(expected_observation))
         visit = next(answers)
@@ -2815,6 +2866,7 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
         ("match", "main_loop"),
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
         ("action", "navigation_replay"),
@@ -3599,7 +3651,9 @@ def test_every_screen_identify_state_takes_is_embedded_and_its_decision_recorded
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Scroll down","required_pointers":1}'
@@ -4289,7 +4343,13 @@ def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
             [
                 httpx.Response(200, json=embedding_body),
                 chat_response(
-                    content=json.dumps({"page_description": "Card editor", "state": state})
+                    content=json.dumps(
+                        {
+                            "page_description": "Card editor",
+                            "state": state,
+                            "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
+                        }
+                    )
                 ),
                 httpx.Response(200, json=embedding_body),
             ]

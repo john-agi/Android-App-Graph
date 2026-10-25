@@ -31,6 +31,7 @@ from openrouter.embeddings import Embeddings
 from openrouter.errors import ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsUsage
 
+from android_app_graph.modal_context import Surface
 from android_app_graph.payloads import as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UNUSABLE_OUTPUT_ATTEMPTS, UnusableOutputError
 from android_app_graph.screen_image import encode_screenshot
@@ -490,10 +491,15 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
             "page_describe_and_state",
             "openai/gpt-6.1-sol",
             (
-                '{"page_description":"home","state":{"tab":"all"},'
-                '"elements":[{"description":"Search","position":"top"}]}'
+                '{"page_description": "home", "state": {"tab": "all"}, "elements": [{"description": "Search", "position": "top"}], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
-            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}], False),
+            (
+                "home",
+                {"tab": "all"},
+                [{"description": "Search", "position": "top"}],
+                False,
+                Surface(),
+            ),
         ),
         ("verify", "node_verify", "openai/gpt-6.1-sol", '{"same":true}', {"same": True}),
         (
@@ -728,7 +734,7 @@ def _sent_schemas(
     router_responses.extend(
         chat_response(content=content)
         for content in (
-            '{"page_description":"home","state":{},"elements":[]}',
+            '{"page_description": "home", "state": {}, "elements": [], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
             '{"same":true}',
             "{}",
             "{}",
@@ -799,9 +805,11 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.append(
-        chat_response(content='{"page_description":"news article","is_external_web":true}')
+        chat_response(
+            content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        )
     )
-    *_, is_external_web = vlm.describe_page_and_state(
+    *_, is_external_web, _surface = vlm.describe_page_and_state(
         router_client,
         vlm.DescribeRequest(
             screenshot_b64=png_screenshot,
@@ -854,7 +862,9 @@ def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
 ) -> None:
     for known_descriptions in (None, ["Add Wi-Fi network dialog"]):
         router_responses.append(
-            chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
+            chat_response(
+                content='{"page_description": "Add Wi-Fi network dialog", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            )
         )
         vlm.describe_page_and_state(
             router_client,
@@ -898,7 +908,9 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
     dialog or full-screen picker with its own purpose is described as a screen."""
     for known_descriptions in (None, ["Add Wi-Fi network dialog"]):
         router_responses.append(
-            chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
+            chat_response(
+                content='{"page_description": "Add Wi-Fi network dialog", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            )
         )
         vlm.describe_page_and_state(
             router_client,
@@ -911,11 +923,13 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
         prompt = json.loads(request.content)["messages"][0]["content"][0]["text"]
         kept_out = re.search(r'[^.]*never change "page_description"', prompt)
         assert kept_out is not None
-        for kind in ("menu", "dropdown", "picker", "popup", "expanded"):
+        for kind in ("menu", "dropdown", "popup", "expanded"):
             assert kind in kept_out.group(), kind
         assert '"open_menu"' in prompt
         assert '"expanded_sections"' in prompt
-        assert "full-screen picker that has its own purpose" in prompt
+        assert (
+            "Modal dialogs, picker dialogs and modal bottom sheets are separate screens" in prompt
+        )
 
 
 def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen(
@@ -934,10 +948,11 @@ def test_the_verifier_counts_an_open_menu_or_expanded_section_as_the_same_screen
     same_cases, different_cases = prompt.split("Two screenshots are DIFFERENT screens", 1)
     same_cases = same_cases[same_cases.index("Two screenshots are the SAME screen") :]
     different_cases = different_cases[: different_cases.index("Answer with ONLY")]
-    for kind in ("overflow menu", "dropdown", "picker", "popup", "context menu", "expanded"):
+    for kind in ("overflow menu", "dropdown", "popup", "context menu", "expanded"):
         assert kind in same_cases, kind
+    assert "picker, popup" not in same_cases
     assert "menu" not in different_cases
-    assert "its own purpose" in different_cases
+    assert "modal purpose" in different_cases
 
 
 def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
@@ -954,7 +969,7 @@ def test_the_verifier_keeps_page_state_out_of_its_refined_descriptions(
     _verify_itself(router_client, png_screenshot, "Wi-Fi Direct")
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     refinement = prompt[prompt.index("If they are DIFFERENT screens") :]
-    for kind in ("keyboard", "focus", "scrolled", "menu", "dropdown", "picker", "expanded"):
+    for kind in ("keyboard", "focus", "scrolled", "menu", "dropdown", "expanded"):
         assert kind in refinement, kind
 
 
@@ -1025,7 +1040,8 @@ def test_the_merge_audit_may_report_a_page_with_its_menu_open(
     router_responses.append(chat_response(content='{"issues":[],"summary":"fine"}'))
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
-    assert "menu" not in prompt
+    assert "Anchored menus" in prompt
+    assert "modal bottom sheets are separate screens" in prompt
 
 
 @pytest.mark.parametrize("reply", ["not-json", "[]", '{"issues":false}'])
@@ -1256,7 +1272,7 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
 _GOOD_REPLIES: dict[str, str] = {
     "chat": "test reply",
     "action": '{"action":"click","coordinate":[500,500],"required_pointers":1}',
-    "description": '{"page_description":"home"}',
+    "description": '{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
 }
 _RESULTS: dict[str, object] = {
     "chat": "test reply",
@@ -1381,7 +1397,9 @@ def _send_every_model_call(
     """Make one call of every call type, each with its role's ``settings``."""
     responses.extend(
         [
-            reply(content='{"page_description":"home"}'),
+            reply(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             reply(content='{"same":true}'),
             reply(content="{}"),
             reply(content="{}"),
@@ -1607,11 +1625,31 @@ def test_a_wrong_vector_count_is_not_re_asked(
         ('{"page_description":', json.JSONDecodeError, "Expecting value"),
         ("[]", TypeError, "page description to be a JSON object"),
         ("{}", ValueError, "non-empty page_description"),
-        ('{"page_description":""}', ValueError, "non-empty page_description"),
-        ('{"page_description":"home","state":[]}', TypeError, "page state"),
-        ('{"page_description":"home","elements":{}}', TypeError, "page elements"),
-        ('{"page_description":"home","elements":[null]}', TypeError, "element description"),
-        ('{"page_description":"home","is_external_web":"yes"}', TypeError, "is_external_web"),
+        (
+            '{"page_description": "", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            ValueError,
+            "non-empty page_description",
+        ),
+        (
+            '{"page_description": "home", "state": [], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "page state",
+        ),
+        (
+            '{"page_description": "home", "elements": {}, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "page elements",
+        ),
+        (
+            '{"page_description": "home", "elements": [null], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "element description",
+        ),
+        (
+            '{"page_description": "home", "is_external_web": "yes", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "is_external_web",
+        ),
     ],
 )
 def test_a_malformed_page_description_is_re_asked_once_then_raises(
@@ -2694,6 +2732,56 @@ def test_text_planning_establishes_the_intended_field_before_typing(
     assert "current caret or field highlight" in prompt
 
 
+@pytest.mark.parametrize("operation", ["page", "verify", "merge", "audit"])
+def test_screen_identity_policy_reaches_every_model_entry(
+    operation: str,
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """Descriptions, matching and audit proposals use one modal identity policy."""
+    router_responses.append(
+        chat_response(
+            content='{"page_description": "home", "same": true, "issues": [], "summary": "ok", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        )
+    )
+    _ROLE_HELPERS[operation](router_client, png_screenshot)
+    content = json.loads(router_requests[0].content)["messages"][0]["content"]
+    prompt = content if isinstance(content, str) else content[0]["text"]
+    for rule in (
+        "Modal dialogs, picker dialogs and modal bottom sheets are separate screens",
+        "Anchored menus",
+        "modal purpose and opening navigation destination",
+        "Selected values, input modes and underlying scroll positions are state",
+        "Dimming supports this distinction",
+        "Preserve the visible opening destination in the modal's description",
+    ):
+        assert rule in prompt
+    assert "dropdown, picker, popup" not in prompt
+
+
+def test_modal_refinement_retains_the_opening_destination(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    """Refining a modal's description keeps its purpose and visible opening destination."""
+    router_responses.append(chat_response(content='{"same":false,"reason":"other destination"}'))
+    vlm.verify_same_node(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Alarm time picker"),
+        new=vlm.DescribedScreenshot(png_screenshot, "Bedtime time picker"),
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    refinement = prompt[prompt.index("If they are DIFFERENT screens") :]
+    assert "modal purpose and opening navigation destination" in refinement
+
+
 def test_observed_feedback_scope_preserves_app_controls_and_action_context(
     router_client: OpenRouter,
     router_requests: list[httpx.Request],
@@ -2704,7 +2792,7 @@ def test_observed_feedback_scope_preserves_app_controls_and_action_context(
     router_responses.extend(
         [
             chat_response(
-                content='{"page_description":"Calculator","state":{},"elements":[{"description":"App Share","position":"top"}]}'
+                content='{"page_description": "Calculator", "state": {}, "elements": [{"description": "App Share", "position": "top"}], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
             chat_response(
                 content='{"element":1,"instruction":"Tap unobscured app Share","required_pointers":1}'

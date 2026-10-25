@@ -1057,8 +1057,10 @@ class Kobe:
                     device_state = restart_into_app(self.controller, self.app_launch, self.logger)
                 expect_start()
         observation = Observation.from_state(device_state)
-        self.controller.record_match(observation, expected_observation)
-        node = self.graph.identify_state(observation, expected_observation=expected_observation)
+        match_input = self.controller.record_match(observation, expected_observation)
+        node = self.graph.identify_state(
+            observation, expected_observation=expected_observation, match_input=match_input
+        )
         return node, device_state
 
     def _continue_after(self, node: str, device_state: dict[str, Any], max_steps: int) -> _Position:

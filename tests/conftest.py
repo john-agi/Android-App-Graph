@@ -32,6 +32,7 @@ from android_app_graph.graph_files import (
     save_embeddings,
     text_embeddings_path,
 )
+from android_app_graph.modal_context import Surface
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import save_image_embeddings
 from android_app_graph.utils import DEFAULT_MATCHING, open_client
@@ -440,7 +441,11 @@ def _write_member_record(steps_dir: Path, identify_file: Path, observation_id: s
     }
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     describe = {"page_description": f"Screen {observation_id}", "state": {}, "elements": []}
-    line = {"observation": observation_id, "describe": {**describe, "is_external_web": False}}
+    line = {
+        "observation": observation_id,
+        "describe": {**describe, "is_external_web": False, "surface": Surface().as_record()},
+        "modal_context": [],
+    }
     append_json_line(identify_file, line)
 
 
@@ -573,10 +578,15 @@ def write_member_graph() -> Callable[..., None]:
                         "state": {"seen_in": observation_id},
                         "elements": [{"description": f"Button {observation_id}"}],
                         "is_external_web": False,
+                        "surface": Surface().as_record(),
                     }
                     if observation_id in copies:
                         describe["copied_from"] = source
-                    line: dict[str, object] = {"observation": observation_id, "describe": describe}
+                    line: dict[str, object] = {
+                        "observation": observation_id,
+                        "describe": describe,
+                        "modal_context": [],
+                    }
                     if observation_id in refinements:
                         refinement = {"new_description": refinements[observation_id]}
                         line["identify"] = {"stage": "new", "refinement": refinement}

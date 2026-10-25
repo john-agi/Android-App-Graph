@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
 from xml.parsers import expat
 
 from android_app_graph.display_state import NIGHT_KEYS, DisplayState
@@ -56,6 +56,13 @@ class DeviceController(Protocol):
     def get_state(self, *, deadline: float | None = None) -> dict[str, Any]: ...
 
     def exe_action(self, action: dict[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class SystemEventRecorder(Protocol):
+    """A controller that retains app-task and system recovery boundaries."""
+
+    def record_system_event(self, fields: Mapping[str, object]) -> None: ...
 
 
 class AvdManager(Protocol):
@@ -969,6 +976,8 @@ def restart_app(controller: DeviceController, app: AppLaunch, logger: logging.Lo
     before anything is launched, so no replay starts from an unknown screen. An ``am
     start`` that cannot start the component raises ``ActivityStartError``.
     """
+    if isinstance(controller, SystemEventRecorder):
+        controller.record_system_event({"status": "task_restart"})
     udid = controller.config["device"]["udid"]
     force_stop = ["-s", udid, "shell", "am", "force-stop", app.package_name]
     stopped = run_adb(force_stop, output="discard", check=False)
