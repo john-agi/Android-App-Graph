@@ -32,6 +32,7 @@ from android_app_graph.device import (
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
 from android_app_graph.navigation_history import NavigationHistory, RouteState
+from android_app_graph.payloads import as_str
 from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
@@ -84,6 +85,14 @@ def _route_state(node: str, observation: Observation) -> RouteState:
 
 class NoPathError(ValueError):
     """The graph records no path from its start node to the target, so no replay began."""
+
+
+class _ReplayInterruptedError(Exception):
+    """The observed app boundary invalidates the remaining recorded inputs."""
+
+    def __init__(self, node: str) -> None:
+        super().__init__(node)
+        self.node = node
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +469,11 @@ class Kobe:
                 actual_node = self._replay_action(
                     action, expected_observation=self.graph.earliest_member(node_id)
                 )
+        except _ReplayInterruptedError as interruption:
+            actual_node = interruption.node
+            self.logger.warning(
+                "Replay stopped at an app boundary; continuing from %s", actual_node
+            )
         except (InputRejectedError, SystemOverlayActionError) as error:
             self.logger.warning(
                 "Replay input is unreachable: %s; identifying the current screen", error
@@ -482,12 +496,20 @@ class Kobe:
             if isinstance(action, list):
                 time.sleep(0.5)
             if index + 1 < len(actions):
-                self._identify(self.controller.get_state())
+                self._identify_replay(self.controller.get_state())
         time.sleep(1)
-        reached, _ = self._identify(
+        return self._identify_replay(
             self.controller.get_state(), expected_observation=expected_observation
         )
-        return reached
+
+    def _identify_replay(
+        self, state: dict[str, object], *, expected_observation: str | None = None
+    ) -> str:
+        outside = is_outside_app(as_str(state.get("package"), ""), self.package_name)
+        node, _ = self._identify(state, expected_observation=expected_observation)
+        if outside:
+            raise _ReplayInterruptedError(node)
+        return node
 
     def _report_arrival(self, actual_node: str, target_node: str) -> str:
         """Log whether a replay to ``target_node`` reached it, count a miss on it when it

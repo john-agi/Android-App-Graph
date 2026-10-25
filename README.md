@@ -659,7 +659,10 @@ and inputs within a compound action. A modal's opening destination therefore com
 from the observed intermediate screen, even if it differs from the planned route.
 These intermediate matches add screenshot embedding and, when needed, description
 and verification calls; they are retained in the step log without counting as new
-exploration steps. Existing modal provenance is preserved, not repaired by replay.
+exploration steps. If an intermediate capture fails, remaining inputs are not sent.
+An observed external app or system surface stops the remaining replay after the
+normal recovery, if any, and reports the observed arrival. Existing modal
+provenance is preserved, not repaired by replay.
 
 The replay follows the path that sends the fewest device actions, each edge
 weighed by its cheapest action: the action's own steps and its

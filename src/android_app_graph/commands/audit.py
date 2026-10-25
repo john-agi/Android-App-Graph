@@ -354,6 +354,14 @@ class _InspectionBlockedError(ValueError):
     """A recorded navigation instruction crosses the audit's inspection boundary."""
 
 
+class _ReplayInterruptedError(Exception):
+    """The observed app boundary invalidates the remaining recorded inputs."""
+
+    def __init__(self, node: str) -> None:
+        super().__init__(node)
+        self.node = node
+
+
 def _check_instruction_policy(run: _ReExploreRun, source: str, instruction: str) -> None:
     blocked = inspection_block_reason(instruction, context=run.graph.latest_description(source))
     if blocked is not None:
@@ -420,6 +428,16 @@ def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
     return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
+def _identify_replay(
+    run: _ReExploreRun, state: dict[str, object], *, expected_observation: str | None = None
+) -> str:
+    boundary = _left_app(run, state) or state.get("system_surface") is not None
+    node = _identify(run, state, expected_observation=expected_observation)
+    if boundary:
+        raise _ReplayInterruptedError(node)
+    return node
+
+
 def _execute(
     run: _ReExploreRun, action: dict[str, object] | list[dict[str, object]]
 ) -> dict[str, object]:
@@ -429,7 +447,7 @@ def _execute(
         if isinstance(action, list):
             time.sleep(0.5)
         if index + 1 < len(actions):
-            _identify(run, run.recorder.get_state())
+            _identify_replay(run, run.recorder.get_state())
     time.sleep(1)
     return as_object_dict(run.recorder.get_state())
 
@@ -461,12 +479,15 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         try:
             for step in path[1:]:
                 for setup_action in step.setup:
-                    _identify(run, _execute(run, setup_action))
-                actual = _identify(
+                    _identify_replay(run, _execute(run, setup_action))
+                actual = _identify_replay(
                     run,
                     _execute(run, step.action),
                     expected_observation=run.graph.earliest_member(step.node),
                 )
+        except _ReplayInterruptedError as interruption:
+            actual = interruption.node
+            logger.warning("Replay stopped at an app boundary; continuing from %s", actual)
         except (InputRejectedError, SystemOverlayActionError) as error:
             logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
             actual = _identify(
@@ -811,7 +832,7 @@ def _correct_flagged_edge(
         return {"status": "unverified", "reached": source}
     _check_setup_policy(run, source, setup)
     for setup_action in setup:
-        _identify(run, _execute(run, setup_action))
+        _identify_replay(run, _execute(run, setup_action))
     before = run.recorder.get_state()
     after = _execute(run, action)
     reached = (
@@ -860,6 +881,8 @@ def _guarded_correction(
     try:
         with run.recorder.source("edge_retry"):
             return _correct_flagged_edge(run, source, target, instruction)
+    except _ReplayInterruptedError as interruption:
+        return {"status": "unverified", "reached": interruption.node}
     except (InputRejectedError, SystemOverlayActionError) as error:
         return {"status": "skipped", "reason": str(error)}
 

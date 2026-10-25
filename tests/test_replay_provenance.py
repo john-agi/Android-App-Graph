@@ -63,15 +63,18 @@ def _explorer(device: DeviceController, tmp_path: Path, client: OpenRouter) -> K
 def _navigate(boundary: str, explorer: Kobe, device: DeviceController, client: OpenRouter) -> str:
     if boundary == "explorer":
         return explorer.navigate_to_node("Modal")
+    issue: dict[str, object] = {
+        "type": "explore_node",
+        "node": "Modal",
+        "execution": {"effect": "inspection", "reason": "Inspect the modal."},
+    }
+    if boundary == "audit_retry":
+        issue.update(
+            type="retry_edge", source_node="Home", target_node="Modal", instruction="Inspect modal"
+        )
     (result,) = audit.re_explore_issues(
         explorer.graph,
-        [
-            {
-                "type": "explore_node",
-                "node": "Modal",
-                "execution": {"effect": "inspection", "reason": "Inspect the modal."},
-            }
-        ],
+        [issue],
         target=audit.ReExploreTarget(
             app_name="demo", package_name="com.demo", graph_path=explorer.graph_path
         ),
@@ -84,7 +87,9 @@ def _navigate(boundary: str, explorer: Kobe, device: DeviceController, client: O
         ),
         client=client,
     )
-    return str(result["navigated_to"])
+    reached = result["reached" if boundary == "audit_retry" else "navigated_to"]
+    assert isinstance(reached, str)
+    return reached
 
 
 @pytest.mark.parametrize("boundary", ["explorer", "audit"])
@@ -197,8 +202,19 @@ class _RecoveringDevice(_RouteDevice):
         )
 
 
-@pytest.mark.parametrize("boundary", ["explorer", "audit"])
-@pytest.mark.parametrize("shape", ["edges", "compound", "setup"])
+@pytest.mark.parametrize(
+    ("boundary", "shape"),
+    [
+        ("explorer", "edges"),
+        ("explorer", "compound"),
+        ("explorer", "setup"),
+        ("audit", "edges"),
+        ("audit", "compound"),
+        ("audit", "setup"),
+        ("audit_retry", "compound"),
+        ("audit_retry", "setup"),
+    ],
+)
 @pytest.mark.usefixtures("no_sleep", "device_log")
 def test_system_recovery_ends_the_pending_replay_sequence(
     boundary: str,
@@ -217,9 +233,16 @@ def test_system_recovery_ends_the_pending_replay_sequence(
         graph.add_edge("Home", "Settings", [first])
         graph.add_edge("Settings", "Modal", [pending])
     elif shape == "compound":
-        graph.add_edge("Home", "Modal", [first, pending])
+        graph.add_edge(
+            "Home", "Modal", [first, pending], details=EdgeDetails(instruction="Inspect modal")
+        )
     else:
-        graph.add_edge("Home", "Modal", [pending], details=EdgeDetails(setup=[first]))
+        graph.add_edge(
+            "Home",
+            "Modal",
+            [pending],
+            details=EdgeDetails(instruction="Inspect modal", setup=[first]),
+        )
     monkeypatch.setattr(
         graph, "identify_state", lambda observation, **_kwargs: observation.activity
     )
