@@ -1182,8 +1182,13 @@ both are described below the steps.
    described as a page: the screen
    copies that member's description, state, elements and description vector, so
    neither the description model nor the verifier runs. Members of two nodes with the
-   same hash decide nothing. A matching modal member takes the description and
-   verification path with its recorded opening evidence.
+   same hash decide nothing. When a usable actual preceding capture and input sequence
+   are available, unchanged pixels reuse that preceding member's output. Changed pixels
+   take the contextual description and verification path, which can rejoin the same
+   node. An empty input sequence is usable; a missing, broken or foreign predecessor
+   leaves the image-only shortcut in effect, with the copied member recorded as
+   `copied_from`. A matching modal member takes the description and verification path
+   with its recorded opening evidence.
 3. **Description.** The description model describes the screen, given a bounded selection of
    relevant descriptions, in the step
    order of the first member described so: a screen of a listed type takes that
