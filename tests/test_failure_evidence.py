@@ -154,3 +154,11 @@ def test_native_tombstone_boundary_prevents_borrowing_previous_identity() -> Non
     text += log("*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***", tag="DEBUG")
     text += log("signal 11 (SIGSEGV), code 1", tag="DEBUG")
     assert crash_evidence(text, "com.example")[0].process is None
+
+
+def test_exit_reason_preserves_android_nested_reason_labels() -> None:
+    text = """ApplicationExitInfo #0:
+      timestamp=2026-10-25 02:00:00.001 pid=42 realUid=1000 packageUid=1000 definingUid=1000 user=0
+      process=com.example reason=4 (APP CRASH(EXCEPTION)) subreason=0 (UNKNOWN) status=0
+"""
+    assert exit_evidence(text, "com.example")[0].reason == "4 (APP CRASH(EXCEPTION))"
