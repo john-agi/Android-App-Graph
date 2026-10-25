@@ -2701,6 +2701,120 @@ def _numbered_steps(messages: list[str]) -> list[str]:
     return [message.split(" | ")[0] for message in messages if re.search(r"Step [0-9]*/", message)]
 
 
+@pytest.mark.parametrize("saturated", [False, True], ids=["guarded-back", "saturated"])
+@pytest.mark.parametrize("merge_arrival", [False, True], ids=["arrival", "arrival-alias"])
+@pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_keeps_its_due_merge_audit_and_next_local_step(
+    kobe: Kobe,
+    saturated: bool,
+    merge_arrival: bool,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counted continuation retains its arrival through a scheduled merge audit."""
+    _list_reached_from_home(kobe, "s2_alias")
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    if saturated:
+        monkeypatch.setattr(kobe, "_self_loops_in_a_row", {"s0_home": 15})
+    else:
+        router_responses.append(chat_response(content=_BACK_REPLY))
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    choices: list[str] = []
+    navigations: list[str] = []
+    audits: list[int] = []
+
+    def choose(current: str) -> str:
+        choices.append(current)
+        return "s1_list" if current == "s0_home" else "s0_home"
+
+    def navigate(target: str) -> str:
+        navigations.append(target)
+        return target
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        assert app_name == "demo"
+        audits.append(kobe.graph.total_steps_completed)
+        if merge_arrival:
+            assert kobe.graph.merge_nodes("s2_alias", "s1_list")
+        return {"merged_count": int(merge_arrival)}
+
+    monkeypatch.setattr(kobe, "_choose_continuation_target", choose)
+    monkeypatch.setattr(kobe, "navigate_to_node", navigate)
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=51)
+
+    arrival = "s2_alias" if merge_arrival else "s1_list"
+    assert navigations == ["s1_list"]
+    assert choices == ["s0_home"]
+    assert audits == [50]
+    assert planned_from == ([] if saturated else ["s0_home"]) + [arrival]
+    assert _numbered_steps(caplog.messages) == [
+        "Step 50/51: s0_home --[continue]--> s1_list",
+        f"Step 51/51: {arrival} --[wait]--> {arrival}",
+    ]
+    saved = json.loads(kobe.graph_path.read_text())
+    assert saved["total_steps_completed"] == 51
+
+
+@pytest.mark.parametrize("arrival", [None, "s2_other"], ids=["unreachable", "wrong-arrival"])
+@pytest.mark.usefixtures("no_sleep")
+def test_unsuccessful_ranked_arrival_keeps_ordinary_checkpoint_relocation(
+    kobe: Kobe,
+    arrival: str | None,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unsuccessful continuation leaves the due checkpoint free to select a target."""
+    _list_reached_from_home(kobe, "s2_other")
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    monkeypatch.setattr(kobe, "_self_loops_in_a_row", {"s0_home": 15})
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    choices: list[str] = []
+    navigations: list[str] = []
+    audits: list[int] = []
+
+    def choose(current: str) -> str:
+        choices.append(current)
+        return "s1_list" if current == "s0_home" else "s0_home"
+
+    def navigate(target: str) -> str:
+        navigations.append(target)
+        if len(navigations) == 1:
+            if arrival is None:
+                raise NoPathError(target)
+            return arrival
+        return target
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        assert app_name == "demo"
+        audits.append(kobe.graph.total_steps_completed)
+        return {"merged_count": 0}
+
+    monkeypatch.setattr(kobe, "_choose_continuation_target", choose)
+    monkeypatch.setattr(kobe, "navigate_to_node", navigate)
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=51)
+
+    assert choices == ["s0_home", arrival or "s0_home"]
+    assert navigations == ["s1_list", "s0_home" if arrival else "s1_list"]
+    assert audits == [50]
+    assert planned_from == [navigations[-1]]
+    assert len(_numbered_steps(caplog.messages)) == 2
+    assert kobe.graph.total_steps_completed == 51
+
+
 @pytest.mark.parametrize("action_reply", [_BACK_REPLY, '{"action":"end"}'], ids=["back", "end"])
 @pytest.mark.usefixtures("no_sleep")
 def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
