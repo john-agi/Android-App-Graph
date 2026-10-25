@@ -667,7 +667,11 @@ _DRAWER_OPEN = {"open_menu": "navigation drawer"}
 
 @pytest.mark.usefixtures("no_sleep")
 def test_a_replay_opens_the_drawer_before_tapping_a_drawer_row_whose_setup_is_unknown(
-    replaying_kobe: Kobe, device_log: list[object], monkeypatch: pytest.MonkeyPatch
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
 ) -> None:
     """How the device came to be on the home screen is unknown, so is the setup of every
     action sent there. The tap on a row of the drawer, which is part of the home screen's
@@ -682,6 +686,7 @@ def test_a_replay_opens_the_drawer_before_tapping_a_drawer_row_whose_setup_is_un
     _explore_sending(replaying_kobe, monkeypatch, _OPEN_DRAWER, _OPEN_RECENT)
     device_log.clear()
 
+    router_responses.append(chat_response(content='{"applicable":true,"reason":"same drawer row"}'))
     assert replaying_kobe.navigate_to_node("s2_recent") == "s2_recent"
     assert device_log == [*_FIRST_RESTART, _OPEN_DRAWER, _OPEN_RECENT]
 
@@ -2180,6 +2185,8 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         home,
         settings,
         home,
+        home,
+        item_list,
         item_list,
         item_list,
         item_list,
@@ -2238,9 +2245,11 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "coverage_checkpoint"),
         ("match", "coverage_checkpoint"),
@@ -2304,7 +2313,14 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
     open_item: dict[str, object] = {"action": "tap", "coordinate": [30, 40]}
     web_page, item_list = _in_app("Article", "orange"), _in_app("List", "blue")
     device = _ReplayScript(
-        device_log, _in_app("Home", "white"), web_page, web_page, item_list, broken=open_item
+        device_log,
+        _in_app("Home", "white"),
+        _in_app("Home", "white"),
+        web_page,
+        web_page,
+        web_page,
+        item_list,
+        broken=open_item,
     )
     explorer = _explorer(device, tmp_path, router_client)
     explorer.graph.graph.add_nodes_from(["s0_home", "s1_list", "s2_detail"], replay_misses=0)
@@ -3238,6 +3254,7 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
         ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
@@ -4899,9 +4916,9 @@ def test_system_recovery_preserves_the_replay_expectation(
         "system_surface": "notification_shade" if restart else surface,
     }
     device = (
-        _TimedFeedbackDevice(HOME_SCREEN, boundary, boundary, HOME_SCREEN)
+        _TimedFeedbackDevice(HOME_SCREEN, HOME_SCREEN, boundary, boundary, HOME_SCREEN)
         if restart
-        else _TimedFeedbackDevice(HOME_SCREEN, boundary, app)
+        else _TimedFeedbackDevice(HOME_SCREEN, HOME_SCREEN, boundary, app)
     )
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
     kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
@@ -5164,6 +5181,123 @@ def test_unsupported_gestures_count_once_without_input_edges_or_element_credit(
         "Previous instruction was unsupported"
         in json.loads(router_requests[1].content)["messages"][0]["content"][0]["text"]
     )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_reconstructed_menu_checks_operation_context_before_its_dependent_input(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_graph_file: Callable[..., None],
+) -> None:
+    """Equal menu names leave the dependent action subject to its observed context."""
+    graph_file = tmp_path / "saved.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_picker")]},
+        embedding_model="provider/embedding",
+    )
+    graph = replaying_kobe.graph
+    graph.load_graph(graph_file)
+    ordinary_opener = {"action": "tap", "x": 90, "y": 10}
+    selected_opener = {"action": "tap", "x": 89, "y": 10}
+    copy = {"action": "tap", "x": 60, "y": 80}
+    for opener in (ordinary_opener, selected_opener):
+        graph.add_edge(
+            "s0_home",
+            "s0_home",
+            opener,
+            details=EdgeDetails(schema_delta={"open_menu": {"before": None, "after": "overflow"}}),
+        )
+    graph.add_edge("s0_home", "s1_picker", copy, details=EdgeDetails(open_menu="overflow"))
+    graph.graph["s0_home"]["s1_picker"]["action_sources"] = ["selected-menu-observation"]
+    monkeypatch.setattr(graph, "can_replay_action", lambda *_args, **_kwargs: False, raising=False)
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home", "s0_home")
+
+    reached = replaying_kobe.navigate_to_node("s1_picker")
+
+    assert reached == "s0_home"
+    assert device_log == [*_FIRST_RESTART, ordinary_opener]
+
+
+def test_navigation_requires_a_recorded_graph_before_device_input(
+    replaying_kobe: Kobe, device_log: list[object]
+) -> None:
+    """An empty graph fails before restarting or preparing a device route."""
+    assert replaying_kobe.graph.graph.number_of_nodes() == 0
+    with pytest.raises(NoPathError, match="Graph is empty"):
+        replaying_kobe.navigate_to_node("s0_home")
+    assert device_log == []
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("failure_at", ["capture", "verification"])
+def test_replay_never_sends_the_dependent_action_after_context_capture_or_verification_fails(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    failure_at: str,
+) -> None:
+    graph = replaying_kobe.graph
+    graph.graph.add_nodes_from(["s0_home", "s1_picker"], replay_misses=0)
+    graph.add_edge("s0_home", "s1_picker", _OPEN_RECENT, details=EdgeDetails(setup=[_OPEN_DRAWER]))
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home")
+    original = replaying_kobe.controller.get_state
+    reads = 0
+
+    def capture(*, deadline: float | None = None) -> dict[str, object]:
+        nonlocal reads
+        reads += 1
+        if reads == 3 and failure_at == "capture":
+            message = "capture unavailable"
+            raise RuntimeError(message)
+        return as_object_dict(original(deadline=deadline))
+
+    def verify(*_args: object, **_kwargs: object) -> bool:
+        message = "verification unavailable"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(replaying_kobe.controller, "get_state", capture)
+    monkeypatch.setattr(graph, "can_replay_action", verify)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        replaying_kobe.navigate_to_node("s1_picker")
+    assert device_log == [*_FIRST_RESTART, _OPEN_DRAWER]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("accepted", [False, True])
+def test_replay_passes_the_selected_merged_variant_to_context_validation(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_graph_file: Callable[..., None],
+    accepted: bool,
+) -> None:
+    graph_file = tmp_path / "merged.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_picker", "s2_alternate")]},
+        embedding_model="provider/embedding",
+    )
+    graph = replaying_kobe.graph
+    graph.load_graph(graph_file)
+    graph.add_edge("s0_home", "s1_picker", _OPEN_RECENT, details=EdgeDetails(setup=[_OPEN_DRAWER]))
+    graph.add_edge("s2_alternate", "s1_picker", dict(_OPEN_RECENT), details=EdgeDetails(setup=[]))
+    graph.merge_nodes("s0_home", "s2_alternate")
+    selected: list[object] = []
+
+    def verify(*_args: object, index: object) -> bool:
+        selected.append(index)
+        return accepted
+
+    monkeypatch.setattr(graph, "can_replay_action", verify)
+    expected = "s1_picker" if accepted else "s0_home"
+    _identifying(replaying_kobe, monkeypatch, "s0_home", expected)
+    assert replaying_kobe.navigate_to_node("s1_picker") == expected
+    assert selected == [1]
+    assert device_log == [*_FIRST_RESTART, *([_OPEN_RECENT] if accepted else [])]
 
 
 @pytest.mark.usefixtures("no_sleep")

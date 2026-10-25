@@ -493,6 +493,7 @@ def _edge(source: str, target: str, *actions: dict[str, Any], **extra: object) -
         "schema_deltas": [None] * len(actions),
         "setups": [None] * len(actions),
         "open_menus": [None] * len(actions),
+        "action_sources": [None] * len(actions),
         "setup_observations": [None] * len(actions),
         "setup_alternatives": [[]] * len(actions),
         "visit_count": len(actions),

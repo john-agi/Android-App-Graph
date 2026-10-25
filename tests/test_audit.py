@@ -492,6 +492,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "schema_deltas": [None],
                         "setups": [None],
                         "open_menus": [None],
+                        "action_sources": [None],
                         "setup_observations": [None],
                         "setup_alternatives": [[]],
                     }
@@ -756,6 +757,7 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
@@ -766,16 +768,16 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         ("transition", "re_explore"),
     ]
     assert {record["run_kind"] for record in records} == {"audit"}
-    assert records[3]["observation"] == records[1]["id"]
+    assert records[4]["observation"] == records[3]["id"]
     matches = [record for record in records if record["kind"] == "match"]
     assert [(r["observation"], r["expected_observation"]) for r in matches] == [
         ("000001", "s0_home-observation"),
-        ("000004", "s1_detail-observation"),
-        ("000008", None),
+        ("000005", "s1_detail-observation"),
+        ("000009", None),
     ]
-    assert {key: records[10][key] for key in _STEP_FIELDS} == {
-        "before": "000006",
-        "after": "000008",
+    assert {key: records[11][key] for key in _STEP_FIELDS} == {
+        "before": "000007",
+        "after": "000009",
         "instruction": "tap the first button",
         "element": None,
         "action": tap,
@@ -1212,6 +1214,7 @@ def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_wit
                 "schema_deltas": [None],
                 "setups": [None],
                 "open_menus": [None],
+                "action_sources": [None],
                 "setup_observations": [None],
                 "setup_alternatives": [[]],
                 "visit_count": 1,
@@ -3203,6 +3206,7 @@ def test_audit_exploration_records_system_boundaries_and_the_recovered_app(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
+    step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     graph, _path = _two_node_graph(tmp_path)
     _identifying(graph, monkeypatch, "s0_home", "s1_detail", "s1_detail")
@@ -3227,6 +3231,9 @@ def test_audit_exploration_records_system_boundaries_and_the_recovered_app(
     assert graph.graph.nodes[step["to"]]["system_surface"] == surface
     assert graph.graph.has_edge("s1_detail", step["to"])
     assert len([node for node in graph.graph if not node.startswith("ext_")]) == 2
+
+    transitions = [r for r in step_records(tmp_path / "steps") if r["kind"] == "transition"]
+    assert graph.graph["s1_detail"][step["to"]]["action_sources"] == [transitions[-1]["before"]]
 
 
 @pytest.mark.usefixtures("_fake_device")
@@ -3371,6 +3378,48 @@ def test_audit_unsupported_gestures_exhaust_the_budget_without_executed_records(
     assert not any(r["kind"] in {"action", "transition"} for r in records)
     assert list(graph.graph.edges) == edges_before
     assert controller.actions == []
+
+
+@pytest.mark.usefixtures("_fake_device")
+@pytest.mark.parametrize("operation", ["navigate", "correct"])
+def test_audit_stops_after_menu_preparation_when_action_context_is_unverified(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    operation: str,
+) -> None:
+    graph = _flagged_graph()
+    _describing_by_node_id(graph, monkeypatch)
+    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE, _SWIPE]]
+    graph.graph["s0_home"]["s1_detail"]["instructions"] = ["other context"]
+    graph.graph.add_node("s3_alternate", **dict(graph.graph.nodes["s0_home"]))
+    graph.add_edge(
+        "s3_alternate",
+        "s1_detail",
+        [_DETAIL_TAP],
+        details=EdgeDetails(instruction=_FLAGGED, setup=[_SWIPE]),
+    )
+    graph.merge_nodes("s0_home", "s3_alternate")
+    selected: list[object] = []
+
+    def verify(*_args: object, index: object) -> bool:
+        selected.append(index)
+        return False
+
+    monkeypatch.setattr(graph, "can_replay_action", verify)
+    _identifying(graph, monkeypatch, "s0_home", "s0_home", "s0_home")
+    issue = (
+        _retry()
+        if operation == "correct"
+        else {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
+    )
+    (result,) = _re_explore(graph, [issue], _ReplayController(device_log), client, tmp_path)
+    assert selected == [1]
+    assert _DETAIL_TAP not in device_log
+    assert _SWIPE in device_log
+    assert result.get("reached", result.get("navigated_to")) == "s0_home"
+    assert graph.graph.has_edge("s0_home", "s1_detail")
 
 
 @pytest.mark.usefixtures("_fake_device")

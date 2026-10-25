@@ -263,6 +263,7 @@ _TIMEOUTS_BY_ROLE: dict[str, dict[str, float]] = {
     "page_detail": {
         "page_describe_and_state": 55,
         "node_verify": 35,
+        "replay_action": 35,
         "replay_source": 35,
         "normalize_edge": 50,
         "exploration_target": 25,

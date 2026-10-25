@@ -478,26 +478,23 @@ class Kobe:
                         expected_observation=self.graph.earliest_member(target_node),
                     )
                     break
+
                 node_id, action, setup = step.node, step.action, step.setup
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
-                if isinstance(action, list):
-                    self.logger.info(
-                        "  Replay %d/%d: %s --> %s via %d compound actions",
-                        i,
-                        len(path) - 1,
-                        path[i - 1][0],
-                        node_id,
-                        len(action),
+                before = self.controller.get_state()
+                if not self.graph.can_replay_action(
+                    Observation.from_state(before),
+                    path[i - 1][0],
+                    node_id,
+                    action,
+                    index=step.action_index,
+                ):
+                    self.logger.warning(
+                        "Replay action context is unverified; identifying the current screen"
                     )
-                else:
-                    self.logger.info(
-                        "  Replay %d/%d: %s --> %s via %s",
-                        i,
-                        len(path) - 1,
-                        path[i - 1][0],
-                        node_id,
-                        action.get("action", "?"),
-                    )
+                    actual_node, _ = self._identify(before)
+                    break
+                self._log_replay_step(path[i - 1].node, step, i, len(path) - 1)
                 actual_node = self._replay_action(
                     action, expected_observation=self.graph.earliest_member(node_id)
                 )
@@ -515,6 +512,26 @@ class Kobe:
                 expected_observation=self.graph.earliest_member(target_node),
             )
         return self._report_arrival(actual_node, self.graph.resolve_node_id(target_node))
+
+    def _log_replay_step(self, source: str, step: PathStep, index: int, total: int) -> None:
+        if isinstance(step.action, list):
+            self.logger.info(
+                "  Replay %d/%d: %s --> %s via %d compound actions",
+                index,
+                total,
+                source,
+                step.node,
+                len(step.action),
+            )
+        else:
+            self.logger.info(
+                "  Replay %d/%d: %s --> %s via %s",
+                index,
+                total,
+                source,
+                step.node,
+                step.action.get("action", "?"),
+            )
 
     def _replay_action(
         self,
@@ -971,6 +988,7 @@ class Kobe:
                 setup=self._setup_trail.setup(move.source),
                 setup_observation=self._setup_trail.setup_observation(move.source),
                 open_menu=open_menu_in(move.detail_before),
+                action_source=move.before.observation_id,
             ),
         )
         self.controller.record_transition(

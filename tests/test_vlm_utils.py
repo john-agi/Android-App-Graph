@@ -2945,6 +2945,84 @@ def test_verifier_cache_context_contains_the_complete_sent_policy(
     assert vlm.node_verification_context(PAGE_DETAIL)["prompt"] == prompt
 
 
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ('{"applicable":true,"reason":"same operation"}', True),
+        ('{"applicable":false,"reason":"different operation"}', False),
+        ('{"applicable":true,"reason":""}', False),
+        ('{"applicable":"true","reason":"uncertain"}', False),
+        ("not json", False),
+        ("[]", False),
+        ("{}", False),
+    ],
+)
+def test_menu_action_question_uses_both_images_and_requires_an_answer(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    png_screenshot: str,
+    reply: str,
+    expected: bool,
+) -> None:
+    router_responses.append(chat_response(content=reply))
+    accepted, reason = vlm.verify_replay_action(
+        router_client,
+        recorded=png_screenshot,
+        current=png_screenshot,
+        actions=({"action": "tap", "x": 5, "y": 7},),
+        settings=PAGE_DETAIL,
+    )
+    assert accepted is expected
+    assert reason
+    assert len(router_requests) == 1
+    payload = json.loads(router_requests[0].content)
+    content = payload["messages"][0]["content"]
+    assert len([item for item in content if item["type"] == "image_url"]) == 2
+    assert '"x": 5' in content[-1]["text"]
+    assert payload["model"] == PAGE_DETAIL.model
+
+
+@pytest.mark.parametrize(
+    "failure", [httpx.ReadTimeout("deadline"), vlm.TruncatedReplyError("length")]
+)
+def test_menu_context_has_no_answer_after_deadline_or_truncated_output(
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    def failed(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(vlm, "send_chat", failed)
+    assert vlm.verify_replay_action(
+        router_client, recorded="old", current="fresh", actions=(), settings=PAGE_DETAIL
+    ) == (False, "action applicability unanswered")
+
+
+def test_menu_applicability_question_distinguishes_controls_from_selected_item_identity(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    png_screenshot: str,
+) -> None:
+    router_responses.append(
+        chat_response(content='{"applicable":true,"reason":"same current-selection operation"}')
+    )
+    vlm.verify_replay_action(
+        router_client,
+        recorded=png_screenshot,
+        current=png_screenshot,
+        actions=({"action": "tap", "x": 408, "y": 480},),
+        settings=PAGE_DETAIL,
+    )
+    prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
+    assert "Do not require the original selected items" in prompt
+    assert "different operation at the recorded coordinates" in prompt
+
+
 @pytest.mark.parametrize("applicable", [True, False])
 def test_replay_source_checks_actual_images_and_recorded_inputs(
     router_client: OpenRouter,

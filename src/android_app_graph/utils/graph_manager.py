@@ -127,6 +127,7 @@ from android_app_graph.utils.vlm_utils import (
     normalize_edge,
     score_by_cosine,
     token_tracker,
+    verify_replay_action,
     verify_replay_source,
     verify_same_node,
 )
@@ -163,12 +164,15 @@ class PathStep(NamedTuple):
     """One step of a path ``find_path`` returns: the node it reaches, the recorded action
     that reaches it, and that action's setup, the device actions sent before it on the
     node the step leaves. The first step is the path's start, with the action ``{}`` and
-    no setup. ``setup_observation`` names the observed entry before the setup."""
+    no setup or action index. ``setup_observation`` names the observed entry before
+    the setup. Other steps retain the selected edge-list index, since merged actions
+    can have equal inputs but different preparations and captures."""
 
     node: str
     action: dict[str, Any] | list[dict[str, Any]]
     setup: tuple[dict[str, Any], ...]
     setup_observation: str | None = None
+    action_index: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -191,6 +195,8 @@ class EdgeDetails:
         setup_observation: The observed entry before the setup, None when unknown.
         open_menu: The menu open over the source node when the action is sent, as
             ``open_menu_in`` reads it from the node's state; None when none is.
+        action_source: The actual before-observation ID, independent of whether its
+            arrival preparation is known.
     """
 
     instruction: str | None = None
@@ -199,6 +205,7 @@ class EdgeDetails:
     num_steps: int | None = None
     setup: Sequence[dict[str, Any]] | None = None
     open_menu: str | None = None
+    action_source: str | None = None
     setup_observation: str | None = None
 
 
@@ -899,6 +906,7 @@ def _count_repeat(
     action: dict[str, Any] | list[dict[str, Any]],
     setup: list[dict[str, Any]] | None,
     setup_observation: str | None,
+    action_source: str | None,
 ) -> bool:
     """Count one more visit when the edge already holds ``action``, and return whether it
     does. Retain the first known preparation and strictly shorter observed arrivals."""
@@ -906,7 +914,12 @@ def _count_repeat(
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
             if setup is not None:
+                before = (edge_data["setups"][index], edge_data["setup_observations"][index])
                 _retain_preparation(edge_data, index, setup, setup_observation)
+                after = (edge_data["setups"][index], edge_data["setup_observations"][index])
+                if before != after:
+                    edge_data["action_sources"][index] = action_source
+
             return True
     return False
 
@@ -1044,6 +1057,22 @@ def _saved_matching(graph: dict[str, Any]) -> MatchingSettings | None:
     return MatchingSettings(*counts) if len(counts) == len(values) else None
 
 
+def _require_action_sources(edges: list[dict[str, Any]], path: Path, steps_dir: Path) -> None:
+    """Action captures can be noncanonical observations outside the node member lists."""
+    for edge in edges:
+        for member in edge["action_sources"]:
+            if member is None:
+                continue
+            if not isinstance(member, str) or not member:
+                raise unloadable_graph(path, ["An action source must be an observation ID or null"])
+            record = read_observation_record(steps_dir, member)
+            if record is None or observation_ownership(record).error is not None:
+                raise unloadable_graph(
+                    path, [f"Action source {member!r} has no supported observation"]
+                )
+            recorded_observation(steps_dir, record)
+
+
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
     member observations or that has no integer ``replay_misses`` count, every member
@@ -1062,7 +1091,9 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(f"no matching settings, a whole number for each of {settings}")
     if problems:
         raise unloadable_graph(path, problems)
+    _require_action_sources(graph["edges"], path, steps_dir)
     _require_preparation_anchors(graph, path)
+
     for node in graph["nodes"]:
         for member in node["observations"]:
             record = read_observation_record(steps_dir, member)
@@ -2550,7 +2581,7 @@ class GraphManager:
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            if _count_repeat(edge_data, action, setup, setup_observation):
+            if _count_repeat(edge_data, action, setup, setup_observation, details.action_source):
                 return
         else:
             self.graph.add_edge(source, target, visit_count=1)
@@ -2564,6 +2595,7 @@ class GraphManager:
             ("schema_deltas", details.schema_delta),
             ("setups", setup),
             ("open_menus", details.open_menu),
+            ("action_sources", details.action_source),
             ("setup_observations", setup_observation),
             ("setup_alternatives", []),
         ):
@@ -2605,6 +2637,57 @@ class GraphManager:
                 return index, action
         return None
 
+    def can_replay_action(
+        self,
+        current: Observation,
+        source: str,
+        target: str,
+        action: dict[str, Any] | list[dict[str, Any]],
+        *,
+        index: int | None = None,
+    ) -> bool:
+        """Check a recorded action after preparation, before sending its inputs.
+
+        An unknown preparation's reconstructed menu must support the original
+        operation. Node identity alone does not establish its selection or controls.
+        """
+        edge = self.graph[source][target]
+        if index is None:
+            matches = [i for i, candidate in enumerate(edge["actions"]) if candidate == action]
+            if len(matches) != 1:
+                return False
+            index = matches[0]
+        if not 0 <= index < len(edge["actions"]) or edge["actions"][index] != action:
+            return False
+        reconstructed = edge["setups"][index] is None and edge["open_menus"][index] is not None
+        member = edge["action_sources"][index]
+        if member is None:
+            return not reconstructed
+        recorded = self._member_observation(member)
+        if (
+            current.black
+            or recorded.black
+            or current.system_surface is not None
+            or recorded.system_surface is not None
+            or not current.package
+            or not current.activity
+            or (current.package, current.activity) != (recorded.package, recorded.activity)
+        ):
+            logger.warning("Replay action source %s has incompatible ownership or activity", member)
+            return False
+        if not reconstructed:
+            return True
+        client, settings = self._require_page_detail()
+        accepted, reason = verify_replay_action(
+            client,
+            recorded=recorded.app_image,
+            current=current.app_image,
+            actions=_device_actions(action),
+            settings=settings,
+        )
+        logger.info("Replay action source %s applicable=%s: %s", member, accepted, reason)
+        return accepted
+
     def action_setup(
         self, source: str, target: str, index: int
     ) -> tuple[dict[str, Any], ...] | None:
@@ -2628,6 +2711,7 @@ class GraphManager:
             self.graph[source][target]["actions"][index],
             option.setup,
             option.setup_observation,
+            option.index,
         )
 
     def applicable_preparation(
@@ -2639,12 +2723,14 @@ class GraphManager:
             (
                 option
                 for option in self._replay_options(source, step.node)
-                if actions[option.index] == step.action
+                if option.index == step.action_index and actions[option.index] == step.action
             ),
             key=lambda option: option.cost,
         )
         for option in options:
-            candidate = PathStep(step.node, step.action, option.setup, option.setup_observation)
+            candidate = PathStep(
+                step.node, step.action, option.setup, option.setup_observation, option.index
+            )
             if self.can_replay(observation, candidate):
                 return candidate
         return None
@@ -3254,6 +3340,7 @@ class GraphManager:
                     self.graph[s][t]["actions"][best.index],
                     best.setup,
                     best.setup_observation,
+                    best.index,
                 )
             )
 
@@ -3579,6 +3666,7 @@ class GraphManager:
                 "schema_deltas": attrs.get("schema_deltas", []),
                 "setups": attrs.get("setups", []),
                 "open_menus": attrs.get("open_menus", []),
+                "action_sources": attrs.get("action_sources", []),
                 "setup_observations": attrs.get("setup_observations", []),
                 "setup_alternatives": attrs.get("setup_alternatives", []),
             }

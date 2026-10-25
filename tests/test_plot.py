@@ -209,6 +209,7 @@ def _saved(edge: dict[str, Any]) -> dict[str, Any]:
         "schema_deltas": [None] * count,
         "setups": [None] * count,
         "open_menus": [None] * count,
+        "action_sources": [None] * count,
         "setup_observations": [None] * count,
         "setup_alternatives": [[]] * count,
     }

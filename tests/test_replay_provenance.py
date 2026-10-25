@@ -178,6 +178,69 @@ def test_a_failed_intermediate_capture_prevents_the_next_replay_input(
     assert device.actions == [first]
 
 
+@pytest.mark.parametrize("boundary", ["explorer", "audit", "audit_retry"])
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_context_refusal_reports_the_screen_observed_after_preparation(
+    boundary: str,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preparation provenance and the actual refusal screen survive a rejected action."""
+    device = _RouteDevice("ObservedMenu")
+    explorer = _explorer(device, tmp_path, router_client)
+    graph = explorer.graph
+    graph.graph.add_nodes_from(["Home", "ObservedMenu", "Modal"], replay_misses=0)
+    opener: dict[str, object] = {"action": "tap", "x": 10, "y": 20}
+    pending: dict[str, object] = {"action": "tap", "x": 30, "y": 40}
+    graph.add_edge(
+        "Home",
+        "Modal",
+        [pending],
+        details=EdgeDetails(instruction="Inspect modal", setup=[opener]),
+    )
+    observations: dict[str, str] = {}
+    inputs: list[MatchInput] = []
+
+    def identify(
+        observation: Observation,
+        *,
+        match_input: MatchInput,
+        expected_observation: str | None = None,
+    ) -> str:
+        del expected_observation
+        observations[observation.observation_id] = observation.activity
+        inputs.append(match_input)
+        return observation.activity
+
+    checked: list[tuple[str, int | None]] = []
+
+    def refuse(
+        current: Observation,
+        _source: str,
+        _target: str,
+        _action: dict[str, object] | list[dict[str, object]],
+        *,
+        index: int | None,
+    ) -> bool:
+        checked.append((current.activity, index))
+        return False
+
+    monkeypatch.setattr(graph, "identify_state", identify)
+    monkeypatch.setattr(graph, "latest_description", lambda node: node)
+    monkeypatch.setattr(graph, "can_replay_action", refuse)
+
+    assert _navigate(boundary, explorer, device, router_client) == "ObservedMenu"
+    assert device.actions == [opener]
+    assert checked == [("ObservedMenu", 0)]
+    assert list(observations.values()) == ["Home", "ObservedMenu", "ObservedMenu"]
+    assert observations[inputs[1].previous or ""] == "Home"
+    assert inputs[1].actions == (opener,)
+    assert observations[inputs[2].previous or ""] == "ObservedMenu"
+    assert inputs[2].actions == ()
+    assert graph.graph.has_edge("Home", "Modal")
+
+
 class _RecoveringDevice(_RouteDevice):
     def __init__(self) -> None:
         super().__init__("Shade")

@@ -381,6 +381,7 @@ PER_ACTION_LISTS = (
     "schema_deltas",
     "setups",
     "open_menus",
+    "action_sources",
     "setup_observations",
     "setup_alternatives",
 )

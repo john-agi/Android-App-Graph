@@ -236,7 +236,9 @@ with each request:
 |---|---|---|---|
 | Screen description | `page_describe_and_state` | `page_detail` | 55 s |
 | Node verification | `node_verify` | `page_detail` | 35 s |
+| Reconstructed menu action | `replay_action` | `page_detail` | 35 s |
 | Replay source applicability | `replay_source` | `page_detail` | 35 s |
+
 | Edge normalization | `normalize_edge` | `page_detail` | 50 s |
 | The coverage checkpoint's target choice | `exploration_target` | `page_detail` | 25 s |
 | Node-merge audit and graph audit | `node_merge_audit`, `graph_audit` | `page_detail` | 300 s |
@@ -703,7 +705,15 @@ action of the screen that opened that menu, the one that sends the fewest device
 actions with its own setup; one whose setup is unknown counts only when it was sent
 with no menu open, as a replay arrives. The opening counts toward the action's
 weight like a setup, and the log names its actions as setup actions. An action sent
-in a menu that no recorded action opens is in no path.
+in a menu that no recorded action opens is in no path. After reconstructing a menu,
+replay compares its fresh screenshot with the action's recorded source screenshot
+and asks whether the action still addresses the same operation and controls. A
+changed menu target, unresolved context or missing source capture stops the path
+before the dependent action. The current screen is identified and a miss remains
+a miss; this check does not reconstruct unknown selection history. Every replayed
+edge action with a recorded source also checks its package and activity before
+input. These checks apply to exploration replay and audit re-exploration, including
+flagged-action correction. They do not validate every input inside a known setup.
 
 `--resume-from auto` resumes from the node the coverage checkpoint's ranking puts
 first, without a model call. The ranking holds the nodes a replay from the start
@@ -1321,12 +1331,22 @@ description. Explore the app again into a new graph directory.
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
 `instructions`, `target_observations`, `schema_deltas`, `setups`, `open_menus`,
-`setup_observations` and `setup_alternatives`
+`action_sources`, `setup_observations` and `setup_alternatives`
 lists hold one entry per action, in the same order, so entry *i* of each
+
 describes `actions[i]`. An action that recorded no instruction or observation has
 `""` in that list, and an action that recorded no state change has `null` in
 `schema_deltas`; only self-loop actions record one. Skip those entries when you
 read an edge.
+
+An action's `action_sources` entry is its actual before-observation ID, independent
+of whether its arrival setup is known. The capture may not be a node member when
+an exact image reused an existing member. Its record and image must be retained;
+`null` cannot qualify a reconstructed menu. Graphs without this aligned list need
+fresh exploration or a fresh build from retained step observations. When the primary
+setup changes, its action-source capture changes with it. An alternative preparation
+retains its entry anchor and uses the action's recorded source for the later context
+check.
 
 An action's entry in `open_menus` is the `open_menu` of the source node's
 [state](#graph-nodes) when the action was sent, such as `"navigation drawer"`, or

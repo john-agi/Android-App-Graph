@@ -69,11 +69,13 @@ DEFAULT_UNREACHABLE_LIMIT = 1800.0
 # to 5 s and at least 15 s. Edge normalization's attempts are those of the normalizer
 # sent at most 20 instructions, timed on the edges of those runs. The relabelling of a
 # flagged edge, which those runs never made, takes the planner's, the other instruction
-# call on one screenshot.
+# call on one screenshot. The reconstructed-menu comparison uses node verification's
+# deadline because both compare two captured screens.
 REQUEST_TIMEOUTS: Mapping[str, float] = MappingProxyType(
     {
         "page_describe_and_state": 55.0,
         "node_verify": 35.0,
+        "replay_action": 35.0,
         "replay_source": 35.0,  # Source applicability has the same two-image scope as node verification.
         "normalize_edge": 50.0,
         "exploration_target": 25.0,

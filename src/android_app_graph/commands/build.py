@@ -233,7 +233,8 @@ class _Replay:
     def _transition(self, record: Mapping[str, object]) -> None:
         run = self._run(record)
         step = as_str(record.get("id"), "")
-        start = run.start_of(as_str(record.get("before"), ""))
+        before = as_str(record.get("before"), "")
+        start = run.start_of(before)
         source = self.graph.node_of(start)
         if start is None or source is None:
             logger.warning("Step %s starts on no screenshot the build matched; skipping it", step)
@@ -255,7 +256,10 @@ class _Replay:
             target,
             actions,
             details=replace(
-                details, setup=run.trail.setup(source), open_menu=open_menu_in(self._states[start])
+                details,
+                setup=run.trail.setup(source),
+                open_menu=open_menu_in(self._states[start]),
+                action_source=before,
             ),
         )
         element = record.get("element")

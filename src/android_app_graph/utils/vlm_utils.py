@@ -1251,6 +1251,68 @@ def verify_same_node(
     return result
 
 
+def verify_replay_action(
+    client: OpenRouter,
+    *,
+    recorded: str,
+    current: str,
+    actions: Sequence[Mapping[str, object]],
+    settings: ModelSettings,
+) -> tuple[bool, str]:
+    """Check a reconstructed menu against the operation its action was learned in."""
+    prompt = """The recorded action below was learned in the FIRST screenshot.
+The CURRENT second screenshot follows reconstruction of a menu whose opening history
+was unknown. Decide whether the action addresses the same operation and visible controls
+now. This is action applicability, not page identity: one screen's ordinary and selected
+menus can place different operations at identical coordinates. The target is the UI control
+and its operation, not the identity of selected items that supply that operation's data.
+Do not require the original selected items to remain selected for an operation on the
+current selection. Visible selection mode and the menu can establish that context even
+when the menu obscures individual selection marks. Different content or selection count
+is acceptable only when the same operation remains at the same coordinates. Reject a
+different operation at the recorded coordinates, including rows shifted by selection count.
+Compare menu entries, selection mode, toolbar and the actual control. Do not infer missing
+selection mode or hidden prerequisites from the intended action. A covered control or
+uncertain operation means applicable=false. Matching pixels alone do not prove hidden
+state. Return applicable (boolean) and reason (string)."""
+    try:
+        response = send_chat(
+            client,
+            call_type="replay_action",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": "Recorded action source"},
+                        build_image_message(recorded),
+                        {"type": "text", "text": "Current reconstructed menu"},
+                        build_image_message(current),
+                        {"type": "text", "text": "Recorded action: " + json.dumps(actions)},
+                    ],
+                }
+            ],
+            response_format=_structured_output(
+                "replay_action",
+                {
+                    "type": "object",
+                    "properties": {"applicable": {"type": "boolean"}, "reason": {"type": "string"}},
+                    "required": ["applicable", "reason"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+        result = as_object_dict(json.loads(strip_json_fences(message_text(response))))
+    except (httpx.TimeoutException, TruncatedReplyError, json.JSONDecodeError) as error:
+        logger.warning("Replay action unanswered: %s", error)
+        return False, "action applicability unanswered"
+    reason = as_str(result.get("reason"), "")
+    return result.get("applicable") is True and bool(
+        reason
+    ), reason or "action applicability unanswered"
+
+
 def verify_replay_source(
     client: OpenRouter,
     *,

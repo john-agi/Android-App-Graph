@@ -484,36 +484,49 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     _check_navigation_policy(run, path)
 
     actual = opened_on
-    if len(path) > 1:
-        try:
-            for index, recorded in enumerate(path[1:], start=1):
-                step = _prepare_replay_step(run, path[index - 1].node, recorded)
-                if step is None:
-                    logger.warning("Replay source is inapplicable; identifying the current screen")
-                    actual = _identify(
-                        run,
-                        run.recorder.get_state(),
-                        expected_observation=run.graph.earliest_member(target_node),
-                    )
-                    break
-                _check_setup_policy(run, path[index - 1].node, step.setup)
-                for setup_action in step.setup:
-                    _identify_replay(run, _execute(run, setup_action))
-                actual = _identify_replay(
+    try:
+        for index, recorded in enumerate(path[1:], start=1):
+            step = _prepare_replay_step(run, path[index - 1].node, recorded)
+            if step is None:
+                logger.warning("Replay source is inapplicable; identifying the current screen")
+                actual = _identify(
                     run,
-                    _execute(run, step.action),
-                    expected_observation=run.graph.earliest_member(step.node),
+                    run.recorder.get_state(),
+                    expected_observation=run.graph.earliest_member(target_node),
                 )
-        except _ReplayInterruptedError as interruption:
-            actual = interruption.node
-            logger.warning("Replay stopped at an app boundary; continuing from %s", actual)
-        except (InputRejectedError, SystemOverlayActionError) as error:
-            logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
-            actual = _identify(
+                break
+            _check_setup_policy(run, path[index - 1].node, step.setup)
+
+            for setup_action in step.setup:
+                _identify_replay(run, _execute(run, setup_action))
+            before = run.recorder.get_state()
+            if not run.graph.can_replay_action(
+                Observation.from_state(before),
+                path[index - 1].node,
+                step.node,
+                step.action,
+                index=step.action_index,
+            ):
+                logger.warning(
+                    "Replay action context is unverified; identifying the current screen"
+                )
+                actual = _identify(run, before)
+                break
+            actual = _identify_replay(
                 run,
-                run.recorder.get_state(),
-                expected_observation=run.graph.earliest_member(target_node),
+                _execute(run, step.action),
+                expected_observation=run.graph.earliest_member(step.node),
             )
+    except _ReplayInterruptedError as interruption:
+        actual = interruption.node
+        logger.warning("Replay stopped at an app boundary; continuing from %s", actual)
+    except (InputRejectedError, SystemOverlayActionError) as error:
+        logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
+        actual = _identify(
+            run,
+            run.recorder.get_state(),
+            expected_observation=run.graph.earliest_member(target_node),
+        )
     if actual != run.graph.resolve_node_id(target_node):
         logger.warning(
             "Expected to reach %s but arrived at %s",
@@ -660,6 +673,7 @@ def _record_step(
             setup=step.setup,
             setup_observation=step.setup_observation,
             open_menu=step.open_menu,
+            action_source=step.before.observation_id,
         ),
     )
     run.recorder.record_transition(
@@ -711,6 +725,7 @@ def _record_system_step(
         details=EdgeDetails(
             instruction=step.instruction,
             target_observation=f"[system surface: {after.system_surface}]",
+            action_source=step.before.observation_id,
         ),
     )
     run.recorder.record_transition(
@@ -866,6 +881,10 @@ def _correct_flagged_edge(
     for setup_action in setup:
         _identify_replay(run, _execute(run, setup_action))
     before = run.recorder.get_state()
+    if not run.graph.can_replay_action(
+        Observation.from_state(before), source, target, action, index=index
+    ):
+        return {"status": "unverified", "reached": _identify(run, before)}
     after = _execute(run, action)
     reached = (
         f"ext_{as_str(after['package'], '').strip()}"
@@ -889,9 +908,12 @@ def _correct_flagged_edge(
         run.graph.record_external_app_visit(Observation.from_state(after))
         _recover_system_surface(run, after)
     if reached != target:
-        if not run.graph.move_edge_action(source, target, index, reached):
-            return {"status": "unverified", "reached": reached}
-        return {"status": "moved", "moved_to": reached}
+        moved = run.graph.move_edge_action(source, target, index, reached)
+        return (
+            {"status": "moved", "moved_to": reached}
+            if moved
+            else {"status": "unverified", "reached": reached}
+        )
 
     label = describe_executed_action(
         client=run.client,
