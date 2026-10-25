@@ -399,7 +399,7 @@ class Kobe:
         arrival_state = None
         if reached == self.graph.resolve_node_id(target_node):
             arrival_state = self._require_node(reached).get("last_detail_snapshot", {})
-        self._setup_trail.begin(reached, arrival_state)
+        self._setup_trail.begin(reached, arrival_state, observation=self.controller.last_match)
         return reached
 
     def _replay_to(self, target_node: str) -> str:
@@ -436,7 +436,15 @@ class Kobe:
         )
 
         try:
-            for i, (node_id, action, setup) in enumerate(path[1:], start=1):
+            for i, step in enumerate(path[1:], start=1):
+                node_id, action, setup = step.node, step.action, step.setup
+                if step.setup_observation is not None and not self.graph.can_replay(
+                    Observation.from_state(self.controller.get_state()), step
+                ):
+                    self.logger.warning(
+                        "Replay source is inapplicable; identifying the current screen"
+                    )
+                    break
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
                 if isinstance(action, list):
                     self.logger.info(
@@ -587,6 +595,7 @@ class Kobe:
         self, resume_from: str | None, start_step: int, max_steps: int
     ) -> _Position:
         self._navigation_history.clear()
+        fresh_graph = self.graph.graph.number_of_nodes() == 0
         if start_step > 0:
             self.logger.info(
                 "Resuming exploration from step %d (target: %d steps total)",
@@ -617,7 +626,16 @@ class Kobe:
         except UnresolvedPermissionError, UnresolvedSystemOverlayError:
             self.save_graph()
             raise
-        self._setup_trail.begin(node, None)
+        arrival = (
+            self._require_node(node).get("last_detail_snapshot", {})
+            if fresh_graph
+            and device_state.get("package") == self.package_name
+            and device_state.get("system_surface") is None
+            else None
+        )
+        self._setup_trail.begin(
+            node, arrival, observation=Observation.from_state(device_state).observation_id
+        )
         return _Position(node, device_state)
 
     def _explore_step_through_outage(self, position: _Position, max_steps: int) -> _Position:
@@ -887,6 +905,7 @@ class Kobe:
             details=replace(
                 details,
                 setup=self._setup_trail.setup(move.source),
+                setup_observation=self._setup_trail.setup_observation(move.source),
                 open_menu=open_menu_in(move.detail_before),
             ),
         )
@@ -970,7 +989,12 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
-        self._setup_trail.step(move.action_sequence, new_node, detail_after)
+        self._setup_trail.step(
+            move.action_sequence,
+            new_node,
+            detail_after,
+            observation=Observation.from_state(device_state).observation_id,
+        )
         self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.maybe_normalize_node_edges(move.source)
         self._count_step(move.source, move.action_sequence, new_node, move.tokens_before, max_steps)

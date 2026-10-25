@@ -378,6 +378,7 @@ PER_ACTION_LISTS = (
     "schema_deltas",
     "setups",
     "open_menus",
+    "setup_observations",
 )
 
 
@@ -386,6 +387,7 @@ def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
     and the edges whose per-action lists do not hold one entry per action."""
     without_actions: list[str] = []
     misaligned: list[str] = []
+    invalid_anchors: list[str] = []
     for edge in edges:
         name = f"{edge['source']} -> {edge['target']}"
         actions = edge.get("actions")
@@ -396,6 +398,12 @@ def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
             for key in PER_ACTION_LISTS
         ):
             misaligned.append(name)
+        elif any(
+            anchor is not None
+            and (not isinstance(anchor, str) or not anchor or not isinstance(setup, list))
+            for anchor, setup in zip(edge["setup_observations"], edge["setups"], strict=True)
+        ):
+            invalid_anchors.append(name)
     problems = []
     if without_actions:
         problems.append(f"edge(s) without actions: {without_actions}")
@@ -404,6 +412,8 @@ def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
             f"edge(s) without one entry per action in each of {', '.join(PER_ACTION_LISTS)}: "
             f"{misaligned}"
         )
+    if invalid_anchors:
+        problems.append(f"edge(s) with invalid preparation anchors: {invalid_anchors}")
     return problems
 
 

@@ -236,6 +236,7 @@ with each request:
 |---|---|---|---|
 | Screen description | `page_describe_and_state` | `page_detail` | 55 s |
 | Node verification | `node_verify` | `page_detail` | 35 s |
+| Replay source applicability | `replay_source` | `page_detail` | 35 s |
 | Edge normalization | `normalize_edge` | `page_detail` | 50 s |
 | The coverage checkpoint's target choice | `exploration_target` | `page_detail` | 25 s |
 | Node-merge audit and graph audit | `node_merge_audit`, `graph_audit` | `page_detail` | 300 s |
@@ -664,6 +665,17 @@ that filled in a form. What exploration did on the screen and undid before the
 action, such as opening a row and pressing Back, is not part of the setup, so
 the replay does not send it. Exploration's log names each setup action, as in
 `Replay 2/3: setup 1/1 on s30 via swipe`.
+
+Before an anchored preparation, replay captures the current screen and asks the
+page-detail model whether the full recorded input sequence applies from that visible
+entry. This checks source state rather than node identity: a shared folder-browser
+node does not make a root-relative sequence applicable inside a folder. Different
+owners or activities, black captures and system surfaces are rejected without a
+model call. A negative or unanswered check sends none of that step's inputs and the
+replay identifies where it stopped. The check adds a capture and a `replay_source`
+request per anchored step; it cannot prove hidden state or guarantee that later
+coordinates remain valid. Audit navigation and flagged-action retries use the same
+check. Menu reconstruction retains the recorded opener's anchor when one is known.
 
 An action whose setup is unknown was sent in a state the replay cannot rebuild,
 except for the menu open over the screen, which the action records (see
@@ -1279,7 +1291,8 @@ description. Explore the app again into a new graph directory.
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations`, `schema_deltas`, `setups` and `open_menus`
+`instructions`, `target_observations`, `schema_deltas`, `setups`, `open_menus` and
+`setup_observations`
 lists hold one entry per action, in the same order, so entry *i* of each
 describes `actions[i]`. An action that recorded no instruction or observation has
 `""` in that list, and an action that recorded no state change has `null` in
@@ -1314,13 +1327,23 @@ agree on every key, a key one of them lacks counting as `null`, as in
 The entry is `null` when the setup is unknown or too long:
 
 - How the device came to be on a screen is unknown on the screen a run begins
-  on without a replay, after a step that leaves the app, and after a replay that
+  on in an existing graph without a replay, after a step that leaves the app, and after a replay that
   ends elsewhere than its node, until exploration arrives at that screen from
   another one.
 - A setup of more than 8 actions, counted without what was undone, is dropped,
   and the log says so.
 
-An action recorded again keeps the shorter of its known setups. Of an action whose
+The first observed entry of a new graph starts with a known empty setup. Each known
+arrival records its actual observation in `setup_observations`; an unknown or dropped
+setup has `null` there. A saved non-null anchor must name a graph member observation,
+including one an audit has reassigned to another node. Graph files without this
+aligned field must be explored again into a new directory.
+
+An action recorded again retains its first known preparation and entry observation.
+A shorter preparation replaces it only when both start from that same observation;
+a shorter sequence learned from another arrival does not replace it. Only one
+preparation is retained per action, so another entry may have a valid route that the
+saved preparation cannot replay. Of an action whose
 setup is unknown, a replay rebuilds only the menu in `open_menus`, by a recorded
 action that opened it, and no replay sends an action whose menu no recorded action
 opens (see [Replaying to a node](#replaying-to-a-node)).

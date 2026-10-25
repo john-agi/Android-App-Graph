@@ -487,6 +487,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "schema_deltas": [None],
                         "setups": [None],
                         "open_menus": [None],
+                        "setup_observations": [None],
                     }
                 ],
             }
@@ -1205,6 +1206,7 @@ def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_wit
                 "schema_deltas": [None],
                 "setups": [None],
                 "open_menus": [None],
+                "setup_observations": [None],
                 "visit_count": 1,
             },
         ),
@@ -3360,3 +3362,48 @@ def test_audit_unsupported_gestures_exhaust_the_budget_without_executed_records(
     assert not any(r["kind"] in {"action", "transition"} for r in records)
     assert list(graph.graph.edges) == edges_before
     assert controller.actions == []
+
+
+@pytest.mark.usefixtures("_fake_device")
+@pytest.mark.parametrize("applicable", [True, False])
+def test_audit_navigation_checks_the_preparation_before_input(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    applicable: bool,
+) -> None:
+    graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}))
+    _describing_by_node_id(graph, monkeypatch)
+    graph.add_edge(
+        "s0_home",
+        "s1_detail",
+        [_DETAIL_TAP],
+        details=EdgeDetails(setup=[_SWIPE], setup_observation="observed-entry"),
+    )
+    monkeypatch.setattr(graph, "can_replay", lambda *_args: applicable)
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail" if applicable else "s0_home")
+    issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
+    (result,) = _re_explore(
+        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
+    )
+    assert result["navigated_to"] == ("s1_detail" if applicable else "s0_home")
+    assert device_log == [*_FIRST_RESTART, *([_SWIPE, _DETAIL_TAP] if applicable else [])]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_correction_leaves_an_inapplicable_preparation_unexecuted(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    _describing_by_node_id(graph, monkeypatch)
+    edge = graph.graph["s0_home"]["s1_detail"]
+    edge["setups"] = [[_SWIPE]]
+    edge["setup_observations"] = ["observed-entry"]
+    monkeypatch.setattr(graph, "can_replay", lambda *_args: False)
+    edges = _edges(graph)
+    _identifying(graph, monkeypatch, "s0_home")
+    (result,) = _re_explore(graph, [_retry()], _ReplayController(device_log), client, tmp_path)
+    assert result == {"issue": _retry(), "status": "unverified", "reached": "s0_home"}
+    assert device_log == _FIRST_RESTART
+    assert _edges(graph) == edges

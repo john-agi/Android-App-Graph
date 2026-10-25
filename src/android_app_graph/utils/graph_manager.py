@@ -126,6 +126,7 @@ from android_app_graph.utils.vlm_utils import (
     normalize_edge,
     score_by_cosine,
     token_tracker,
+    verify_replay_source,
     verify_same_node,
 )
 
@@ -163,11 +164,12 @@ class PathStep(NamedTuple):
     """One step of a path ``find_path`` returns: the node it reaches, the recorded action
     that reaches it, and that action's setup, the device actions sent before it on the
     node the step leaves. The first step is the path's start, with the action ``{}`` and
-    no setup."""
+    no setup. ``setup_observation`` names the observed entry before the setup."""
 
     node: str
     action: dict[str, Any] | list[dict[str, Any]]
     setup: tuple[dict[str, Any], ...]
+    setup_observation: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -187,6 +189,7 @@ class EdgeDetails:
             the traversal last arrived there from elsewhere, whose effect on the node's
             state is in force when the action is sent, as ``SetupTrail`` reads them;
             None when they are unknown.
+        setup_observation: The observed entry before the setup, None when unknown.
         open_menu: The menu open over the source node when the action is sent, as
             ``open_menu_in`` reads it from the node's state; None when none is.
     """
@@ -197,6 +200,7 @@ class EdgeDetails:
     num_steps: int | None = None
     setup: Sequence[dict[str, Any]] | None = None
     open_menu: str | None = None
+    setup_observation: str | None = None
 
 
 def open_menu_in(state: Mapping[str, object]) -> str | None:
@@ -214,6 +218,7 @@ class _ReplayOption(NamedTuple):
     cost: int
     index: int
     setup: tuple[dict[str, Any], ...]
+    setup_observation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +237,7 @@ class _Arrival:
 
     node: str
     states: list[_NodeState] | None
+    observation: str | None = None
 
 
 def _same_state(first: Mapping[str, object], second: Mapping[str, object]) -> bool:
@@ -283,7 +289,13 @@ class SetupTrail:
         self._actions: list[dict[str, Any]] = []
         self._arrivals: list[_Arrival] = []
 
-    def begin(self, node: str, arrival_state: Mapping[str, object] | None) -> None:
+    def begin(
+        self,
+        node: str,
+        arrival_state: Mapping[str, object] | None,
+        *,
+        observation: str | None = None,
+    ) -> None:
         """Begin the trail again on ``node``, forgetting every action before.
 
         ``arrival_state`` is the node's state when the device has just arrived there from
@@ -294,7 +306,12 @@ class SetupTrail:
         """
         self._actions = []
         states = None if arrival_state is None else [_NodeState(0, dict(arrival_state))]
-        self._arrivals = [_Arrival(node, states)]
+        self._arrivals = [_Arrival(node, states, observation if states is not None else None)]
+
+    def setup_observation(self, node: str) -> str | None:
+        """Return the observed arrival from which this node's preparation starts."""
+        position = self._position(node)
+        return None if position is None else self._arrivals[position].observation
 
     def setup(self, node: str) -> list[dict[str, Any]] | None:
         """Return the setup of an action sent on ``node``, the node the trail is on, or
@@ -310,7 +327,12 @@ class SetupTrail:
         ]
 
     def step(
-        self, actions: Sequence[dict[str, Any]], reached: str, state: Mapping[str, object]
+        self,
+        actions: Sequence[dict[str, Any]],
+        reached: str,
+        state: Mapping[str, object],
+        *,
+        observation: str | None = None,
     ) -> None:
         """Add ``actions``, sent on the node the trail is on, and ``reached``, the node
         they led to, in ``state``."""
@@ -318,7 +340,7 @@ class SetupTrail:
         reached_state = _NodeState(len(self._actions), dict(state))
         position = self._position(reached)
         if position is None:
-            self._arrivals.append(_Arrival(reached, [reached_state]))
+            self._arrivals.append(_Arrival(reached, [reached_state], observation))
             return
         del self._arrivals[position + 1 :]
         states = self._arrivals[position].states
@@ -877,17 +899,23 @@ def _count_repeat(
     edge_data: dict[str, Any],
     action: dict[str, Any] | list[dict[str, Any]],
     setup: list[dict[str, Any]] | None,
+    setup_observation: str | None,
 ) -> bool:
     """Count one more visit when the edge already holds ``action``, and return whether it
-    does. A known ``setup`` replaces the action's recorded one when that is unknown or
-    longer."""
+    does. A known ``setup`` replaces an unknown one, or a longer preparation from
+    the same observed arrival."""
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
             setups = edge_data["setups"]
             recorded = setups[index]
-            if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
+            anchor = edge_data["setup_observations"][index]
+            if setup is not None and (
+                not isinstance(recorded, list)
+                or (anchor == setup_observation and len(setup) < len(recorded))
+            ):
                 setups[index] = setup
+                edge_data["setup_observations"][index] = setup_observation
             return True
     return False
 
@@ -897,7 +925,12 @@ def _device_actions(action: object) -> tuple[dict[str, Any], ...]:
     return tuple(as_str_dict(step) for step in (action if isinstance(action, list) else [action]))
 
 
-def _menu_openers(loop: dict[str, Any] | None) -> dict[str, tuple[dict[str, Any], ...]]:
+class _Preparation(NamedTuple):
+    actions: tuple[dict[str, Any], ...]
+    observation: str | None
+
+
+def _menu_openers(loop: dict[str, Any] | None) -> dict[str, _Preparation]:
     """Return, by menu, the fewest device actions that open it on a node whose self-loop
     is ``loop``: a recorded self-loop action whose schema delta records the menu opening,
     after its setup. An action whose setup is unknown opens the menu only when it was
@@ -905,12 +938,13 @@ def _menu_openers(loop: dict[str, Any] | None) -> dict[str, tuple[dict[str, Any]
     if loop is None:
         return {}
     aligned = _aligned_lists(loop)
-    openers: dict[str, tuple[dict[str, Any], ...]] = {}
-    for action, delta, setup, menu in zip(
+    openers: dict[str, _Preparation] = {}
+    for action, delta, setup, menu, observation in zip(
         aligned["actions"],
         aligned["schema_deltas"],
         aligned["setups"],
         aligned["open_menus"],
+        aligned["setup_observations"],
         strict=True,
     ):
         opened = as_object_dict(as_object_dict(delta).get("open_menu")).get("after")
@@ -918,22 +952,22 @@ def _menu_openers(loop: dict[str, Any] | None) -> dict[str, tuple[dict[str, Any]
         if not isinstance(opened, str) or not replayable:
             continue
         sent = (*_setup_actions(setup), *_device_actions(action))
-        if opened not in openers or len(sent) < len(openers[opened]):
-            openers[opened] = sent
+        if opened not in openers or len(sent) < len(openers[opened].actions):
+            openers[opened] = _Preparation(sent, observation)
     return openers
 
 
 def _replay_setup(
-    setup: object, menu: object, openers: Mapping[str, tuple[dict[str, Any], ...]]
-) -> tuple[dict[str, Any], ...] | None:
+    setup: object, menu: object, observation: str | None, openers: Mapping[str, _Preparation]
+) -> _Preparation | None:
     """Return the device actions a replay sends before an action whose ``setups`` and
     ``open_menus`` entries are ``setup`` and ``menu``: its recorded setup, or, when that
     is unknown, the opening of the menu it was sent in from ``openers``; None when no
     recorded action opens that menu."""
     if isinstance(setup, list):
-        return _setup_actions(setup)
+        return _Preparation(_setup_actions(setup), observation)
     if not isinstance(menu, str):
-        return ()
+        return _Preparation((), None)
     return openers.get(menu)
 
 
@@ -996,6 +1030,7 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(f"no matching settings, a whole number for each of {settings}")
     if problems:
         raise unloadable_graph(path, problems)
+    _require_preparation_anchors(graph, path)
     for node in graph["nodes"]:
         for member in node["observations"]:
             record = read_observation_record(steps_dir, member)
@@ -1008,6 +1043,17 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
             ):
                 msg = f"member {member!r} has unsupported ownership for node {node['id']!r}"
                 raise unloadable_graph(path, [msg])
+
+
+def _require_preparation_anchors(graph: dict[str, Any], path: Path) -> None:
+    """Retain entry observations even when an audit reassigns their node membership."""
+    members = {member for node in graph["nodes"] for member in node["observations"]}
+    for edge in graph["edges"]:
+        for anchor in edge["setup_observations"]:
+            if anchor is not None and anchor not in members:
+                raise unloadable_graph(
+                    path, [f"preparation anchor {anchor!r} is not a graph member"]
+                )
 
 
 def _raise_for_members_without(vector: str, without: Mapping[str, Sequence[str]]) -> None:
@@ -2407,7 +2453,7 @@ class GraphManager:
 
         If an edge with the same action already exists, it is not duplicated.
         Instead, a visit counter is incremented, and a known setup replaces the
-        action's recorded one when that is unknown or longer. A new action from another
+        action's recorded one when unknown, or longer from the same observed arrival. A new action from another
         node clears the target's replay misses: it can give a replay another way there.
 
         A setup of more than ``MAX_SETUP_ACTIONS`` actions is logged as dropped and
@@ -2434,10 +2480,11 @@ class GraphManager:
         if num_steps is None:
             num_steps = _default_num_steps(action)
         setup = _recorded_setup(details.setup, source, target)
+        setup_observation = details.setup_observation if setup is not None else None
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            if _count_repeat(edge_data, action, setup):
+            if _count_repeat(edge_data, action, setup, setup_observation):
                 return
         else:
             self.graph.add_edge(source, target, visit_count=1)
@@ -2451,6 +2498,7 @@ class GraphManager:
             ("schema_deltas", details.schema_delta),
             ("setups", setup),
             ("open_menus", details.open_menu),
+            ("setup_observations", setup_observation),
         ):
             edge_data[key].append(value)
         if source != target:
@@ -2500,6 +2548,59 @@ class GraphManager:
             (o.setup for o in self._replay_options(source, target) if o.index == index), None
         )
 
+    def replay_step(self, source: str, target: str, index: int) -> PathStep | None:
+        """Return one recorded action with its applicable preparation evidence."""
+        option = next((o for o in self._replay_options(source, target) if o.index == index), None)
+        if option is None:
+            return None
+        return PathStep(
+            target,
+            self.graph[source][target]["actions"][index],
+            option.setup,
+            option.setup_observation,
+        )
+
+    def can_replay(self, observation: Observation, step: PathStep) -> bool:
+        """Verify an anchored preparation against the current observed source before input."""
+        if step.setup_observation is None:
+            return True
+        anchor = self._member_observation(step.setup_observation)
+        if (
+            observation.system_surface is not None
+            or anchor.system_surface is not None
+            or not observation.package
+            or not observation.activity
+            or observation.black
+            or anchor.black
+            or observation.package != anchor.package
+            or observation.activity != anchor.activity
+        ):
+            logger.info(
+                "Replay source %s rejected: owner, activity or capture differs",
+                observation.observation_id,
+            )
+            return False
+        client, settings = self._require_page_detail()
+        applicable, reason = verify_replay_source(
+            client,
+            existing=self._described_app_member(
+                step.setup_observation, self._descriptions.get(step.setup_observation, "")
+            ),
+            current=DescribedScreenshot(
+                observation.app_image, "", system_feedback=bool(observation.system_overlays)
+            ),
+            actions=(*step.setup, *_device_actions(step.action)),
+            settings=settings,
+        )
+        logger.info(
+            "Replay source %s against %s: applicable=%s; %s",
+            observation.observation_id,
+            step.setup_observation,
+            applicable,
+            reason,
+        )
+        return applicable
+
     def _replay_options(self, source: str, target: str) -> list[_ReplayOption]:
         """Return the actions of source→target a replay can send, in edge order.
 
@@ -2516,12 +2617,20 @@ class GraphManager:
         loop = self.graph[source][source] if self.graph.has_edge(source, source) else None
         openers = _menu_openers(loop)
         options: list[_ReplayOption] = []
-        for index, (own, setup, menu) in enumerate(
-            zip(steps, aligned["setups"], aligned["open_menus"], strict=True)
+        for index, (own, setup, menu, observation) in enumerate(
+            zip(
+                steps,
+                aligned["setups"],
+                aligned["open_menus"],
+                aligned["setup_observations"],
+                strict=True,
+            )
         ):
-            sent = _replay_setup(setup, menu, openers)
+            sent = _replay_setup(setup, menu, observation, openers)
             if sent is not None:
-                options.append(_ReplayOption(own + len(sent), index, sent))
+                options.append(
+                    _ReplayOption(own + len(sent.actions), index, sent.actions, sent.observation)
+                )
         return options
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
@@ -3051,7 +3160,12 @@ class GraphManager:
         for s, t in itertools.pairwise(node_path):
             best = min(self._replay_options(s, t), key=lambda option: option.cost)
             result.append(
-                PathStep(_node_id(t), self.graph[s][t]["actions"][best.index], best.setup)
+                PathStep(
+                    _node_id(t),
+                    self.graph[s][t]["actions"][best.index],
+                    best.setup,
+                    best.setup_observation,
+                )
             )
 
         return result
@@ -3099,7 +3213,8 @@ class GraphManager:
                     return None
 
                 for i in range(1, len(nav_path)):
-                    node_id, action, setup = nav_path[i]
+                    step = nav_path[i]
+                    node_id, action, setup = step.node, step.action, step.setup
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
                     path_steps.append(
@@ -3108,6 +3223,7 @@ class GraphManager:
                             "from": prev_node,
                             "to": node_id,
                             "setup": list(setup),
+                            "setup_observation": step.setup_observation,
                             "action": action,
                             "instruction": edge_data["instructions"][0],
                             "target_observation": edge_data["target_observations"][0],
@@ -3374,6 +3490,7 @@ class GraphManager:
                 "schema_deltas": attrs.get("schema_deltas", []),
                 "setups": attrs.get("setups", []),
                 "open_menus": attrs.get("open_menus", []),
+                "setup_observations": attrs.get("setup_observations", []),
             }
             if attrs.get("normalized_instructions_hash"):
                 edge_data["normalized_instructions_hash"] = attrs["normalized_instructions_hash"]

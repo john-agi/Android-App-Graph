@@ -74,6 +74,7 @@ REQUEST_TIMEOUTS: Mapping[str, float] = MappingProxyType(
     {
         "page_describe_and_state": 55.0,
         "node_verify": 35.0,
+        "replay_source": 35.0,  # Source applicability has the same two-image scope as node verification.
         "normalize_edge": 50.0,
         "exploration_target": 25.0,
         "node_merge_audit": DEFAULT_AUDIT_TIMEOUT,

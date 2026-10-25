@@ -341,6 +341,7 @@ class _Step:
     action: dict[str, Any]
     setup: list[dict[str, Any]] | None = None
     open_menu: str | None = None
+    setup_observation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +457,11 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     if len(path) > 1:
         try:
             for step in path[1:]:
+                if step.setup_observation is not None and not run.graph.can_replay(
+                    Observation.from_state(run.recorder.get_state()), step
+                ):
+                    logger.warning("Replay source is inapplicable; identifying the current screen")
+                    break
                 for setup_action in step.setup:
                     _execute(run.recorder, setup_action)
                 _execute(run.recorder, step.action)
@@ -610,6 +616,7 @@ def _record_step(
             target_observation=target_obs,
             num_steps=1,
             setup=step.setup,
+            setup_observation=step.setup_observation,
             open_menu=step.open_menu,
         ),
     )
@@ -709,7 +716,11 @@ def _explore_steps(
     excluded: dict[str, list[str]] = {}
     step_results: list[dict[str, Any]] = []
     trail = SetupTrail(run.graph.resolve_node_id)
-    trail.begin(start_from, _last_state(run, start_from) if arrived else None)
+    trail.begin(
+        start_from,
+        _last_state(run, start_from) if arrived else None,
+        observation=run.recorder.last_match,
+    )
 
     for step_i in range(num_steps):
         device_state = run.recorder.get_state()
@@ -759,6 +770,7 @@ def _explore_steps(
         step = replace(
             step,
             setup=trail.setup(current_node),
+            setup_observation=trail.setup_observation(current_node),
             open_menu=open_menu_in(_last_state(run, current_node)),
         )
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
@@ -766,7 +778,12 @@ def _explore_steps(
         if step_result["to"] == EXTERNAL_WEB_NODE:
             trail.begin(current_node, None)
         else:
-            trail.step([step.action], current_node, _last_state(run, current_node))
+            trail.step(
+                [step.action],
+                current_node,
+                _last_state(run, current_node),
+                observation=run.recorder.last_match,
+            )
 
     return step_results
 
@@ -792,15 +809,16 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, action = found
 
-    setup = run.graph.action_setup(source, target, index)
-    if setup is None:
+    step = run.graph.replay_step(source, target, index)
+    if step is None or (
+        step.setup_observation is not None
+        and not run.graph.can_replay(Observation.from_state(run.recorder.get_state()), step)
+    ):
         logger.warning(
-            "No recorded action opens the menu that '%s' on %s → %s is sent in",
-            instruction,
-            source,
-            target,
+            "No applicable recorded preparation for '%s' on %s → %s", instruction, source, target
         )
         return {"status": "unverified", "reached": source}
+    setup = step.setup
     _check_setup_policy(run, source, setup)
     for setup_action in setup:
         _execute(run.recorder, setup_action)
