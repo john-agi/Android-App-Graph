@@ -31,6 +31,7 @@ from android_app_graph.device import (
     wait_for_device_state,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
 from android_app_graph.utils import (
@@ -573,12 +574,19 @@ class Kobe:
                     self.logger.info("Auto-selected resume target: %s", resume_from)
 
                 if resume_from and resume_from in self.graph.graph:
-                    node = self.navigate_to_node(resume_from)
-                    return _Position(node, self.controller.get_state())
-                self.logger.warning(
-                    "Node %s not found in graph. Starting from current screen.",
-                    resume_from,
-                )
+                    try:
+                        node = self.navigate_to_node(resume_from)
+                    except UnsafeReplayError as error:
+                        self.logger.warning(
+                            "Resume replay rejected; identifying the current screen: %s", error
+                        )
+                    else:
+                        return _Position(node, self.controller.get_state())
+                else:
+                    self.logger.warning(
+                        "Node %s not found in graph. Starting from current screen.",
+                        resume_from,
+                    )
             node, device_state = self._identify(self.controller.get_state())
         except UnresolvedPermissionError, UnresolvedSystemOverlayError:
             self.save_graph()

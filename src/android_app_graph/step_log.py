@@ -36,6 +36,7 @@ from android_app_graph.graph_files import (
     write_json_atomically,
 )
 from android_app_graph.payloads import as_int_list, as_object_dict, as_str
+from android_app_graph.run_environment import RunRecording, UnsafeReplayError
 from android_app_graph.screen_image import (
     encode_screenshot,
     is_black,
@@ -428,10 +429,13 @@ class StepRecorder:
                 "status_bar_rows": band_rows,
                 "pixel_hash": observation.pixel_hash,
                 "black": observation.black,
+                "display_state": state.get("display_state"),
                 **ownership_fields,
                 **({"input_regions": state["input_regions"]} if "input_regions" in state else {}),
             },
         )
+        if isinstance(self._controller, RunRecording):
+            self._controller.record_observation(observation.observation_id, self._source)
         last = self._last_observation
         if (
             last is None
@@ -461,6 +465,17 @@ class StepRecorder:
         replay from planning. A rejected request records the policy decision and its reason.
         """
         last = self._last_observation
+        if isinstance(self._controller, RunRecording):
+            try:
+                self._controller.prepare_action(action, source=self._source)
+            except UnsafeReplayError as error:
+                self._write_record(
+                    self._take_step_id(),
+                    "action_rejected",
+                    last,
+                    {"action": action, "reason": str(error)},
+                )
+                raise
         action_id = self._take_step_id()
         self._write_record(
             action_id,

@@ -1682,7 +1682,7 @@ def test_startup_keeps_one_confirmation_allowance_across_repeated_phase_timeouts
     no_sleep: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     unknown = subprocess.CalledProcessError(
-        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window"]
+        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window", "-a"]
     )
     reads = iter([unknown, {"package": "com.demo"}, unknown])
 

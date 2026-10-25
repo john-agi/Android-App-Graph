@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
 
+from android_app_graph.display_state import NIGHT_KEYS, DisplayState
 from android_app_graph.payloads import as_int
 from android_app_graph.system_surfaces import (
     SystemOverlayActionError,
@@ -579,6 +580,96 @@ class AdbController:
                 time.sleep(1)
 
 
+class AdbDisplayAccess:
+    """Supported display configuration and explicit public seed-directory hashes."""
+
+    def __init__(self, udid: str) -> None:
+        self._serial = ["-s", udid]
+
+    def _read(self, command: tuple[str, ...], deadline: float) -> str:
+        try:
+            return self._run(command, deadline)
+        except subprocess.TimeoutExpired:
+            logger.warning("Display read %s timed out; retrying once", shlex.join(command))
+            return self._run(command, deadline)
+
+    def _run(self, command: tuple[str, ...], deadline: float) -> str:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, 0)
+        return run_adb(
+            [*self._serial, "shell", *(shlex.quote(argument) for argument in command)],
+            output="capture",
+            check=True,
+            timeout=min(_PROBE_TIMEOUT_SECONDS, remaining),
+        ).stdout.strip()
+
+    def capture(self, *, deadline: float | None = None) -> DisplayState:
+        bound = time.monotonic() + _READ_TIMEOUT_SECONDS if deadline is None else deadline
+        size = self._read(("wm", "size"), bound)
+        density = self._read(("wm", "density"), bound)
+        dump = self._read(("dumpsys", "uimode"), bound)
+        custom = re.search(r"customStart=([0-9:.]+)\s+customEnd=?([0-9:.]+)", dump)
+        overrides = re.search(r"mOverrideOn/Off=(true|false)/(true|false)", dump)
+        if custom is None or overrides is None:
+            msg = "The device does not expose supported custom night configuration"
+            raise ValueError(msg)
+        settings = {key: self._setting("secure", key, bound) for key in NIGHT_KEYS}
+        return DisplayState.from_dict(
+            {
+                "physical_size": self._wm_value(size, "Physical size", pair=True),
+                "size_override": self._wm_value(size, "Override size", pair=True),
+                "physical_density": self._wm_value(density, "Physical density", pair=False),
+                "density_override": self._wm_value(density, "Override density", pair=False),
+                "font_scale": self._setting("system", "font_scale", bound),
+                "night_mode": self._read(("cmd", "uimode", "night"), bound).removeprefix(
+                    "Night mode: "
+                ),
+                "custom_start": custom.group(1),
+                "custom_end": custom.group(2),
+                "night_settings": settings,
+                "night_overrides": [value == "true" for value in overrides.groups()],
+            }
+        )
+
+    def _setting(self, namespace: str, key: str, deadline: float) -> str | None:
+        value = self._read(("settings", "get", namespace, key), deadline)
+        return None if value == "null" else value
+
+    @staticmethod
+    def _wm_value(output: str, label: str, *, pair: bool) -> object:
+        pattern = rf"(?m)^{label}: (\d+)x(\d+)\s*$" if pair else rf"(?m)^{label}: (\d+)\s*$"
+        match = re.search(pattern, output)
+        if match is None:
+            if label in output:
+                msg = f"Malformed display setting: {label}"
+                raise ValueError(msg)
+            return None
+        return [int(match[1]), int(match[2])] if pair else int(match[1])
+
+    def execute(self, command: tuple[str, ...], *, deadline: float) -> None:
+        self._run(command, deadline)
+
+    def seed_hashes(self, root: str, *, deadline: float | None = None) -> dict[str, str]:
+        bound = time.monotonic() + _READ_TIMEOUT_SECONDS if deadline is None else deadline
+        try:
+            output = self._read(
+                ("find", root, "-type", "f", "-exec", "sha256sum", "{}", "+"), bound
+            )
+        except subprocess.CalledProcessError as exc:
+            if "No such file or directory" in (exc.stderr or ""):
+                return {}
+            raise
+        hashes: dict[str, str] = {}
+        for line in output.splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+            if match is None or not match[2].startswith(root.rstrip("/") + "/"):
+                msg = "The seed directory hash output is malformed"
+                raise ValueError(msg)
+            hashes[match[2]] = match[1]
+        return hashes
+
+
 class _AvdHost(NamedTuple):
     """Where this machine keeps AVDs and the SDK, and the emulator's CPU architecture."""
 
@@ -1062,8 +1153,20 @@ def _read_phase(command: object, udid: str) -> str | None:
             return "hierarchy"
         case [str(), "-s", serial, "exec-out", "screencap -p"] if serial == udid:
             return "screenshot"
-        case [str(), "-s", serial, "shell", "dumpsys", "window"] if serial == udid:
+        case [str(), "-s", serial, "shell", "dumpsys", "window", "-a"] if serial == udid:
             return "window"
+        case [str(), "-s", serial, "shell", "dumpsys", "activity", "activities"] if serial == udid:
+            return "activity"
+        case [str(), "-s", serial, "shell", *arguments] if serial == udid:
+            display_reads = (
+                ("wm", "size"),
+                ("wm", "density"),
+                ("dumpsys", "uimode"),
+                ("cmd", "uimode", "night"),
+                ("settings", "get", "system", "font_scale"),
+                *(("settings", "get", "secure", key) for key in NIGHT_KEYS),
+            )
+            return "display" if tuple(arguments) in display_reads else None
         case _:
             return None
 

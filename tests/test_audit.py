@@ -8,6 +8,7 @@ import io
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, NoReturn, override
 
@@ -26,6 +27,7 @@ from android_app_graph.graph_files import (
     save_embeddings,
     text_embeddings_path,
 )
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder, read_records
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
@@ -287,6 +289,8 @@ def test_non_executable_audit_advice_leaves_permissions_and_launch_untouched(
 
     monkeypatch.setattr(audit, "grant_runtime_permissions", forbidden)
     monkeypatch.setattr(audit, "launch_app", forbidden)
+    monkeypatch.setattr(audit, "AdbDisplayAccess", forbidden)
+    monkeypatch.setattr(audit, "RunEnvironment", forbidden)
     assert audit.main(["--config", str(config), "--re-explore"]) == 0
     [result] = json.loads((app_dir / "demo_re_explore.json").read_text())
     assert result["status"] == "skipped"
@@ -2245,6 +2249,10 @@ def test_re_explore_saves_its_corrections_and_the_outcome_of_each_issue(
     reached = iter(["s0_home", "s2_settings", "s0_home"] * 2)
     identify_files: list[Path | None] = []
 
+    monkeypatch.setattr(
+        audit, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
+
     def identify(self: GraphManager, *_args: object, **_kwargs: object) -> str:
         identify_files.append(self.identify_file)
         return next(reached)
@@ -2736,6 +2744,9 @@ def test_re_exploration_resolves_one_outage_limit_for_the_device_and_each_app(
     def grant(_udid: str, package: str, recovery: StartupRecovery) -> None:
         startup_limits.append((package, recovery.limit))
 
+    monkeypatch.setattr(
+        audit, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
     monkeypatch.setattr(audit, "resolve_unreachable_limit", resolve_limit)
     monkeypatch.setattr(audit, "AdbController", controller)
     monkeypatch.setattr(audit, "grant_runtime_permissions", grant)
@@ -2775,6 +2786,10 @@ def test_re_explore_grants_the_requested_permissions_before_launching_the_app(
         encoding="utf-8",
     )
     events: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(
+        audit, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
 
     def launch(*_args: object) -> str:
         events.append(("launch",))
@@ -2933,6 +2948,106 @@ def test_audit_startup_unreachable_device_exits_nonzero_with_a_clear_error(
     assert capsys.readouterr().err == (
         "app-graph-audit: error: Device test-device unreachable for 0.75 minutes\n"
     )
+
+
+def test_re_exploration_reports_unsafe_display_replay_as_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client: OpenRouter,
+) -> None:
+    graph = _graph_with_nodes(("s0", {"is_start": True, "activity": "Main", "package": "com.demo"}))
+
+    def refuse(*_args: object) -> NoReturn:
+        message = "Recorded display differs"
+        raise UnsafeReplayError(message)
+
+    monkeypatch.setattr(audit, "_retry_edge", refuse)
+    session = audit.ReExploreSession(
+        FakeController("com.demo"),
+        ModelSettings("fake"),
+        ModelSettings("fake"),
+        unreachable_limit=1800,
+    )
+    results = audit.re_explore_issues(
+        graph,
+        [{**_inspection(), "type": "retry_edge", "instruction": "Open Settings"}],
+        target=audit.ReExploreTarget(
+            app_name="demo", package_name="com.demo", graph_path=tmp_path / "demo.json"
+        ),
+        session=session,
+        client=client,
+    )
+    assert results == [
+        {
+            "issue": {**_inspection(), "type": "retry_edge", "instruction": "Open Settings"},
+            "status": "skipped",
+            "reason": "Recorded display differs",
+        }
+    ]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_a_display_rejected_return_replay_retains_the_applied_edge_correction(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _flagged_graph()
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s2_settings")
+    _describing_by_node_id(graph, monkeypatch)
+    replays = 0
+
+    def replay(_run: object, target: str) -> str:
+        nonlocal replays
+        replays += 1
+        if replays == 2:
+            message = "Recorded display differs"
+            raise UnsafeReplayError(message)
+        return target
+
+    monkeypatch.setattr(audit, "_replay_to", replay)
+    (result,) = _re_explore(
+        graph, [_retry()], _ReplayController(device_log), client, tmp_path, steps_per_issue=1
+    )
+    assert result["status"] == "moved"
+    assert result["moved_to"] == "s2_settings"
+    assert result["steps"] == []
+    assert result["reason"] == "Recorded display differs"
+    assert graph.graph["s0_home"]["s2_settings"]["instructions"][-1] == _FLAGGED
+    assert not graph.graph.has_edge("s0_home", "s1_detail")
+    assert device_log == [_DETAIL_TAP]
+
+
+@pytest.mark.usefixtures("model_environment", "opened_clients", "no_sleep")
+def test_re_explore_reports_a_missing_run_baseline_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _install_fake_adb(monkeypatch, FakeController("com.demo"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    graph_dir = tmp_path / "graphs"
+    (graph_dir / "demo").mkdir(parents=True)
+    graph_path = graph_dir / "demo" / "demo.json"
+    graph_path.write_text(
+        json.dumps({"matching": DEFAULT_MATCHING._asdict(), "nodes": [], "edges": []})
+    )
+    config = tmp_path / "audit.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "device": {"udid": "test-device"},
+                "experiment": {"graph_dir": str(graph_dir)},
+                "apps": [{"name": "demo", "package_name": "com.demo"}],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        audit,
+        "run_audit",
+        lambda *_args: {"issues": [{**_inspection(), "type": "explore_node", "node": "s0"}]},
+    )
+    assert audit.main(["--config", str(config), "--re-explore"]) == 1
+    error = capsys.readouterr().err
+    assert "app-graph-audit: error: The existing graph requires its original run baseline" in error
+    assert "Traceback" not in error
+    assert not graph_path.with_name("demo_run.json").exists()
 
 
 class _FeedbackController(_LoggingController):

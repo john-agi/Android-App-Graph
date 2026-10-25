@@ -28,6 +28,7 @@ from android_app_graph.device import (
 )
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
@@ -3435,7 +3436,7 @@ def _dump_timed_out() -> subprocess.TimeoutExpired:
 
 def _read_failed(diagnostic: str) -> subprocess.CalledProcessError:
     return subprocess.CalledProcessError(
-        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window"], stderr=diagnostic
+        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window", "-a"], stderr=diagnostic
     )
 
 
@@ -3763,8 +3764,12 @@ def _recovery_explorer(
 @pytest.mark.parametrize(
     "diagnostic", ["Permission denied", "invalid option -- bad", "Can't find service: window"]
 )
+@pytest.mark.parametrize(
+    "read", [["dumpsys", "window", "-a"], ["dumpsys", "activity", "activities"], ["wm", "size"]]
+)
 def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     diagnostic: str,
+    read: list[str],
     tmp_path: Path,
     router_client: OpenRouter,
     no_sleep: list[float],
@@ -3774,7 +3779,9 @@ def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     log: list[object] = []
     monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
     monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
-    failure = _read_failed(diagnostic)
+    failure = subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", "shell", *read], stderr=diagnostic
+    )
     explorer = _recovery_explorer(log, [failure], tmp_path, router_client, monkeypatch)
 
     with pytest.raises(subprocess.CalledProcessError) as raised:
@@ -3784,7 +3791,7 @@ def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     assert log == [_PROBE]
     assert no_sleep == []
     assert any(
-        "dumpsys window" in line and "exit 1" in line and diagnostic in line
+        " ".join(read) in line and "exit 1" in line and diagnostic in line
         for line in caplog.messages
     )
 
@@ -3871,7 +3878,15 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
 @pytest.mark.parametrize(
     ("read_command", "stderr", "stdout", "failures", "diagnostic", "excluded", "stops"),
     [
-        (["shell", "dumpsys", "window"], b"error: closed", None, 2, "error: closed", "", False),
+        (
+            ["shell", "dumpsys", "window", "-a"],
+            b"error: closed",
+            None,
+            2,
+            "error: closed",
+            "",
+            False,
+        ),
         (
             ["exec-out", "uiautomator dump /dev/stdout"],
             "android.os.DeadObjectException",
@@ -3882,7 +3897,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             None,
             "Window{private-screen}\nerror: device offline",
             2,
@@ -3900,7 +3915,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             b"unclassified " + b"x" * 1100 + b"private-tail",
             None,
             1,
@@ -3909,7 +3924,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             None,
             "Permission denied\nWindow{private-screen}",
             1,
@@ -3982,7 +3997,12 @@ def test_recovery_uses_bounded_error_diagnostics_and_preserves_observation_paylo
             "com.demo",
             "android.permission.CAMERA",
         ],
-        ["adb", "-s", "other-device", "shell", "dumpsys", "window"],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "window", "-a"],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "activity", "activities"],
+        ["adb", "-s", "test-device", "shell", "input", "tap", "10", "20"],
+        ["adb", "-s", "other-device", "shell", "wm", "size"],
+        ["adb", "-s", "test-device", "shell", "wm", "density", "reset"],
+        ["adb", "-s", "test-device", "shell", "settings", "put", "system", "font_scale", "1"],
     ],
 )
 def test_recovery_stops_nonzero_commands_outside_its_observation_reads(
@@ -4317,6 +4337,40 @@ def test_an_ime_target_records_its_own_settings_as_app_coverage(
     record = json.loads((explorer.controller.steps / "000000.json").read_text())
     assert record["package"] == package
     assert record["system_surface"] is None
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("resume_from", ["auto", "s1_settings"])
+def test_display_rejected_resume_identifies_the_current_screen_and_explores(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    resume_from: str,
+) -> None:
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
+    kobe.graph.graph.add_node("s1_settings", replay_misses=0)
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> NoReturn:
+        replayed.append(node_id)
+        message = "Coordinate replay requires its recorded display state or fresh grounding"
+        raise UnsafeReplayError(message)
+
+    monkeypatch.setattr(kobe, "navigate_to_node", replay)
+    monkeypatch.setattr(kobe.graph, "get_resume_target", lambda **_kwargs: "s1_settings")
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(kobe, monkeypatch)
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from=resume_from)
+
+    assert replayed == ["s1_settings"]
+    assert planned_from == ["s0_home"]
+    assert kobe.graph.total_steps_completed == 1
 
 
 @pytest.mark.usefixtures("no_sleep")

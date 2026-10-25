@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,9 @@ def _install_startup_device(
             interrupt("resume")
 
     monkeypatch.setattr(cli, "AdbController", Device)
+    monkeypatch.setattr(
+        cli, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
     monkeypatch.setattr(device, "run_adb", _startup_adb(phase, interrupt))
 
 

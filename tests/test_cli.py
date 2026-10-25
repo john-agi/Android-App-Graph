@@ -6,6 +6,7 @@ import json
 import logging
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import NoReturn
 
@@ -121,6 +122,9 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     monkeypatch.setattr(cli, "AdbController", Device)
     monkeypatch.setattr(cli, "EmulatorManager", lambda _logger: object())
     monkeypatch.setattr(cli, "Kobe", Explorer)
+    monkeypatch.setattr(
+        cli, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
     monkeypatch.setattr(cli, "check_avd", check_avd)
     grants: list[tuple[str, str]] = []
 
@@ -288,6 +292,9 @@ def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
     monkeypatch.setattr(cli, "grant_runtime_permissions", lambda *_args: None)
     monkeypatch.setattr(cli, "launch_app", lambda *_args: None)
     monkeypatch.setattr(cli, "Kobe", Explorer)
+    monkeypatch.setattr(
+        cli, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
     monkeypatch.setattr(sys, "argv", ["app-graph", "-c", str(config)])
 
     with pytest.raises(SystemExit) as caught:
@@ -307,6 +314,19 @@ class _NoRunningAvd:
 
     def duplicate_avd(self, avd_name: str) -> None:
         self.duplicated.append(avd_name)
+
+
+def test_check_avd_uses_a_connected_device_without_creating_an_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    avds = _NoRunningAvd()
+    monkeypatch.setattr(
+        avds, "get_running_avd_list", lambda: [{"udid": "test-device", "status": "device"}]
+    )
+
+    cli.check_avd(avds, {"device": {"udid": "test-device"}}, logging.getLogger("test"))
+
+    assert avds.duplicated == []
 
 
 @pytest.mark.usefixtures("no_sleep")

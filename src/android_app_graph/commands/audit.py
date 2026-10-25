@@ -30,6 +30,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
@@ -45,6 +46,7 @@ from android_app_graph.commands.audit_policy import (
 )
 from android_app_graph.device import (
     AdbController,
+    AdbDisplayAccess,
     AppLaunch,
     DeviceController,
     DeviceUnreachableError,
@@ -66,6 +68,12 @@ from android_app_graph.member_groups import (
     IMAGE_GROUPING_FLOOR,
     TEXT_GROUPING_FLOOR,
     MemberCheck,
+)
+from android_app_graph.run_environment import (
+    RunBaselineError,
+    RunEnvironment,
+    UnsafeReplayError,
+    mutation_config,
 )
 from android_app_graph.step_log import (
     Observation,
@@ -871,8 +879,8 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
     if executed:
         try:
             reached = _replay_to(run, source)
-        except _InspectionBlockedError as exc:
-            outcome["reason"] = str(exc)
+        except (_InspectionBlockedError, UnsafeReplayError) as error:
+            outcome = {**outcome, "reason": str(error)}
             reached = None
         if reached != run.graph.resolve_node_id(source):
             logger.warning("Replay after the correction missed %s; not exploring", source)
@@ -990,7 +998,7 @@ def re_explore_issues(
             try:
                 handler = _retry_edge if itype == "retry_edge" else _explore_node
                 results.append(handler(run, issue))
-            except _InspectionBlockedError as exc:
+            except (_InspectionBlockedError, UnsafeReplayError) as exc:
                 results.append({"issue": issue, "status": "skipped", "reason": str(exc)})
     except UnresolvedPermissionError, UnresolvedSystemOverlayError:
         graph.save_graph(target.graph_path)
@@ -1151,24 +1159,40 @@ def _re_explore_app(
     package_name = app["package_name"]
     logger.info("Starting re-exploration for %d issues...", len(issues))
 
-    launch_activity = None
-    if any(execution_decision(issue).executable for issue in issues):
-        recovery = StartupRecovery(session.controller, session.unreachable_limit, logger)
-        grant_runtime_permissions(run.config["device"]["udid"], package_name, recovery)
-        launch_activity = launch_app(run.config, app, logger, recovery)
-        time.sleep(4)
-
-    target = ReExploreTarget(
-        app_name=app_name,
-        package_name=package_name,
-        graph_path=_app_file(run.graph_dir, app_name, "_audited"),
-        launch_activity=launch_activity,
+    executable = any(execution_decision(issue).executable for issue in issues)
+    environment = (
+        RunEnvironment(
+            session.controller,
+            AdbDisplayAccess(run.config["device"]["udid"]),
+            _app_file(run.graph_dir, app_name),
+            mutation=mutation_config(run.config.get("experiment", {}).get("mutation", {})),
+            logger=logger,
+        )
+        if executable
+        else nullcontext(session.controller)
     )
-    re_results = re_explore_issues(graph, issues, target=target, session=session, client=run.client)
+    with environment as managed:
+        session = session._replace(controller=managed)
+        launch_activity = None
+        if executable:
+            recovery = StartupRecovery(session.controller, session.unreachable_limit, logger)
+            grant_runtime_permissions(run.config["device"]["udid"], package_name, recovery)
+            launch_activity = launch_app(run.config, app, logger, recovery)
+            time.sleep(4)
 
-    results_path = _app_file(run.graph_dir, app_name, "_re_explore")
-    _write_json(results_path, re_results)
-    logger.info("Re-exploration results saved to %s", results_path)
+        target = ReExploreTarget(
+            app_name=app_name,
+            package_name=package_name,
+            graph_path=_app_file(run.graph_dir, app_name, "_audited"),
+            launch_activity=launch_activity,
+        )
+        re_results = re_explore_issues(
+            graph, issues, target=target, session=session, client=run.client
+        )
+
+        results_path = _app_file(run.graph_dir, app_name, "_re_explore")
+        _write_json(results_path, re_results)
+        logger.info("Re-exploration results saved to %s", results_path)
 
 
 def _report_no_path_to_start(
@@ -1271,13 +1295,14 @@ def _main(argv: list[str] | None) -> int:
 
     try:
         check_config_keys(config)
+        mutation_config(exp_config.get("mutation", {}))
         selected_apps = select_apps_for_audit(
             config,
             graph_dir,
             app_name=args.app,
             re_explore=args.re_explore,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, TypeError) as exc:
         parser.error(str(exc))
 
     try:
@@ -1312,8 +1337,12 @@ def _main(argv: list[str] | None) -> int:
             matching=matching,
             session=session,
         )
-        for app in selected_apps:
-            _audit_app(run, app)
+        try:
+            for app in selected_apps:
+                _audit_app(run, app)
+        except RunBaselineError as error:
+            sys.stderr.write(f"app-graph-audit: error: {error}\n")
+            return 1
 
     token_tracker.print_summary()
     logger.info("Audit complete.")
