@@ -79,6 +79,7 @@ def test_action_variants_do_not_hide_matching_observed_routes(history: Navigatio
     _record(history, [form, dialog, form], "tap")
 
     assert "form --tap--> dialog --tap--> form" in history.feedback(form)
+    assert "latest cycle actions" in history.feedback(form)
 
 
 def test_new_edges_start_fresh_evidence(history: NavigationHistory) -> None:
