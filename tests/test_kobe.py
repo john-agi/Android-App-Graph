@@ -3291,9 +3291,11 @@ def _explore_recorded_outcomes(
     router_client: OpenRouter,
     monkeypatch: pytest.MonkeyPatch,
     destinations: Sequence[str],
+    *,
+    extra_nodes: Sequence[str] = (),
 ) -> Kobe:
     explorer = _explorer(_Screens(HOME_SCREEN), tmp_path, router_client)
-    _list_reached_from_home(explorer)
+    _list_reached_from_home(explorer, *extra_nodes)
     _identifying(explorer, monkeypatch, "s0_home", *destinations)
     _without_templates(monkeypatch)
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
@@ -3417,6 +3419,86 @@ def test_checkpoint_replay_preserves_histories_and_continuation_clears_only_its_
     assert explorer.graph.total_steps_completed == 36
     assert not _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
     assert _asks_for_saturation_target(explorer, "s1_list", monkeypatch)
+
+
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_a_checkpoint_merge_starts_a_fresh_window_before_planning_on_its_survivor(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    screens_by_log: Callable[..., DeviceController],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A merged identity plans locally while its new outcome window warms up."""
+    explorer = _explorer(screens_by_log(HOME_SCREEN), tmp_path, router_client)
+    _list_reached_from_home(explorer, "s2_other")
+    first = ([*["s0_home"] * 4, "s1_list", "s0_home"] * 3)[:-1]
+    destinations = [*first, *(["s2_other", "s1_list"] * 16), "s2_other"]
+    assert len(destinations) == 50
+    _identifying(explorer, monkeypatch, "s0_home", *destinations, "s0_home", "s0_home", "s2_other")
+    _without_templates(monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    planned: list[object] = []
+    monkeypatch.setattr(
+        "android_app_graph.kobe.plan_next_action", _planner("Explore this screen", planned)
+    )
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (_OPEN_LIST, {})
+    )
+
+    def merge_audit(**_kwargs: object) -> dict[str, int]:
+        assert explorer.graph.total_steps_completed == 50
+        assert explorer.graph.merge_nodes("s0_home", "s1_list")
+        return {"merged_count": 1}
+
+    monkeypatch.setattr(explorer.graph, "run_node_merge_audit", merge_audit)
+    router_responses.extend(
+        [
+            chat_response(content='{"node_id":"s0_home","reason":"checkpoint target"}'),
+            chat_response(content='{"node_id":"s2_other","reason":"unexplored target"}'),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="test")
+
+    explorer.explore(max_steps=51)
+
+    assert len(planned) == 51
+    assert _numbered_steps(caplog.messages)[-1] == "Step 51/51: s0_home --[tap]--> s0_home"
+    assert not _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+
+
+@pytest.mark.parametrize("removed_has_history", [False, True])
+@pytest.mark.usefixtures("no_sleep")
+def test_merges_reset_affected_histories_and_preserve_an_unrelated_window(
+    removed_has_history: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destinations = ["s0_home"] * 15
+    if removed_has_history:
+        destinations.extend(["s1_list"] * 16)
+    destinations.extend(["s2_unrelated"] * 16)
+    explorer = _explore_recorded_outcomes(
+        tmp_path,
+        router_client,
+        monkeypatch,
+        destinations,
+        extra_nodes=["s2_unrelated"],
+    )
+
+    def merge_audit(**_kwargs: object) -> dict[str, int]:
+        assert explorer.graph.merge_nodes("s0_home", "s1_list")
+        return {"merged_count": 1}
+
+    monkeypatch.setattr(explorer.graph, "run_node_merge_audit", merge_audit)
+
+    assert explorer.maybe_continue_from_coverage_checkpoint(50, 100, "s1_list") is None
+    assert explorer.graph.resolve_node_id("s1_list") == "s0_home"
+    assert not _asks_for_saturation_target(explorer, "s0_home", monkeypatch)
+    assert _asks_for_saturation_target(explorer, "s2_unrelated", monkeypatch)
 
 
 @pytest.mark.usefixtures("no_sleep")
