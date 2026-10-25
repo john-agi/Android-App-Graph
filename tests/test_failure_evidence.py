@@ -141,3 +141,16 @@ def test_same_pid_in_separate_timestamps_remains_separate_evidence() -> None:
     assert events[0].pid == events[1].pid
     assert events[0].fingerprint != events[1].fingerprint
     assert all(event.process_instance == "unresolved_historical" for event in events)
+
+
+def test_java_process_line_from_a_different_log_entry_stays_unresolved() -> None:
+    text = log("FATAL EXCEPTION: main")
+    text += log("Process: com.example, PID: 42", time="124.000")
+    assert crash_evidence(text, "com.example")[0].process is None
+
+
+def test_native_tombstone_boundary_prevents_borrowing_previous_identity() -> None:
+    text = log("pid: 51, tid: 52, name: worker  >>> com.example <<<", tag="DEBUG")
+    text += log("*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***", tag="DEBUG")
+    text += log("signal 11 (SIGSEGV), code 1", tag="DEBUG")
+    assert crash_evidence(text, "com.example")[0].process is None
