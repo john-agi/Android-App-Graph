@@ -490,6 +490,11 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
                 step = _prepare_replay_step(run, path[index - 1].node, recorded)
                 if step is None:
                     logger.warning("Replay source is inapplicable; identifying the current screen")
+                    actual = _identify(
+                        run,
+                        run.recorder.get_state(),
+                        expected_observation=run.graph.earliest_member(target_node),
+                    )
                     break
                 _check_setup_policy(run, path[index - 1].node, step.setup)
                 for setup_action in step.setup:

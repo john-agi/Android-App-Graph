@@ -3391,7 +3391,9 @@ def test_audit_navigation_checks_the_preparation_before_input(
         details=EdgeDetails(setup=[_SWIPE], setup_observation="observed-entry"),
     )
     monkeypatch.setattr(graph, "can_replay", lambda *_args: applicable)
-    _identifying(graph, monkeypatch, "s0_home", "s1_detail" if applicable else "s2_changed")
+    _identifying(
+        graph, monkeypatch, "s0_home", *(["s0_home", "s1_detail"] if applicable else ["s2_changed"])
+    )
     issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
     (result,) = _re_explore(
         graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
@@ -3444,7 +3446,7 @@ def test_audit_navigation_tries_a_retained_preparation_before_input(
         return step.setup_observation == "root"
 
     monkeypatch.setattr(graph, "can_replay", applies)
-    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
+    _identifying(graph, monkeypatch, "s0_home", "s0_home", "s1_detail")
     issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
     (result,) = _re_explore(
         graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path

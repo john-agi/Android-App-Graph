@@ -473,6 +473,10 @@ class Kobe:
                     self.logger.warning(
                         "Replay source is inapplicable; identifying the current screen"
                     )
+                    actual_node, _ = self._identify(
+                        self.controller.get_state(),
+                        expected_observation=self.graph.earliest_member(target_node),
+                    )
                     break
                 node_id, action, setup = step.node, step.action, step.setup
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
