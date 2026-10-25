@@ -668,6 +668,13 @@ pressed. A step on a node whose last 15 steps were all self-loops continues from
 ranked target the same way, before it plans (see [Explore an App](#explore-an-app)),
 and plans as usual when no other node is ranked.
 
+When a ranked continuation reaches its selected node on a checkpoint boundary,
+the due merge audit runs and exploration retains that arrival, resolving its node
+ID through any audit merge. The next step plans from there under the usual step
+limit and recovery rules. A failed continuation or an arrival at another node
+keeps the checkpoint's target selection and replay. A continuation at `max_steps`
+ends the run, as other final steps do.
+
 When a replay for `--resume-from`, a checkpoint or a continuation from a ranked target
 lands on a node other than its target, from whichever screen it starts, it counts a
 miss on the target, saved in the graph file as the node's `replay_misses`. The ranking
