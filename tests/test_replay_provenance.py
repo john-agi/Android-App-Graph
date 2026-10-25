@@ -75,12 +75,12 @@ def test_replay_modal_source_is_the_observed_immediate_opener(
     open_settings: dict[str, object] = {"action": "tap", "x": 10, "y": 20}
     open_modal: dict[str, object] = {"action": "tap", "x": 30, "y": 40}
     if shape == "edges":
-        graph.add_edge("Home", "Settings", open_settings)
-        graph.add_edge("Settings", "Modal", open_modal)
+        graph.add_edge("Home", "Settings", [open_settings])
+        graph.add_edge("Settings", "Modal", [open_modal])
     elif shape == "compound":
         graph.add_edge("Home", "Modal", [open_settings, open_modal])
     else:
-        graph.add_edge("Home", "Modal", open_modal, details=EdgeDetails(setup=[open_settings]))
+        graph.add_edge("Home", "Modal", [open_modal], details=EdgeDetails(setup=[open_settings]))
     observations: dict[str, str] = {}
     inputs: list[MatchInput] = []
 
@@ -96,6 +96,7 @@ def test_replay_modal_source_is_the_observed_immediate_opener(
         return observation.activity
 
     monkeypatch.setattr(graph, "identify_state", identify)
+    monkeypatch.setattr(graph, "latest_description", lambda node: node)
     if boundary == "explorer":
         reached = explorer.navigate_to_node("Modal")
     else:
