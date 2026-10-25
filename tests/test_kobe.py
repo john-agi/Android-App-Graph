@@ -444,6 +444,52 @@ def test_navigation_without_a_recorded_path_leaves_the_app_running(
 
 
 @pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("manual_resume", [False, True])
+@pytest.mark.parametrize("aliased", [False, True])
+@pytest.mark.parametrize("target", ["ext_com.foreign", EXTERNAL_WEB_NODE, "s1_boundary"])
+def test_external_replay_target_is_rejected_before_device_or_model_access(
+    kobe: Kobe,
+    device_log: list[object],
+    router_requests: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    *,
+    aliased: bool,
+    manual_resume: bool,
+) -> None:
+    """External destinations retain their recorded path and reject explicit replay."""
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
+    kobe.graph.graph.add_node(target, is_external=target == "s1_boundary", replay_misses=0)
+    kobe.graph.add_edge("s0_home", target, action={"action": "tap", "coordinate": [30, 40]})
+    requested = target
+    if aliased:
+        requested = "s2_alias"
+        kobe.graph.graph.add_node(requested)
+        assert kobe.graph.merge_nodes(target, requested)
+    path = kobe.graph.find_path("s0_home", target)
+    assert path is not None
+    before = kobe.graph.graph.copy()
+    monkeypatch.setattr(
+        kobe.controller,
+        "get_state",
+        lambda **_kwargs: pytest.fail("An external replay target requires no observation"),
+    )
+
+    if manual_resume:
+        with pytest.raises(ValueError, match="External replay target"):
+            kobe.explore(max_steps=1, resume_from=requested)
+    else:
+        with pytest.raises(ValueError, match="External replay target"):
+            kobe.navigate_to_node(requested)
+
+    assert device_log == []
+    assert router_requests == []
+    assert kobe.graph.find_path("s0_home", target) == path
+    assert dict(kobe.graph.graph.nodes(data=True)) == dict(before.nodes(data=True))
+    assert dict(kobe.graph.graph.edges) == dict(before.edges)
+
+
+@pytest.mark.usefixtures("no_sleep")
 @pytest.mark.parametrize("action", [{"action": "tap", "coordinate": [30, 40]}, {"action": "menu"}])
 def test_navigation_replays_an_edge_action_recorded_as_a_single_dict(
     replaying_kobe: Kobe,
