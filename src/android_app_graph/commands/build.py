@@ -23,6 +23,7 @@ from android_app_graph.graph_files import (
     image_embeddings_path,
     read_json_lines,
 )
+from android_app_graph.modal_context import MatchInput
 from android_app_graph.payloads import as_object_dict, as_str
 from android_app_graph.step_log import (
     load_image_embeddings,
@@ -112,6 +113,9 @@ def read_recorded_log(steps: Path, run_kinds: Collection[str]) -> RecordedLog:
         raise ValueError(msg)
     for record in observations.values():
         observation_ownership(record)
+    for event in events:
+        if event.get("kind") == "match":
+            MatchInput.from_record(event.get("match_input"))
     return log
 
 
@@ -214,7 +218,11 @@ class _Replay:
         observation = recorded_observation(self.log.steps, self.log.observations[observation_id])
         expected = record.get("expected_observation")
         expected_observation = expected if isinstance(expected, str) else None
-        node = self.graph.identify_state(observation, expected_observation=expected_observation)
+        node = self.graph.identify_state(
+            observation,
+            expected_observation=expected_observation,
+            match_input=MatchInput.from_record(record.get("match_input")),
+        )
         state = self.graph.graph.nodes[node].get("last_detail_snapshot", {})
         self._states[observation_id] = dict(state)
         in_replay = record.get("source") == "navigation_replay"

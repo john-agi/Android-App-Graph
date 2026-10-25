@@ -35,6 +35,7 @@ from android_app_graph.graph_files import (
     write_bytes_atomically,
     write_json_atomically,
 )
+from android_app_graph.modal_context import MAX_OPENING_ACTIONS, MatchInput
 from android_app_graph.payloads import as_int_list, as_object_dict, as_str
 from android_app_graph.run_environment import RunRecording, UnsafeReplayError
 from android_app_graph.screen_image import (
@@ -359,6 +360,7 @@ class StepRecorder:
         self._last_input_regions: object = None
         self.input_rejection_hint: str = ""
         self.last_match: str | None = None
+        self._match_actions: list[dict[str, object]] | None = []
         steps.mkdir(parents=True, exist_ok=True)
         self._next_number = _first_free_number(steps)
 
@@ -482,6 +484,8 @@ class StepRecorder:
             last,
             {"observation": last.observation_id if last else None, "action": action},
         )
+        preceding_actions = self._match_actions
+        self._match_actions = None
         try:
             check_overlay_action(action, last.system_overlays if last else ())
             self._controller.exe_action(action)
@@ -508,6 +512,11 @@ class StepRecorder:
             )
             raise
         self.input_rejection_hint = ""
+        self._match_actions = preceding_actions
+        if self._match_actions is not None:
+            self._match_actions.append(dict(action))
+            if len(self._match_actions) > MAX_OPENING_ACTIONS:
+                self._match_actions = None
 
     def record_unsupported_action(
         self, instruction: str, required_pointers: int | None, outcome: Mapping[str, object]
@@ -532,6 +541,7 @@ class StepRecorder:
 
     def record_system_event(self, fields: Mapping[str, object]) -> None:
         """Keep ownership recovery and skipped-input evidence outside app transitions."""
+        self._match_actions = None
         last = self._last_observation
         self._write_record(
             self._take_step_id(),
@@ -540,9 +550,15 @@ class StepRecorder:
             {"observation": last.observation_id if last else None, **fields},
         )
 
-    def record_match(self, observation: Observation, expected_observation: str | None) -> None:
+    def record_match(
+        self, observation: Observation, expected_observation: str | None
+    ) -> MatchInput:
         """Record that the run asks for the node of ``observation``, expecting the node
         ``expected_observation`` belongs to when it names one."""
+        context = MatchInput(
+            self.last_match,
+            tuple(self._match_actions) if self._match_actions is not None else None,
+        )
         self._write_record(
             self._take_step_id(),
             "match",
@@ -550,9 +566,12 @@ class StepRecorder:
             {
                 "observation": observation.observation_id,
                 "expected_observation": expected_observation,
+                "match_input": context.as_record(),
             },
         )
         self.last_match = observation.observation_id
+        self._match_actions = []
+        return context
 
     def record_transition(self, transition: Transition) -> None:
         """Record ``transition``, an edge the graph was given."""
