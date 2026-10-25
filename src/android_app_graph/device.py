@@ -21,6 +21,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
+from xml.parsers import expat
 
 from android_app_graph.display_state import NIGHT_KEYS, DisplayState
 from android_app_graph.payloads import as_int
@@ -562,7 +563,28 @@ class AdbController:
 
     def _clear(self) -> None:
         self._input("keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A", check=True)
+        # Asynchronous shortcut delivery can precede a field's selection update.
+        self._observe_idle_hierarchy()
         self._input("keyboard", "keyevent", "KEYCODE_DEL", check=True)
+
+    def _observe_idle_hierarchy(self) -> None:
+        dump = self._ui_dump().removesuffix("UI hierchary dumped to: /dev/stdout\n")
+        elements: list[str] = []
+
+        def start_element(name: str, _attributes: dict[str, str]) -> None:
+            elements.append(name)
+
+        parser = expat.ParserCreate()
+        parser.StartElementHandler = start_element
+        try:
+            is_final: bool = True
+            parser.Parse(dump, is_final)
+        except expat.ExpatError as error:
+            msg = "Text replacement requires a valid idle UI hierarchy."
+            raise ValueError(msg) from error
+        if not elements or elements[0] != "hierarchy":
+            msg = "Text replacement requires a valid idle UI hierarchy."
+            raise ValueError(msg)
 
     def _type(self, text: str) -> None:
         """Type ``text`` with ``input text``, which turns each character into key events
