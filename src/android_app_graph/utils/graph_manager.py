@@ -61,6 +61,7 @@ from android_app_graph.checkpoint import (
     identity_batches,
 )
 from android_app_graph.graph_files import (
+    MAX_SETUP_ACTIONS,
     PER_ACTION_LISTS,
     append_json_line,
     edge_problems,
@@ -139,7 +140,6 @@ EXTERNAL_WEB_NODE = "ext_web"
 # A redirecting link or a browser's own history can keep an outside page up after one back press.
 EXTERNAL_WEB_BACK_PRESSES = 3
 # A longer setup is an excursion, not a recipe for the state an action needs.
-MAX_SETUP_ACTIONS = 8
 _DESCRIBE_CONTEXT_ENTRIES = 16
 _DESCRIBE_CONTEXT_BYTES = 2048
 
@@ -907,17 +907,35 @@ def _count_repeat(
     for index, recorded_action in enumerate(edge_data.get("actions", [])):
         if recorded_action == action:
             edge_data["visit_count"] = edge_data.get("visit_count", 1) + 1
-            setups = edge_data["setups"]
-            recorded = setups[index]
-            anchor = edge_data["setup_observations"][index]
-            if setup is not None and (
-                not isinstance(recorded, list)
-                or (anchor == setup_observation and len(setup) < len(recorded))
-            ):
-                setups[index] = setup
-                edge_data["setup_observations"][index] = setup_observation
+            if setup is not None:
+                _retain_preparation(edge_data, index, setup, setup_observation)
             return True
     return False
+
+
+def _retain_preparation(
+    edge: dict[str, Any], index: int, setup: list[dict[str, Any]], observation: str | None
+) -> None:
+    """Keep the first entry and strictly shorter arrivals, bounded by setup length."""
+    recorded = edge["setups"][index]
+    if not isinstance(recorded, list):
+        edge["setups"][index] = setup
+        edge["setup_observations"][index] = observation
+        return
+    preparations = [
+        {"setup": recorded, "observation": edge["setup_observations"][index]},
+        *edge["setup_alternatives"][index],
+    ]
+    same = next((entry for entry in preparations if entry["observation"] == observation), None)
+    if same is not None:
+        if len(setup) < len(same["setup"]):
+            same["setup"] = setup
+    elif observation is not None and len(setup) < min(
+        len(entry["setup"]) for entry in preparations
+    ):
+        preparations.append({"setup": setup, "observation": observation})
+    edge["setups"][index] = preparations[0]["setup"]
+    edge["setup_alternatives"][index] = preparations[1:]
 
 
 def _device_actions(action: object) -> tuple[dict[str, Any], ...]:
@@ -930,45 +948,61 @@ class _Preparation(NamedTuple):
     observation: str | None
 
 
-def _menu_openers(loop: dict[str, Any] | None) -> dict[str, _Preparation]:
-    """Return, by menu, the fewest device actions that open it on a node whose self-loop
-    is ``loop``: a recorded self-loop action whose schema delta records the menu opening,
-    after its setup. An action whose setup is unknown opens the menu only when it was
-    sent with no menu open, the state a replay arrives in."""
+def _known_preparations(
+    setup: object, observation: str | None, alternatives: Sequence[dict[str, Any]]
+) -> tuple[_Preparation, ...]:
+    return (
+        _Preparation(_setup_actions(setup), observation),
+        *(
+            _Preparation(_setup_actions(entry["setup"]), entry["observation"])
+            for entry in alternatives
+        ),
+    )
+
+
+def _menu_openers(loop: dict[str, Any] | None) -> dict[str, tuple[_Preparation, ...]]:
+    """Keep the cheapest recorded opener per menu, with its entry preparations."""
     if loop is None:
         return {}
     aligned = _aligned_lists(loop)
-    openers: dict[str, _Preparation] = {}
-    for action, delta, setup, menu, observation in zip(
+    openers: dict[str, tuple[_Preparation, ...]] = {}
+    for action, delta, setup, menu, observation, alternatives in zip(
         aligned["actions"],
         aligned["schema_deltas"],
         aligned["setups"],
         aligned["open_menus"],
         aligned["setup_observations"],
+        aligned["setup_alternatives"],
         strict=True,
     ):
         opened = as_object_dict(as_object_dict(delta).get("open_menu")).get("after")
         replayable = isinstance(setup, list) or menu is None
         if not isinstance(opened, str) or not replayable:
             continue
-        sent = (*_setup_actions(setup), *_device_actions(action))
-        if opened not in openers or len(sent) < len(openers[opened].actions):
-            openers[opened] = _Preparation(sent, observation)
+        sent = tuple(
+            _Preparation((*entry.actions, *_device_actions(action)), entry.observation)
+            for entry in _known_preparations(setup, observation, alternatives)
+        )
+        if opened not in openers or min(len(entry.actions) for entry in sent) < min(
+            len(entry.actions) for entry in openers[opened]
+        ):
+            openers[opened] = sent
     return openers
 
 
-def _replay_setup(
-    setup: object, menu: object, observation: str | None, openers: Mapping[str, _Preparation]
-) -> _Preparation | None:
-    """Return the device actions a replay sends before an action whose ``setups`` and
-    ``open_menus`` entries are ``setup`` and ``menu``: its recorded setup, or, when that
-    is unknown, the opening of the menu it was sent in from ``openers``; None when no
-    recorded action opens that menu."""
+def _replay_setups(
+    setup: object,
+    menu: object,
+    observation: str | None,
+    alternatives: Sequence[dict[str, Any]],
+    openers: Mapping[str, tuple[_Preparation, ...]],
+) -> tuple[_Preparation, ...]:
+    """Return recorded preparations, or the known menu opener when setup is unknown."""
     if isinstance(setup, list):
-        return _Preparation(_setup_actions(setup), observation)
+        return _known_preparations(setup, observation, alternatives)
     if not isinstance(menu, str):
-        return _Preparation((), None)
-    return openers.get(menu)
+        return (_Preparation((), None),)
+    return openers.get(menu, ())
 
 
 def _instructions_hash(instructions: list[str]) -> str:
@@ -1049,7 +1083,15 @@ def _require_preparation_anchors(graph: dict[str, Any], path: Path) -> None:
     """Retain entry observations even when an audit reassigns their node membership."""
     members = {member for node in graph["nodes"] for member in node["observations"]}
     for edge in graph["edges"]:
-        for anchor in edge["setup_observations"]:
+        anchors = [
+            *edge["setup_observations"],
+            *(
+                entry["observation"]
+                for alternatives in edge["setup_alternatives"]
+                for entry in alternatives
+            ),
+        ]
+        for anchor in anchors:
             if anchor is not None and anchor not in members:
                 raise unloadable_graph(
                     path, [f"preparation anchor {anchor!r} is not a graph member"]
@@ -2499,6 +2541,7 @@ class GraphManager:
             ("setups", setup),
             ("open_menus", details.open_menu),
             ("setup_observations", setup_observation),
+            ("setup_alternatives", []),
         ):
             edge_data[key].append(value)
         if source != target:
@@ -2544,13 +2587,16 @@ class GraphManager:
         """Return the device actions a replay sends on *source* before action *index* of
         source→target, or None when it sends none because no recorded action opens the
         menu the action was sent in (see ``_replay_options``)."""
-        return next(
-            (o.setup for o in self._replay_options(source, target) if o.index == index), None
-        )
+        step = self.replay_step(source, target, index)
+        return None if step is None else step.setup
 
     def replay_step(self, source: str, target: str, index: int) -> PathStep | None:
         """Return one recorded action with its applicable preparation evidence."""
-        option = next((o for o in self._replay_options(source, target) if o.index == index), None)
+        option = min(
+            (o for o in self._replay_options(source, target) if o.index == index),
+            key=lambda option: option.cost,
+            default=None,
+        )
         if option is None:
             return None
         return PathStep(
@@ -2559,6 +2605,25 @@ class GraphManager:
             option.setup,
             option.setup_observation,
         )
+
+    def applicable_preparation(
+        self, source: str, step: PathStep, observation: Observation
+    ) -> PathStep | None:
+        """Choose the shortest confirmed preparation of this already selected action."""
+        actions = self.graph[source][step.node]["actions"]
+        options = sorted(
+            (
+                option
+                for option in self._replay_options(source, step.node)
+                if actions[option.index] == step.action
+            ),
+            key=lambda option: option.cost,
+        )
+        for option in options:
+            candidate = PathStep(step.node, step.action, option.setup, option.setup_observation)
+            if self.can_replay(observation, candidate):
+                return candidate
+        return None
 
     def can_replay(self, observation: Observation, step: PathStep) -> bool:
         """Verify an anchored preparation against the current observed source before input."""
@@ -2617,20 +2682,20 @@ class GraphManager:
         loop = self.graph[source][source] if self.graph.has_edge(source, source) else None
         openers = _menu_openers(loop)
         options: list[_ReplayOption] = []
-        for index, (own, setup, menu, observation) in enumerate(
+        for index, (own, setup, menu, observation, alternatives) in enumerate(
             zip(
                 steps,
                 aligned["setups"],
                 aligned["open_menus"],
                 aligned["setup_observations"],
+                aligned["setup_alternatives"],
                 strict=True,
             )
         ):
-            sent = _replay_setup(setup, menu, observation, openers)
-            if sent is not None:
-                options.append(
-                    _ReplayOption(own + len(sent.actions), index, sent.actions, sent.observation)
-                )
+            options.extend(
+                _ReplayOption(own + len(sent.actions), index, sent.actions, sent.observation)
+                for sent in _replay_setups(setup, menu, observation, alternatives, openers)
+            )
         return options
 
     def move_edge_action(self, source: str, target: str, index: int, new_target: str) -> bool:
@@ -3491,6 +3556,7 @@ class GraphManager:
                 "setups": attrs.get("setups", []),
                 "open_menus": attrs.get("open_menus", []),
                 "setup_observations": attrs.get("setup_observations", []),
+                "setup_alternatives": attrs.get("setup_alternatives", []),
             }
             if attrs.get("normalized_instructions_hash"):
                 edge_data["normalized_instructions_hash"] = attrs["normalized_instructions_hash"]

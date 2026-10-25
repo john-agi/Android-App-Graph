@@ -371,6 +371,8 @@ def require_known_edge_endpoints(data: object, path: Path) -> dict[str, Any]:
     return graph
 
 
+MAX_SETUP_ACTIONS = 8
+
 PER_ACTION_LISTS = (
     "num_steps",
     "instructions",
@@ -379,7 +381,29 @@ PER_ACTION_LISTS = (
     "setups",
     "open_menus",
     "setup_observations",
+    "setup_alternatives",
 )
+
+
+def _valid_preparation(value: object) -> bool:
+    entry = as_object_dict(value)
+    setup, observation = entry.get("setup"), entry.get("observation")
+    return (
+        set(entry) == {"setup", "observation"}
+        and isinstance(setup, list)
+        and len(setup) <= MAX_SETUP_ACTIONS
+        and all(isinstance(action, dict) for action in setup)
+        and isinstance(observation, str)
+        and bool(observation)
+    )
+
+
+def _valid_preparation_alternatives(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_SETUP_ACTIONS
+        and all(_valid_preparation(entry) for entry in value)
+    )
 
 
 def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
@@ -399,6 +423,8 @@ def edge_problems(edges: Iterable[dict[str, Any]]) -> list[str]:
         ):
             misaligned.append(name)
         elif any(
+            not _valid_preparation_alternatives(value) for value in edge["setup_alternatives"]
+        ) or any(
             anchor is not None
             and (not isinstance(anchor, str) or not anchor or not isinstance(setup, list))
             for anchor, setup in zip(edge["setup_observations"], edge["setups"], strict=True)

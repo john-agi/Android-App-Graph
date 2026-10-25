@@ -494,6 +494,7 @@ def _edge(source: str, target: str, *actions: dict[str, Any], **extra: object) -
         "setups": [None] * len(actions),
         "open_menus": [None] * len(actions),
         "setup_observations": [None] * len(actions),
+        "setup_alternatives": [[]] * len(actions),
         "visit_count": len(actions),
         **extra,
     }

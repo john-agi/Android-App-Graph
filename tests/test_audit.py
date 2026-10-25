@@ -31,7 +31,12 @@ from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder, read_records
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
-from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
+from android_app_graph.utils.graph_manager import (
+    EXTERNAL_WEB_NODE,
+    EdgeDetails,
+    GraphManager,
+    PathStep,
+)
 from android_app_graph.utils.vlm_utils import (
     ActionPlan,
     ActionRequest,
@@ -488,6 +493,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "setups": [None],
                         "open_menus": [None],
                         "setup_observations": [None],
+                        "setup_alternatives": [[]],
                     }
                 ],
             }
@@ -1207,6 +1213,7 @@ def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_wit
                 "setups": [None],
                 "open_menus": [None],
                 "setup_observations": [None],
+                "setup_alternatives": [[]],
                 "visit_count": 1,
             },
         ),
@@ -3407,3 +3414,39 @@ def test_audit_correction_leaves_an_inapplicable_preparation_unexecuted(
     assert result == {"issue": _retry(), "status": "unverified", "reached": "s0_home"}
     assert device_log == _FIRST_RESTART
     assert _edges(graph) == edges
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_navigation_tries_a_retained_preparation_before_input(
+    client: OpenRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    graph = _graph_with_nodes(("s0_home", {}), ("s1_detail", {}))
+    _describing_by_node_id(graph, monkeypatch)
+    graph.add_edge(
+        "s0_home",
+        "s1_detail",
+        [_DETAIL_TAP],
+        details=EdgeDetails(setup=[_SWIPE], setup_observation="root"),
+    )
+    graph.add_edge(
+        "s0_home",
+        "s1_detail",
+        [_DETAIL_TAP],
+        details=EdgeDetails(setup=[], setup_observation="folder"),
+    )
+    checked: list[str | None] = []
+
+    def applies(_observation: Observation, step: PathStep) -> bool:
+        checked.append(step.setup_observation)
+        assert device_log == _FIRST_RESTART
+        return step.setup_observation == "root"
+
+    monkeypatch.setattr(graph, "can_replay", applies)
+    _identifying(graph, monkeypatch, "s0_home", "s1_detail")
+    issue = {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
+    (result,) = _re_explore(
+        graph, [issue], _LoggingController("com.demo", device_log), client, tmp_path
+    )
+    assert result["navigated_to"] == "s1_detail"
+    assert checked == ["folder", "root"]
+    assert device_log == [*_FIRST_RESTART, _SWIPE, _DETAIL_TAP]

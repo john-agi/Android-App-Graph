@@ -46,6 +46,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    PathStep,
     SetupTrail,
     open_menu_in,
     schema_delta,
@@ -402,6 +403,14 @@ class Kobe:
         self._setup_trail.begin(reached, arrival_state, observation=self.controller.last_match)
         return reached
 
+    def _prepare_replay_step(self, source: str, step: PathStep) -> PathStep | None:
+        """Observe source applicability only when the recorded preparation has an anchor."""
+        if step.setup_observation is None:
+            return step
+        return self.graph.applicable_preparation(
+            source, step, Observation.from_state(self.controller.get_state())
+        )
+
     def _replay_to(self, target_node: str) -> str:
         start_node = self.graph.get_start_node()
         if start_node is None:
@@ -436,15 +445,14 @@ class Kobe:
         )
 
         try:
-            for i, step in enumerate(path[1:], start=1):
-                node_id, action, setup = step.node, step.action, step.setup
-                if step.setup_observation is not None and not self.graph.can_replay(
-                    Observation.from_state(self.controller.get_state()), step
-                ):
+            for i, recorded in enumerate(path[1:], start=1):
+                step = self._prepare_replay_step(path[i - 1].node, recorded)
+                if step is None:
                     self.logger.warning(
                         "Replay source is inapplicable; identifying the current screen"
                     )
                     break
+                node_id, action, setup = step.node, step.action, step.setup
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
                 if isinstance(action, list):
                     self.logger.info(

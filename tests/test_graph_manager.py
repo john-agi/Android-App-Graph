@@ -2757,6 +2757,7 @@ def test_a_setup_trail_matches_a_node_merged_away_while_it_holds_it() -> None:
         "setups",
         "open_menus",
         "setup_observations",
+        "setup_alternatives",
     ],
 )
 @pytest.mark.parametrize("entries", [None, []], ids=["absent", "short"])
@@ -2773,6 +2774,7 @@ def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
         "setups": [[]],
         "open_menus": [None],
         "setup_observations": [None],
+        "setup_alternatives": [[]],
     }
     lacking = {"source": "s0_home", "target": "s1_settings", **complete}
     if entries is None:
@@ -3085,11 +3087,11 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
     assert gm.move_edge_action("s0_home", "s1_settings", 1, "s2_search") is True
 
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None, None),
-        ({"action": "swipe"}, 3, "", "", None, None, None, None),
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None, []),
+        ({"action": "swipe"}, 3, "", "", None, None, None, None, []),
     ]
     assert edge_rows(gm, "s0_home", "s2_search") == [
-        ({"action": "enter"}, 1, "submit the search", "", None, None, None, None),
+        ({"action": "enter"}, 1, "submit the search", "", None, None, None, None, []),
         (
             search,
             2,
@@ -3099,6 +3101,7 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
             [_SCROLL],
             "search toolbar menu",
             None,
+            [],
         ),
     ]
     assert gm.graph["s0_home"]["s1_settings"]["instruction_templates"] == []
@@ -3120,7 +3123,7 @@ def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_ne
 
     assert not gm.graph.has_edge("s0_home", "s1_settings")
     assert edge_rows(gm, "s0_home", "s0_home") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None, [])
     ]
     assert gm.graph["s0_home"]["s0_home"]["visit_count"] == 1
 
@@ -3143,7 +3146,7 @@ def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
 
     assert list(gm.graph.nodes) == ["s0_home", "s1_settings"]
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None, [])
     ]
     assert "move_edge_action: missing node ext_com.other" in caplog.text
 
@@ -3169,7 +3172,7 @@ def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
         assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
 
     assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None, [])
     ]
     assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
     assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
@@ -3933,6 +3936,7 @@ def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
         setups=setups,
         open_menus=[None],
         setup_observations=[None],
+        setup_alternatives=[[]],
     )
 
     path = gm.find_path("s0_home", "s1_settings")
@@ -5338,6 +5342,7 @@ def _graph_edge(source: str, target: str, instruction: str, observation: str) ->
         "setups": [None],
         "open_menus": [None],
         "setup_observations": [None],
+        "setup_alternatives": [[]],
         "visit_count": 1,
     }
 
@@ -5744,6 +5749,7 @@ recorded_actions = st.lists(
         setup_entries,
         st.none() | st.text(max_size=12),
         st.none(),
+        st.just([]),
     ),
     min_size=1,
     max_size=3,
@@ -5809,6 +5815,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "setups": d.get("setups", []),
             "open_menus": d.get("open_menus", []),
             "setup_observations": d.get("setup_observations", []),
+            "setup_alternatives": d.get("setup_alternatives", []),
             "normalized_instructions_hash": d.get("normalized_instructions_hash") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
@@ -6400,6 +6407,14 @@ def test_preparation_anchor_persists_independently_of_later_member_assignment(
     add_screen(graph, "s1", "Settings page", **destination_members)
     anchor = destination_members["observations"][0]
     graph.add_edge(
+        "s0",
+        "s1",
+        {"action": "tap"},
+        details=EdgeDetails(
+            setup=[{"action": "back"}], setup_observation=source_members["observations"][0]
+        ),
+    )
+    graph.add_edge(
         "s0", "s1", {"action": "tap"}, details=EdgeDetails(setup=[], setup_observation=anchor)
     )
     loaded = with_text_vectors(graph, steps)
@@ -6408,7 +6423,7 @@ def test_preparation_anchor_persists_independently_of_later_member_assignment(
     assert step.setup_observation == anchor
     path = graph_beside(steps)
     payload = json.loads(path.read_text())
-    payload["edges"][0]["setup_observations"] = ["missing-observation"]
+    payload["edges"][0]["setup_alternatives"][0][0]["observation"] = "missing-observation"
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="not a graph member"):
         make_manager().load_graph(path)
@@ -6424,4 +6439,49 @@ def test_loading_rejects_malformed_preparation_anchor(anchor: object, setup: obj
     }
     edge["setup_observations"] = [anchor]
     edge["setups"] = [setup]
+    edge["setup_alternatives"] = [[]]
     assert "invalid preparation anchors" in gm_module.edge_problems([edge])[0]
+
+
+@pytest.mark.parametrize(
+    "alternatives",
+    [
+        None,
+        [None],
+        [{"setup": [], "observation": ""}],
+        [{"setup": [7], "observation": "entry"}],
+        [{"setup": [], "observation": 7}],
+        [{"setup": [], "observation": "entry", "extra": True}],
+        [{"setup": [{"action": "back"}] * 9, "observation": "entry"}],
+        [{"setup": [], "observation": "entry"}] * 9,
+    ],
+)
+def test_loading_rejects_unbounded_or_malformed_preparation_alternatives(
+    alternatives: object,
+) -> None:
+    edge = {
+        "source": "s0",
+        "target": "s1",
+        "actions": [{"action": "tap"}],
+        **{name: [None] for name in PER_ACTION_LISTS},
+    }
+    edge["setup_alternatives"] = [alternatives]
+    assert "invalid preparation anchors" in gm_module.edge_problems([edge])[0]
+
+
+def test_moving_an_action_preserves_each_recorded_preparation() -> None:
+    graph = make_manager()
+    for node in ("s0", "s1", "s2"):
+        add_screen(graph, node, "Home screen")
+    action = {"action": "tap"}
+    graph.add_edge(
+        "s0",
+        "s1",
+        action,
+        details=EdgeDetails(setup=[{"action": "back"}], setup_observation="root"),
+    )
+    graph.add_edge("s0", "s1", action, details=EdgeDetails(setup=[], setup_observation="folder"))
+    before = edge_rows(graph, "s0", "s1")
+    assert graph.move_edge_action("s0", "s1", 0, "s2")
+    assert edge_rows(graph, "s0", "s2") == before
+    assert not graph.graph.has_edge("s0", "s1")

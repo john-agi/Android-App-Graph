@@ -671,10 +671,10 @@ page-detail model whether the full recorded input sequence applies from that vis
 entry. This checks source state rather than node identity: a shared folder-browser
 node does not make a root-relative sequence applicable inside a folder. Different
 owners or activities, black captures and system surfaces are rejected without a
-model call. A negative or unanswered check sends none of that step's inputs and the
-replay identifies where it stopped. The check adds a capture and a `replay_source`
-request per anchored step; it cannot prove hidden state or guarantee that later
-coordinates remain valid. Audit navigation and flagged-action retries use the same
+model call. If no retained entry is confirmed, replay sends none of that step's inputs
+and identifies where it stopped. The check adds one capture per anchored step and up
+to nine `replay_source` requests, trying retained preparations from shortest to
+longest. It cannot prove hidden state or guarantee that later coordinates remain valid. Audit navigation and flagged-action retries use the same
 check. Menu reconstruction retains the recorded opener's anchor when one is known.
 
 An action whose setup is unknown was sent in a state the replay cannot rebuild,
@@ -1291,8 +1291,8 @@ description. Explore the app again into a new graph directory.
 ### Graph edges
 
 Each edge in a graph file lists its actions in `actions`. The `num_steps`,
-`instructions`, `target_observations`, `schema_deltas`, `setups`, `open_menus` and
-`setup_observations`
+`instructions`, `target_observations`, `schema_deltas`, `setups`, `open_menus`,
+`setup_observations` and `setup_alternatives`
 lists hold one entry per action, in the same order, so entry *i* of each
 describes `actions[i]`. An action that recorded no instruction or observation has
 `""` in that list, and an action that recorded no state change has `null` in
@@ -1337,13 +1337,18 @@ The first observed entry of a new graph starts with a known empty setup. Each kn
 arrival records its actual observation in `setup_observations`; an unknown or dropped
 setup has `null` there. A saved non-null anchor must name a graph member observation,
 including one an audit has reassigned to another node. Graph files without this
-aligned field must be explored again into a new directory.
+aligned fields must be explored again into a new directory.
 
 An action recorded again retains its first known preparation and entry observation.
-A shorter preparation replaces it only when both start from that same observation;
-a shorter sequence learned from another arrival does not replace it. Only one
-preparation is retained per action, so another entry may have a valid route that the
-saved preparation cannot replay. Of an action whose
+A shorter preparation replaces one from the same observation. A strictly shorter
+sequence learned from another entry is retained in `setup_alternatives`, as an object
+with `setup` and `observation`. Equal or longer sequences from other entries are not
+added. The first preparation plus strictly decreasing lengths from the eight-action
+limit gives at most nine preparations per action. A replay tries these entries in
+input-count order for its chosen action and sends the first applicable sequence;
+it sends none if all entries are inapplicable. This preserves an earlier root-relative
+route alongside a later direct route without searching alternative paths or inventing
+preparations. Unrecorded arrivals can still have no applicable route. Of an action whose
 setup is unknown, a replay rebuilds only the menu in `open_menus`, by a recorded
 action that opened it, and no replay sends an action whose menu no recorded action
 opens (see [Replaying to a node](#replaying-to-a-node)).

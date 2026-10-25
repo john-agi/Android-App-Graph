@@ -456,12 +456,19 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     actual = opened_on
     if len(path) > 1:
         try:
-            for step in path[1:]:
-                if step.setup_observation is not None and not run.graph.can_replay(
-                    Observation.from_state(run.recorder.get_state()), step
-                ):
-                    logger.warning("Replay source is inapplicable; identifying the current screen")
-                    break
+            for index, recorded in enumerate(path[1:], start=1):
+                step = recorded
+                if step.setup_observation is not None:
+                    prepared = run.graph.applicable_preparation(
+                        path[index - 1].node, step, Observation.from_state(run.recorder.get_state())
+                    )
+                    if prepared is None:
+                        logger.warning(
+                            "Replay source is inapplicable; identifying the current screen"
+                        )
+                        break
+                    step = prepared
+                _check_setup_policy(run, path[index - 1].node, step.setup)
                 for setup_action in step.setup:
                     _execute(run.recorder, setup_action)
                 _execute(run.recorder, step.action)
@@ -810,10 +817,11 @@ def _correct_flagged_edge(
     index, action = found
 
     step = run.graph.replay_step(source, target, index)
-    if step is None or (
-        step.setup_observation is not None
-        and not run.graph.can_replay(Observation.from_state(run.recorder.get_state()), step)
-    ):
+    if step is not None and step.setup_observation is not None:
+        step = run.graph.applicable_preparation(
+            source, step, Observation.from_state(run.recorder.get_state())
+        )
+    if step is None:
         logger.warning(
             "No applicable recorded preparation for '%s' on %s → %s", instruction, source, target
         )
