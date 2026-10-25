@@ -24,6 +24,7 @@ The auditor finds two types of issues:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import logging
 import sys
@@ -455,9 +456,19 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     actual = opened_on
     if len(path) > 1:
         try:
-            for step in path[1:]:
+            for previous, step in itertools.pairwise(path):
                 for setup_action in step.setup:
                     _execute(run.recorder, setup_action)
+                if not run.graph.can_replay_action(
+                    Observation.from_state(run.recorder.get_state()),
+                    previous.node,
+                    step.node,
+                    step.action,
+                ):
+                    logger.warning(
+                        "Replay action context is unverified; identifying the current screen"
+                    )
+                    break
                 _execute(run.recorder, step.action)
         except (InputRejectedError, SystemOverlayActionError) as error:
             logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
@@ -611,6 +622,7 @@ def _record_step(
             num_steps=1,
             setup=step.setup,
             open_menu=step.open_menu,
+            action_source=step.before.observation_id,
         ),
     )
     run.recorder.record_transition(
@@ -805,6 +817,8 @@ def _correct_flagged_edge(
     for setup_action in setup:
         _execute(run.recorder, setup_action)
     before = run.recorder.get_state()
+    if not run.graph.can_replay_action(Observation.from_state(before), source, target, action):
+        return {"status": "unverified", "reached": _identify(run, before)}
     _execute(run.recorder, action)
     after = run.recorder.get_state()
     reached = (
@@ -829,9 +843,12 @@ def _correct_flagged_edge(
         run.graph.record_external_app_visit(Observation.from_state(after))
         _recover_system_surface(run, after)
     if reached != target:
-        if not run.graph.move_edge_action(source, target, index, reached):
-            return {"status": "unverified", "reached": reached}
-        return {"status": "moved", "moved_to": reached}
+        moved = run.graph.move_edge_action(source, target, index, reached)
+        return (
+            {"status": "moved", "moved_to": reached}
+            if moved
+            else {"status": "unverified", "reached": reached}
+        )
 
     label = describe_executed_action(
         client=run.client,

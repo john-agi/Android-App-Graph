@@ -1238,6 +1238,63 @@ def verify_same_node(
     return result
 
 
+def verify_replay_action(
+    client: OpenRouter,
+    *,
+    recorded: str,
+    current: str,
+    actions: Sequence[Mapping[str, object]],
+    settings: ModelSettings,
+) -> tuple[bool, str]:
+    """Check a reconstructed menu against the operation its action was learned in."""
+    prompt = """The recorded action below was learned in the FIRST screenshot.
+The CURRENT second screenshot follows reconstruction of a menu whose opening history
+was unknown. Decide whether the action addresses the same operation and visible controls
+now. This is action applicability, not page identity: one screen's ordinary and selected
+menus can place different operations at identical coordinates. Compare the exact target,
+menu entries, selection mode, toolbar and visible operation. Do not infer selection or
+hidden prerequisites from the intended action. Different content or selection count alone
+is acceptable when the same action still has the same meaning and target. A changed target,
+covered control or uncertain operation means applicable=false. Matching pixels alone do not
+prove hidden state. Return applicable (boolean) and reason (string)."""
+    try:
+        response = send_chat(
+            client,
+            call_type="replay_action",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": "Recorded action source"},
+                        build_image_message(recorded),
+                        {"type": "text", "text": "Current reconstructed menu"},
+                        build_image_message(current),
+                        {"type": "text", "text": "Recorded action: " + json.dumps(actions)},
+                    ],
+                }
+            ],
+            response_format=_structured_output(
+                "replay_action",
+                {
+                    "type": "object",
+                    "properties": {"applicable": {"type": "boolean"}, "reason": {"type": "string"}},
+                    "required": ["applicable", "reason"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+        result = as_object_dict(json.loads(strip_json_fences(message_text(response))))
+    except (httpx.TimeoutException, TruncatedReplyError, json.JSONDecodeError) as error:
+        logger.warning("Replay action unanswered: %s", error)
+        return False, "action applicability unanswered"
+    reason = as_str(result.get("reason"), "")
+    return result.get("applicable") is True and bool(
+        reason
+    ), reason or "action applicability unanswered"
+
+
 _MAX_INSTRUCTIONS_SENT = 20
 
 _PLACEHOLDER = re.compile(r"\{+[^{}]*\}+")

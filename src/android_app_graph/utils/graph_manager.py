@@ -126,6 +126,7 @@ from android_app_graph.utils.vlm_utils import (
     normalize_edge,
     score_by_cosine,
     token_tracker,
+    verify_replay_action,
     verify_same_node,
 )
 
@@ -189,6 +190,8 @@ class EdgeDetails:
             None when they are unknown.
         open_menu: The menu open over the source node when the action is sent, as
             ``open_menu_in`` reads it from the node's state; None when none is.
+        action_source: The actual before-observation ID, independent of whether its
+            arrival preparation is known.
     """
 
     instruction: str | None = None
@@ -197,6 +200,7 @@ class EdgeDetails:
     num_steps: int | None = None
     setup: Sequence[dict[str, Any]] | None = None
     open_menu: str | None = None
+    action_source: str | None = None
 
 
 def open_menu_in(state: Mapping[str, object]) -> str | None:
@@ -877,6 +881,7 @@ def _count_repeat(
     edge_data: dict[str, Any],
     action: dict[str, Any] | list[dict[str, Any]],
     setup: list[dict[str, Any]] | None,
+    action_source: str | None,
 ) -> bool:
     """Count one more visit when the edge already holds ``action``, and return whether it
     does. A known ``setup`` replaces the action's recorded one when that is unknown or
@@ -888,6 +893,7 @@ def _count_repeat(
             recorded = setups[index]
             if setup is not None and (not isinstance(recorded, list) or len(setup) < len(recorded)):
                 setups[index] = setup
+                edge_data["action_sources"][index] = action_source
             return True
     return False
 
@@ -978,6 +984,22 @@ def _saved_matching(graph: dict[str, Any]) -> MatchingSettings | None:
     return MatchingSettings(*counts) if len(counts) == len(values) else None
 
 
+def _require_action_sources(edges: list[dict[str, Any]], path: Path, steps_dir: Path) -> None:
+    """Action captures can be noncanonical observations outside the node member lists."""
+    for edge in edges:
+        for member in edge["action_sources"]:
+            if member is None:
+                continue
+            if not isinstance(member, str) or not member:
+                raise unloadable_graph(path, ["An action source must be an observation ID or null"])
+            record = read_observation_record(steps_dir, member)
+            if record is None or observation_ownership(record).error is not None:
+                raise unloadable_graph(
+                    path, [f"Action source {member!r} has no supported observation"]
+                )
+            recorded_observation(steps_dir, record)
+
+
 def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) -> None:
     """Raise ``ValueError`` naming ``path`` and every saved node that does not list its
     member observations or that has no integer ``replay_misses`` count, every member
@@ -996,6 +1018,7 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(f"no matching settings, a whole number for each of {settings}")
     if problems:
         raise unloadable_graph(path, problems)
+    _require_action_sources(graph["edges"], path, steps_dir)
     for node in graph["nodes"]:
         for member in node["observations"]:
             record = read_observation_record(steps_dir, member)
@@ -2437,7 +2460,7 @@ class GraphManager:
 
         if self.graph.has_edge(source, target):
             edge_data = self.graph[source][target]
-            if _count_repeat(edge_data, action, setup):
+            if _count_repeat(edge_data, action, setup, details.action_source):
                 return
         else:
             self.graph.add_edge(source, target, visit_count=1)
@@ -2451,6 +2474,7 @@ class GraphManager:
             ("schema_deltas", details.schema_delta),
             ("setups", setup),
             ("open_menus", details.open_menu),
+            ("action_sources", details.action_source),
         ):
             edge_data[key].append(value)
         if source != target:
@@ -2489,6 +2513,49 @@ class GraphManager:
             if recorded_instruction == instruction:
                 return index, action
         return None
+
+    def can_replay_action(
+        self,
+        current: Observation,
+        source: str,
+        target: str,
+        action: dict[str, Any] | list[dict[str, Any]],
+    ) -> bool:
+        """Check a recorded action after preparation, before sending its inputs.
+
+        An unknown preparation's reconstructed menu must support the original
+        operation. Node identity alone does not establish its selection or controls.
+        """
+        edge = self.graph[source][target]
+        index = edge["actions"].index(action)
+        reconstructed = edge["setups"][index] is None and edge["open_menus"][index] is not None
+        member = edge["action_sources"][index]
+        if member is None:
+            return not reconstructed
+        recorded = self._member_observation(member)
+        if (
+            current.black
+            or recorded.black
+            or current.system_surface is not None
+            or recorded.system_surface is not None
+            or not current.package
+            or not current.activity
+            or (current.package, current.activity) != (recorded.package, recorded.activity)
+        ):
+            logger.warning("Replay action source %s has incompatible ownership or activity", member)
+            return False
+        if not reconstructed:
+            return True
+        client, settings = self._require_page_detail()
+        accepted, reason = verify_replay_action(
+            client,
+            recorded=recorded.app_image,
+            current=current.app_image,
+            actions=_device_actions(action),
+            settings=settings,
+        )
+        logger.info("Replay action source %s applicable=%s: %s", member, accepted, reason)
+        return accepted
 
     def action_setup(
         self, source: str, target: str, index: int
@@ -3374,6 +3441,7 @@ class GraphManager:
                 "schema_deltas": attrs.get("schema_deltas", []),
                 "setups": attrs.get("setups", []),
                 "open_menus": attrs.get("open_menus", []),
+                "action_sources": attrs.get("action_sources", []),
             }
             if attrs.get("normalized_instructions_hash"):
                 edge_data["normalized_instructions_hash"] = attrs["normalized_instructions_hash"]

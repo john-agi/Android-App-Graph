@@ -487,6 +487,7 @@ def _two_node_graph(tmp_path: Path) -> tuple[GraphManager, Path]:
                         "schema_deltas": [None],
                         "setups": [None],
                         "open_menus": [None],
+                        "action_sources": [None],
                     }
                 ],
             }
@@ -749,6 +750,7 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
+        ("observation", "navigation_replay"),
         ("action", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
@@ -759,16 +761,16 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         ("transition", "re_explore"),
     ]
     assert {record["run_kind"] for record in records} == {"audit"}
-    assert records[3]["observation"] == records[1]["id"]
+    assert records[4]["observation"] == records[3]["id"]
     matches = [record for record in records if record["kind"] == "match"]
     assert [(r["observation"], r["expected_observation"]) for r in matches] == [
         ("000001", "s0_home-observation"),
-        ("000004", "s1_detail-observation"),
-        ("000008", None),
+        ("000005", "s1_detail-observation"),
+        ("000009", None),
     ]
-    assert {key: records[10][key] for key in _STEP_FIELDS} == {
-        "before": "000006",
-        "after": "000008",
+    assert {key: records[11][key] for key in _STEP_FIELDS} == {
+        "before": "000007",
+        "after": "000009",
         "instruction": "tap the first button",
         "element": None,
         "action": tap,
@@ -1205,6 +1207,7 @@ def test_the_retry_hint_names_the_flagged_target_by_its_members_descriptions_wit
                 "schema_deltas": [None],
                 "setups": [None],
                 "open_menus": [None],
+                "action_sources": [None],
                 "visit_count": 1,
             },
         ),
@@ -3360,3 +3363,29 @@ def test_audit_unsupported_gestures_exhaust_the_budget_without_executed_records(
     assert not any(r["kind"] in {"action", "transition"} for r in records)
     assert list(graph.graph.edges) == edges_before
     assert controller.actions == []
+
+
+@pytest.mark.usefixtures("_fake_device")
+@pytest.mark.parametrize("operation", ["navigate", "correct"])
+def test_audit_stops_after_menu_preparation_when_action_context_is_unverified(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+    operation: str,
+) -> None:
+    graph = _flagged_graph()
+    _describing_by_node_id(graph, monkeypatch)
+    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
+    monkeypatch.setattr(graph, "can_replay_action", lambda *_args: False)
+    _identifying(graph, monkeypatch, "s0_home", "s0_home")
+    issue = (
+        _retry()
+        if operation == "correct"
+        else {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
+    )
+    (result,) = _re_explore(graph, [issue], _ReplayController(device_log), client, tmp_path)
+    assert _DETAIL_TAP not in device_log
+    assert _SWIPE in device_log
+    assert result.get("reached", result.get("navigated_to")) == "s0_home"
+    assert graph.graph.has_edge("s0_home", "s1_detail")

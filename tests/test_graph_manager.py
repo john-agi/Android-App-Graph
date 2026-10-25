@@ -2749,7 +2749,7 @@ def test_a_setup_trail_matches_a_node_merged_away_while_it_holds_it() -> None:
 
 @pytest.mark.parametrize(
     "key",
-    ["num_steps", "instructions", "target_observations", "schema_deltas", "setups", "open_menus"],
+    [*PER_ACTION_LISTS],
 )
 @pytest.mark.parametrize("entries", [None, []], ids=["absent", "short"])
 def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
@@ -2764,6 +2764,7 @@ def test_load_graph_rejects_an_edge_without_one_entry_per_action_in_a_list(
         "schema_deltas": [None],
         "setups": [[]],
         "open_menus": [None],
+        "action_sources": [None],
     }
     lacking = {"source": "s0_home", "target": "s1_settings", **complete}
     if entries is None:
@@ -3076,11 +3077,11 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
     assert gm.move_edge_action("s0_home", "s1_settings", 1, "s2_search") is True
 
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None),
-        ({"action": "swipe"}, 3, "", "", None, None, None),
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None),
+        ({"action": "swipe"}, 3, "", "", None, None, None, None),
     ]
     assert edge_rows(gm, "s0_home", "s2_search") == [
-        ({"action": "enter"}, 1, "submit the search", "", None, None, None),
+        ({"action": "enter"}, 1, "submit the search", "", None, None, None, None),
         (
             search,
             2,
@@ -3089,6 +3090,7 @@ def test_move_edge_action_takes_its_entry_from_every_per_action_list_to_the_othe
             {"query": {"after": "milk"}},
             [_SCROLL],
             "search toolbar menu",
+            None,
         ),
     ]
     assert gm.graph["s0_home"]["s1_settings"]["instruction_templates"] == []
@@ -3110,7 +3112,7 @@ def test_move_edge_action_removes_the_edge_it_empties_and_creates_the_edge_it_ne
 
     assert not gm.graph.has_edge("s0_home", "s1_settings")
     assert edge_rows(gm, "s0_home", "s0_home") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None)
     ]
     assert gm.graph["s0_home"]["s0_home"]["visit_count"] == 1
 
@@ -3133,7 +3135,7 @@ def test_move_edge_action_refuses_a_destination_missing_from_the_graph(
 
     assert list(gm.graph.nodes) == ["s0_home", "s1_settings"]
     assert edge_rows(gm, "s0_home", "s1_settings") == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None)
     ]
     assert "move_edge_action: missing node ext_com.other" in caplog.text
 
@@ -3159,7 +3161,7 @@ def test_move_edge_action_moves_into_an_external_node_but_never_out_of_one(
         assert gm.move_edge_action(EXTERNAL_WEB_NODE, "s0_home", 0, EXTERNAL_WEB_NODE) is False
 
     assert edge_rows(gm, "s0_home", EXTERNAL_WEB_NODE) == [
-        ({"action": "tap"}, 1, "open settings", "", None, None, None)
+        ({"action": "tap"}, 1, "open settings", "", None, None, None, None)
     ]
     assert not gm.graph.has_edge(EXTERNAL_WEB_NODE, EXTERNAL_WEB_NODE)
     assert gm.graph[EXTERNAL_WEB_NODE]["s0_home"]["actions"] == [{"action": "back"}]
@@ -5322,6 +5324,7 @@ def _graph_edge(source: str, target: str, instruction: str, observation: str) ->
         "schema_deltas": [None],
         "setups": [None],
         "open_menus": [None],
+        "action_sources": [None],
         "visit_count": 1,
     }
 
@@ -5727,6 +5730,7 @@ recorded_actions = st.lists(
         st.none() | st.dictionaries(st.text(max_size=6), json_scalars, max_size=2),
         setup_entries,
         st.none() | st.text(max_size=12),
+        st.none(),
     ),
     min_size=1,
     max_size=3,
@@ -5791,6 +5795,7 @@ def canonical(gm: GraphManager) -> dict[str, Any]:
             "schema_deltas": d.get("schema_deltas", []),
             "setups": d.get("setups", []),
             "open_menus": d.get("open_menus", []),
+            "action_sources": d.get("action_sources", []),
             "normalized_instructions_hash": d.get("normalized_instructions_hash") or None,
         }
         for u, v, d in gm.graph.edges(data=True)
@@ -6324,3 +6329,163 @@ def test_load_graph_names_invalid_modal_metadata_and_preserves_loaded_nodes(
     assert str(path) in str(error.value)
     assert "Explore the app again into a new graph directory." in str(error.value)
     assert list(manager.graph.nodes) == ["s9_stale"]
+
+
+def action_context_graph(
+    screen: Screens, setup: list[dict[str, Any]] | None = None
+) -> tuple[GraphManager, Observation]:
+    observed = screen()
+    record = {**screen.record(observed), "activity": observed.activity}
+    (screen.steps_dir / f"{observed.observation_id}.json").write_text(json.dumps(record))
+    gm = make_manager(screen.steps_dir)
+    add_screen(gm, "s0", "Home screen", observations=[observed.observation_id])
+    add_screen(gm, "s1", "Settings page", **members(screen.steps_dir))
+    gm.add_edge(
+        "s0",
+        "s1",
+        _TAP,
+        details=EdgeDetails(
+            setup=setup, open_menu="overflow", action_source=observed.observation_id
+        ),
+    )
+    return gm, observed
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_reconstructed_menu_uses_observed_action_context_without_changing_unknown_setup(
+    screen: Screens, monkeypatch: pytest.MonkeyPatch, accepted: bool
+) -> None:
+    gm, observed = action_context_graph(screen)
+    calls: list[dict[str, object]] = []
+
+    def verify(_client: OpenRouter, **kwargs: object) -> tuple[bool, str]:
+        calls.append(kwargs)
+        return accepted, "observed operation"
+
+    monkeypatch.setattr(gm_module, "verify_replay_action", verify)
+    assert gm.can_replay_action(observed, "s0", "s1", _TAP) is accepted
+    assert calls == [
+        {
+            "recorded": observed.app_image,
+            "current": observed.app_image,
+            "actions": (_TAP,),
+            "settings": PAGE_DETAIL,
+        }
+    ]
+    assert gm.graph["s0"]["s1"]["setups"] == [None]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"activity": SETTINGS},
+        {"package": OTHER_PACKAGE},
+        {"activity": ""},
+        {"package": ""},
+        {"black": True},
+        {"system_surface": "permission"},
+    ],
+)
+def test_action_replay_rejects_unusable_or_different_activity_before_any_verifier(
+    screen: Screens, changed: dict[str, object]
+) -> None:
+    gm, observed = action_context_graph(screen, [])
+    current = Observation.from_state(
+        {
+            "observation_id": "fresh",
+            "screenshot": observed.screenshot_b64,
+            "activity": observed.activity,
+            "package": observed.package,
+            **changed,
+        }
+    )
+    assert not gm.can_replay_action(current, "s0", "s1", _TAP)
+
+
+def test_known_preparation_uses_local_activity_check_without_menu_model_call(
+    screen: Screens,
+) -> None:
+    gm, observed = action_context_graph(screen, [])
+    assert gm.can_replay_action(observed, "s0", "s1", _TAP)
+
+
+@pytest.mark.parametrize("menu", [None, "overflow"])
+def test_action_without_a_capture_cannot_qualify_an_unknown_reconstructed_menu(
+    menu: str | None,
+) -> None:
+    gm = make_manager()
+    for node in ("s0", "s1"):
+        add_screen(gm, node, "Home screen")
+    gm.add_edge("s0", "s1", _TAP, details=EdgeDetails(open_menu=menu))
+    observed = Observation("fresh", SHOT_A, HOME, PACKAGE, "hash", black=False)
+    assert gm.can_replay_action(observed, "s0", "s1", _TAP) is (menu is None)
+
+
+def test_repeated_action_keeps_its_capture_aligned_with_the_selected_preparation(
+    screen: Screens,
+) -> None:
+    gm, observed = action_context_graph(screen)
+    for setup, source, expected in [
+        ([_SCROLL], "second", "second"),
+        ([_SCROLL, _TAP], "longer", "second"),
+        ([], "shorter", "shorter"),
+        ([], "equal", "shorter"),
+    ]:
+        gm.add_edge("s0", "s1", _TAP, details=EdgeDetails(setup=setup, action_source=source))
+        assert gm.graph["s0"]["s1"]["action_sources"] == [expected]
+    assert observed.observation_id != "shorter"
+    assert gm.graph["s0"]["s1"]["visit_count"] == 5
+
+
+def test_action_source_survives_save_load_and_movement_without_becoming_a_node_member(
+    screen: Screens,
+) -> None:
+    gm, observed = action_context_graph(screen, [])
+    nonmember = screen(activity=HOME, screenshot=SHOT_B)
+    record = {**screen.record(nonmember), "activity": HOME}
+    (screen.steps_dir / f"{nonmember.observation_id}.json").write_text(json.dumps(record))
+    gm.graph["s0"]["s1"]["action_sources"] = [nonmember.observation_id]
+    path = graph_beside(screen.steps_dir)
+    save_with_text_vectors(gm, path)
+    loaded = make_manager(screen.steps_dir)
+    loaded.load_graph(path)
+    assert loaded.can_replay_action(observed, "s0", "s1", _TAP)
+    assert nonmember.observation_id not in loaded.graph.nodes["s0"]["observations"]
+    assert loaded.move_edge_action("s0", "s1", 0, "s0")
+    assert loaded.graph["s0"]["s0"]["action_sources"] == [nonmember.observation_id]
+
+
+@pytest.mark.parametrize("invalid", ["", 42, "missing"])
+def test_saved_action_sources_require_real_observation_records(
+    screen: Screens, invalid: object
+) -> None:
+    gm, _observed = action_context_graph(screen)
+    path = graph_beside(screen.steps_dir)
+    save_with_text_vectors(gm, path)
+    data = json.loads(path.read_text())
+    data["edges"][0]["action_sources"] = [invalid]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match=r"[Aa]ction source"):
+        make_manager(screen.steps_dir).load_graph(path)
+
+
+@pytest.mark.parametrize("change", [{"black": True}, {"system_surface": "permission"}])
+def test_unusable_recorded_source_cannot_authorize_a_current_action(
+    screen: Screens, change: dict[str, object]
+) -> None:
+    gm, observed = action_context_graph(screen)
+    path = screen.steps_dir / f"{observed.observation_id}.json"
+    path.write_text(json.dumps({**screen.record(observed), **change}))
+    assert not gm.can_replay_action(observed, "s0", "s1", _TAP)
+
+
+def test_saved_action_source_with_unresolved_ownership_is_rejected(screen: Screens) -> None:
+    gm, observed = action_context_graph(screen)
+    path = graph_beside(screen.steps_dir)
+    save_with_text_vectors(gm, path)
+    record = screen.record(observed)
+    (screen.steps_dir / f"{observed.observation_id}.json").write_text(
+        json.dumps({**record, "system_overlay_error": "ambiguous owner"})
+    )
+    with pytest.raises(ValueError, match="Action source"):
+        make_manager(screen.steps_dir).load_graph(path)

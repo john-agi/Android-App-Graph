@@ -438,6 +438,16 @@ class Kobe:
         try:
             for i, (node_id, action, setup) in enumerate(path[1:], start=1):
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
+                if not self.graph.can_replay_action(
+                    Observation.from_state(self.controller.get_state()),
+                    path[i - 1][0],
+                    node_id,
+                    action,
+                ):
+                    self.logger.warning(
+                        "Replay action context is unverified; identifying the current screen"
+                    )
+                    break
                 if isinstance(action, list):
                     self.logger.info(
                         "  Replay %d/%d: %s --> %s via %d compound actions",
@@ -888,6 +898,7 @@ class Kobe:
                 details,
                 setup=self._setup_trail.setup(move.source),
                 open_menu=open_menu_in(move.detail_before),
+                action_source=move.before.observation_id,
             ),
         )
         self.controller.record_transition(
