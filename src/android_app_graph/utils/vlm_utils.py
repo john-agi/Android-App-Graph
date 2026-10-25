@@ -345,6 +345,24 @@ Examples:
 
 _SCREEN_IDENTITY_POLICY = """\
 Screen identity policy:
+Determine the observed navigation destination before comparing state. \
+A destination the app names in its own navigation, such as a tab, a bottom navigation bar \
+item, a navigation drawer entry or a named view selector, is a screen of its own. Two screenshots that show \
+different destinations are DIFFERENT screens, even when they share a layout and serve the \
+same purpose: Downloads, Recent and Internal storage in a file manager are three screens, \
+and so are Alarm and Timer in a clock. Content inside one destination is the SAME screen as \
+that destination: a subfolder opened inside it, a different search query or a different list. \
+The selected tab or navigation item, or the first entry of a breadcrumb trail, shows which \
+destination a screenshot is in.
+Mutually exclusive named views are distinct destinations even when they present the same \
+data. A view's distinguishing layout is not merely an expanded or hidden section. \
+Empty content, keyboard visibility, scroll position and week-start preferences are state \
+within one destination, as are filters, sorting and expanded controls. \
+Preserve the observed destination in page descriptions and refinements. Use the visible \
+title, selected navigation, distinctive controls and supplied descriptions as evidence; \
+report uncertainty when the destination cannot be established. \
+An intended action or expected replay target does not establish an observed destination.
+
 Modal dialogs, picker dialogs and modal bottom sheets are separate screens from the \
 page underneath, including time, date, radio-choice and confirmation dialogs. Identify \
 the foreground interaction window: it asks for a decision or input before returning to \
@@ -382,6 +400,7 @@ All user-specific data belongs in "state", never in "page_description". \
 The on-screen keyboard, which input field has focus, how far a list is scrolled, \
 an overflow menu, dropdown, popup or context menu open over the screen, and which \
 of its sections are expanded never change "page_description"; record them in "state". \
+Preserve the observed named navigation destination in the page description. \
 Describe a modal by its purpose and opening navigation destination. \
 Always describe what you actually see. \
 {description_hint}
@@ -399,9 +418,9 @@ For the "state" object, focus on:
   when none is open
 - "expanded_sections": on a screen with collapsible sections, the ones shown expanded, \
   comma-separated (e.g. "Advanced options"), or null when none is
-- User-controlled state: active tab, search query, applied filters, sort order, toggle states, \
+- User-controlled state within one destination: search query, applied filters, sort order, toggle states, \
   selected items, input field contents
-- Navigation state: which sub-section or category is currently shown
+- Content state within one destination: which sub-section or category is currently shown
 
 Do NOT include in "state":
 - Static UI elements that never change (titles, fixed icons, permanent buttons, status bar)
@@ -484,14 +503,7 @@ even if they look visually similar. Pay close attention to:
 navigation destination with those of another modal.
 - A search page and a search result list page is considered different usually, though sometimes the search page also provide some suggestions.
 
-A destination the app names in its own navigation, such as a tab, a bottom navigation bar \
-item or a navigation drawer entry, is a screen of its own. Two screenshots that show \
-different destinations are DIFFERENT screens, even when they share a layout and serve the \
-same purpose: Downloads, Recent and Internal storage in a file manager are three screens, \
-and so are Alarm and Timer in a clock. Content inside one destination is the SAME screen as \
-that destination: a subfolder opened inside it, a different search query or a different list. \
-The selected tab or navigation item, or the first entry of a breadcrumb trail, shows which \
-destination a screenshot is in.
+
 
 Answer with ONLY a JSON object:
 
@@ -501,7 +513,8 @@ If they are the SAME screen:
 If they are DIFFERENT screens, you must also provide a slightly more specific description of the \
 second screenshot that distinguishes it from the first. Usually adding one or two extra \
 distinguishing words is enough. Keep the description concise (under 10 words). \
-Name the screen by its purpose, preserving its modal purpose and opening navigation destination. \
+Name the screen by its purpose and observed named navigation destination, \
+preserving its modal purpose and opening navigation destination. \
 Leave out the on-screen keyboard, \
 which input field has focus, how far a list is scrolled, any overflow menu, dropdown, \
 popup or context menu open over it, and which of its sections are expanded, even when the \
@@ -1167,7 +1180,7 @@ def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItems
 def node_verification_context(settings: ModelSettings) -> dict[str, object]:
     """Return the rule, output schema and resolved settings a member question uses."""
     return {
-        "prompt": NODE_VERIFY_PROMPT,
+        "prompt": f"{_SCREEN_IDENTITY_POLICY}{NODE_VERIFY_PROMPT}",
         "schema": _NODE_VERIFICATION_SCHEMA,
         "settings": settings._asdict(),
         "timeout": settings.timeout("node_verify"),
