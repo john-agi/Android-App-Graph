@@ -32,6 +32,7 @@ from android_app_graph.device import (
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
 from android_app_graph.navigation_history import NavigationHistory, RouteState
+from android_app_graph.payloads import as_str
 from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.step_log import Observation, StepRecorder, Transition
 from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
@@ -84,6 +85,14 @@ def _route_state(node: str, observation: Observation) -> RouteState:
 
 class NoPathError(ValueError):
     """The graph records no path from its start node to the target, so no replay began."""
+
+
+class _ReplayInterruptedError(Exception):
+    """The observed app boundary invalidates the remaining recorded inputs."""
+
+    def __init__(self, node: str) -> None:
+        super().__init__(node)
+        self.node = node
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +444,7 @@ class Kobe:
             target_node,
         )
 
+        actual_node = opened_on
         try:
             for i, (node_id, action, setup) in enumerate(path[1:], start=1):
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
@@ -447,9 +457,6 @@ class Kobe:
                         node_id,
                         len(action),
                     )
-                    for sub_action in action:
-                        self.controller.exe_action(sub_action)
-                        time.sleep(0.5)
                 else:
                     self.logger.info(
                         "  Replay %d/%d: %s --> %s via %s",
@@ -459,18 +466,50 @@ class Kobe:
                         node_id,
                         action.get("action", "?"),
                     )
-                    self.controller.exe_action(action)
-                time.sleep(1)  # brief pause for the UI to settle
+                actual_node = self._replay_action(
+                    action, expected_observation=self.graph.earliest_member(node_id)
+                )
+        except _ReplayInterruptedError as interruption:
+            actual_node = interruption.node
+            self.logger.warning(
+                "Replay stopped at an app boundary; continuing from %s", actual_node
+            )
         except (InputRejectedError, SystemOverlayActionError) as error:
             self.logger.warning(
                 "Replay input is unreachable: %s; identifying the current screen", error
             )
+            actual_node, _ = self._identify(
+                self.controller.get_state(),
+                expected_observation=self.graph.earliest_member(target_node),
+            )
+        return self._report_arrival(actual_node, self.graph.resolve_node_id(target_node))
 
-        actual_node, _ = self._identify(
-            self.controller.get_state(),
-            expected_observation=self.graph.earliest_member(target_node),
+    def _replay_action(
+        self,
+        action: dict[str, object] | list[dict[str, object]],
+        *,
+        expected_observation: str | None = None,
+    ) -> str:
+        actions = action if isinstance(action, list) else [action]
+        for index, sub_action in enumerate(actions):
+            self.controller.exe_action(sub_action)
+            if isinstance(action, list):
+                time.sleep(0.5)
+            if index + 1 < len(actions):
+                self._identify_replay(self.controller.get_state())
+        time.sleep(1)
+        return self._identify_replay(
+            self.controller.get_state(), expected_observation=expected_observation
         )
-        return self._report_arrival(actual_node, target_node)
+
+    def _identify_replay(
+        self, state: dict[str, object], *, expected_observation: str | None = None
+    ) -> str:
+        outside = is_outside_app(as_str(state.get("package"), ""), self.package_name)
+        node, _ = self._identify(state, expected_observation=expected_observation)
+        if outside:
+            raise _ReplayInterruptedError(node)
+        return node
 
     def _report_arrival(self, actual_node: str, target_node: str) -> str:
         """Log whether a replay to ``target_node`` reached it, count a miss on it when it
@@ -488,7 +527,7 @@ class Kobe:
 
         return actual_node
 
-    def _replay_setup(self, setup: Sequence[dict[str, Any]], node: str, progress: str) -> None:
+    def _replay_setup(self, setup: Sequence[dict[str, object]], node: str, progress: str) -> None:
         """Send ``setup``, the setup of the replay's next action, on ``node``, each action
         followed by the pause every replayed action gets."""
         for number, setup_action in enumerate(setup, start=1):
@@ -500,8 +539,7 @@ class Kobe:
                 node,
                 setup_action.get("action", "?"),
             )
-            self.controller.exe_action(setup_action)
-            time.sleep(1)
+            self._replay_action(setup_action)
 
     def explore(
         self,
@@ -514,7 +552,7 @@ class Kobe:
             max_steps: Maximum total exploration steps. If the graph already
                 has some steps completed, exploration continues from there.
             resume_from: Node ID to resume from. If provided, the explorer
-                replays saved edges to reach this node first (no VLM calls),
+                replays saved edges with screen identification to reach this node first,
                 then continues exploring from there.
                 Special values:
                   - "auto": the top-ranked exploration target, chosen without a model call.
