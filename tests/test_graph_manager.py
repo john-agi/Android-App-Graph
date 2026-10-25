@@ -65,6 +65,7 @@ from android_app_graph.utils.vlm_utils import (
     DescribedScreenshot,
     DescribeRequest,
     TokenTracker,
+    _parse_page_description,
 )
 
 PACKAGE = "com.example.app"
@@ -6043,3 +6044,40 @@ def test_persisted_system_boundaries_keep_their_external_ownership(
     manager.load_graph(path)
     assert manager.get_resume_target() is None
     assert vlm.calls == []
+
+
+def test_identical_modal_pixels_with_unknown_origins_require_verification(
+    vlm: FakeVlm, screen: Screens, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hidden modal origin is not established by repeated pixels."""
+
+    def describe(
+        client: OpenRouter | None, request: DescribeRequest, *, settings: ModelSettings
+    ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+        description, state, elements, external = vlm.describe_page_and_state(
+            client, request, settings=settings
+        )
+        return _parse_page_description(
+            json.dumps(
+                {
+                    "page_description": description,
+                    "state": state,
+                    "elements": elements,
+                    "is_external_web": external,
+                    "surface": {"kind": "modal", "relation": "unknown", "return_depth": 0},
+                }
+            )
+        )
+
+    monkeypatch.setattr(gm_module, "describe_page_and_state", describe)
+    vlm.descriptions.extend(
+        [("Copy destination sort sheet", {}, []), ("Move destination sort sheet", {}, [])]
+    )
+    vlm.verdicts.append({"same": False, "reason": "The observed origins differ"})
+    manager = make_manager(screen.steps_dir)
+    first = manager.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    second = manager.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    assert first != second
+    assert vlm.kinds().count("describe") == 2
+    assert vlm.kinds().count("verify") == 1
