@@ -1024,8 +1024,9 @@ one step and observes the result before typing. An already identified active fie
 can receive text directly.
 
 On the [supported Android versions](#prerequisites), Type replaces the complete focused
-value as one recorded action. It targets standard editable fields that handle Android
-cursor movement, selection and delete keyboard editing: Ctrl+End moves to the end of the
+value as one recorded action. It targets standard editable fields that retain focus while
+clearing and handle Android cursor movement, selection and delete keyboard editing:
+Ctrl+End moves to the end of the
 complete value, Ctrl+Shift+Home selects back to its beginning, and one Delete removes it.
 An idle UI hierarchy observation after each combination lets the field publish the caret
 or selection before the next input. The requested text is then entered with shell quoting
