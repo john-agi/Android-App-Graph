@@ -837,6 +837,10 @@ graph, starts a fresh session with a baseline of retained history. `report.json`
 separates the host outcome (`completed`, `host_failure`, `operator_stop` or
 `device_outage`) from application evidence. Each numbered capture retains raw
 files, SHA-256 hashes, source status, device boot identity and device/host times.
+The session records its exploration step-log `run_id` once exploration is
+initialized. Crash records use device epoch time; exit history renders device
+wall time. Current timezone and process metadata accompany each snapshot;
+historical clock continuity remains unknown.
 
 The crash buffer supplies Java `FATAL EXCEPTION` and native-signal evidence.
 Android's package-filtered exit history separately supplies `recorded_exit`
@@ -853,10 +857,14 @@ and takes a final snapshot. Each capture has an eight-second ADB deadline and
 limits of 32 KiB for device/process metadata, 256 KiB and 512 records for the
 crash buffer, and 64 KiB for exit history. A session retains at most 1,024
 captures, reserving its last slot for shutdown; reaching that limit leaves later
-coverage unknown. Startup can wait eight seconds. Shutdown waits at most nine
+coverage unknown. Startup can wait eight seconds. Shutdown waits at most eight
 seconds for an active collector and eight seconds for the final read. Filesystem
 failures are logged; abrupt host termination can leave a partial capture or a
-report whose outcome is `running`.
+report whose outcome is `running`. A collector that exceeds the shutdown wait
+keeps that incomplete outcome and logs it. Writes stage outside the publication
+lock and check session closure before atomic publication; a stalled operating
+system write can leave a `.partial` file after closure. ADB deadlines and thread
+join waits do not promise to interrupt filesystem operations.
 
 Ordered record overlap identifies repeated or newly retained log records.
 Identical repeated records, missing overlap, empty history, failed/truncated

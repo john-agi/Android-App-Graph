@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import override
 
@@ -21,7 +22,10 @@ class Reader:
     def capture(self) -> dict[str, SourceRead]:
         self.calls += 1
         return {
-            "metadata": SourceRead(b"boot=12345678-1234-1234-1234-123456789abc\nepoch=100\n", "ok"),
+            "metadata": SourceRead(
+                b"boot=12345678-1234-1234-1234-123456789abc\nepoch=100\nuser=0\npackage:com.example uid:1001\npackage:com.example.other uid:1002\n",
+                "ok",
+            ),
             "crash": SourceRead(b"", "ok"),
             "exits": SourceRead(b"", "ok"),
         }
@@ -55,6 +59,7 @@ def test_context_retains_baseline_final_and_an_unknown_census(tmp_path: Path) ->
     assert first["phase"] == "baseline"
     assert first["boot_id"] == "12345678-1234-1234-1234-123456789abc"
     assert first["coverage"]["relation"] == "baseline"
+    assert first["current_owner"] == {"android_user": 0, "package_uid": 1001}
     assert final["phase"] == "final"
     assert final["coverage"]["relation"] == "unanchored"
     assert first["sources"]["crash"]["bytes"] == 0
@@ -169,7 +174,7 @@ def test_slow_worker_does_not_block_shutdown_indefinitely(
 
     monkeypatch.setattr(current, "_thread", Worker())
     current.__exit__(None, None, None)
-    assert joins == [9.0]
+    assert joins == [8.0]
     assert "shutdown is incomplete" in caplog.text
 
 
@@ -186,6 +191,7 @@ def test_unavailable_metadata_leaves_identity_unknown(
     capture = json.loads((current.directory / "0000.json").read_text())
     assert capture["boot_id"] is None
     assert capture["device_epoch_seconds"] is None
+    assert capture["current_owner"] == {"android_user": None, "package_uid": None}
     assert capture["coverage"]["relation"] == "unavailable"
     assert capture["sources"]["crash"]["status"] == "truncated"
 
@@ -271,3 +277,57 @@ def test_exhausted_capture_deadline_performs_no_adb_call(monkeypatch: pytest.Mon
     monkeypatch.setattr(monitor.time, "monotonic", lambda: next(times))
     sources = AdbFailureReader("serial", "com.example").capture()
     assert all(source.detail == "capture deadline" for source in sources.values())
+
+
+@pytest.mark.parametrize(
+    "blocked_stage", ["reader", "0001-metadata.txt", "0001.json", "report.json"]
+)
+def test_closing_a_stalled_capture_prevents_late_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_stage: str
+) -> None:
+    monkeypatch.setattr(monitor, "CAPTURE_INTERVAL", 0.001)
+    monkeypatch.setattr(monitor, "CAPTURE_SECONDS", 0.01)
+    entered = threading.Event()
+    release = threading.Event()
+    workers: list[threading.Thread] = []
+    original_thread = threading.Thread
+    original_write = Path.write_bytes
+
+    def thread(*, target: Callable[[], None], daemon: bool, name: str) -> threading.Thread:
+        result = original_thread(target=target, daemon=daemon, name=name)
+        workers.append(result)
+        return result
+
+    class SlowReader(Reader):
+        @override
+        def capture(self) -> dict[str, SourceRead]:
+            if self.calls == 1 and blocked_stage == "reader":
+                entered.set()
+                assert release.wait(2)
+            return super().capture()
+
+    reader = SlowReader()
+
+    def write(path: Path, data: bytes) -> int:
+        result = original_write(path, data)
+        if reader.calls == 2 and path.name == f".{blocked_stage}.partial":
+            entered.set()
+            assert release.wait(2)
+        return result
+
+    monkeypatch.setattr(monitor.threading, "Thread", thread)
+    monkeypatch.setattr(Path, "write_bytes", write)
+    with collector(tmp_path, reader) as current:
+        assert entered.wait(2)
+    report_before_release = (current.directory / "report.json").read_bytes()
+    release.set()
+    for worker in workers:
+        worker.join(2)
+        assert not worker.is_alive()
+    assert (current.directory / "report.json").read_bytes() == report_before_release
+    assert json.loads(report_before_release)["outcome"] == "running"
+    if blocked_stage != "report.json":
+        assert not (current.directory / "0001.json").exists()
+    calls = reader.calls
+    current.capture("periodic")
+    assert reader.calls == calls

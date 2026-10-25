@@ -175,6 +175,7 @@ def _explore() -> None:
                     unreachable_limit=unreachable_limit,
                 )
                 kobe = Kobe(managed, explorer_config, client=client, logger=logger)
+                failure_monitor.step_run_id = kobe.controller.run_id
                 try:
                     kobe.explore(resume_from=resume_from)
                 finally:

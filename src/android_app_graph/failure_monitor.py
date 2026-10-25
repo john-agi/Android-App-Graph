@@ -57,6 +57,7 @@ class AdbFailureReader:
         metadata = (
             "printf 'boot='; cat /proc/sys/kernel/random/boot_id; "
             "printf 'epoch='; date +%s; printf 'uptime='; cat /proc/uptime; "
+            "printf 'timezone='; getprop persist.sys.timezone; "
             "printf 'user='; am get-current-user; "
             f"cmd package list packages -U {package}; "
             "printf 'process_samples\n'; "
@@ -128,6 +129,16 @@ def _outcome(exc: BaseException | None) -> str:
     return "host_failure"
 
 
+def _current_owner(source: SourceRead, package: str) -> dict[str, int | None]:
+    text = source.text if source.status == "ok" else ""
+    user = re.search(r"^user=(\d+)$", text, re.MULTILINE)
+    uid = re.search(rf"^package:{re.escape(package)} uid:(\d+)$", text, re.MULTILINE)
+    return {
+        "android_user": int(user.group(1)) if user else None,
+        "package_uid": int(uid.group(1)) if uid else None,
+    }
+
+
 class FailureMonitor:
     """One monitor session retains independent snapshots, including baseline history."""
 
@@ -149,10 +160,13 @@ class FailureMonitor:
         self._started = datetime.now(UTC).isoformat()
         self._cursor = SnapshotCursor()
         self._stop = threading.Event()
+        self._closed = threading.Event()
+        self._publication = threading.Lock()
         self._thread: threading.Thread | None = None
         self._captures = 0
         self._error: str | None = None
         self._latest_counts: dict[str, int] = {}
+        self.step_run_id: str | None = None
 
     def __enter__(self) -> Self:
         if self._safe_capture("baseline"):
@@ -170,8 +184,9 @@ class FailureMonitor:
     ) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(CAPTURE_SECONDS + 1)
+            self._thread.join(CAPTURE_SECONDS)
             if self._thread.is_alive():
+                self._close()
                 self.logger.error(
                     "Failure collector shutdown is incomplete; coverage remains unknown"
                 )
@@ -182,6 +197,21 @@ class FailureMonitor:
             self._report(_outcome(exc), type(exc).__name__ if exc else None)
         except OSError:
             self.logger.exception("Cannot persist the failure collection report")
+        self._close()
+
+    def _close(self) -> None:
+        with self._publication:
+            self._closed.set()
+
+    def _publish(self, filename: str, data: bytes) -> bool:
+        path = self.directory / filename
+        staging = path.with_name(f".{filename}.partial")
+        staging.write_bytes(data)
+        with self._publication:
+            if self._closed.is_set():
+                return False
+            staging.replace(path)
+        return True
 
     def _poll(self) -> None:
         while not self._stop.wait(CAPTURE_INTERVAL):
@@ -198,10 +228,12 @@ class FailureMonitor:
         return True
 
     def capture(self, phase: str) -> None:
-        if self._captures >= CAPTURE_LIMIT:
+        if self._captures >= CAPTURE_LIMIT or self._closed.is_set():
             return
         started = datetime.now(UTC).isoformat()
         sources = self.reader.capture()
+        if self._closed.is_set():
+            return
         boot, clock = _clock_identity(sources["metadata"])
         crash = sources["crash"]
         records = tuple(
@@ -225,7 +257,8 @@ class FailureMonitor:
         raw: dict[str, object] = {}
         for name, source in sources.items():
             filename = f"{sequence:04d}-{name}.txt"
-            (self.directory / filename).write_bytes(source.data)
+            if not self._publish(filename, source.data):
+                return
             raw[name] = {
                 "file": filename,
                 "sha256": hashlib.sha256(source.data).hexdigest(),
@@ -235,12 +268,18 @@ class FailureMonitor:
             }
         capture = {
             "session_id": self.session_id,
+            "step_run_id": self.step_run_id,
             "phase": phase,
             "sequence": sequence,
             "host_started_utc": started,
             "host_finished_utc": datetime.now(UTC).isoformat(),
             "boot_id": boot,
             "device_epoch_seconds": clock,
+            "current_owner": _current_owner(sources["metadata"], self.package),
+            "source_time_basis": {
+                "crash": "device epoch seconds",
+                "exits": "device-local wall time rendered at capture; historical clock continuity unknown",
+            },
             "coverage": asdict(coverage),
             "sources": raw,
             "evidence": [asdict(event) for event in events],
@@ -248,15 +287,17 @@ class FailureMonitor:
             "evidence_scope": "retained_snapshot; occurrences can overlap other captures",
             "process_samples": "current non-atomic metadata; historical instances remain unresolved",
         }
-        (self.directory / f"{sequence:04d}.json").write_text(
-            json.dumps(capture, indent=2) + "\n", encoding="utf-8"
-        )
+        if not self._publish(
+            f"{sequence:04d}.json", (json.dumps(capture, indent=2) + "\n").encode()
+        ):
+            return
         self._captures += 1
         self._report("running", None)
 
     def _report(self, outcome: str, exception: str | None) -> None:
         report = {
             "session_id": self.session_id,
+            "step_run_id": self.step_run_id,
             "package": self.package,
             "serial": self.serial,
             "graph": self._graph,
@@ -278,7 +319,4 @@ class FailureMonitor:
                 "source_bytes": dict(_SOURCE_LIMITS),
             },
         }
-        path = self.directory / "report.json"
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
+        self._publish("report.json", (json.dumps(report, indent=2) + "\n").encode())

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn
 
 import httpx
@@ -100,6 +101,8 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
             events.append("terminate")
 
     class Explorer:
+        controller = SimpleNamespace(run_id="test-run")
+
         def __init__(
             self,
             controller: Device,
@@ -288,6 +291,8 @@ def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
             pass
 
     class Explorer:
+        controller = SimpleNamespace(run_id="test-run")
+
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 

@@ -61,11 +61,12 @@ def _records(text: str) -> list[_LogRecord]:
 
 def _java_process(records: list[_LogRecord], head: _LogRecord) -> tuple[str | None, int | None]:
     for record in records:
-        if (record.uid, record.pid, record.tid, record.tag) != (
+        if (record.uid, record.pid, record.tid, record.tag, record.timestamp) != (
             head.uid,
             head.pid,
             head.tid,
             head.tag,
+            head.timestamp,
         ):
             continue
         if record.message.startswith("FATAL EXCEPTION:"):
@@ -89,6 +90,8 @@ def crash_evidence(text: str, package: str) -> list[FailureEvidence]:
             for record in reversed(records[max(0, index - 64) : index]):
                 if (record.uid, record.pid, record.tag) != (head.uid, head.pid, head.tag):
                     continue
+                if record.message.startswith("*** ***"):
+                    break
                 match = re.match(r"pid: (\d+), tid: \d+, name: .* >>> (\S+) <<<$", record.message)
                 if match:
                     pid, process = int(match.group(1)), match.group(2)
