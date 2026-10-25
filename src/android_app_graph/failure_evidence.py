@@ -43,7 +43,7 @@ def _attribution(process: str | None, package: str) -> str:
         return "unresolved_process"
     if process == package or process.startswith(f"{package}:"):
         return "target_process_name"
-    return "unrelated_process"
+    return "other_process_name"
 
 
 def _records(text: str) -> list[_LogRecord]:

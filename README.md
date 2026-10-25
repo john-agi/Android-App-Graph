@@ -848,6 +848,9 @@ records, including its reason and user/UID fields. A Java header alone does not
 establish process death. Counts describe target process names in one retained
 snapshot; snapshots can overlap and their counts are not added. Other process
 names and records with unresolved process names remain explicitly classified.
+Process-name labels compare the recorded name with the package or its `:suffix`
+processes. Apps can use custom or shared names, so these labels establish name
+matches rather than historical package ownership.
 Historical process instances remain unresolved: a current PID, UID or window
 cannot establish the identity of a past process. Current process metadata includes
 available `/proc` start ticks for inspection and is a non-atomic sample.

@@ -29,7 +29,7 @@ def test_java_header_is_evidence_with_unresolved_instance() -> None:
     ("text", "attribution"),
     [
         (java("com.example:worker"), "target_process_name"),
-        (java("com.example.other"), "unrelated_process"),
+        (java("com.example.other"), "other_process_name"),
         (log("FATAL EXCEPTION: main"), "unresolved_process"),
         (
             log("FATAL EXCEPTION: main") + log("Process: com.example, PID: 43", pid=43),
