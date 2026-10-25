@@ -38,6 +38,45 @@ from android_app_graph.utils import ModelSettings, open_client, resolve_model_se
 from android_app_graph.utils import vlm_utils as vlm
 from android_app_graph.utils.vlm_utils import cosine_similarity, score_by_cosine
 
+
+@pytest.mark.parametrize("pointers", [2, 3, 10])
+def test_multi_pointer_swipe_is_an_unexecuted_capability_result(pointers: int) -> None:
+    result = vlm.tool_call_to_action(
+        {
+            "action": "swipe",
+            "required_pointers": pointers,
+            "coordinate": [500, 700],
+            "coordinate2": [500, 300],
+        },
+        screen_w=720,
+        screen_h=1280,
+    )
+    assert result["action"] == "unsupported"
+    assert result["required_pointers"] == pointers
+    assert "pointer" in str(result["reason"])
+    assert "x1" not in result
+
+
+@pytest.mark.parametrize("pointers", [None, True, "1", 1.5, -1])
+def test_malformed_pointer_requirement_never_becomes_a_swipe(pointers: object) -> None:
+    result = vlm.tool_call_to_action(
+        {"action": "swipe", "required_pointers": pointers, "direction": "up"}
+    )
+    assert result["action"] == "unsupported"
+    assert "required_pointers" in str(result["reason"])
+
+
+def test_grounder_can_report_an_unsupported_gesture_without_coordinates() -> None:
+    result = vlm.tool_call_to_action(
+        {"action": "unsupported", "required_pointers": 1, "reason": "Curved paths unavailable"}
+    )
+    assert result == {
+        "action": "unsupported",
+        "required_pointers": 1,
+        "reason": "Curved paths unavailable",
+    }
+
+
 PAGE_DETAIL = ModelSettings("openai/gpt-6.1-sol")
 ACTION = ModelSettings("qwen/qwen3.8-flash")
 OTHER = ModelSettings("provider/other", request_timeout=60)
