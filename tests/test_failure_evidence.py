@@ -111,3 +111,33 @@ def test_empty_and_identical_records_do_not_prove_a_complete_interval() -> None:
     assert cursor.observe(("a",), "boot", 2, 2, readable=True).relation == "unanchored"
     cursor.observe(("a", "a"), "boot", 3, 3, readable=True)
     assert cursor.observe(("a", "a"), "boot", 4, 4, readable=True).relation == "ambiguous_overlap"
+
+
+def test_incomplete_headers_never_borrow_a_later_process_incarnation() -> None:
+    text = log("FATAL EXCEPTION: first") + java()
+    first, second = crash_evidence(text, "com.example")
+    assert first.process is None
+    assert second.process == "com.example"
+    assert first.fingerprint != second.fingerprint
+    mismatch = log("FATAL EXCEPTION: main") + log("Process: com.example, PID: 99")
+    assert crash_evidence(mismatch, "com.example")[0].process is None
+
+
+def test_native_signal_with_missing_or_unrelated_context_stays_unresolved() -> None:
+    text = log("pid: 51, tid: 52, name: worker  >>> com.example <<<", pid=99, tag="DEBUG")
+    text += log("ordinary tombstone line", tag="DEBUG")
+    text += log("signal 11 (SIGSEGV), code 1", tag="DEBUG")
+    (event,) = crash_evidence(text, "com.example")
+    assert event.process is None
+    assert event.attribution == "unresolved_process"
+    assert exit_evidence("ApplicationExitInfo #0:\npartial", "com.example") == []
+
+
+def test_same_pid_in_separate_timestamps_remains_separate_evidence() -> None:
+    first = java()
+    second = first.replace("123.000", "124.000")
+    events = crash_evidence(first + second, "com.example")
+    assert len(events) == 2
+    assert events[0].pid == events[1].pid
+    assert events[0].fingerprint != events[1].fingerprint
+    assert all(event.process_instance == "unresolved_historical" for event in events)
