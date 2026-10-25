@@ -70,6 +70,7 @@ depends_on = [
 [[modules]]
 path = "android_app_graph.cli"
 depends_on = [
+    "android_app_graph.failure_monitor",
     "android_app_graph.graph_files",
     "android_app_graph.payloads",
     "android_app_graph.run_environment",
@@ -149,6 +150,14 @@ depends_on = ["android_app_graph.device", "android_app_graph.display_state", "an
 [[modules]]
 path = "android_app_graph.system_surfaces"
 depends_on = ["android_app_graph.payloads"]
+
+[[modules]]
+path = "android_app_graph.failure_evidence"
+depends_on = []
+
+[[modules]]
+path = "android_app_graph.failure_monitor"
+depends_on = ["android_app_graph.device", "android_app_graph.failure_evidence"]
 
 [[modules]]
 path = "android_app_graph.modal_context"

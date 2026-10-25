@@ -20,6 +20,7 @@ from android_app_graph.device import (
     grant_runtime_permissions,
     launch_app,
 )
+from android_app_graph.failure_monitor import AdbFailureReader, FailureMonitor
 from android_app_graph.graph_files import app_graph_path
 from android_app_graph.kobe import EXPLORATION_ROLES, ExplorerConfig, Kobe
 from android_app_graph.payloads import as_object_dict
@@ -146,7 +147,14 @@ def _explore() -> None:
                 mutation=mutation,
                 logger=logger,
             )
-            with environment as managed:
+            failure_monitor = FailureMonitor(
+                AdbFailureReader(config["device"]["udid"], package_name),
+                graph_path,
+                package_name,
+                config["device"]["udid"],
+                logger,
+            )
+            with failure_monitor, environment as managed:
                 logger.info("Terminating all running apps...")
                 controller.terminate_all_apps(recovery)
                 time.sleep(1)
@@ -167,6 +175,7 @@ def _explore() -> None:
                     unreachable_limit=unreachable_limit,
                 )
                 kobe = Kobe(managed, explorer_config, client=client, logger=logger)
+                failure_monitor.step_run_id = kobe.controller.run_id
                 try:
                     kobe.explore(resume_from=resume_from)
                 finally:
