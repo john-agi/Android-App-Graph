@@ -24,7 +24,6 @@ The auditor finds two types of issues:
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import logging
 import sys
@@ -342,6 +341,7 @@ class _Step:
     action: dict[str, Any]
     setup: list[dict[str, Any]] | None = None
     open_menu: str | None = None
+    setup_observation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +453,14 @@ def _execute(
     return as_object_dict(run.recorder.get_state())
 
 
+def _prepare_replay_step(run: _ReExploreRun, source: str, step: PathStep) -> PathStep | None:
+    if step.setup_observation is None:
+        return step
+    return run.graph.applicable_preparation(
+        source, step, Observation.from_state(run.recorder.get_state())
+    )
+
+
 def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     """Navigate the app, just restarted, to target node by replaying the shortest path from
     the node of the screen it opened on, when one leads from it, and otherwise from the
@@ -476,39 +484,49 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
     _check_navigation_policy(run, path)
 
     actual = opened_on
-    if len(path) > 1:
-        try:
-            for previous, step in itertools.pairwise(path):
-                for setup_action in step.setup:
-                    _identify_replay(run, _execute(run, setup_action))
-                before = run.recorder.get_state()
-                if not run.graph.can_replay_action(
-                    Observation.from_state(before),
-                    previous.node,
-                    step.node,
-                    step.action,
-                    index=step.action_index,
-                ):
-                    logger.warning(
-                        "Replay action context is unverified; identifying the current screen"
-                    )
-                    actual = _identify(run, before)
-                    break
-                actual = _identify_replay(
+    try:
+        for index, recorded in enumerate(path[1:], start=1):
+            step = _prepare_replay_step(run, path[index - 1].node, recorded)
+            if step is None:
+                logger.warning("Replay source is inapplicable; identifying the current screen")
+                actual = _identify(
                     run,
-                    _execute(run, step.action),
-                    expected_observation=run.graph.earliest_member(step.node),
+                    run.recorder.get_state(),
+                    expected_observation=run.graph.earliest_member(target_node),
                 )
-        except _ReplayInterruptedError as interruption:
-            actual = interruption.node
-            logger.warning("Replay stopped at an app boundary; continuing from %s", actual)
-        except (InputRejectedError, SystemOverlayActionError) as error:
-            logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
-            actual = _identify(
+                break
+            _check_setup_policy(run, path[index - 1].node, step.setup)
+
+            for setup_action in step.setup:
+                _identify_replay(run, _execute(run, setup_action))
+            before = run.recorder.get_state()
+            if not run.graph.can_replay_action(
+                Observation.from_state(before),
+                path[index - 1].node,
+                step.node,
+                step.action,
+                index=step.action_index,
+            ):
+                logger.warning(
+                    "Replay action context is unverified; identifying the current screen"
+                )
+                actual = _identify(run, before)
+                break
+            actual = _identify_replay(
                 run,
-                run.recorder.get_state(),
-                expected_observation=run.graph.earliest_member(target_node),
+                _execute(run, step.action),
+                expected_observation=run.graph.earliest_member(step.node),
             )
+    except _ReplayInterruptedError as interruption:
+        actual = interruption.node
+        logger.warning("Replay stopped at an app boundary; continuing from %s", actual)
+    except (InputRejectedError, SystemOverlayActionError) as error:
+        logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
+        actual = _identify(
+            run,
+            run.recorder.get_state(),
+            expected_observation=run.graph.earliest_member(target_node),
+        )
     if actual != run.graph.resolve_node_id(target_node):
         logger.warning(
             "Expected to reach %s but arrived at %s",
@@ -653,6 +671,7 @@ def _record_step(
             target_observation=target_obs,
             num_steps=1,
             setup=step.setup,
+            setup_observation=step.setup_observation,
             open_menu=step.open_menu,
             action_source=step.before.observation_id,
         ),
@@ -754,7 +773,11 @@ def _explore_steps(
     excluded: dict[str, list[str]] = {}
     step_results: list[dict[str, Any]] = []
     trail = SetupTrail(run.graph.resolve_node_id)
-    trail.begin(start_from, _last_state(run, start_from) if arrived else None)
+    trail.begin(
+        start_from,
+        _last_state(run, start_from) if arrived else None,
+        observation=run.recorder.last_match,
+    )
 
     for step_i in range(num_steps):
         device_state = run.recorder.get_state()
@@ -804,6 +827,7 @@ def _explore_steps(
         step = replace(
             step,
             setup=trail.setup(current_node),
+            setup_observation=trail.setup_observation(current_node),
             open_menu=open_menu_in(_last_state(run, current_node)),
         )
         current_node, step_result = _record_step(run, current_node, step, device_state, step_i + 1)
@@ -811,7 +835,12 @@ def _explore_steps(
         if step_result["to"] == EXTERNAL_WEB_NODE:
             trail.begin(current_node, None)
         else:
-            trail.step([step.action], current_node, _last_state(run, current_node))
+            trail.step(
+                [step.action],
+                current_node,
+                _last_state(run, current_node),
+                observation=run.recorder.last_match,
+            )
 
     return step_results
 
@@ -837,15 +866,17 @@ def _correct_flagged_edge(
         return {"status": "instruction_not_found"}
     index, action = found
 
-    setup = run.graph.action_setup(source, target, index)
-    if setup is None:
+    step = run.graph.replay_step(source, target, index)
+    if step is not None and step.setup_observation is not None:
+        step = run.graph.applicable_preparation(
+            source, step, Observation.from_state(run.recorder.get_state())
+        )
+    if step is None:
         logger.warning(
-            "No recorded action opens the menu that '%s' on %s → %s is sent in",
-            instruction,
-            source,
-            target,
+            "No applicable recorded preparation for '%s' on %s → %s", instruction, source, target
         )
         return {"status": "unverified", "reached": source}
+    setup = step.setup
     _check_setup_policy(run, source, setup)
     for setup_action in setup:
         _identify_replay(run, _execute(run, setup_action))

@@ -532,6 +532,10 @@ def _explore_sending(
         lambda *_args, **_kwargs: {"is_template": False},
     )
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr(
+        "android_app_graph.utils.graph_manager.verify_replay_source",
+        lambda *_args, **_kwargs: (True, "fixture arrival applies"),
+    )
     explorer.explore(max_steps=len(actions))
 
 
@@ -5217,6 +5221,16 @@ def test_reconstructed_menu_checks_operation_context_before_its_dependent_input(
     assert device_log == [*_FIRST_RESTART, ordinary_opener]
 
 
+def test_navigation_requires_a_recorded_graph_before_device_input(
+    replaying_kobe: Kobe, device_log: list[object]
+) -> None:
+    """An empty graph fails before restarting or preparing a device route."""
+    assert replaying_kobe.graph.graph.number_of_nodes() == 0
+    with pytest.raises(NoPathError, match="Graph is empty"):
+        replaying_kobe.navigate_to_node("s0_home")
+    assert device_log == []
+
+
 @pytest.mark.usefixtures("no_sleep")
 @pytest.mark.parametrize("failure_at", ["capture", "verification"])
 def test_replay_never_sends_the_dependent_action_after_context_capture_or_verification_fails(
@@ -5284,3 +5298,130 @@ def test_replay_passes_the_selected_merged_variant_to_context_validation(
     assert replaying_kobe.navigate_to_node("s1_picker") == expected
     assert selected == [1]
     assert device_log == [*_FIRST_RESTART, *([_OPEN_RECENT] if accepted else [])]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_fresh_graph_entry_establishes_observed_preparation(
+    replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new graph retains its first observed entry as known preparation state."""
+    kobe = replaying_kobe
+    states = iter(({"folder": "root"}, {"folder": "Pictures"}))
+
+    def identify(state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        kobe.graph.graph.add_node(
+            "s0",
+            package="com.demo",
+            replay_misses=0,
+            observations=[state["observation_id"]],
+            last_detail_snapshot=next(states),
+        )
+        return "s0", state
+
+    monkeypatch.setattr(kobe, "_identify", identify)
+    _describing_by_node_id(kobe, monkeypatch)
+    _explore_sending(kobe, monkeypatch, {"action": "tap", "x": 20, "y": 30})
+    assert kobe.graph.graph["s0"]["s0"]["setups"] == [[]]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("applicable", [True, False])
+def test_navigation_checks_preparation_before_sending_any_recorded_input(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_graph_file: Callable[..., None],
+    applicable: bool,
+) -> None:
+    graph_file = tmp_path / "saved.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_detail", "s2_changed")]},
+        embedding_model="provider/embedding",
+    )
+    graph = replaying_kobe.graph
+    graph.load_graph(graph_file)
+    setup = {"action": "type", "text": "Pictures"}
+    action = {"action": "tap", "x": 30, "y": 40}
+    anchor = Observation.from_state(replaying_kobe.controller.get_state()).observation_id
+    graph.steps_dir = replaying_kobe.controller.steps
+    graph.graph.nodes["s0_home"]["observations"].append(anchor)
+    graph.add_edge(
+        "s0_home", "s1_detail", action, details=EdgeDetails(setup=[setup], setup_observation=anchor)
+    )
+    _identifying(
+        replaying_kobe,
+        monkeypatch,
+        "s0_home",
+        *(["s0_home", "s1_detail"] if applicable else ["s2_changed"]),
+    )
+    monkeypatch.setattr(
+        "android_app_graph.utils.graph_manager.verify_replay_source",
+        lambda *_args, **_kwargs: (applicable, "actual entry fixture"),
+    )
+    reached = replaying_kobe.navigate_to_node("s1_detail")
+    assert reached == ("s1_detail" if applicable else "s2_changed")
+    assert device_log == [*_FIRST_RESTART, *([setup, action] if applicable else [])]
+    assert graph.graph.nodes["s1_detail"]["replay_misses"] == (0 if applicable else 1)
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize(
+    ("answers", "prepared"), [([True], False), ([False, True], True), ([False, False], None)]
+)
+def test_navigation_uses_the_shortest_applicable_entry_and_preserves_the_other_route(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_graph_file: Callable[..., None],
+    answers: list[bool],
+    prepared: bool | None,
+) -> None:
+    graph_file = tmp_path / "saved.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_detail")]},
+        embedding_model="provider/embedding",
+    )
+    graph = replaying_kobe.graph
+    graph.load_graph(graph_file)
+    graph.steps_dir = replaying_kobe.controller.steps
+    anchors = [
+        Observation.from_state(replaying_kobe.controller.get_state()).observation_id
+        for _ in range(2)
+    ]
+    graph.graph.nodes["s0_home"]["observations"].extend(anchors)
+    setup = {"action": "type", "text": "Pictures"}
+    action = {"action": "tap", "x": 30, "y": 40}
+    graph.add_edge(
+        "s0_home",
+        "s1_detail",
+        action,
+        details=EdgeDetails(setup=[setup], setup_observation=anchors[0]),
+    )
+    graph.add_edge(
+        "s0_home", "s1_detail", action, details=EdgeDetails(setup=[], setup_observation=anchors[1])
+    )
+    _identifying(
+        replaying_kobe,
+        monkeypatch,
+        "s0_home",
+        *(["s0_home"] if prepared else []),
+        "s0_home" if prepared is None else "s1_detail",
+    )
+    replies = iter(answers)
+    checked: list[object] = []
+
+    def verify(*_args: object, **kwargs: object) -> tuple[bool, str]:
+        checked.append(kwargs["actions"])
+        assert device_log == _FIRST_RESTART
+        return next(replies), "entry fixture"
+
+    monkeypatch.setattr("android_app_graph.utils.graph_manager.verify_replay_source", verify)
+    reached = replaying_kobe.navigate_to_node("s1_detail")
+    assert reached == ("s0_home" if prepared is None else "s1_detail")
+    assert len(checked) == len(answers)
+    expected = [] if prepared is None else [setup, action] if prepared else [action]
+    assert device_log == [*_FIRST_RESTART, *expected]

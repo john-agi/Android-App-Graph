@@ -47,6 +47,7 @@ from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_NODE,
     EdgeDetails,
     GraphManager,
+    PathStep,
     SetupTrail,
     open_menu_in,
     schema_delta,
@@ -413,7 +414,7 @@ class Kobe:
         arrival_state = None
         if reached == self.graph.resolve_node_id(target_node):
             arrival_state = self._require_node(reached).get("last_detail_snapshot", {})
-        self._setup_trail.begin(reached, arrival_state)
+        self._setup_trail.begin(reached, arrival_state, observation=self.controller.last_match)
         return reached
 
     def _validate_replay_target(self, target_node: str) -> None:
@@ -422,6 +423,14 @@ class Kobe:
         if resolved.startswith("ext_") or node.get("is_external"):
             msg = f"External replay target {target_node!r} is a boundary visit; choose an app node."
             raise ValueError(msg)
+
+    def _prepare_replay_step(self, source: str, step: PathStep) -> PathStep | None:
+        """Observe source applicability only when the recorded preparation has an anchor."""
+        if step.setup_observation is None:
+            return step
+        return self.graph.applicable_preparation(
+            source, step, Observation.from_state(self.controller.get_state())
+        )
 
     def _replay_to(self, target_node: str) -> str:
         start_node = self.graph.get_start_node()
@@ -458,7 +467,18 @@ class Kobe:
 
         actual_node = opened_on
         try:
-            for i, step in enumerate(path[1:], start=1):
+            for i, recorded in enumerate(path[1:], start=1):
+                step = self._prepare_replay_step(path[i - 1].node, recorded)
+                if step is None:
+                    self.logger.warning(
+                        "Replay source is inapplicable; identifying the current screen"
+                    )
+                    actual_node, _ = self._identify(
+                        self.controller.get_state(),
+                        expected_observation=self.graph.earliest_member(target_node),
+                    )
+                    break
+
                 node_id, action, setup = step.node, step.action, step.setup
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
                 before = self.controller.get_state()
@@ -474,24 +494,7 @@ class Kobe:
                     )
                     actual_node, _ = self._identify(before)
                     break
-                if isinstance(action, list):
-                    self.logger.info(
-                        "  Replay %d/%d: %s --> %s via %d compound actions",
-                        i,
-                        len(path) - 1,
-                        path[i - 1][0],
-                        node_id,
-                        len(action),
-                    )
-                else:
-                    self.logger.info(
-                        "  Replay %d/%d: %s --> %s via %s",
-                        i,
-                        len(path) - 1,
-                        path[i - 1][0],
-                        node_id,
-                        action.get("action", "?"),
-                    )
+                self._log_replay_step(path[i - 1].node, step, i, len(path) - 1)
                 actual_node = self._replay_action(
                     action, expected_observation=self.graph.earliest_member(node_id)
                 )
@@ -509,6 +512,26 @@ class Kobe:
                 expected_observation=self.graph.earliest_member(target_node),
             )
         return self._report_arrival(actual_node, self.graph.resolve_node_id(target_node))
+
+    def _log_replay_step(self, source: str, step: PathStep, index: int, total: int) -> None:
+        if isinstance(step.action, list):
+            self.logger.info(
+                "  Replay %d/%d: %s --> %s via %d compound actions",
+                index,
+                total,
+                source,
+                step.node,
+                len(step.action),
+            )
+        else:
+            self.logger.info(
+                "  Replay %d/%d: %s --> %s via %s",
+                index,
+                total,
+                source,
+                step.node,
+                step.action.get("action", "?"),
+            )
 
     def _replay_action(
         self,
@@ -651,6 +674,7 @@ class Kobe:
         self, resume_from: str | None, start_step: int, max_steps: int
     ) -> _Position:
         self._navigation_history.clear()
+        fresh_graph = self.graph.graph.number_of_nodes() == 0
         if start_step > 0:
             self.logger.info(
                 "Resuming exploration from step %d (target: %d steps total)",
@@ -683,7 +707,16 @@ class Kobe:
         except UnresolvedPermissionError, UnresolvedSystemOverlayError:
             self.save_graph()
             raise
-        self._setup_trail.begin(node, None)
+        arrival = (
+            self._require_node(node).get("last_detail_snapshot", {})
+            if fresh_graph
+            and device_state.get("package") == self.package_name
+            and device_state.get("system_surface") is None
+            else None
+        )
+        self._setup_trail.begin(
+            node, arrival, observation=Observation.from_state(device_state).observation_id
+        )
         return _Position(node, device_state)
 
     def _explore_step_through_outage(self, position: _Position, max_steps: int) -> _Position:
@@ -953,6 +986,7 @@ class Kobe:
             details=replace(
                 details,
                 setup=self._setup_trail.setup(move.source),
+                setup_observation=self._setup_trail.setup_observation(move.source),
                 open_menu=open_menu_in(move.detail_before),
                 action_source=move.before.observation_id,
             ),
@@ -1037,7 +1071,12 @@ class Kobe:
                 num_steps=len(move.action_sequence),
             ),
         )
-        self._setup_trail.step(move.action_sequence, new_node, detail_after)
+        self._setup_trail.step(
+            move.action_sequence,
+            new_node,
+            detail_after,
+            observation=Observation.from_state(device_state).observation_id,
+        )
         self.graph.mark_element_explored(move.source, move.planned_element)
         self.graph.maybe_normalize_node_edges(move.source)
         self._count_step(move.source, move.action_sequence, new_node, move.tokens_before, max_steps)

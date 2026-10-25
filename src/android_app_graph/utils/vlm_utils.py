@@ -1313,6 +1313,60 @@ state. Return applicable (boolean) and reason (string)."""
     ), reason or "action applicability unanswered"
 
 
+def verify_replay_source(
+    client: OpenRouter,
+    *,
+    existing: DescribedScreenshot,
+    current: DescribedScreenshot,
+    actions: Sequence[Mapping[str, object]],
+    settings: ModelSettings,
+) -> tuple[bool, str]:
+    """Check the observed source state for a recorded preparation and action sequence."""
+    prompt = """The recorded inputs below were learned starting at the first screenshot.
+Determine whether the CURRENT second screenshot supports that same input sequence.
+This is source-state applicability, not screen identity: two folders, scroll positions,
+keyboard states or toolbar layouts may belong to one screen but require different inputs.
+Check the visible entry context, controls, focus, selected mode and coordinate targets.
+Reject a stale prefix that starts from another entry, even if its node or purpose matches.
+Content differences alone do not reject a sequence when its controls and meaning apply.
+A changed toolbar, covered target or uncertain source means applicable=false.
+Do not infer a current state from the intended inputs or expected destination. Matching
+pixels do not prove hidden state. Report uncertainty rather than inventing prerequisites.
+Return applicable (boolean) and reason (string)."""
+    try:
+        response = send_chat(
+            client,
+            call_type="replay_source",
+            settings=settings,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        *_shown("Recorded source entry", existing),
+                        *_shown("Current observed source", current),
+                        {"type": "text", "text": "Recorded inputs: " + json.dumps(actions)},
+                    ],
+                }
+            ],
+            response_format=_structured_output(
+                "replay_source",
+                {
+                    "type": "object",
+                    "properties": {"applicable": {"type": "boolean"}, "reason": {"type": "string"}},
+                    "required": ["applicable", "reason"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+        result = as_object_dict(json.loads(strip_json_fences(message_text(response))))
+    except (httpx.TimeoutException, TruncatedReplyError, json.JSONDecodeError) as error:
+        logger.warning("Replay source unanswered: %s", error)
+        return False, "source applicability unanswered"
+    reason = as_str(result.get("reason"), "source applicability unanswered")
+    return result.get("applicable") is True and bool(as_str(result.get("reason"), "")), reason
+
+
 _MAX_INSTRUCTIONS_SENT = 20
 
 _PLACEHOLDER = re.compile(r"\{+[^{}]*\}+")

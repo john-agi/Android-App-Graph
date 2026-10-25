@@ -3021,3 +3021,67 @@ def test_menu_applicability_question_distinguishes_controls_from_selected_item_i
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"][0]["text"]
     assert "Do not require the original selected items" in prompt
     assert "different operation at the recorded coordinates" in prompt
+
+
+@pytest.mark.parametrize("applicable", [True, False])
+def test_replay_source_checks_actual_images_and_recorded_inputs(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    applicable: bool,
+) -> None:
+    router_responses.append(
+        chat_response(content=json.dumps({"applicable": applicable, "reason": "entry check"}))
+    )
+    inputs = [{"action": "tap", "x": 35, "y": 80}, {"action": "type", "text": "Pictures"}]
+    result = vlm.verify_replay_source(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Folders"),
+        current=vlm.DescribedScreenshot(png_screenshot, ""),
+        actions=inputs,
+        settings=PAGE_DETAIL,
+    )
+    assert result == (applicable, "entry check")
+    (request,) = router_requests
+    body = json.loads(request.content)
+    content = body["messages"][0]["content"]
+    assert json.loads(content[-1]["text"].removeprefix("Recorded inputs: ")) == inputs
+    assert len([part for part in content if part["type"] == "image_url"]) == 2
+    assert "not screen identity" in content[0]["text"]
+    assert body["response_format"]["json_schema"]["schema"]["required"] == ["applicable", "reason"]
+    assert request.extensions["timeout"]["read"] == 35
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["not json", "[]", "{}", '{"applicable": "true"}', '{"applicable": 1}', '{"applicable":true}'],
+)
+def test_replay_source_without_a_boolean_confirmation_refuses_input(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+    reply: str,
+) -> None:
+    router_responses.append(chat_response(content=reply))
+    assert not vlm.verify_replay_source(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Folders"),
+        current=vlm.DescribedScreenshot(png_screenshot, ""),
+        actions=[],
+        settings=PAGE_DETAIL,
+    )[0]
+
+
+def test_replay_source_timeout_refuses_input(
+    timing_out_client: OpenRouter, png_screenshot: str
+) -> None:
+    assert vlm.verify_replay_source(
+        timing_out_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Folders"),
+        current=vlm.DescribedScreenshot(png_screenshot, ""),
+        actions=[],
+        settings=PAGE_DETAIL,
+    ) == (False, "source applicability unanswered")
