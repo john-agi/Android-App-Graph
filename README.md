@@ -654,6 +654,13 @@ start screen. When it is another node and recorded actions lead from that node t
 target, the replay starts there, and otherwise from the start screen; a log line names
 the node whenever it is not the start screen.
 
+Replay captures and identifies the screen after each input, including setup actions
+and inputs within a compound action. A modal's opening destination therefore comes
+from the observed intermediate screen, even if it differs from the planned route.
+These intermediate matches add screenshot embedding and, when needed, description
+and verification calls; they are retained in the step log without counting as new
+exploration steps. Existing modal provenance is preserved, not repaired by replay.
+
 The replay follows the path that sends the fewest device actions, each edge
 weighed by its cheapest action: the action's own steps and its
 [setup](#graph-edges), so a path whose actions need no setup is preferred. On
