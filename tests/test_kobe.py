@@ -5074,3 +5074,41 @@ def test_unsupported_gestures_count_once_without_input_edges_or_element_credit(
         "Previous instruction was unsupported"
         in json.loads(router_requests[1].content)["messages"][0]["content"][0]["text"]
     )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_reconstructed_menu_checks_operation_context_before_its_dependent_input(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_graph_file: Callable[..., None],
+) -> None:
+    """Equal menu names leave the dependent action subject to its observed context."""
+    graph_file = tmp_path / "saved.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_picker")]},
+        embedding_model="provider/embedding",
+    )
+    graph = replaying_kobe.graph
+    graph.load_graph(graph_file)
+    ordinary_opener = {"action": "tap", "x": 90, "y": 10}
+    selected_opener = {"action": "tap", "x": 89, "y": 10}
+    copy = {"action": "tap", "x": 60, "y": 80}
+    for opener in (ordinary_opener, selected_opener):
+        graph.add_edge(
+            "s0_home",
+            "s0_home",
+            opener,
+            details=EdgeDetails(schema_delta={"open_menu": {"before": None, "after": "overflow"}}),
+        )
+    graph.add_edge("s0_home", "s1_picker", copy, details=EdgeDetails(open_menu="overflow"))
+    graph.graph["s0_home"]["s1_picker"]["action_sources"] = ["selected-menu-observation"]
+    monkeypatch.setattr(graph, "can_replay_action", lambda *_args: False, raising=False)
+    _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home")
+
+    reached = replaying_kobe.navigate_to_node("s1_picker")
+
+    assert reached == "s0_home"
+    assert device_log == [*_FIRST_RESTART, ordinary_opener]
