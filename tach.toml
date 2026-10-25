@@ -47,6 +47,10 @@ path = "android_app_graph.merge_rounds"
 depends_on = []
 
 [[modules]]
+path = "android_app_graph.navigation_history"
+depends_on = []
+
+[[modules]]
 path = "android_app_graph.screen_image"
 depends_on = []
 
@@ -76,6 +80,7 @@ depends_on = [
 [[modules]]
 path = "android_app_graph.kobe"
 depends_on = [
+    "android_app_graph.navigation_history",
     "android_app_graph.run_environment",
     "android_app_graph.device",
     "android_app_graph.graph_files",
