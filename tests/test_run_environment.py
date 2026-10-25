@@ -91,9 +91,8 @@ class _Controller:
 
 
 class _Explorer:
-    controller = SimpleNamespace(run_id="test-run")
-
     def __init__(self, script: _Script) -> None:
+        self.controller = SimpleNamespace(run_id="test-run")
         self.script = script
 
     def explore(self, *, resume_from: str | None) -> None:
