@@ -554,3 +554,27 @@ def test_a_recorded_system_boundary_requires_no_model_image_vector(tmp_path: Pat
     }
     log = RecordedLog(tmp_path, [{"kind": "match", "observation": "000001"}], {"000001": record})
     assert require_image_vectors(log, "image-model") == {}
+
+
+@pytest.mark.usefixtures("vlm")
+def test_build_keeps_the_actual_noncanonical_before_capture_for_reconstructed_menu_actions(
+    recorded: _Log, config: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "built"
+    assert _build(config, recorded, out) == 0
+    graph = _load(out, MatchingSettings())
+    source = graph.node_of(recorded.observations["back"].observation_id)
+    target = graph.node_of(recorded.observations["after_planned"].observation_id)
+    transition = next(
+        record
+        for record in read_records(recorded.steps)
+        if record["kind"] == "transition"
+        and record["after"] == recorded.observations["after_planned"].observation_id
+    )
+    assert source is not None
+    assert target is not None
+    edge = graph.graph[source][target]
+    assert edge["action_sources"] == [transition["before"]]
+    assert transition["before"] != recorded.observations["back"].observation_id
+    assert edge["setups"] == [None]
+    assert edge["open_menus"] == ["share menu"]

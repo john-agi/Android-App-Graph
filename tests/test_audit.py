@@ -3195,6 +3195,7 @@ def test_audit_exploration_records_system_boundaries_and_the_recovered_app(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     device_log: list[object],
+    step_records: Callable[[Path], list[dict[str, Any]]],
 ) -> None:
     graph, _path = _two_node_graph(tmp_path)
     _identifying(graph, monkeypatch, "s0_home", "s1_detail", "s1_detail")
@@ -3219,6 +3220,9 @@ def test_audit_exploration_records_system_boundaries_and_the_recovered_app(
     assert graph.graph.nodes[step["to"]]["system_surface"] == surface
     assert graph.graph.has_edge("s1_detail", step["to"])
     assert len([node for node in graph.graph if not node.startswith("ext_")]) == 2
+
+    transitions = [r for r in step_records(tmp_path / "steps") if r["kind"] == "transition"]
+    assert graph.graph["s1_detail"][step["to"]]["action_sources"] == [transitions[-1]["before"]]
 
 
 @pytest.mark.usefixtures("_fake_device")
