@@ -3036,6 +3036,61 @@ def test_back_on_the_start_screen_passes_over_a_target_whose_last_replay_missed(
 _SCROLL_DOWN_PLAN = '{"element":null,"instruction":"Scroll down"}'
 
 
+@pytest.mark.usefixtures("no_sleep", "device_log")
+def test_repeated_internal_route_informs_the_planner_without_replacing_its_next_action(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated observed form/dialog navigation retains a useful local action."""
+    dialog = _screen("com.demo.Home", "gray")
+    picker = _screen("com.demo.Home", "blue")
+    device = _Screens(HOME_SCREEN, dialog, HOME_SCREEN, dialog, HOME_SCREEN, picker)
+    explorer = _explorer(device, tmp_path, router_client)
+    explorer.graph.graph.add_node("s0_seed", package="com.demo", replay_misses=0)
+    for node in ("s1_form", "s2_dialog", "s3_picker"):
+        explorer.graph.graph.add_node(node, package="com.demo", replay_misses=0)
+    explorer.graph.add_edge("s1_form", "s2_dialog", action=[{"action": "back"}])
+    explorer.graph.add_edge("s2_dialog", "s1_form", action=[{"action": "back"}])
+    _identifying(
+        explorer,
+        monkeypatch,
+        "s1_form",
+        "s2_dialog",
+        "s1_form",
+        "s2_dialog",
+        "s1_form",
+        "s3_picker",
+    )
+    _without_templates(monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    for _ in range(4):
+        router_responses.extend(
+            [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_BACK_REPLY)]
+        )
+    router_responses.extend(
+        [chat_response(content=_SCROLL_DOWN_PLAN), chat_response(content=_TAP_REPLY)]
+    )
+
+    explorer.explore(max_steps=5)
+
+    prompts = [
+        str(json.loads(request.content)["messages"][-1]["content"][0]["text"])
+        for request in router_requests
+        if json.loads(request.content)["model"] == "provider/instruction"
+    ]
+    assert all("Recent repeated route" not in prompt for prompt in prompts[:4])
+    assert "Recent repeated route" in prompts[4]
+    assert "s1_form --back--> s2_dialog --back--> s1_form" in prompts[4]
+    assert "Hidden state may still change" in prompts[4]
+    assert device.actions == [*[{"action": "back"}] * 4, {"action": "tap", "coordinate": [50, 100]}]
+    assert explorer.graph.total_steps_completed == 5
+    assert explorer.graph.graph.has_edge("s1_form", "s3_picker")
+
+
 def _toggles(explorer: Kobe, *days: int) -> None:
     """Record a self-loop on the start screen with one action for each of ``days``, in
     order, each with the instruction ``Toggle day <day>``."""
