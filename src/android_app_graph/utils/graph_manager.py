@@ -3432,7 +3432,10 @@ class GraphManager:
             )
             raise ValueError(msg)
         identify_file = identify_file_path(path)
-        stored_screens = _stored_screens(data["nodes"], path, steps_dir, identify_file)
+        try:
+            stored_screens = _stored_screens(data["nodes"], path, steps_dir, identify_file)
+        except (TypeError, ValueError) as exc:
+            raise unloadable_graph(path, [f"Invalid member metadata: {exc}"]) from exc
         descriptions = read_member_descriptions(path, data["nodes"])
         image_vectors = (
             load_image_embeddings(steps_dir, model=self.image_embedding.model)
