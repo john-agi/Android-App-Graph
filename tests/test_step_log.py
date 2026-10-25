@@ -816,3 +816,19 @@ def test_input_rejection_feedback_belongs_to_the_current_unchanged_screen(
         monkeypatch.setattr(device, "get_state", state)
     recorder.get_state()
     assert recorder.input_rejection_hint == ""
+
+
+def test_unsupported_action_retains_intent_without_input_or_a_performed_record(
+    device: _Device, steps: Path
+) -> None:
+    recorder = _recorder(device, steps)
+    outcome = {"action": "unsupported", "required_pointers": 3, "reason": "Only one pointer"}
+    recorder.record_unsupported_action("Swipe with three fingers", 3, outcome)
+    assert device.actions == []
+    record = _record(steps, "000000")
+    assert record["kind"] == "unsupported_action"
+    assert record["observation"] is None
+    assert record["instruction"] == "Swipe with three fingers"
+    assert record["planned_required_pointers"] == 3
+    assert record["reason"] == "Only one pointer"
+    assert _files(steps) == ["000000.json"]

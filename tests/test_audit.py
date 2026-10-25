@@ -32,7 +32,12 @@ from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder, read_records
 from android_app_graph.utils import DEFAULT_MATCHING, ModelSettings, graph_manager, open_client
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails, GraphManager
-from android_app_graph.utils.vlm_utils import ActionRequest, PlanRequest
+from android_app_graph.utils.vlm_utils import (
+    ActionPlan,
+    ActionRequest,
+    PlanRequest,
+    predict_next_action,
+)
 
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
 _RESOLVE_LAUNCHER = [
@@ -173,9 +178,9 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
     )
     descriptions: list[str] = []
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         descriptions.append(request.page_description)
-        return next(planned), None
+        return ActionPlan(next(planned), None, 1)
 
     monkeypatch.setattr(audit, "plan_next_action", plan)
     grounded: list[str] = []
@@ -195,8 +200,8 @@ def test_audit_plans_consume_the_step_budget_when_a_commitment_is_skipped(
         steps_per_issue=3,
     )
 
-    assert "Excluded by the inspection policy" not in descriptions[0]
-    assert "Excluded by the inspection policy" in descriptions[1]
+    assert "Instructions already skipped" not in descriptions[0]
+    assert "Instructions already skipped" in descriptions[1]
     assert "Confirm deletion of the contact" in descriptions[1]
     assert result["steps"][0]["status"] == "skipped"
     assert "policy" in result["steps"][0]["reason"]
@@ -567,7 +572,9 @@ def _fake_device(
 ) -> None:
     """Silence every side effect re_explore_issues has outside the graph."""
     del no_sleep, device_log  # requested for their side effects on time.sleep and subprocess.run
-    monkeypatch.setattr(audit, "plan_next_action", lambda **_kwargs: ("tap the first button", None))
+    monkeypatch.setattr(
+        audit, "plan_next_action", lambda **_kwargs: ActionPlan("tap the first button", None, 1)
+    )
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "end"}, ""))
 
 
@@ -580,9 +587,9 @@ def test_re_explore_issues_retries_explores_and_skips(
     controller = FakeController("com.demo")
     models: list[tuple[str, str]] = []
 
-    def plan(*, settings: ModelSettings, **_kwargs: object) -> tuple[str, None]:
+    def plan(*, settings: ModelSettings, **_kwargs: object) -> ActionPlan:
         models.append(("plan", settings.model))
-        return "tap the first button", None
+        return ActionPlan("tap the first button", None, 1)
 
     def act(*, settings: ModelSettings, **_kwargs: object) -> tuple[dict[str, str], str]:
         models.append(("act", settings.model))
@@ -997,13 +1004,13 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
     assert "add_edge: missing node(s)" not in caplog.text
 
 
-def _recording_planner(planned_from: list[str]) -> Callable[..., tuple[str, None]]:
+def _recording_planner(planned_from: list[str]) -> Callable[..., ActionPlan]:
     """A ``plan_next_action`` that records the page description of each screen it plans
     from, hint included."""
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         planned_from.append(request.page_description)
-        return "Tap the Search button", None
+        return ActionPlan("Tap the Search button", None, 1)
 
     return plan
 
@@ -1025,10 +1032,10 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
     input_statuses: list[str] = []
     grounded: list[str] = []
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         planned_from.append(request.page_description)
         input_statuses.append(request.input_status)
-        return "Tap the Search button", None
+        return ActionPlan("Tap the Search button", None, 1)
 
     def act(*, request: ActionRequest, **_kwargs: object) -> tuple[dict[str, object], str]:
         grounded.append(request.instruction)
@@ -1140,7 +1147,9 @@ def test_re_exploration_lists_a_self_loop_s_30_most_recent_instructions_as_explo
     monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: "s1_detail")
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "wait"}, ""))
-    router_responses.append(chat_response(content='{"element":null,"instruction":"Scroll down"}'))
+    router_responses.append(
+        chat_response(content='{"element":null,"instruction":"Scroll down","required_pointers":1}')
+    )
 
     _re_explore(
         graph,
@@ -1258,7 +1267,9 @@ def test_re_exploration_tells_the_planner_that_back_leaves_the_app_where_it_does
     monkeypatch.setattr(graph, "identify_state", lambda _observation, **_kwargs: node)
     monkeypatch.setattr(audit, "soft_keyboard_hint", lambda _udid: "")
     monkeypatch.setattr(audit, "predict_next_action", lambda **_kwargs: ({"action": "wait"}, ""))
-    router_responses.append(chat_response(content='{"element":null,"instruction":"Scroll down"}'))
+    router_responses.append(
+        chat_response(content='{"element":null,"instruction":"Scroll down","required_pointers":1}')
+    )
 
     _re_explore(
         graph,
@@ -3273,9 +3284,9 @@ def test_audit_unreachable_plans_spend_the_bounded_step_budget_without_coverage(
     _describing_by_node_id(graph, monkeypatch)
     planning_hints: list[str] = []
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         planning_hints.append(request.input_status)
-        return "Open the control", None
+        return ActionPlan("Open the control", None, 1)
 
     monkeypatch.setattr(audit, "plan_next_action", plan)
     controller = _ReplayController(device_log)
@@ -3303,3 +3314,36 @@ def test_audit_unreachable_plans_spend_the_bounded_step_budget_without_coverage(
     assert len(rejected) == 2
     assert "rejected" not in planning_hints[0]
     assert "Previous tap was rejected: App input targets a system touch region" in planning_hints[1]
+
+
+@pytest.mark.usefixtures("_fake_device")
+def test_audit_unsupported_gestures_exhaust_the_budget_without_executed_records(
+    client: OpenRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    graph, graph_path = _two_node_graph(tmp_path)
+    monkeypatch.setattr(graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    instruction = "Swipe with three fingers"
+    monkeypatch.setattr(
+        audit, "plan_next_action", lambda **_kwargs: ActionPlan(instruction, None, 3)
+    )
+    controller = FakeController("com.demo")
+    edges_before = list(graph.graph.edges)
+    monkeypatch.setattr(audit, "predict_next_action", predict_next_action)
+    [result] = _re_explore(
+        graph,
+        [{**_inspection(), "type": "explore_node", "node": "s0_home", "expected_pages": []}],
+        controller,
+        client,
+        graph_path.parent,
+        steps_per_issue=3,
+    )
+    assert [step["status"] for step in result["steps"]] == ["unsupported"] * 3
+    assert [step["step"] for step in result["steps"]] == [1, 2, 3]
+    records = step_records(graph_path.parent / "steps")
+    assert len([r for r in records if r["kind"] == "unsupported_action"]) == 3
+    assert not any(r["kind"] in {"action", "transition"} for r in records)
+    assert list(graph.graph.edges) == edges_before
+    assert controller.actions == []

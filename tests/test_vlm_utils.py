@@ -215,7 +215,7 @@ def test_score_by_cosine_keeps_the_scored_order_equal_to_the_input_order() -> No
     assert [key for key, _ in scored] == ["c", "a", "b"]
 
 
-_CLICK = '{"action":"click","coordinate":[500,500]}'
+_CLICK = '{"action":"click","coordinate":[500,500],"required_pointers":1}'
 
 
 @pytest.fixture
@@ -475,7 +475,9 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
         client, screenshot, {"action": "back"}, (1080, 1920), settings=PAGE_DETAIL
     ),
     "action": lambda client, screenshot: vlm.predict_next_action(
-        client, vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait"), settings=ACTION
+        client,
+        vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait", required_pointers=0),
+        settings=ACTION,
     ),
 }
 
@@ -520,8 +522,8 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
             "planner",
             "instruction",
             "openai/gpt-6.1-sol",
-            '```json\n{"element":null,"instruction":"Tap Search"}\n```',
-            ("Tap Search", None),
+            '```json\n{"element":null,"instruction":"Tap Search","required_pointers":1}\n```',
+            vlm.ActionPlan("Tap Search", None, 1),
         ),
         (
             "describe",
@@ -534,7 +536,7 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
             "action",
             "action",
             "qwen/qwen3.8-flash",
-            '{"action":"wait"}',
+            '{"action":"wait","required_pointers":0}',
             ({"action": "wait", "time": 3}, "{'action': 'wait', 'time': 3}"),
         ),
     ],
@@ -590,19 +592,23 @@ def test_a_native_tool_call_without_text_content_is_still_read(
     action, history = vlm.predict_next_action(
         router_client,
         vlm.ActionRequest(
-            screenshot_b64=png_screenshot, instruction="tap", screen_w=100, screen_h=200
+            screenshot_b64=png_screenshot,
+            instruction="tap",
+            screen_w=100,
+            screen_h=200,
+            required_pointers=1,
         ),
         settings=ACTION,
     )
     assert action == {"action": "tap", "x": 50, "y": 100}
-    assert history == "{'action': 'click', 'coordinate': [500, 500]}"
+    assert history == "{'action': 'click', 'coordinate': [500, 500], 'required_pointers': 1}"
 
 
 @pytest.mark.parametrize("native", [False, True])
 def test_menu_tool_calls_convert_to_the_menu_device_action(
     native: bool, chat_response: Callable[..., httpx.Response]
 ) -> None:
-    arguments = '{"action": "system_button", "button": "Menu"}'
+    arguments = '{"action":"system_button","button":"Menu","required_pointers":0}'
     reply = ChatResult.model_validate(
         chat_response(
             content="" if native else f"<tool_call>{arguments}</tool_call>",
@@ -623,11 +629,17 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.append(chat_response(content='<tool_call>{"action":"wait"}</tool_call>'))
+    router_responses.append(
+        chat_response(content='<tool_call>{"action":"wait","required_pointers":0}</tool_call>')
+    )
     vlm.predict_next_action(
         router_client,
         vlm.ActionRequest(
-            screenshot_b64=png_screenshot, instruction="wait", screen_w=1080, screen_h=2400
+            screenshot_b64=png_screenshot,
+            instruction="wait",
+            screen_w=1080,
+            screen_h=2400,
+            required_pointers=0,
         ),
         settings=ACTION,
     )
@@ -645,8 +657,8 @@ def test_action_prompt_declares_mobile_use_and_the_benchmarked_screen_line(
 @pytest.mark.parametrize(
     "tool_call",
     [
-        '{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [752, 170]}}',
-        '{"action": "click", "coordinate": [752, 170]}',
+        '{"name":"mobile_use","arguments":{"action":"click","coordinate":[752,170],"required_pointers":1}}',
+        '{"action":"click","coordinate":[752,170],"required_pointers":1}',
     ],
 )
 def test_a_tool_call_missing_its_closing_tag_is_still_read(
@@ -665,7 +677,11 @@ def test_a_tool_call_missing_its_closing_tag_is_still_read(
     action, history = vlm.predict_next_action(
         router_client,
         vlm.ActionRequest(
-            screenshot_b64=png_screenshot, instruction="tap", screen_w=1000, screen_h=2000
+            screenshot_b64=png_screenshot,
+            instruction="tap",
+            screen_w=1000,
+            screen_h=2000,
+            required_pointers=1,
         ),
         settings=ACTION,
     )
@@ -1222,7 +1238,9 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
         case "action":
             return vlm.predict_next_action(
                 client,
-                vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                vlm.ActionRequest(
+                    screenshot_b64=png_screenshot, instruction="tap", required_pointers=1
+                ),
                 settings=ACTION,
             )[0]
         case _:
@@ -1237,7 +1255,7 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
 
 _GOOD_REPLIES: dict[str, str] = {
     "chat": "test reply",
-    "action": '{"action":"click","coordinate":[500,500]}',
+    "action": '{"action":"click","coordinate":[500,500],"required_pointers":1}',
     "description": '{"page_description":"home"}',
 }
 _RESULTS: dict[str, object] = {
@@ -1371,7 +1389,7 @@ def _send_every_model_call(
             reply(content="{}"),
             reply(content="{}"),
             reply(content="Tap Search"),
-            reply(content='{"action":"wait"}'),
+            reply(content='{"action":"wait","required_pointers":0}'),
             httpx.Response(200, json=embedding_body),
             httpx.Response(200, json=embedding_body),
         ]
@@ -1402,7 +1420,7 @@ def _send_every_model_call(
     )
     vlm.predict_next_action(
         client,
-        vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait"),
+        vlm.ActionRequest(screenshot_b64=screenshot, instruction="wait", required_pointers=0),
         settings=settings["action"],
     )
     vlm.get_embedding(client, "home", model=settings["embedding"].model)
@@ -1495,11 +1513,13 @@ def test_a_reply_without_choices_keeps_parse_fallbacks(
                 screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
             ),
             settings=PAGE_DETAIL,
-        ) == ("", None)
+        ) == vlm.ActionPlan("", None, None)
     else:
         assert vlm.predict_next_action(
             router_client,
-            vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+            vlm.ActionRequest(
+                screenshot_b64=png_screenshot, instruction="tap", required_pointers=1
+            ),
             settings=ACTION,
         ) == (
             {"action": "wait", "time": 1},
@@ -1673,7 +1693,9 @@ def _final_fallback(operation: str, client: OpenRouter, png_screenshot: str) -> 
         case _:
             result = vlm.predict_next_action(
                 client,
-                vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                vlm.ActionRequest(
+                    screenshot_b64=png_screenshot, instruction="tap", required_pointers=1
+                ),
                 settings=ACTION,
             )[0]
     return result
@@ -2114,7 +2136,7 @@ def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_conte
                 screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
             ),
             settings=PAGE_DETAIL,
-        ) == ("Tap", None)
+        ) == vlm.ActionPlan("Tap", None, None)
     assert "instruction: the provider's content filter stopped the reply" in caplog.text
     assert len(router_requests) == 1
 
@@ -2128,7 +2150,9 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
 ) -> None:
     instruction = "Tap the floating action button in the bottom right"
     router_responses.append(
-        chat_response(content=json.dumps({"element": 2, "instruction": instruction}))
+        chat_response(
+            content=json.dumps({"required_pointers": 1, "element": 2, "instruction": instruction})
+        )
     )
     assert vlm.plan_next_action(
         router_client,
@@ -2143,7 +2167,7 @@ def test_the_planner_numbers_the_unexplored_elements_and_returns_the_one_it_name
             ],
         ),
         settings=PAGE_DETAIL,
-    ) == (instruction, 2)
+    ) == vlm.ActionPlan(instruction, 2, 1)
     prompt = json.loads(router_requests[0].content)["messages"][-1]["content"][0]["text"]
     assert "1. Turn on dark mode toggle (top)\n2. Compose FAB (bottom right)\n" in prompt
 
@@ -2157,7 +2181,9 @@ def test_the_planner_says_where_each_tried_action_led_by_its_own_target_observat
 ) -> None:
     """An edge with instructions lists the actions that have one, and an edge without
     lists every action, each with the observation it recorded."""
-    router_responses.append(chat_response(content='{"element":null,"instruction":"Go back"}'))
+    router_responses.append(
+        chat_response(content='{"element":null,"instruction":"Go back","required_pointers":0}')
+    )
     explored_edges: list[dict[str, Any]] = [
         {
             "target": "s1_network",
@@ -2195,8 +2221,11 @@ def test_the_planner_says_where_each_tried_action_led_by_its_own_target_observat
 @pytest.mark.parametrize(
     ("reply", "instruction"),
     [
-        ('{"element": null, "instruction": "Type \'stewed beef\'"}', "Type 'stewed beef'"),
-        ('{"element": null, "instruction": "Tap \\"Save\\""}', 'Tap "Save"'),
+        (
+            '{"element":null,"instruction":"Type \'stewed beef\'","required_pointers":0}',
+            "Type 'stewed beef'",
+        ),
+        ('{"element":null,"instruction":"Tap \\"Save\\"","required_pointers":1}', 'Tap "Save"'),
         ('"Tap Search"', '"Tap Search"'),
         ("'Type 'stewed beef''", "'Type 'stewed beef''"),
     ],
@@ -2210,13 +2239,16 @@ def test_the_planner_keeps_every_quote_in_its_instruction(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.append(chat_response(content=reply))
-    assert vlm.plan_next_action(
-        router_client,
-        vlm.PlanRequest(
-            screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
-        ),
-        settings=PAGE_DETAIL,
-    ) == (instruction, None)
+    assert (
+        vlm.plan_next_action(
+            router_client,
+            vlm.PlanRequest(
+                screenshot_b64=png_screenshot, page_description="home", node="s0", explored_edges=[]
+            ),
+            settings=PAGE_DETAIL,
+        ).instruction
+        == instruction
+    )
 
 
 @pytest.mark.parametrize(
@@ -2270,9 +2302,7 @@ def test_action_text_observations_survive_native_calls(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    text = (
-        'Thought: Search is visible\nAction: Tap Search\n<tool_call>{"action":"wait"}</tool_call>'
-    )
+    text = 'Thought: Search is visible\nAction: Tap Search\n<tool_call>{"action":"wait","required_pointers":0}</tool_call>'
     router_responses.append(
         chat_response(
             content=[{"type": "text", "text": text}] if multipart else text,
@@ -2282,7 +2312,11 @@ def test_action_text_observations_survive_native_calls(
     action, history = vlm.predict_next_action(
         router_client,
         vlm.ActionRequest(
-            screenshot_b64=png_screenshot, instruction="tap", screen_w=100, screen_h=200
+            screenshot_b64=png_screenshot,
+            instruction="tap",
+            screen_w=100,
+            screen_h=200,
+            required_pointers=1,
         ),
         settings=ACTION,
     )
@@ -2299,17 +2333,27 @@ _UP_SWIPE = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 50, "durati
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
-        ({"action": "click", "coordinate": [500.5, 300.5]}, {"action": "tap", "x": 50, "y": 60}),
         (
-            {"action": "long_press", "coordinate": [500, 300]},
+            {"required_pointers": 1, "action": "click", "coordinate": [500.5, 300.5]},
+            {"action": "tap", "x": 50, "y": 60},
+        ),
+        (
+            {"required_pointers": 1, "action": "long_press", "coordinate": [500, 300]},
             {"action": "long_press", "x": 50, "y": 60, "duration": 1000},
         ),
         (
-            {"action": "long_press", "coordinate": [500, 300], "time": 250, "duration": 750},
+            {
+                "required_pointers": 1,
+                "action": "long_press",
+                "coordinate": [500, 300],
+                "time": 250,
+                "duration": 750,
+            },
             {"action": "long_press", "x": 50, "y": 60, "duration": 250},
         ),
         (
             {
+                "required_pointers": 1,
                 "action": "swipe",
                 "coordinate": [500, 300],
                 "coordinate2": [250, 800],
@@ -2317,22 +2361,30 @@ _UP_SWIPE = {"action": "swipe", "x1": 50, "y1": 150, "x2": 50, "y2": 50, "durati
             },
             {"action": "swipe", "x1": 50, "y1": 60, "x2": 25, "y2": 160, "duration": 750},
         ),
-        ({"action": "swipe", "direction": "up"}, _UP_SWIPE),
-        ({"action": "swipe", "direction": "up", "coordinate": [500, 300]}, _UP_SWIPE),
+        ({"required_pointers": 1, "action": "swipe", "direction": "up"}, _UP_SWIPE),
         (
-            {"action": "swipe", "direction": "down"},
+            {
+                "required_pointers": 1,
+                "action": "swipe",
+                "direction": "up",
+                "coordinate": [500, 300],
+            },
+            _UP_SWIPE,
+        ),
+        (
+            {"required_pointers": 1, "action": "swipe", "direction": "down"},
             {"action": "swipe", "x1": 50, "y1": 50, "x2": 50, "y2": 150, "duration": 1000},
         ),
         (
-            {"action": "swipe", "direction": "left"},
+            {"required_pointers": 1, "action": "swipe", "direction": "left"},
             {"action": "swipe", "x1": 80, "y1": 100, "x2": 20, "y2": 100, "duration": 1000},
         ),
         (
-            {"action": "swipe", "direction": "right"},
+            {"required_pointers": 1, "action": "swipe", "direction": "right"},
             {"action": "swipe", "x1": 20, "y1": 100, "x2": 80, "y2": 100, "duration": 1000},
         ),
-        ({"action": "end"}, {"action": "end"}),
-        ({"action": "terminate"}, {"action": "end"}),
+        ({"required_pointers": 0, "action": "end"}, {"action": "end"}),
+        ({"required_pointers": 0, "action": "terminate"}, {"action": "end"}),
     ],
 )
 def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
@@ -2349,7 +2401,11 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
     action, _ = vlm.predict_next_action(
         router_client,
         vlm.ActionRequest(
-            screenshot_b64=png_screenshot, instruction="act", screen_w=100, screen_h=200
+            screenshot_b64=png_screenshot,
+            instruction="act",
+            screen_w=100,
+            screen_h=200,
+            required_pointers=1,
         ),
         settings=ACTION,
     )
@@ -2361,19 +2417,48 @@ def test_valid_coordinate_actions_and_intentional_end_remain_single_requests(
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        ({"action": "swipe", "direction": "north"}, "Swipe requires a supported direction"),
-        ({"action": "type"}, "Type requires a text string"),
-        ({"action": "system_button", "button": "Power"}, "Back, Home, Menu or Enter"),
-        ({"action": "invented"}, "Unknown action"),
-        ({"action": "click"}, "two finite numbers"),
-        ({"action": "click", "coordinate": [500]}, "two finite numbers"),
-        ({"action": "click", "coordinate": [float("nan"), 300]}, "two finite numbers"),
-        ({"action": "swipe", "coordinate": [500, 300]}, "coordinates or a supported direction"),
-        ({"action": "swipe", "coordinate": [500, 300], "coordinate2": [500]}, "two finite numbers"),
-        ({"action": "swipe", "direction": "north", "coordinate": [500]}, "two finite numbers"),
-        ({"action": ["click"]}, "Unknown action"),
-        ({"action": "swipe", "direction": ["up"]}, "Swipe requires a supported direction"),
-        ({"action": "system_button", "button": ["Back"]}, "Back, Home, Menu or Enter"),
+        (
+            {"required_pointers": 1, "action": "swipe", "direction": "north"},
+            "Swipe requires a supported direction",
+        ),
+        ({"required_pointers": 0, "action": "type"}, "Type requires a text string"),
+        (
+            {"required_pointers": 0, "action": "system_button", "button": "Power"},
+            "Back, Home, Menu or Enter",
+        ),
+        ({"required_pointers": 0, "action": "invented"}, "Unknown action"),
+        ({"required_pointers": 1, "action": "click"}, "two finite numbers"),
+        ({"required_pointers": 1, "action": "click", "coordinate": [500]}, "two finite numbers"),
+        (
+            {"required_pointers": 1, "action": "click", "coordinate": [float("nan"), 300]},
+            "two finite numbers",
+        ),
+        (
+            {"required_pointers": 1, "action": "swipe", "coordinate": [500, 300]},
+            "coordinates or a supported direction",
+        ),
+        (
+            {
+                "required_pointers": 1,
+                "action": "swipe",
+                "coordinate": [500, 300],
+                "coordinate2": [500],
+            },
+            "two finite numbers",
+        ),
+        (
+            {"required_pointers": 1, "action": "swipe", "direction": "north", "coordinate": [500]},
+            "two finite numbers",
+        ),
+        ({"required_pointers": 0, "action": ["click"]}, "Unknown action"),
+        (
+            {"required_pointers": 1, "action": "swipe", "direction": ["up"]},
+            "Swipe requires a supported direction",
+        ),
+        (
+            {"required_pointers": 0, "action": "system_button", "button": ["Back"]},
+            "Back, Home, Menu or Enter",
+        ),
     ],
 )
 def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message: str) -> None:
@@ -2383,7 +2468,9 @@ def test_malformed_tool_arguments_are_rejected(args: dict[str, object], message:
 
 def test_direction_does_not_hide_invalid_partial_coordinates() -> None:
     with pytest.raises(ValueError, match="coordinates"):
-        vlm.tool_call_to_action({"action": "swipe", "direction": "up", "coordinate": [500]})
+        vlm.tool_call_to_action(
+            {"action": "swipe", "required_pointers": 1, "direction": "up", "coordinate": [500]}
+        )
 
 
 @pytest.mark.parametrize(
@@ -2408,26 +2495,37 @@ def test_raw_json_tool_call_is_unwrapped_to_its_arguments(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     reply = ChatResult.model_validate(
-        chat_response(content='{"name":"mobile_use","arguments":{"action":"wait"}}').json()
+        chat_response(
+            content='{"name":"mobile_use","arguments":{"action":"wait","required_pointers":0}}'
+        ).json()
     )
-    assert vlm.parse_agent_response(reply) == ({"action": "wait"}, "", "")
+    assert vlm.parse_agent_response(reply) == ({"action": "wait", "required_pointers": 0}, "", "")
 
 
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
-        ({"action": "type", "text": "milk"}, {"action": "type", "text": "milk"}),
-        ({"action": "system_button", "button": "Back"}, {"action": "back"}),
-        ({"action": "system_button", "button": "Home"}, {"action": "home"}),
-        ({"action": "system_button", "button": "Menu"}, {"action": "menu"}),
-        ({"action": "system_button", "button": "Enter"}, {"action": "enter"}),
-        ({"action": "answer", "text": "9 EUR"}, {"action": "end"}),
-        ({"action": "error"}, {"action": "end"}),
-        ({"action": "wait"}, {"action": "wait", "time": 3}),
-        ({"action": "wait", "duration": 2}, {"action": "wait", "time": 2}),
-        ({"action": "wait", "time": "5"}, {"action": "wait", "time": "5"}),
         (
-            {"name": "mobile_use", "arguments": {"action": "click", "coordinate": [500, 500]}},
+            {"required_pointers": 0, "action": "type", "text": "milk"},
+            {"action": "type", "text": "milk"},
+        ),
+        ({"required_pointers": 0, "action": "system_button", "button": "Back"}, {"action": "back"}),
+        ({"required_pointers": 0, "action": "system_button", "button": "Home"}, {"action": "home"}),
+        ({"required_pointers": 0, "action": "system_button", "button": "Menu"}, {"action": "menu"}),
+        (
+            {"required_pointers": 0, "action": "system_button", "button": "Enter"},
+            {"action": "enter"},
+        ),
+        ({"required_pointers": 0, "action": "answer", "text": "9 EUR"}, {"action": "end"}),
+        ({"required_pointers": 0, "action": "error"}, {"action": "end"}),
+        ({"required_pointers": 0, "action": "wait"}, {"action": "wait", "time": 3}),
+        ({"required_pointers": 0, "action": "wait", "duration": 2}, {"action": "wait", "time": 2}),
+        ({"required_pointers": 0, "action": "wait", "time": "5"}, {"action": "wait", "time": "5"}),
+        (
+            {
+                "name": "mobile_use",
+                "arguments": {"required_pointers": 1, "action": "click", "coordinate": [500, 500]},
+            },
             {"action": "tap", "x": 540, "y": 960},
         ),
     ],
@@ -2464,7 +2562,7 @@ _XML_TAGS = "the <tool_call> block used <function=...> tags instead of JSON"
         ("<tool_call>5</tool_call>", _NO_JSON),
         ("", _NO_JSON),
         (
-            '<tool_call>{"name": "mobile_use", "arguments": {"action": "type"}}</tool_call>',
+            '<tool_call>{"name":"mobile_use","arguments":{"action":"type","required_pointers":0}}</tool_call>',
             "the mobile_use arguments were invalid: Type requires a text string",
         ),
     ],
@@ -2484,7 +2582,11 @@ def test_an_unusable_action_reply_is_retried_with_what_was_wrong(
     action, _ = vlm.predict_next_action(
         router_client,
         vlm.ActionRequest(
-            screenshot_b64=png_screenshot, instruction="tap", screen_w=100, screen_h=200
+            screenshot_b64=png_screenshot,
+            instruction="tap",
+            screen_w=100,
+            screen_h=200,
+            required_pointers=1,
         ),
         settings=ACTION,
     )
@@ -2515,7 +2617,7 @@ def test_a_second_unusable_action_reply_falls_back_to_wait(
     router_responses.extend(chat_response(content="Tap Search") for _ in range(2))
     assert vlm.predict_next_action(
         router_client,
-        vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+        vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap", required_pointers=1),
         settings=ACTION,
     ) == (
         {"action": "wait", "time": 1},
@@ -2541,7 +2643,7 @@ def test_action_retries_and_the_single_re_ask_are_separate(
         [
             httpx.Response(503, json={"error": {"code": 503, "message": "busy"}}),
             httpx.Response(200, json=bad),
-            chat_response(content='{"action":"click","coordinate":[500,300]}')
+            chat_response(content='{"action":"click","coordinate":[500,300],"required_pointers":1}')
             if recover
             else httpx.Response(200, json=bad),
         ]
@@ -2549,7 +2651,9 @@ def test_action_retries_and_the_single_re_ask_are_separate(
     if recover:
         action, _ = vlm.predict_next_action(
             router_client,
-            vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+            vlm.ActionRequest(
+                screenshot_b64=png_screenshot, instruction="tap", required_pointers=1
+            ),
             settings=ACTION,
         )
         assert action == {"action": "tap", "x": 540, "y": 576}
@@ -2557,7 +2661,9 @@ def test_action_retries_and_the_single_re_ask_are_separate(
         with pytest.raises(ResponseValidationError):
             vlm.predict_next_action(
                 router_client,
-                vlm.ActionRequest(screenshot_b64=png_screenshot, instruction="tap"),
+                vlm.ActionRequest(
+                    screenshot_b64=png_screenshot, instruction="tap", required_pointers=1
+                ),
                 settings=ACTION,
             )
     assert len(router_requests) == 3
@@ -2571,7 +2677,9 @@ def test_text_planning_establishes_the_intended_field_before_typing(
     png_screenshot: str,
     chat_response: Callable[..., httpx.Response],
 ) -> None:
-    router_responses.append(chat_response(content='{"element":null,"instruction":"Tap Note"}'))
+    router_responses.append(
+        chat_response(content='{"element":null,"instruction":"Tap Note","required_pointers":1}')
+    )
     vlm.plan_next_action(
         router_client,
         vlm.PlanRequest(
@@ -2598,8 +2706,10 @@ def test_observed_feedback_scope_preserves_app_controls_and_action_context(
             chat_response(
                 content='{"page_description":"Calculator","state":{},"elements":[{"description":"App Share","position":"top"}]}'
             ),
-            chat_response(content='{"element":1,"instruction":"Tap unobscured app Share"}'),
-            chat_response(content='{"action":"wait"}'),
+            chat_response(
+                content='{"element":1,"instruction":"Tap unobscured app Share","required_pointers":1}'
+            ),
+            chat_response(content='{"action":"wait","required_pointers":0}'),
             chat_response(content='{"same":true}'),
         ]
     )
@@ -2628,6 +2738,7 @@ def test_observed_feedback_scope_preserves_app_controls_and_action_context(
             action_history=["Copy app result"],
             overall_task="Inspect calculator actions",
             system_feedback=True,
+            required_pointers=1,
         ),
         settings=PAGE_DETAIL,
     )
@@ -2651,3 +2762,72 @@ def test_observed_feedback_scope_preserves_app_controls_and_action_context(
     assert "Copy app result" in prompts[2]
     assert "Inspect calculator actions" in prompts[2]
     assert "compare the app outside them" in prompts[3]
+
+
+@pytest.mark.parametrize("pointers", [None, True, "1", 1.5, -1, 3])
+def test_planned_pointer_requirement_is_checked_before_grounding(
+    pointers: object,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    instruction = "Swipe downward with three fingers through the center of the settings list"
+    router_responses.append(
+        chat_response(
+            content=json.dumps(
+                {"element": None, "instruction": instruction, "required_pointers": pointers}
+            )
+        )
+    )
+    plan = vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot, page_description="Settings", node="s0", explored_edges=[]
+        ),
+        settings=PAGE_DETAIL,
+    )
+    action, _ = vlm.predict_next_action(
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot,
+            instruction=plan.instruction,
+            required_pointers=plan.required_pointers,
+        ),
+        settings=ACTION,
+    )
+    assert plan.instruction == instruction
+    assert action["action"] == "unsupported"
+    assert len(router_requests) == 1
+    assert router_responses == []
+    body = json.loads(router_requests[0].content)
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert "required_pointers" in schema["required"]
+    assert vlm.GESTURE_CAPABILITIES in body["messages"][0]["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"action": "click", "required_pointers": 0, "coordinate": [500, 500]}, None),
+        ({"action": "type", "required_pointers": 1, "text": "x"}, None),
+        ({"action": "click", "required_pointers": 1, "coordinate": [500, 500]}, 0),
+        ({"action": "unsupported", "required_pointers": 1, "reason": " "}, None),
+        ({"action": "swipe", "direction": "up"}, None),
+    ],
+)
+def test_inconsistent_or_missing_capability_is_an_explicit_unsupported_result(
+    args: dict[str, object], expected: int | None
+) -> None:
+    action = vlm.tool_call_to_action(args, expected_pointers=expected)
+    assert action["action"] == "unsupported"
+    assert action["reason"]
+
+
+@pytest.mark.parametrize("action", ["wait", "end"])
+def test_grounder_can_decline_a_supported_pointer_plan(action: str) -> None:
+    result = vlm.tool_call_to_action(
+        {"action": action, "required_pointers": 0}, expected_pointers=1
+    )
+    assert result["action"] == action
