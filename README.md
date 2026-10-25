@@ -505,6 +505,21 @@ where they led, and then how many more were tried. However many actions the
 self-loop collects, the prompt grows only with the actions of edges to other nodes.
 `app-graph-audit --re-explore` plans with the same prompt.
 
+Ordinary exploration also supplies a bounded recent-route hint when two closed
+routes of two through four steps repeat the same nodes and recorded pixels below
+the status bar. The hint lists the route and action families and asks the planner
+to consider relevant untried controls while preserving useful pending workflows
+and the existing mutation rules. Hidden state can change even when pixels repeat,
+so this context leaves the next action to the planner. Moving images can prevent
+an exact repeat from being recognized.
+
+This history holds at most eight ordinary transitions over known edges. New edges,
+missing observations, changed node identities, discontinuities, waits, unsupported
+instructions, outages, external transitions, replay, due checkpoints and fresh
+exploration clear it.
+Instruction paraphrases and description changes do not establish progress. The
+history stays in memory and adds no counted step or model request.
+
 When the last 15 steps planned on a node were all self-loops on it, the next step
 there plans nothing: it [continues from a ranked target](#replaying-to-a-node), as a
 step that plans Back where Back leaves the app does. A step to another node and such

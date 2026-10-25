@@ -2180,6 +2180,7 @@ class PlanRequest:
         back_leaves_app: Whether Back on this screen leaves the app, which the prompt
             then says.
         system_feedback: Ownership evidence marks gray image regions as system feedback.
+        navigation_feedback: Bounded context from repeated ordinary exploration routes.
     """
 
     screenshot_b64: str
@@ -2191,6 +2192,7 @@ class PlanRequest:
     input_status: str = "Keyboard visibility and focused field are unknown."
     back_leaves_app: bool = False
     system_feedback: bool = False
+    navigation_feedback: str = ""
 
 
 def _tried_actions(edge: dict[str, Any]) -> list[tuple[str, str]]:
@@ -2282,6 +2284,7 @@ def plan_next_action(
         GESTURE_CAPABILITIES
         + "\n"
         + ownership_hint
+        + request.navigation_feedback
         + NEXT_ACTION_PLAN_PROMPT.format(
             app_name=request.app_name,
             page_description=request.page_description,
