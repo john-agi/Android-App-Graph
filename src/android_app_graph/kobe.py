@@ -381,18 +381,23 @@ class Kobe:
             return checkpoint_node, self.controller.get_state()
 
     def navigate_to_node(self, target_node: str) -> str:
-        """Navigate to a target node by restarting the app and replaying saved edges.
+        """Navigate to an app node by restarting the app and replaying saved edges.
 
         This executes the shortest path of already-known actions to the target node
         from the node of the screen the app opens on, when one leads from it, and
         otherwise from the start node. Each action's setup is sent before it.
 
         Args:
-            target_node: The node ID to navigate to.
+            target_node: The app-owned node ID to navigate to.
 
         Returns:
             The node ID actually reached (verified via identify_state).
+
+        Raises:
+            ValueError: An external boundary target is requested. Its resolved ID is
+                checked before replay restarts the app or sends device input.
         """
+        self._validate_replay_target(target_node)
         self._navigation_history.clear()
         with self.controller.source("navigation_replay"):
             reached = self._replay_to(target_node)
@@ -401,6 +406,13 @@ class Kobe:
             arrival_state = self._require_node(reached).get("last_detail_snapshot", {})
         self._setup_trail.begin(reached, arrival_state)
         return reached
+
+    def _validate_replay_target(self, target_node: str) -> None:
+        resolved = self.graph.resolve_node_id(target_node)
+        node = self.graph.get_node(resolved) or {}
+        if resolved.startswith("ext_") or node.get("is_external"):
+            msg = f"External replay target {target_node!r} is a boundary visit; choose an app node."
+            raise ValueError(msg)
 
     def _replay_to(self, target_node: str) -> str:
         start_node = self.graph.get_start_node()
@@ -599,6 +611,8 @@ class Kobe:
                     resume_from = self.graph.get_resume_target(package_name=self.package_name)
                     self.logger.info("Auto-selected resume target: %s", resume_from)
 
+                if resume_from is not None:
+                    self._validate_replay_target(resume_from)
                 if resume_from and resume_from in self.graph.graph:
                     try:
                         node = self.navigate_to_node(resume_from)

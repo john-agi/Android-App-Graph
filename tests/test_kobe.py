@@ -1738,6 +1738,32 @@ def test_resuming_from_a_node_plans_the_first_step_from_the_node_the_replay_reac
 
 
 @pytest.mark.usefixtures("no_sleep")
+def test_auto_resume_with_only_external_nodes_starts_from_the_current_screen(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kobe.graph.graph.add_node("ext_com.foreign", replay_misses=0)
+    assert kobe.graph.get_resume_target(package_name="com.demo") is None
+
+    def identify(_observation: Observation, **_kwargs: object) -> str:
+        kobe.graph.graph.add_node("s0_home", replay_misses=0)
+        return "s0_home"
+
+    planned_from: list[object] = []
+    monkeypatch.setattr(kobe.graph, "identify_state", identify)
+    _describing_by_node_id(kobe, monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from="auto")
+
+    assert planned_from == ["s0_home"]
+
+
+@pytest.mark.usefixtures("no_sleep")
 def test_resuming_from_a_node_missing_from_the_graph_starts_from_the_current_screen(
     kobe: Kobe,
     router_responses: list[httpx.Response],
