@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import threading
 import time
+from copy import copy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -239,13 +240,14 @@ class FailureMonitor:
         records = tuple(
             line for line in crash.text.splitlines() if not line.startswith("---------")
         )
-        coverage = self._cursor.observe(
+        next_cursor = copy(self._cursor)
+        coverage = next_cursor.observe(
             records, boot, clock, time.monotonic(), readable=crash.status == "ok"
         )
         events = crash_evidence(crash.text, self.package) + exit_evidence(
             sources["exits"].text, self.package
         )
-        self._latest_counts = {
+        counts = {
             kind: sum(
                 event.kind == kind and event.attribution == "target_process_name"
                 for event in events
@@ -283,7 +285,7 @@ class FailureMonitor:
             "coverage": asdict(coverage),
             "sources": raw,
             "evidence": [asdict(event) for event in events],
-            "target_process_name_counts": self._latest_counts,
+            "target_process_name_counts": counts,
             "evidence_scope": "retained_snapshot; occurrences can overlap other captures",
             "process_samples": "current non-atomic metadata; historical instances remain unresolved",
         }
@@ -291,6 +293,8 @@ class FailureMonitor:
             f"{sequence:04d}.json", (json.dumps(capture, indent=2) + "\n").encode()
         ):
             return
+        self._cursor = next_cursor
+        self._latest_counts = counts
         self._captures += 1
         self._report("running", None)
 
