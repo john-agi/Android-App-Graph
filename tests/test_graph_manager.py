@@ -3882,8 +3882,8 @@ def test_find_path_prefers_the_fewest_total_steps() -> None:
 
     assert path == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {"action": "a"}, ()),
-        PathStep("s3_results", {"action": "b"}, ()),
+        PathStep("s1_settings", {"action": "a"}, (), 0),
+        PathStep("s3_results", {"action": "b"}, (), 0),
     ]
 
 
@@ -3896,7 +3896,10 @@ def test_find_path_picks_the_action_with_the_fewest_steps() -> None:
 
     path = gm.find_path("s0_home", "s1_settings")
 
-    assert path == [PathStep("s0_home", {}, ()), PathStep("s1_settings", {"action": "short"}, ())]
+    assert path == [
+        PathStep("s0_home", {}, ()),
+        PathStep("s1_settings", {"action": "short"}, (), 1),
+    ]
 
 
 def test_find_path_returns_the_setup_of_the_action_it_takes() -> None:
@@ -3907,7 +3910,7 @@ def test_find_path_returns_the_setup_of_the_action_it_takes() -> None:
 
     assert gm.find_path("s0_home", "s1_settings") == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {"action": "row"}, (_SCROLL,)),
+        PathStep("s1_settings", {"action": "row"}, (_SCROLL,), 0),
     ]
 
 
@@ -3925,7 +3928,7 @@ def test_find_path_sends_no_setup_for_an_entry_that_is_not_a_list_of_actions(
     path = gm.find_path("s0_home", "s1_settings")
 
     assert path is not None
-    assert path[1] == PathStep("s1_settings", {"action": "row"}, ())
+    assert path[1] == PathStep("s1_settings", {"action": "row"}, (), 0)
 
 
 def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
@@ -3947,8 +3950,8 @@ def test_find_path_weighs_an_action_by_its_setup_and_its_own_steps() -> None:
 
     assert path == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_settings", {"action": "a"}, ()),
-        PathStep("s3_results", {"action": "b"}, ()),
+        PathStep("s1_settings", {"action": "a"}, (), 0),
+        PathStep("s3_results", {"action": "b"}, (), 0),
     ]
 
 
@@ -3986,7 +3989,7 @@ def test_find_path_opens_the_menu_of_an_unknown_setup_with_the_fewest_recorded_a
 
     assert gm.find_path("s0_home", "s1_recent") == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_recent", _RECENT, (_SWIPE_DRAWER_OPEN,)),
+        PathStep("s1_recent", _RECENT, (_SWIPE_DRAWER_OPEN,), 0),
     ]
 
 
@@ -4002,7 +4005,7 @@ def test_find_path_sends_the_known_setup_of_an_action_sent_in_a_menu() -> None:
 
     assert gm.find_path("s0_home", "s1_recent") == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_recent", _RECENT, (_OPEN_DRAWER,)),
+        PathStep("s1_recent", _RECENT, (_OPEN_DRAWER,), 0),
     ]
 
 
@@ -4020,7 +4023,7 @@ def test_no_path_takes_an_action_sent_in_a_menu_that_no_recorded_action_opens() 
 
     assert gm.find_path("s0_home", "s1_recent") == [
         PathStep("s0_home", {}, ()),
-        PathStep("s1_recent", _TAP, (_SCROLL,)),
+        PathStep("s1_recent", _TAP, (_SCROLL,), 1),
     ]
     assert _candidate_ids(gm) == ["s1_recent", "s0_home"]
 
@@ -6508,4 +6511,21 @@ def test_merged_equal_actions_keep_the_selected_variant_index(screen: Screens) -
     path = gm.find_path("s0", "s1")
     assert path is not None
     assert path[1].setup == ()
-    assert path[1]._asdict().get("action_index") == 1
+    assert path[1].action_index == 1
+    assert gm.can_replay_action(current, "s0", "s1", path[1].action, index=path[1].action_index)
+    assert not gm.can_replay_action(current, "s0", "s1", path[1].action)
+    assert not gm.can_replay_action(current, "s0", "s1", path[1].action, index=0)
+
+
+@pytest.mark.parametrize("index", [-1, 1])
+def test_action_replay_rejects_an_out_of_range_variant(screen: Screens, index: int) -> None:
+    gm, observed = action_context_graph(screen, [])
+    assert not gm.can_replay_action(observed, "s0", "s1", _TAP, index=index)
+
+
+@pytest.mark.parametrize("index", [None, 0])
+def test_action_replay_rejects_a_payload_outside_the_selected_variant(
+    screen: Screens, index: int | None
+) -> None:
+    gm, observed = action_context_graph(screen, [])
+    assert not gm.can_replay_action(observed, "s0", "s1", _SCROLL, index=index)

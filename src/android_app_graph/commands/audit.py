@@ -464,6 +464,7 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
                     previous.node,
                     step.node,
                     step.action,
+                    index=step.action_index,
                 ):
                     logger.warning(
                         "Replay action context is unverified; identifying the current screen"
@@ -818,7 +819,9 @@ def _correct_flagged_edge(
     for setup_action in setup:
         _execute(run.recorder, setup_action)
     before = run.recorder.get_state()
-    if not run.graph.can_replay_action(Observation.from_state(before), source, target, action):
+    if not run.graph.can_replay_action(
+        Observation.from_state(before), source, target, action, index=index
+    ):
         return {"status": "unverified", "reached": _identify(run, before)}
     _execute(run.recorder, action)
     after = run.recorder.get_state()

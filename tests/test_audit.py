@@ -3380,8 +3380,23 @@ def test_audit_stops_after_menu_preparation_when_action_context_is_unverified(
 ) -> None:
     graph = _flagged_graph()
     _describing_by_node_id(graph, monkeypatch)
-    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE]]
-    monkeypatch.setattr(graph, "can_replay_action", lambda *_args: False)
+    graph.graph["s0_home"]["s1_detail"]["setups"] = [[_SWIPE, _SWIPE]]
+    graph.graph["s0_home"]["s1_detail"]["instructions"] = ["other context"]
+    graph.graph.add_node("s3_alternate", **dict(graph.graph.nodes["s0_home"]))
+    graph.add_edge(
+        "s3_alternate",
+        "s1_detail",
+        [_DETAIL_TAP],
+        details=EdgeDetails(instruction=_FLAGGED, setup=[_SWIPE]),
+    )
+    graph.merge_nodes("s0_home", "s3_alternate")
+    selected: list[object] = []
+
+    def verify(*_args: object, index: object) -> bool:
+        selected.append(index)
+        return False
+
+    monkeypatch.setattr(graph, "can_replay_action", verify)
     _identifying(graph, monkeypatch, "s0_home", "s0_home")
     issue = (
         _retry()
@@ -3389,6 +3404,7 @@ def test_audit_stops_after_menu_preparation_when_action_context_is_unverified(
         else {**_inspection(), "type": "explore_node", "node": "s1_detail", "expected_pages": []}
     )
     (result,) = _re_explore(graph, [issue], _ReplayController(device_log), client, tmp_path)
+    assert selected == [1]
     assert _DETAIL_TAP not in device_log
     assert _SWIPE in device_log
     assert result.get("reached", result.get("navigated_to")) == "s0_home"

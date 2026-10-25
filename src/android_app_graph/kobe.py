@@ -436,13 +436,15 @@ class Kobe:
         )
 
         try:
-            for i, (node_id, action, setup) in enumerate(path[1:], start=1):
+            for i, step in enumerate(path[1:], start=1):
+                node_id, action, setup = step.node, step.action, step.setup
                 self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
                 if not self.graph.can_replay_action(
                     Observation.from_state(self.controller.get_state()),
                     path[i - 1][0],
                     node_id,
                     action,
+                    index=step.action_index,
                 ):
                     self.logger.warning(
                         "Replay action context is unverified; identifying the current screen"

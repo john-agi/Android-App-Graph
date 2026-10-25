@@ -5128,7 +5128,7 @@ def test_reconstructed_menu_checks_operation_context_before_its_dependent_input(
         )
     graph.add_edge("s0_home", "s1_picker", copy, details=EdgeDetails(open_menu="overflow"))
     graph.graph["s0_home"]["s1_picker"]["action_sources"] = ["selected-menu-observation"]
-    monkeypatch.setattr(graph, "can_replay_action", lambda *_args: False, raising=False)
+    monkeypatch.setattr(graph, "can_replay_action", lambda *_args, **_kwargs: False, raising=False)
     _identifying(replaying_kobe, monkeypatch, "s0_home", "s0_home")
 
     reached = replaying_kobe.navigate_to_node("s1_picker")
@@ -5160,7 +5160,7 @@ def test_replay_never_sends_the_dependent_action_after_context_capture_or_verifi
             raise RuntimeError(message)
         return as_object_dict(original(deadline=deadline))
 
-    def verify(*_args: object) -> bool:
+    def verify(*_args: object, **_kwargs: object) -> bool:
         message = "verification unavailable"
         raise RuntimeError(message)
 
@@ -5169,3 +5169,38 @@ def test_replay_never_sends_the_dependent_action_after_context_capture_or_verifi
     with pytest.raises(RuntimeError, match="unavailable"):
         replaying_kobe.navigate_to_node("s1_picker")
     assert device_log == [*_FIRST_RESTART, _OPEN_DRAWER]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("accepted", [False, True])
+def test_replay_passes_the_selected_merged_variant_to_context_validation(
+    replaying_kobe: Kobe,
+    device_log: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_graph_file: Callable[..., None],
+    accepted: bool,
+) -> None:
+    graph_file = tmp_path / "merged.json"
+    write_graph_file(
+        graph_file,
+        {"nodes": [{"id": node} for node in ("s0_home", "s1_picker", "s2_alternate")]},
+        embedding_model="provider/embedding",
+    )
+    graph = replaying_kobe.graph
+    graph.load_graph(graph_file)
+    graph.add_edge("s0_home", "s1_picker", _OPEN_RECENT, details=EdgeDetails(setup=[_OPEN_DRAWER]))
+    graph.add_edge("s2_alternate", "s1_picker", dict(_OPEN_RECENT), details=EdgeDetails(setup=[]))
+    graph.merge_nodes("s0_home", "s2_alternate")
+    selected: list[object] = []
+
+    def verify(*_args: object, index: object) -> bool:
+        selected.append(index)
+        return accepted
+
+    monkeypatch.setattr(graph, "can_replay_action", verify)
+    expected = "s1_picker" if accepted else "s0_home"
+    _identifying(replaying_kobe, monkeypatch, "s0_home", expected)
+    assert replaying_kobe.navigate_to_node("s1_picker") == expected
+    assert selected == [1]
+    assert device_log == [*_FIRST_RESTART, *([_OPEN_RECENT] if accepted else [])]

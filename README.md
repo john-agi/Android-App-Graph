@@ -1299,7 +1299,8 @@ An action's `action_sources` entry is its actual before-observation ID, independ
 of whether its arrival setup is known. The capture may not be a node member when
 an exact image reused an existing member. Its record and image must be retained;
 `null` cannot qualify a reconstructed menu. Graphs without this aligned list need
-fresh exploration. A shorter replacement setup retains its own source capture.
+fresh exploration or a fresh build from retained step observations. A shorter
+replacement setup retains its own source capture.
 
 An action's entry in `open_menus` is the `open_menu` of the source node's
 [state](#graph-nodes) when the action was sent, such as `"navigation drawer"`, or

@@ -164,11 +164,13 @@ class PathStep(NamedTuple):
     """One step of a path ``find_path`` returns: the node it reaches, the recorded action
     that reaches it, and that action's setup, the device actions sent before it on the
     node the step leaves. The first step is the path's start, with the action ``{}`` and
-    no setup."""
+    no setup or action index. Other steps retain the selected edge-list index, since
+    merged actions can have equal inputs but different preparations and captures."""
 
     node: str
     action: dict[str, Any] | list[dict[str, Any]]
     setup: tuple[dict[str, Any], ...]
+    action_index: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -2520,6 +2522,8 @@ class GraphManager:
         source: str,
         target: str,
         action: dict[str, Any] | list[dict[str, Any]],
+        *,
+        index: int | None = None,
     ) -> bool:
         """Check a recorded action after preparation, before sending its inputs.
 
@@ -2527,7 +2531,13 @@ class GraphManager:
         operation. Node identity alone does not establish its selection or controls.
         """
         edge = self.graph[source][target]
-        index = edge["actions"].index(action)
+        if index is None:
+            matches = [i for i, candidate in enumerate(edge["actions"]) if candidate == action]
+            if len(matches) != 1:
+                return False
+            index = matches[0]
+        if not 0 <= index < len(edge["actions"]) or edge["actions"][index] != action:
+            return False
         reconstructed = edge["setups"][index] is None and edge["open_menus"][index] is not None
         member = edge["action_sources"][index]
         if member is None:
@@ -3118,7 +3128,9 @@ class GraphManager:
         for s, t in itertools.pairwise(node_path):
             best = min(self._replay_options(s, t), key=lambda option: option.cost)
             result.append(
-                PathStep(_node_id(t), self.graph[s][t]["actions"][best.index], best.setup)
+                PathStep(
+                    _node_id(t), self.graph[s][t]["actions"][best.index], best.setup, best.index
+                )
             )
 
         return result
@@ -3166,7 +3178,8 @@ class GraphManager:
                     return None
 
                 for i in range(1, len(nav_path)):
-                    node_id, action, setup = nav_path[i]
+                    step = nav_path[i]
+                    node_id, action, setup = step.node, step.action, step.setup
                     prev_node = nav_path[i - 1].node
                     edge_data = self.graph[prev_node][node_id]
                     path_steps.append(
