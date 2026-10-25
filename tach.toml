@@ -28,6 +28,7 @@ depends_on = [
     "android_app_graph.utils.graph_manager",
     "android_app_graph.utils.logging",
     "android_app_graph.utils.vlm_utils",
+    "android_app_graph.modal_context",
 ]
 
 [[modules]]
@@ -59,6 +60,7 @@ depends_on = [
     "android_app_graph.payloads",
     "android_app_graph.screen_image",
     "android_app_graph.system_surfaces",
+    "android_app_graph.modal_context",
 ]
 
 [[modules]]
@@ -101,6 +103,7 @@ depends_on = [
     "android_app_graph.step_log",
     "android_app_graph.utils",
     "android_app_graph.utils.vlm_utils",
+    "android_app_graph.modal_context",
 ]
 
 [[modules]]
@@ -111,6 +114,7 @@ depends_on = [
     "android_app_graph.retrying",
     "android_app_graph.screen_image",
     "android_app_graph.utils",
+    "android_app_graph.modal_context",
 ]
 
 [[modules]]
@@ -139,4 +143,8 @@ depends_on = ["android_app_graph.device", "android_app_graph.display_state", "an
 
 [[modules]]
 path = "android_app_graph.system_surfaces"
+depends_on = ["android_app_graph.payloads"]
+
+[[modules]]
+path = "android_app_graph.modal_context"
 depends_on = ["android_app_graph.payloads"]

@@ -385,8 +385,10 @@ def _identify(
         run.graph.record_external_app_visit(Observation.from_state(device_state))
         device_state = _recover_system_surface(run, device_state)
     observation = Observation.from_state(device_state)
-    run.recorder.record_match(observation, expected_observation)
-    return run.graph.identify_state(observation, expected_observation=expected_observation)
+    match_input = run.recorder.record_match(observation, expected_observation)
+    return run.graph.identify_state(
+        observation, expected_observation=expected_observation, match_input=match_input
+    )
 
 
 def _recover_system_surface(run: _ReExploreRun, state: dict[str, Any]) -> dict[str, Any]:

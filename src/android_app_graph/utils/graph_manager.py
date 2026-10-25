@@ -86,6 +86,7 @@ from android_app_graph.member_groups import (
     unit_vector,
 )
 from android_app_graph.merge_rounds import NodePair, PairRounds
+from android_app_graph.modal_context import MatchInput, ModalContext, Surface
 from android_app_graph.payloads import (
     as_int_list,
     as_object_dict,
@@ -359,6 +360,7 @@ class _Described(NamedTuple):
     state: dict[str, object]
     elements: list[dict[str, str]]
     is_external_web: bool
+    surface: Surface = Surface()
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -366,6 +368,7 @@ class _Described(NamedTuple):
             "state": self.state,
             "elements": self.elements,
             "is_external_web": self.is_external_web,
+            "surface": self.surface.as_record(),
         }
 
     @classmethod
@@ -392,6 +395,7 @@ class _Described(NamedTuple):
                 for element in elements
             ],
             describe.get("is_external_web") is True,
+            Surface.from_record(describe.get("surface")),
         )
 
 
@@ -414,6 +418,7 @@ class _StoredScreen(NamedTuple):
     pixel_hash: str
     described: _Described
     black_activity: str | None = None
+    modal_context: ModalContext = ModalContext()
 
 
 class ClosestMember(NamedTuple):
@@ -527,7 +532,17 @@ class _MemberReply(NamedTuple):
 
 
 def _shown_member_key(member: str, shown: DescribedScreenshot) -> str:
-    return evidence_key([member, shown.description, shown.screenshot_b64, shown.system_feedback])
+    return evidence_key(
+        [
+            member,
+            shown.description,
+            shown.screenshot_b64,
+            shown.system_feedback,
+            shown.opening_context,
+            shown.opening_images,
+            shown.modal_origin,
+        ]
+    )
 
 
 class ShownMembers(NamedTuple):
@@ -1031,7 +1046,14 @@ def _stored_screens(
         if described is None or not pixel_hash:
             undescribed.append(member)
         else:
-            stored[member] = _StoredScreen(pixel_hash, described, black_activity)
+            stored[member] = _StoredScreen(
+                pixel_hash,
+                described,
+                black_activity,
+                ModalContext.from_record(lines.get(member, {}).get("modal_context"))
+                if black_activity is None
+                else ModalContext(),
+            )
     if undescribed:
         problem = (
             f"member(s) whose record in {steps_dir} holds no pixel hash, or that have no "
@@ -1194,6 +1216,8 @@ class GraphManager:
         line: dict[str, object] = {"observation": observation.observation_id}
         if describe is not None:
             line["describe"] = dict(describe)
+        stored = self._stored_screens.get(observation.observation_id)
+        line["modal_context"] = stored.modal_context.as_record() if stored is not None else []
         line["identify"] = decision.as_record(node_id)
         append_json_line(self._require_identify_file(), line)
 
@@ -1446,8 +1470,8 @@ class GraphManager:
         node and every such member, and so does a node without members.
         """
         pair = closest_pair(
-            _member_observations(self.graph.nodes[existing]),
-            _member_observations(self.graph.nodes[new]),
+            self._verification_members(existing),
+            self._verification_members(new),
             self._member_units([existing, new]),
         )
         if pair is None:
@@ -1502,12 +1526,67 @@ class GraphManager:
 
     def _described_app_member(self, member: str, description: str) -> DescribedScreenshot:
         observed = self._member_observation(member)
+        context = (
+            self._stored_screens[member].modal_context
+            if member in self._stored_screens
+            else ModalContext()
+        )
+        opening_text, opening_images = self._modal_evidence(member)
         return DescribedScreenshot(
-            observed.app_image, description, system_feedback=bool(observed.system_overlays)
+            observed.app_image,
+            description,
+            system_feedback=bool(observed.system_overlays),
+            opening_context=opening_text,
+            opening_images=opening_images,
+            modal_origin="known"
+            if context.origin_known
+            else "unknown"
+            if context.frames
+            else "page",
         )
 
+    def _modal_evidence(self, member: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        stored = self._stored_screens.get(member)
+        if stored is None or not stored.modal_context.frames:
+            return "Foreground is a page, with no active modal opening.", ()
+        text = ["Active modal opening evidence (outermost first; capture IDs are not identities):"]
+        images: list[tuple[str, str]] = []
+        for depth, frame in enumerate(stored.modal_context.frames, 1):
+            opened = self._stored_screens.get(frame.opened)
+            purpose = opened.described.page_description if opened is not None else "unknown modal"
+            text.append(f"Depth {depth}: {purpose}.")
+            opener = frame.source.previous
+            if opener is None:
+                text.append("Opening destination and initiating input are unknown.")
+                continue
+            caption = (
+                f"Depth {depth} opening destination: {self.description(opener)} "
+                f"(current graph node {self.node_of(opener)}). "
+                f"Observed input: {json.dumps(frame.source.actions, ensure_ascii=False)}"
+            )
+            images.append((caption, self._app_member_image(opener)))
+        return "\n".join(text), tuple(images)
+
+    def _description_opening(self, source: MatchInput) -> tuple[str, tuple[tuple[str, str], ...]]:
+        if source.previous is None:
+            return (
+                "No preceding matched capture is available. A visible modal has unknown origin.",
+                (),
+            )
+        text, images = self._modal_evidence(source.previous)
+        caption = (
+            f"Preceding matched capture: {self.description(source.previous)}. "
+            f"Actual input since then: {json.dumps(source.actions, ensure_ascii=False)}. "
+            "These inputs are observations, not evidence that a modal necessarily opened."
+        )
+        return text, (*images, (caption, self._app_member_image(source.previous)))
+
     def identify_state(
-        self, observation: Observation, *, expected_observation: str | None = None
+        self,
+        observation: Observation,
+        *,
+        expected_observation: str | None = None,
+        match_input: MatchInput | None = None,
     ) -> str:
         """Return the node the screen in ``observation`` belongs to, creating one when
         none does, add ``observation`` to its members, and append what decided it to the
@@ -1517,9 +1596,10 @@ class GraphManager:
         compared with the members of the in-app nodes of its ``package``, cheapest
         evidence first:
 
-        1. A member with a describe output and the same ``pixel_hash`` decides alone,
+        1. A page member with a describe output and the same ``pixel_hash`` decides alone,
            when it belongs to one node only: the screen takes that member's describe
-           output, so neither the describe call nor the verifier runs.
+           output, so neither the describe call nor the verifier runs. Modal members
+           always take the describe and verification path with their opening evidence.
         2. The describe call describes the screen; web content from outside the app
            goes to ``EXTERNAL_WEB_NODE``.
         3. The expected node, the node that lists ``expected_observation``, a screenshot
@@ -1558,6 +1638,16 @@ class GraphManager:
         if exact is not None:
             return self._record_exact_match(observation, *exact, decision)
 
+        match_input = match_input or MatchInput()
+        previous = self._stored_screens.get(match_input.previous or "")
+        if (
+            previous is None
+            or match_input.actions is None
+            or self._member_observation(match_input.previous or "").package != observation.package
+        ):
+            match_input, previous = MatchInput(), None
+        prior_context = previous.modal_context if previous is not None else ModalContext()
+        opening_text, opening_images = self._description_opening(match_input)
         described = _Described(
             *describe_page_and_state(
                 client,
@@ -1569,6 +1659,8 @@ class GraphManager:
                     or None,
                     existing_keys=same_package.keys or None,
                     system_feedback=bool(observation.system_overlays),
+                    opening_context=opening_text,
+                    opening_images=opening_images,
                 ),
                 settings=page_detail,
             )
@@ -1591,12 +1683,16 @@ class GraphManager:
             identification = _Identification(
                 observation, image_vector, screen, text_vector, decision
             )
+            self._stored_screens[observation.observation_id] = _StoredScreen(
+                observation.pixel_hash,
+                described,
+                modal_context=prior_context.advance(
+                    observation.observation_id, match_input, described.surface
+                ),
+            )
             node_id = self._assign(identification)
             self._text_vectors[observation.observation_id] = identification.text_vector
             self._descriptions[observation.observation_id] = identification.screen.description
-            self._stored_screens[observation.observation_id] = _StoredScreen(
-                observation.pixel_hash, described
-            )
         self._record_decision(observation, decision, node_id, described.as_record())
         return node_id
 
@@ -1685,6 +1781,8 @@ class GraphManager:
                     and stored.black_activity is None
                     and stored.pixel_hash == pixel_hash
                 ):
+                    if stored.described.surface.kind == "modal":
+                        return None
                     matches[node_id] = member
         if len(matches) > 1:
             logger.info(
@@ -1871,10 +1969,40 @@ class GraphManager:
                 candidate.sources[source.name] = score
         return sorted(candidates.values(), key=_short_list_order)
 
+    def _verification_members(self, node_id: str) -> list[str]:
+        members = _member_observations(self.graph.nodes[node_id])
+        known = [
+            member
+            for member in members
+            if member in self._stored_screens
+            and self._stored_screens[member].modal_context.origin_known
+        ]
+        return known or members
+
+    def _verify_screens(
+        self, existing: DescribedScreenshot, new: DescribedScreenshot
+    ) -> dict[str, Any]:
+        if {existing.modal_origin, new.modal_origin} == {"unknown", "known"}:
+            return {
+                "same": False,
+                "answered": False,
+                "reason": "One modal opening destination is unknown; identity remains unresolved.",
+            }
+        client, page_detail = self._require_page_detail()
+        return verify_same_node(client, existing=existing, new=new, settings=page_detail)
+
     def _verify(self, identification: _Identification, node_id: str, member: str) -> str | None:
         """Ask the verifier whether the identified screen is ``node_id``'s ``member``, and
         return ``node_id`` when it says so; no answer counts as a rejection, and the first
         rejection refines the screen's description."""
+        witnesses = self._verification_members(node_id)
+        if member not in witnesses:
+            member = max(
+                witnesses,
+                key=lambda witness: cosine_similarity(
+                    identification.image_vector, self._image_vectors[witness]
+                ),
+            )
         verdict = self._verifier_reply(identification, node_id, member)
         same = verdict.get("same") is True
         answered = verdict.get("answered") is not False
@@ -1922,17 +2050,12 @@ class GraphManager:
                 member, identification.observation.observation_id, verdicts=verdicts
             )
             return {"same": known.same, "answered": known.answered, "reason": known.reason}
-        client, page_detail = self._require_page_detail()
         (description,) = self._member_descriptions(node_id, [member])
-        return verify_same_node(
-            client,
+        return self._verify_screens(
             existing=self._described_app_member(member, description),
-            new=DescribedScreenshot(
-                identification.observation.app_image,
-                identification.screen.description,
-                system_feedback=bool(identification.observation.system_overlays),
+            new=self._described_app_member(
+                identification.observation.observation_id, identification.screen.description
             ),
-            settings=page_detail,
         )
 
     def verify_members(self, existing: str, new: str, *, verdicts: MemberVerdicts) -> MemberVerdict:
@@ -1990,7 +2113,7 @@ class GraphManager:
         A member without a description raises ``ValueError`` naming every such member
         before any question is asked.
         """
-        client, page_detail = self._require_page_detail()
+        _, page_detail = self._require_page_detail()
         descriptions: dict[str, str] = {}
         undescribed: list[str] = []
         for question in questions:
@@ -2016,12 +2139,7 @@ class GraphManager:
                 if verdicts is self._checkpoint_verdicts
                 else None
             )
-            reply = verify_same_node(
-                client,
-                existing=existing,
-                new=new,
-                settings=page_detail,
-            )
+            reply = self._verify_screens(existing, new)
             return _MemberReply(
                 MemberVerdict(
                     reply.get("same") is True,

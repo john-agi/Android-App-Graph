@@ -31,6 +31,7 @@ from openrouter.embeddings import Embeddings
 from openrouter.errors import ResponseValidationError
 from openrouter.operations.createembeddings import CreateEmbeddingsUsage
 
+from android_app_graph.modal_context import Surface
 from android_app_graph.payloads import as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UNUSABLE_OUTPUT_ATTEMPTS, UnusableOutputError
 from android_app_graph.screen_image import encode_screenshot
@@ -449,10 +450,15 @@ _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
             "page_describe_and_state",
             "openai/gpt-6.1-sol",
             (
-                '{"page_description":"home","state":{"tab":"all"},'
-                '"elements":[{"description":"Search","position":"top"}]}'
+                '{"page_description": "home", "state": {"tab": "all"}, "elements": [{"description": "Search", "position": "top"}], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
-            ("home", {"tab": "all"}, [{"description": "Search", "position": "top"}], False),
+            (
+                "home",
+                {"tab": "all"},
+                [{"description": "Search", "position": "top"}],
+                False,
+                Surface(),
+            ),
         ),
         ("verify", "node_verify", "openai/gpt-6.1-sol", '{"same":true}', {"same": True}),
         (
@@ -673,7 +679,7 @@ def _sent_schemas(
     router_responses.extend(
         chat_response(content=content)
         for content in (
-            '{"page_description":"home","state":{},"elements":[]}',
+            '{"page_description": "home", "state": {}, "elements": [], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
             '{"same":true}',
             "{}",
             "{}",
@@ -744,9 +750,11 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
     chat_response: Callable[..., httpx.Response],
 ) -> None:
     router_responses.append(
-        chat_response(content='{"page_description":"news article","is_external_web":true}')
+        chat_response(
+            content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        )
     )
-    *_, is_external_web = vlm.describe_page_and_state(
+    *_, is_external_web, _surface = vlm.describe_page_and_state(
         router_client,
         vlm.DescribeRequest(
             screenshot_b64=png_screenshot,
@@ -799,7 +807,9 @@ def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
 ) -> None:
     for known_descriptions in (None, ["Add Wi-Fi network dialog"]):
         router_responses.append(
-            chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
+            chat_response(
+                content='{"page_description": "Add Wi-Fi network dialog", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            )
         )
         vlm.describe_page_and_state(
             router_client,
@@ -843,7 +853,9 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
     dialog or full-screen picker with its own purpose is described as a screen."""
     for known_descriptions in (None, ["Add Wi-Fi network dialog"]):
         router_responses.append(
-            chat_response(content='{"page_description":"Add Wi-Fi network dialog"}')
+            chat_response(
+                content='{"page_description": "Add Wi-Fi network dialog", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            )
         )
         vlm.describe_page_and_state(
             router_client,
@@ -1203,7 +1215,7 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
 _GOOD_REPLIES: dict[str, str] = {
     "chat": "test reply",
     "action": '{"action":"click","coordinate":[500,500]}',
-    "description": '{"page_description":"home"}',
+    "description": '{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
 }
 _RESULTS: dict[str, object] = {
     "chat": "test reply",
@@ -1328,7 +1340,9 @@ def _send_every_model_call(
     """Make one call of every call type, each with its role's ``settings``."""
     responses.extend(
         [
-            reply(content='{"page_description":"home"}'),
+            reply(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             reply(content='{"same":true}'),
             reply(content="{}"),
             reply(content="{}"),
@@ -1552,11 +1566,31 @@ def test_a_wrong_vector_count_is_not_re_asked(
         ('{"page_description":', json.JSONDecodeError, "Expecting value"),
         ("[]", TypeError, "page description to be a JSON object"),
         ("{}", ValueError, "non-empty page_description"),
-        ('{"page_description":""}', ValueError, "non-empty page_description"),
-        ('{"page_description":"home","state":[]}', TypeError, "page state"),
-        ('{"page_description":"home","elements":{}}', TypeError, "page elements"),
-        ('{"page_description":"home","elements":[null]}', TypeError, "element description"),
-        ('{"page_description":"home","is_external_web":"yes"}', TypeError, "is_external_web"),
+        (
+            '{"page_description": "", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            ValueError,
+            "non-empty page_description",
+        ),
+        (
+            '{"page_description": "home", "state": [], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "page state",
+        ),
+        (
+            '{"page_description": "home", "elements": {}, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "page elements",
+        ),
+        (
+            '{"page_description": "home", "elements": [null], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "element description",
+        ),
+        (
+            '{"page_description": "home", "is_external_web": "yes", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}',
+            TypeError,
+            "is_external_web",
+        ),
     ],
 )
 def test_a_malformed_page_description_is_re_asked_once_then_raises(
@@ -2562,7 +2596,9 @@ def test_screen_identity_policy_reaches_every_model_entry(
 ) -> None:
     """Descriptions, matching and audit proposals use one modal identity policy."""
     router_responses.append(
-        chat_response(content='{"page_description":"home","same":true,"issues":[],"summary":"ok"}')
+        chat_response(
+            content='{"page_description": "home", "same": true, "issues": [], "summary": "ok", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        )
     )
     _ROLE_HELPERS[operation](router_client, png_screenshot)
     content = json.loads(router_requests[0].content)["messages"][0]["content"]
@@ -2609,7 +2645,7 @@ def test_observed_feedback_scope_preserves_app_controls_and_action_context(
     router_responses.extend(
         [
             chat_response(
-                content='{"page_description":"Calculator","state":{},"elements":[{"description":"App Share","position":"top"}]}'
+                content='{"page_description": "Calculator", "state": {}, "elements": [{"description": "App Share", "position": "top"}], "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
             chat_response(content='{"element":1,"instruction":"Tap unobscured app Share"}'),
             chat_response(content='{"action":"wait"}'),

@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from openrouter import OpenRouter
@@ -26,6 +26,7 @@ from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
 from android_app_graph.checkpoint import APP_NAME_BYTES, CHECKPOINT_INPUT_BYTES
+from android_app_graph.modal_context import Surface
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
@@ -438,6 +439,16 @@ such as a browser or a custom tab that displays an address bar or a URL. The app
 screens are false, including screens it renders in a web view and screens that mention \
 or link to a website, a privacy policy or terms of service.
 
+5. "surface": classify the foreground as "page" or "modal" using the screen identity policy.
+For a page use relation "unknown" and return_depth 0. For a modal, compare the supplied
+preceding capture, actual input and active modal frames: "open" means a newly opened
+modal, including a nested modal; "continue" means the same active modal with changed
+values/input mode/menu state; "return" means a previously active outer modal revealed
+again, with return_depth equal to that frame's supplied depth. All other relations use
+return_depth 0. Use "unknown" when the opening or relationship cannot be established.
+A previous capture alone does not prove an opening. Do not infer origins from expected
+replay destinations. Keep the opening destination and purpose in the description.
+
 Return ONLY the JSON object, nothing else.
 Example:
 {{"page_description": "product search results", "state": {{"search_query": "keyboard", "filter_brand": "logitech"}}, \
@@ -449,7 +460,7 @@ Example:
 {{"description": "Home tab", "position": "bottom navigation bar"}}, \
 {{"description": "Cart tab", "position": "bottom navigation bar"}}, \
 {{"description": "Account tab", "position": "bottom navigation bar"}}], \
-"is_external_web": false}}"""
+"is_external_web": false, "surface": {{"kind": "page", "relation": "unknown", "return_depth": 0}}}}"""
 
 NODE_VERIFY_PROMPT = """\
 You are comparing two mobile app screenshots to decide if they are the SAME screen or DIFFERENT screens.
@@ -562,6 +573,16 @@ _EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
 _PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "surface": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["page", "modal"]},
+                "relation": {"type": "string", "enum": ["open", "continue", "return", "unknown"]},
+                "return_depth": {"type": "integer", "minimum": 0, "maximum": 4},
+            },
+            "required": ["kind", "relation", "return_depth"],
+            "additionalProperties": False,
+        },
         "page_description": {
             "type": "string",
             "description": "The screen type in under 10 words, with no user-specific content.",
@@ -597,7 +618,7 @@ _PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
             "or custom tab showing an address bar or URL; the app's own web views are false.",
         },
     },
-    "required": ["page_description", "state", "elements", "is_external_web"],
+    "required": ["page_description", "state", "elements", "is_external_web", "surface"],
     "additionalProperties": False,
 }
 
@@ -941,7 +962,7 @@ def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
 
 def _parse_page_description(
     text: str,
-) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
     result = json.loads(strip_json_fences(text))
     if not isinstance(result, dict):
         msg = "Expected page description to be a JSON object"
@@ -971,7 +992,13 @@ def _parse_page_description(
     if not isinstance(is_external_web, bool):
         msg = "Expected is_external_web to be a boolean"
         raise TypeError(msg)
-    return description, as_object_dict(state), elements, is_external_web
+    return (
+        description,
+        as_object_dict(state),
+        elements,
+        is_external_web,
+        Surface.from_record(payload.get("surface")),
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -982,6 +1009,10 @@ class DescribeRequest:
     known_descriptions: list[str] | None = None
     existing_keys: list[str] | None = None
     system_feedback: bool = False
+    opening_context: str = (
+        "No preceding matched capture is available. A visible modal has unknown origin."
+    )
+    opening_images: tuple[tuple[str, str], ...] = ()
 
 
 def describe_page_and_state(
@@ -989,7 +1020,7 @@ def describe_page_and_state(
     request: DescribeRequest,
     *,
     settings: ModelSettings,
-) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
     The model always writes its own description based on what it sees. The
@@ -1002,7 +1033,7 @@ def describe_page_and_state(
             with the observed system-feedback scope.
 
     Returns:
-        (page_description, state_dict, elements_list, is_external_web)
+        (page_description, state_dict, elements_list, is_external_web, surface)
         where elements_list is a list of {"description": str, "position": str} dicts
         and is_external_web is true only for web content from outside the app.
     """
@@ -1057,12 +1088,15 @@ def describe_page_and_state(
             "role": "user",
             "content": [
                 {"type": "text", "text": f"{_SCREEN_IDENTITY_POLICY}{prompt}"},
+                {"type": "text", "text": request.opening_context},
+                *_opening_images(request.opening_images),
+                {"type": "text", "text": "Current capture to describe:"},
                 build_image_message(screenshot_b64),
             ],
         }
     ]
 
-    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
         resp = _send_chat_once(
             client,
             call_type="page_describe_and_state",
@@ -1080,13 +1114,13 @@ def describe_page_and_state(
             msg = "Malformed page description"
             raise UnusableOutputError(msg) from exc
 
-    page_description, state, elements, is_external_web = call_with_retry(
+    page_description, state, elements, is_external_web, surface = call_with_retry(
         "[API] page describe and state", request_description
     )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
-    return page_description, state, elements, is_external_web
+    return page_description, state, elements, is_external_web, surface
 
 
 def _no_verifier_answer(reason: str) -> dict[str, Any]:
@@ -1101,6 +1135,17 @@ class DescribedScreenshot:
     screenshot_b64: str
     description: str
     system_feedback: bool = False
+    opening_context: str = ""
+    modal_origin: Literal["unspecified", "page", "known", "unknown"] = "unspecified"
+    opening_images: tuple[tuple[str, str], ...] = ()
+
+
+def _opening_images(images: tuple[tuple[str, str], ...]) -> list[ChatContentItemsTypedDict]:
+    content: list[ChatContentItemsTypedDict] = []
+    for caption, image in images:
+        content.append({"type": "text", "text": caption})
+        content.append(build_image_message(image))
+    return content
 
 
 def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItemsTypedDict]:
@@ -1112,6 +1157,8 @@ def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItems
     return [
         {"type": "text", "text": f'{label}, described as "{screenshot.description}":{ownership}'},
         build_image_message(screenshot.screenshot_b64),
+        {"type": "text", "text": screenshot.opening_context},
+        *_opening_images(screenshot.opening_images),
     ]
 
 
