@@ -84,7 +84,8 @@ class NavigationHistory:
                 route += f" --{family}--> {transition.after.node}"
             return (
                 f"Recent repeated route (last {2 * length} ordinary steps; same recorded pixels "
-                f"at corresponding visits): {route}. Hidden state may still change; repetition "
+                f"at corresponding visits; latest cycle actions): {route}. Hidden state may still "
+                "change; repetition "
                 "does not establish exhaustion. Continue a useful pending workflow when needed. "
                 "Otherwise consider a relevant untried local control within the existing action "
                 "policy. Preserve pending edits and apply the same mutation rules.\n"
