@@ -641,6 +641,7 @@ def controller(adb: _FakeAdb) -> device.AdbController:
     )
     adb.events.clear()
     adb.timeouts.clear()
+    adb.replies[_UI_DUMP] = (0, b"<hierarchy />")
     adb.replies[_DUMPSYS_WINDOW] = (
         0,
         (
@@ -1087,11 +1088,12 @@ def test_an_input_that_times_out_raises_naming_the_command_and_is_not_sent_again
 
 _CLEAR_FIELD = [
     [*_INPUT, "keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"],
+    ["adb", *_UI_DUMP],
     [*_INPUT, "keyboard", "keyevent", "KEYCODE_DEL"],
 ]
 
 
-@pytest.mark.parametrize("command_index", [0, 1], ids=["select-all", "delete-selection"])
+@pytest.mark.parametrize("command_index", [0, 2], ids=["select-all", "delete-selection"])
 @pytest.mark.parametrize("failure", ["exit", "timeout"])
 def test_clearing_failure_stops_type_without_retrying_input(
     controller: device.DeviceController, adb: _FakeAdb, command_index: int, failure: str
@@ -1128,7 +1130,7 @@ def test_clearing_failure_stops_type_without_retrying_input(
     ],
 )
 def test_type_clears_the_field_then_types_the_text_quoted_for_the_device_shell(
-    controller: device.AdbController,
+    controller: device.DeviceController,
     adb: _FakeAdb,
     text: str,
     typed: list[list[str] | float],
@@ -1138,7 +1140,7 @@ def test_type_clears_the_field_then_types_the_text_quoted_for_the_device_shell(
 
 
 def test_type_raises_when_adb_cannot_type_a_character(
-    controller: device.AdbController, adb: _FakeAdb
+    controller: device.DeviceController, adb: _FakeAdb
 ) -> None:
     """``input text`` exits non-zero for a character outside the virtual keyboard map."""
     adb.replies[("-s", _UDID, "shell", "input", "text", "'é'")] = (255, b"")
@@ -1920,3 +1922,66 @@ def test_dispatch_applies_feedback_and_navigation_policy_from_one_window_read(
         with pytest.raises(failure):
             controller.exe_action(action)
         assert adb.events == [["adb", *_DUMPSYS_WINDOW]]
+
+
+@pytest.mark.parametrize(
+    "dump",
+    [
+        b"",
+        b"ERROR: could not get idle state.\n",
+        b"ERROR: null root node returned by UiTestAutomationBridge.\n",
+        b"<hierarchy><node />",
+        b"<window />",
+        b"<hierarchy />ERROR: could not get idle state.\n",
+    ],
+)
+def test_type_stops_before_deletion_when_idle_hierarchy_is_invalid(
+    controller: device.DeviceController, adb: _FakeAdb, dump: bytes
+) -> None:
+    adb.replies[_UI_DUMP] = (0, dump)
+
+    with pytest.raises(ValueError, match="Text replacement requires a valid idle UI hierarchy"):
+        controller.exe_action({"action": "type", "text": "New"})
+
+    assert adb.events == _CLEAR_FIELD[:2]
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_type_observation_failure_never_repeats_selection_or_sends_text(
+    controller: device.DeviceController, adb: _FakeAdb, failure: str
+) -> None:
+    if failure == "timeout":
+        adb.stalls[_UI_DUMP] = 2
+        error = subprocess.TimeoutExpired
+        observations = 2
+    else:
+        adb.replies[_UI_DUMP] = (1, b"")
+        error = subprocess.CalledProcessError
+        observations = 1
+
+    with pytest.raises(error):
+        controller.exe_action({"action": "type", "text": "New"})
+
+    assert adb.events == [_CLEAR_FIELD[0], *(["adb", *_UI_DUMP] for _ in range(observations))]
+
+
+def test_type_retries_only_a_timed_out_selection_observation(
+    controller: device.DeviceController, adb: _FakeAdb
+) -> None:
+    adb.stalls[_UI_DUMP] = 1
+    adb.replies[_UI_DUMP] = (
+        0,
+        b"<hierarchy><node /></hierarchy>UI hierchary dumped to: /dev/stdout\n",
+    )
+
+    controller.exe_action({"action": "type", "text": "New"})
+
+    assert adb.events == [
+        _CLEAR_FIELD[0],
+        ["adb", *_UI_DUMP],
+        ["adb", *_UI_DUMP],
+        _CLEAR_FIELD[2],
+        [*_INPUT, "text", "New"],
+        1,
+    ]
+    assert adb.timeouts == [15, 30, 30, 15, 15]
