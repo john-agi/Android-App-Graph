@@ -460,6 +460,8 @@ def _saved_edge(edge: dict[str, Any]) -> dict[str, Any]:
         "schema_deltas": [None] * len(actions),
         "setups": [None] * len(actions),
         "open_menus": [None] * len(actions),
+        "setup_observations": [None] * len(actions),
+        "setup_alternatives": [[]] * len(actions),
     }
     return {"actions": actions, **recorded, **edge}
 
