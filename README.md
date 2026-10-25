@@ -447,6 +447,23 @@ actions without a text string trigger the same bounded action recovery.
 Explicit `end` and `terminate` become an `end` action, which exploration and the
 audit record as a back press.
 
+Planning declares a required nonnegative integer `required_pointers` independently
+of coordinates. The executor supports one pointer for taps, holds and straight
+swipes; keys, typing and waiting use zero. The grounder declares the same
+requirement and can return `unsupported` with a reason. A multi-pointer request,
+an invalid pointer declaration or a mismatch with the executable primitive sends
+no input. A declaration that differs from the plan also sends no input, except
+when the grounder waits or ends the task.
+
+Exploration records unsupported instructions, their source observation, pointer
+requirements and reason in an `unsupported_action` record. Each consumes one
+step and follows the normal save and checkpoint schedule, without an executed
+action, graph edge or element coverage credit. Audit re-exploration likewise
+counts unsupported attempts within its step budget. This check validates the
+models' structured declarations; it cannot establish that a declaration captures
+every requirement expressed in natural language. A model may report other
+unsupported gestures, including curved paths, without substituting another input.
+
 ## Explore an App
 
 Edit `configs/explore.yaml` for your emulator and target app:
@@ -707,10 +724,16 @@ counts as external web, so the app's own screens get regular nodes even when the
 run in a web view or mention a privacy policy.
 
 Independently navigable system surfaces have explicit external identities: the
-notification shade, runtime permission controller and keyboard settings do not
-count as app coverage or become checkpoint, replay or resume targets. The visible
-shade window takes precedence over the underlying focused app. An attached
-keyboard preserves that app's identity and its visibility is page state. The target
+notification shade, SystemUI dialogs, runtime permission controller and keyboard
+settings do not count as app coverage or become checkpoint, replay or resume targets.
+A focused, visible display-zero `STATUS_BAR_SUB_PANEL` owned by `com.android.systemui`
+has the synthetic window identity `SystemUIDialog` and `system_surface: system_dialog`.
+Its native focus token, owner, type and visibility establish that boundary while the
+underlying focused app remains recorded separately. Ordinary app-owned dialogs and
+panels remain app state. The visible shade window also takes precedence over the
+underlying app. An attached keyboard preserves that app's identity and its visibility
+is page state. Window metadata, XML and screenshots are consecutive reads; UI changes
+can occur between them. The target
 package's own pages remain app coverage, including Settings and keyboard settings
 when their package is the target.
 
@@ -730,7 +753,7 @@ wait without marking the target explored; audit exploration consumes an iteratio
 and replay stops its path. App Copy/Share and unobscured controls remain available.
 No automatic Back press dismisses a clipboard preview. A visible clipboard window
 with unavailable region geometry saves its raw capture and stops with an explicit
-ownership error. Window metadata and screenshots are consecutive device reads. The step log records their observed ownership.
+ownership error. The step log records the observed ownership.
 Persisted observations require explicit native size and ownership fields; graph
 loading and building report missing or malformed metadata before model calls.
 An explicit null represents unavailable evidence under the supported boundary policy.

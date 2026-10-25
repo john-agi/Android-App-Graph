@@ -70,7 +70,7 @@ _OWNERSHIP_FIELDS = frozenset(
         "system_overlay_error",
     }
 )
-_SYSTEM_SURFACES = frozenset({"notification_shade", "permission", "ime_settings"})
+_SYSTEM_SURFACES = frozenset({"notification_shade", "system_dialog", "permission", "ime_settings"})
 
 type RunKind = Literal["explore", "audit"]
 type StepSource = Literal[
@@ -381,11 +381,10 @@ class StepRecorder:
         controller that reports none has the whole image hashed.
         """
         state = self._controller.get_state(deadline=deadline)
-        if state.get("package") == self._target_package and state.get("system_surface") in {
-            "notification_shade",
-            "permission",
-            "ime_settings",
-        }:
+        if (
+            state.get("package") == self._target_package
+            and state.get("system_surface") in _SYSTEM_SURFACES
+        ):
             state = state.copy()
             state["system_surface"] = None
         png = base64.b64decode(state["screenshot"], validate=True)
@@ -510,6 +509,27 @@ class StepRecorder:
             raise
         self.input_rejection_hint = ""
 
+    def record_unsupported_action(
+        self, instruction: str, required_pointers: int | None, outcome: Mapping[str, object]
+    ) -> None:
+        """Preserve unexecuted intent without an action or transition record."""
+        last = self._last_observation
+        self._write_record(
+            self._take_step_id(),
+            "unsupported_action",
+            last,
+            {
+                "observation": last.observation_id if last else None,
+                "instruction": instruction,
+                "planned_required_pointers": required_pointers,
+                **outcome,
+            },
+        )
+        self.input_rejection_hint = (
+            f"\nPrevious instruction was unsupported: {instruction}. {outcome['reason']}. "
+            "Choose a different supported action."
+        )
+
     def record_system_event(self, fields: Mapping[str, object]) -> None:
         """Keep ownership recovery and skipped-input evidence outside app transitions."""
         last = self._last_observation
@@ -560,7 +580,13 @@ class StepRecorder:
         self,
         step_id: str,
         kind: Literal[
-            "observation", "action", "action_rejected", "match", "transition", "system_event"
+            "observation",
+            "action",
+            "action_rejected",
+            "unsupported_action",
+            "match",
+            "transition",
+            "system_event",
         ],
         screen: Observation | None,
         fields: Mapping[str, object],
