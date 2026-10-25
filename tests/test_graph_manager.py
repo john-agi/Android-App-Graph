@@ -742,6 +742,54 @@ def test_exact_match_observation_context_refreshes_a_changed_capture(
     assert "Recent files" in describe["opening_images"][-1][0]
 
 
+@pytest.mark.parametrize("context", ["unknown", "missing", "broken", "foreign"])
+def test_exact_match_observation_context_without_a_usable_predecessor_uses_pixels(
+    vlm: FakeVlm, screen: Screens, context: str
+) -> None:
+    manager, _root, previous = _search_context_members(screen)
+    inputs = {
+        "unknown": MatchInput(),
+        "missing": MatchInput("missing", ()),
+        "broken": MatchInput(previous.observation_id, None),
+    }
+    if context == "foreign":
+        foreign = screen(OTHER_APP, SHOT_C, OTHER_PACKAGE)
+        vlm.descriptions.append(("Other app", {}, []))
+        manager.identify_state(foreign)
+        inputs["foreign"] = MatchInput(foreign.observation_id, ())
+    vlm.calls.clear()
+    current = screen(HOME, SHOT_A)
+
+    assert manager.identify_state(current, match_input=inputs[context]) == "s1"
+
+    assert vlm.kinds() == ["image"]
+    assert screen.decision(current)["describe"]["copied_from"] != previous.observation_id
+    assert manager.observation_state(current) == {"current_folder": "Internal"}
+
+
+def test_exact_match_observation_context_requires_membership_for_reuse(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    manager, _root, previous = _search_context_members(screen)
+    manager.graph.nodes["s1"]["observations"].remove(previous.observation_id)
+    vlm.descriptions.append(("Search results", {"current_folder": "Recent"}, []))
+    vlm.verdicts.append({"same": True, "reason": "Shared search template"})
+    current = screen(HOME, SHOT_A)
+
+    assert (
+        manager.identify_state(
+            current,
+            expected_observation=manager.earliest_member("s1"),
+            match_input=MatchInput(previous.observation_id, ()),
+        )
+        == "s1"
+    )
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    assert manager.observation_state(current) == {"current_folder": "Recent"}
+    assert "copied_from" not in screen.decision(current)["describe"]
+
+
 def test_an_observation_without_a_pixel_hash_is_never_an_exact_match(
     vlm: FakeVlm, screen: Screens
 ) -> None:
