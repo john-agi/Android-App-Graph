@@ -25,6 +25,8 @@ from android_app_graph.kobe import ExplorerConfig, Kobe, _Position
 from android_app_graph.utils import DEFAULT_MATCHING
 from android_app_graph.utils.graph_manager import GraphManager
 
+pytestmark = pytest.mark.usefixtures("fake_failure_reader")
+
 
 def _startup_config(tmp_path: Path, phase: str) -> tuple[Path, Path, int]:
     graph_path = tmp_path / "graphs" / "demo" / "demo.json"
