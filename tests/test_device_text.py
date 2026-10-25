@@ -18,24 +18,37 @@ class _EditableBuffer:
     """Model selection, backward deletion and insertion, without an Android widget or IME."""
 
     def __init__(
-        self, value: str, selection: tuple[int, int], *, handles_select_all: bool = True
+        self,
+        value: str,
+        selection: tuple[int, int],
+        *,
+        handles_select_all: bool = True,
+        deferred_selection: bool = False,
     ) -> None:
         self.value = value
         self.selection = selection
         self.handles_select_all = handles_select_all
+        self.deferred_selection = deferred_selection
+        self.pending_selection: tuple[int, int] | None = None
         self.commands: list[list[str]] = []
 
     def run(self, args: Sequence[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         command = list(args)
         if command == ["-s", "buffer", "shell", "wm", "size"]:
             return subprocess.CompletedProcess(command, 0, "Physical size: 720x1280\n")
+        if command == ["-s", "buffer", "exec-out", "uiautomator dump /dev/stdout"]:
+            return subprocess.CompletedProcess(command, 0, self.observe_idle())
         assert command[:4] == ["-s", "buffer", "shell", "input"]
         editing = command[4:]
         self.commands.append(editing)
         match editing:
             case ["keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"]:
                 if self.handles_select_all:
-                    self.selection = (0, len(self.value))
+                    selection = (0, len(self.value))
+                    if self.deferred_selection:
+                        self.pending_selection = selection
+                    else:
+                        self.selection = selection
             case ["keyevent", *keys] | ["keyboard", "keyevent", *keys]:
                 for key in keys:
                     assert key == "KEYCODE_DEL"
@@ -51,7 +64,14 @@ class _EditableBuffer:
                 pytest.fail(f"Unexpected input: {editing}")
         return subprocess.CompletedProcess(command, 0, "")
 
+    def observe_idle(self) -> str:
+        if self.pending_selection is not None:
+            self.selection = self.pending_selection
+            self.pending_selection = None
+        return "<hierarchy />"
+
     def replace(self, start: int, end: int, text: str) -> None:
+        self.pending_selection = None
         self.value = self.value[:start] + text + self.value[end:]
         self.selection = (start + len(text), start + len(text))
 
@@ -146,3 +166,24 @@ def test_type_replacement_is_one_recorded_action(
     assert len(records) == 1
     assert records[0]["kind"] == "action"
     assert records[0]["action"] == {"action": "type", "text": "New"}
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize(
+    ("initial", "selection", "requested"),
+    [
+        pytest.param("0.5", (3, 3), "5.0", id="decimal"),
+        pytest.param("0.5", (3, 3), "", id="empty-decimal-replacement"),
+        pytest.param("ABCDEFGHIJKLM\nNOPQRSTUVWXYZ", (5, 10), "New", id="multiline-selection"),
+    ],
+)
+def test_type_waits_for_the_pending_selection_before_replacing_the_value(
+    monkeypatch: pytest.MonkeyPatch, initial: str, selection: tuple[int, int], requested: str
+) -> None:
+    """A field applies its selection update when the UI reaches an idle observation."""
+    buffer = _EditableBuffer(initial, selection, deferred_selection=True)
+
+    _controller(buffer, monkeypatch).exe_action({"action": "type", "text": requested})
+
+    assert buffer.value == requested
+    assert buffer.selection == (len(requested), len(requested))
