@@ -569,9 +569,14 @@ class AdbController:
         time.sleep(1)
 
     def _clear(self) -> None:
-        self._input("keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A", check=True)
-        # Asynchronous shortcut delivery can precede a field's selection update.
-        self._observe_idle_hierarchy()
+        # Empty editors can pass Select All to an activity's shortcut handler.
+        for keys in (
+            ("KEYCODE_CTRL_LEFT", "KEYCODE_MOVE_END"),
+            ("KEYCODE_CTRL_LEFT", "KEYCODE_SHIFT_LEFT", "KEYCODE_MOVE_HOME"),
+        ):
+            self._input("keyboard", "keycombination", *keys, check=True)
+            # Asynchronous combinations must settle before the next input.
+            self._observe_idle_hierarchy()
         self._input("keyboard", "keyevent", "KEYCODE_DEL", check=True)
 
     def _observe_idle_hierarchy(self) -> None:
