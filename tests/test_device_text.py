@@ -117,7 +117,7 @@ def test_type_replaces_the_complete_supported_field_value(
 
 
 @pytest.mark.parametrize("length", [1, 26, 10_000])
-def test_type_uses_two_clearing_commands_independently_of_value_length(
+def test_type_uses_two_clearing_input_commands_independently_of_value_length(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float], length: int
 ) -> None:
     buffer = _EditableBuffer("A" * length, (length // 2, length // 2))
@@ -134,7 +134,7 @@ def test_type_uses_two_clearing_commands_independently_of_value_length(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_successful_delivery_does_not_acknowledge_an_unhandled_selection_shortcut(
+def test_command_acceptance_does_not_acknowledge_an_unhandled_selection_shortcut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A field ignoring Select All is outside the supported replacement contract."""
