@@ -1684,8 +1684,10 @@ class GraphManager:
 
         1. A page member with a describe output and the same ``pixel_hash`` decides alone,
            when it belongs to one node only: the screen takes that member's describe
-           output, so neither the describe call nor the verifier runs. Modal members
-           always take the describe and verification path with their opening evidence.
+           output, so neither the describe call nor the verifier runs. With a usable
+           preceding capture, only that member can supply the output, when its pixels
+           are unchanged. Changed captures and modal members take the describe and
+           verification path with their observed opening evidence.
         2. The describe call describes the screen; web content from outside the app
            goes to ``EXTERNAL_WEB_NODE``.
         3. The expected node, the node that lists ``expected_observation``, a screenshot
@@ -1720,10 +1722,6 @@ class GraphManager:
             self._image_vectors[observation.observation_id] = image_vector
         if observation.black:
             return self._record_black_screen(observation, same_package.node_ids, decision)
-        exact = self._exact_match(observation.pixel_hash, same_package.node_ids)
-        if exact is not None:
-            return self._record_exact_match(observation, *exact, decision)
-
         match_input = match_input or MatchInput()
         previous = self._stored_screens.get(match_input.previous or "")
         if (
@@ -1732,6 +1730,14 @@ class GraphManager:
             or self._member_observation(match_input.previous or "").package != observation.package
         ):
             match_input, previous = MatchInput(), None
+        exact = self._exact_match(
+            observation.pixel_hash,
+            same_package.node_ids,
+            previous_observation=match_input.previous,
+        )
+        if exact is not None:
+            return self._record_exact_match(observation, *exact, decision)
+
         prior_context = previous.modal_context if previous is not None else ModalContext()
         opening_text, opening_images = self._description_opening(match_input)
         described = _Described(
@@ -1852,11 +1858,23 @@ class GraphManager:
             dict.fromkeys(description for _, description in described if description in selected)
         )
 
-    def _exact_match(self, pixel_hash: str, node_ids: Sequence[str]) -> tuple[str, str] | None:
+    def _exact_match(
+        self,
+        pixel_hash: str,
+        node_ids: Sequence[str],
+        *,
+        previous_observation: str | None = None,
+    ) -> tuple[str, str] | None:
         """Return the node and member with a describe output whose stored screen has
         ``pixel_hash``, when the members that have it all belong to one of ``node_ids``;
-        the latest such member. A black member has no describe output to copy."""
+        the actual preceding member when supplied, otherwise the latest such member.
+        A black member has no describe output to copy."""
         if not pixel_hash:
+            return None
+        if (
+            previous_observation is not None
+            and self._stored_screens[previous_observation].pixel_hash != pixel_hash
+        ):
             return None
         matches: dict[str, str] = {}
         for node_id in node_ids:
@@ -1878,7 +1896,14 @@ class GraphManager:
             )
         if len(matches) != 1:
             return None
-        return next(iter(matches.items()))
+        node_id, member = next(iter(matches.items()))
+        if previous_observation is not None:
+            return (
+                (node_id, previous_observation)
+                if self.node_of(previous_observation) == node_id
+                else None
+            )
+        return node_id, member
 
     def _record_exact_match(
         self, observation: Observation, node_id: str, member: str, decision: _Decision

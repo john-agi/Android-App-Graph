@@ -360,7 +360,10 @@ class FakeVlm:
     ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool, Surface]:
         call = {"client": client, "screenshot": request.screenshot_b64, "settings": settings}
         call.update(
-            known_descriptions=request.known_descriptions, existing_keys=request.existing_keys
+            known_descriptions=request.known_descriptions,
+            existing_keys=request.existing_keys,
+            opening_context=request.opening_context,
+            opening_images=request.opening_images,
         )
         self.calls.append(("describe", call))
         description, state, elements = self.descriptions.pop(0)
@@ -664,6 +667,127 @@ def test_an_exact_match_copies_from_the_latest_member_with_the_pixels(
     gm.identify_state(third)
 
     assert screen.decision(third)["describe"]["copied_from"] == copy.observation_id
+
+
+def _search_context_members(screen: Screens) -> tuple[GraphManager, Observation, Observation]:
+    manager = make_manager(screen.steps_dir)
+    root = screen(HOME, SHOT_B)
+    previous = screen(HOME, SHOT_A)
+    latest = screen(HOME, SHOT_A)
+    add_screen(manager, "s0", "Recent files", observations=[root.observation_id])
+    add_screen(
+        manager,
+        "s1",
+        "Search results",
+        observations=[previous.observation_id, latest.observation_id],
+    )
+    for observation, folder in [(previous, "Recent"), (latest, "Internal")]:
+        write_describe(
+            screen.steps_dir,
+            observation.observation_id,
+            {
+                **described_as_screen(observation.observation_id),
+                "page_description": "Search results",
+                "state": {"current_folder": folder},
+            },
+        )
+    manager.use_image_vectors(
+        {observation.observation_id: ANY_IMAGE for observation in [root, previous, latest]}
+    )
+    return with_text_vectors(manager, screen.steps_dir), root, previous
+
+
+@pytest.mark.parametrize("actions", [(), ({"action": "tap"},), ({"action": "wait"},)])
+def test_exact_match_observation_context_copies_the_actual_previous_member(
+    vlm: FakeVlm, screen: Screens, actions: tuple[dict[str, object], ...]
+) -> None:
+    """Unchanged pixels preserve the actual visit's state across intervening history."""
+    manager, _root, previous = _search_context_members(screen)
+    current = screen(HOME, SHOT_A)
+
+    assert (
+        manager.identify_state(current, match_input=MatchInput(previous.observation_id, actions))
+        == "s1"
+    )
+
+    assert vlm.kinds() == ["image"]
+    assert screen.decision(current)["describe"]["copied_from"] == previous.observation_id
+    assert manager.observation_state(current) == {"current_folder": "Recent"}
+
+
+@pytest.mark.parametrize("actions", [(), ({"action": "tap"},)])
+def test_exact_match_observation_context_refreshes_a_changed_capture(
+    vlm: FakeVlm, screen: Screens, actions: tuple[dict[str, object], ...]
+) -> None:
+    """A changed capture is described in context and may rejoin its shared template."""
+    manager, root, previous = _search_context_members(screen)
+    vlm.descriptions.append(("Search results", {"current_folder": "Recent"}, []))
+    vlm.verdicts.append({"same": True, "reason": "Shared search template"})
+    current = screen(HOME, SHOT_A)
+
+    assert (
+        manager.identify_state(
+            current,
+            expected_observation=previous.observation_id,
+            match_input=MatchInput(root.observation_id, actions),
+        )
+        == "s1"
+    )
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    assert manager.observation_state(current) == {"current_folder": "Recent"}
+    assert "copied_from" not in screen.decision(current)["describe"]
+    describe = next(call for kind, call in vlm.calls if kind == "describe")
+    assert describe["opening_images"][-1][1] == SHOT_B
+    assert "Recent files" in describe["opening_images"][-1][0]
+
+
+@pytest.mark.parametrize("context", ["unknown", "missing", "broken", "foreign"])
+def test_exact_match_observation_context_without_a_usable_predecessor_uses_pixels(
+    vlm: FakeVlm, screen: Screens, context: str
+) -> None:
+    manager, _root, previous = _search_context_members(screen)
+    inputs = {
+        "unknown": MatchInput(),
+        "missing": MatchInput("missing", ()),
+        "broken": MatchInput(previous.observation_id, None),
+    }
+    if context == "foreign":
+        foreign = screen(OTHER_APP, SHOT_C, OTHER_PACKAGE)
+        vlm.descriptions.append(("Other app", {}, []))
+        manager.identify_state(foreign)
+        inputs["foreign"] = MatchInput(foreign.observation_id, ())
+    vlm.calls.clear()
+    current = screen(HOME, SHOT_A)
+
+    assert manager.identify_state(current, match_input=inputs[context]) == "s1"
+
+    assert vlm.kinds() == ["image"]
+    assert screen.decision(current)["describe"]["copied_from"] != previous.observation_id
+    assert manager.observation_state(current) == {"current_folder": "Internal"}
+
+
+def test_exact_match_observation_context_requires_membership_for_reuse(
+    vlm: FakeVlm, screen: Screens
+) -> None:
+    manager, _root, previous = _search_context_members(screen)
+    manager.graph.nodes["s1"]["observations"].remove(previous.observation_id)
+    vlm.descriptions.append(("Search results", {"current_folder": "Recent"}, []))
+    vlm.verdicts.append({"same": True, "reason": "Shared search template"})
+    current = screen(HOME, SHOT_A)
+
+    assert (
+        manager.identify_state(
+            current,
+            expected_observation=manager.earliest_member("s1"),
+            match_input=MatchInput(previous.observation_id, ()),
+        )
+        == "s1"
+    )
+
+    assert vlm.kinds() == ["image", "describe", "embed", "verify"]
+    assert manager.observation_state(current) == {"current_folder": "Recent"}
+    assert "copied_from" not in screen.decision(current)["describe"]
 
 
 def test_an_observation_without_a_pixel_hash_is_never_an_exact_match(

@@ -22,12 +22,13 @@ class _EditableBuffer:
         value: str,
         selection: tuple[int, int],
         *,
-        handles_select_all: bool = True,
+        handles_movement: bool = True,
         deferred_selection: bool = False,
     ) -> None:
         self.value = value
         self.selection = selection
-        self.handles_select_all = handles_select_all
+        self.handles_movement = handles_movement
+        self.application_selection = False
         self.deferred_selection = deferred_selection
         self.pending_selection: tuple[int, int] | None = None
         self.commands: list[list[str]] = []
@@ -42,13 +43,8 @@ class _EditableBuffer:
         editing = command[4:]
         self.commands.append(editing)
         match editing:
-            case ["keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"]:
-                if self.handles_select_all:
-                    selection = (0, len(self.value))
-                    if self.deferred_selection:
-                        self.pending_selection = selection
-                    else:
-                        self.selection = selection
+            case ["keyboard", "keycombination", "KEYCODE_CTRL_LEFT", *keys]:
+                self.shortcut(keys)
             case ["keyevent", *keys] | ["keyboard", "keyevent", *keys]:
                 for key in keys:
                     assert key == "KEYCODE_DEL"
@@ -63,6 +59,26 @@ class _EditableBuffer:
             case _:
                 pytest.fail(f"Unexpected input: {editing}")
         return subprocess.CompletedProcess(command, 0, "")
+
+    def shortcut(self, keys: list[str]) -> None:
+        if keys == ["KEYCODE_A"]:
+            if self.value:
+                self.select(0, len(self.value))
+            else:
+                # An empty TextView declines Select All, passing it to the activity.
+                self.application_selection = True
+        else:
+            assert keys[-1] in {"KEYCODE_MOVE_HOME", "KEYCODE_MOVE_END"}
+            if self.handles_movement:
+                end = 0 if keys[-1] == "KEYCODE_MOVE_HOME" else len(self.value)
+                start = self.selection[0] if "KEYCODE_SHIFT_LEFT" in keys else end
+                self.select(start, end)
+
+    def select(self, start: int, end: int) -> None:
+        if self.deferred_selection:
+            self.pending_selection = start, end
+        else:
+            self.selection = start, end
 
     def observe_idle(self) -> str:
         if self.pending_selection is not None:
@@ -90,6 +106,7 @@ def _controller(
     ("initial", "selection", "requested"),
     [
         pytest.param("", (0, 0), "New", id="empty-field"),
+        pytest.param("", (0, 0), "", id="empty-field-empty-replacement"),
         pytest.param("ABCDE", (0, 0), "New", id="beginning"),
         pytest.param("ABCDE", (2, 2), "New", id="middle"),
         pytest.param("ABCDE", (5, 5), "New", id="end"),
@@ -114,10 +131,11 @@ def test_type_replaces_the_complete_supported_field_value(
 
     assert buffer.value == requested
     assert buffer.selection == (len(requested), len(requested))
+    assert not buffer.application_selection
 
 
 @pytest.mark.parametrize("length", [1, 26, 10_000])
-def test_type_uses_two_clearing_input_commands_independently_of_value_length(
+def test_type_uses_three_clearing_input_commands_independently_of_value_length(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float], length: int
 ) -> None:
     buffer = _EditableBuffer("A" * length, (length // 2, length // 2))
@@ -126,7 +144,14 @@ def test_type_uses_two_clearing_input_commands_independently_of_value_length(
 
     assert buffer.value == "New"
     assert buffer.commands == [
-        ["keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A"],
+        ["keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_MOVE_END"],
+        [
+            "keyboard",
+            "keycombination",
+            "KEYCODE_CTRL_LEFT",
+            "KEYCODE_SHIFT_LEFT",
+            "KEYCODE_MOVE_HOME",
+        ],
         ["keyboard", "keyevent", "KEYCODE_DEL"],
         ["text", "New"],
     ]
@@ -134,16 +159,16 @@ def test_type_uses_two_clearing_input_commands_independently_of_value_length(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_command_acceptance_does_not_acknowledge_an_unhandled_selection_shortcut(
+def test_command_acceptance_does_not_acknowledge_unhandled_movement_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A field ignoring Select All is outside the supported replacement contract."""
-    buffer = _EditableBuffer("ABCDE", (2, 2), handles_select_all=False)
+    """A field ignoring cursor movement is outside the supported replacement contract."""
+    buffer = _EditableBuffer("ABCDE", (2, 2), handles_movement=False)
 
     _controller(buffer, monkeypatch).exe_action({"action": "type", "text": "New"})
 
     assert buffer.value == "ANewCDE"
-    assert len(buffer.commands) == 3
+    assert len(buffer.commands) == 4
 
 
 @pytest.mark.usefixtures("no_sleep")
