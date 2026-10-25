@@ -97,3 +97,17 @@ def test_overlong_preparation_drops_its_anchor_with_its_inputs() -> None:
     )
     assert graph.graph["s0"]["s1"]["setups"] == [None]
     assert graph.graph["s0"]["s1"]["setup_observations"] == [None]
+
+
+def test_a_shorter_known_arrival_remains_available_without_erasing_the_first_preparation() -> None:
+    graph = _graph()
+    action = {"action": "tap", "x": 20, "y": 50}
+    prefix = [{"action": "tap", "x": 20, "y": 30}]
+    graph.add_edge("s0", "s1", action, details=EdgeDetails(setup=prefix, setup_observation="root"))
+    graph.add_edge("s0", "s1", action, details=EdgeDetails(setup=[], setup_observation="Pictures"))
+    path = graph.find_path("s0", "s1")
+    assert path is not None
+    assert path[1].setup == ()
+    assert path[1].setup_observation == "Pictures"
+    assert graph.graph["s0"]["s1"]["setups"] == [prefix]
+    assert graph.graph["s0"]["s1"]["setup_observations"] == ["root"]
