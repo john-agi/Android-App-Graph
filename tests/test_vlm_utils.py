@@ -404,7 +404,11 @@ def _verify_itself(client: OpenRouter, screenshot: str, description: str) -> dic
 
 _ROLE_HELPERS: dict[str, Callable[[OpenRouter, str], object]] = {
     "page": lambda client, screenshot: vlm.describe_page_and_state(
-        client, screenshot, settings=PAGE_DETAIL
+        client,
+        vlm.DescribeRequest(
+            screenshot_b64=screenshot,
+        ),
+        settings=PAGE_DETAIL,
     ),
     "verify": lambda client, screenshot: _verify_itself(client, screenshot, "home"),
     "normalize": lambda client, _screenshot: vlm.normalize_edge(
@@ -678,7 +682,13 @@ def _sent_schemas(
             "{}",
         )
     )
-    vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+    vlm.describe_page_and_state(
+        router_client,
+        vlm.DescribeRequest(
+            screenshot_b64=png_screenshot,
+        ),
+        settings=PAGE_DETAIL,
+    )
     _verify_itself(router_client, png_screenshot, "home")
     vlm.normalize_edge(router_client, ["search milk"], settings=PAGE_DETAIL)
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
@@ -737,7 +747,11 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
         chat_response(content='{"page_description":"news article","is_external_web":true}')
     )
     *_, is_external_web = vlm.describe_page_and_state(
-        router_client, png_screenshot, settings=PAGE_DETAIL
+        router_client,
+        vlm.DescribeRequest(
+            screenshot_b64=png_screenshot,
+        ),
+        settings=PAGE_DETAIL,
     )
     assert is_external_web is True
     body = json.loads(router_requests[0].content)
@@ -745,6 +759,35 @@ def test_the_page_description_asks_for_and_reads_the_external_web_flag(
     assert schema["properties"]["is_external_web"]["type"] == "boolean"
     assert "is_external_web" in schema["required"]
     assert '"is_external_web"' in body["messages"][0]["content"][0]["text"]
+
+
+def test_graph_audit_assesses_the_effect_of_both_kinds_of_device_proposal(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content='{"issues":[],"summary":"Inspection complete"}'))
+    vlm.audit_graph(router_client, "Phone keypad and deletion confirmation", settings=PAGE_DETAIL)
+    [request] = [json.loads(request.content) for request in router_requests]
+    variants = request["response_format"]["json_schema"]["schema"]["properties"]["issues"]["items"][
+        "anyOf"
+    ]
+    for variant in variants:
+        if variant["properties"]["type"]["enum"][0] == "merge_nodes":
+            continue
+        assert "execution" in variant["required"]
+        assessment = variant["properties"]["execution"]
+        assert assessment["properties"]["effect"]["enum"] == [
+            "inspection",
+            "side_effect",
+            "uncertain",
+        ]
+        assert assessment["required"] == ["effect", "reason"]
+    prompt = request["messages"][0]["content"]
+    assert "controlled test number" in prompt
+    assert "confirmation dialog followed" in prompt
+    assert "A recorded action is" in prompt
 
 
 def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
@@ -760,8 +803,9 @@ def test_the_page_description_keeps_keyboard_focus_and_scroll_in_state(
         )
         vlm.describe_page_and_state(
             router_client,
-            png_screenshot,
-            known_descriptions=known_descriptions,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot, known_descriptions=known_descriptions
+            ),
             settings=PAGE_DETAIL,
         )
     for request in router_requests:
@@ -803,8 +847,9 @@ def test_the_page_description_keeps_open_menus_and_expanded_sections_in_state(
         )
         vlm.describe_page_and_state(
             router_client,
-            png_screenshot,
-            known_descriptions=known_descriptions,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot, known_descriptions=known_descriptions
+            ),
             settings=PAGE_DETAIL,
         )
     for request in router_requests:
@@ -926,6 +971,21 @@ def test_the_merge_audit_may_report_a_page_with_its_menu_open(
     vlm.audit_merge_nodes(router_client, "home", settings=PAGE_DETAIL)
     prompt = json.loads(router_requests[0].content)["messages"][0]["content"]
     assert "menu" not in prompt
+
+
+@pytest.mark.parametrize("reply", ["not-json", "[]", '{"issues":false}'])
+def test_unusable_merge_proposals_are_explicitly_unanswered(
+    reply: str,
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.append(chat_response(content=reply))
+
+    result = vlm.audit_merge_nodes(router_client, "nodes", settings=PAGE_DETAIL)
+
+    assert result["answered"] is False
+    assert result["issues"] == []
 
 
 @pytest.mark.parametrize(
@@ -1127,7 +1187,13 @@ def _request(operation: str, client: OpenRouter, png_screenshot: str) -> object:
                 settings=ACTION,
             )[0]
         case _:
-            return vlm.describe_page_and_state(client, png_screenshot, settings=PAGE_DETAIL)[0]
+            return vlm.describe_page_and_state(
+                client,
+                vlm.DescribeRequest(
+                    screenshot_b64=png_screenshot,
+                ),
+                settings=PAGE_DETAIL,
+            )[0]
 
 
 _GOOD_REPLIES: dict[str, str] = {
@@ -1273,7 +1339,13 @@ def _send_every_model_call(
     )
     page_detail = settings["page_detail"]
     shown = vlm.DescribedScreenshot(screenshot, "home")
-    vlm.describe_page_and_state(client, screenshot, settings=page_detail)
+    vlm.describe_page_and_state(
+        client,
+        vlm.DescribeRequest(
+            screenshot_b64=screenshot,
+        ),
+        settings=page_detail,
+    )
     vlm.verify_same_node(client, existing=shown, new=shown, settings=page_detail)
     vlm.normalize_edge(client, ["search milk"], settings=page_detail)
     vlm.audit_merge_nodes(client, "home", settings=page_detail)
@@ -1495,7 +1567,13 @@ def test_a_malformed_page_description_is_re_asked_once_then_raises(
 ) -> None:
     router_responses.extend(chat_response(content=malformed) for _ in range(2))
     with pytest.raises(UnusableOutputError, match="Malformed page description") as caught:
-        vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+        vlm.describe_page_and_state(
+            router_client,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot,
+            ),
+            settings=PAGE_DETAIL,
+        )
     assert isinstance(caught.value.__cause__, error)
     assert message in str(caught.value.__cause__)
     assert len(router_requests) == 2
@@ -1574,7 +1652,7 @@ def _truncated_reply(chat_response: Callable[..., httpx.Response]) -> httpx.Resp
     [
         ("verify", {"same": False, "answered": False, "reason": "reply truncated"}),
         ("normalize", {"instruction_template": "search milk", "is_template": False}),
-        ("merge_audit", {"issues": [], "summary": "reply truncated"}),
+        ("merge_audit", {"issues": [], "summary": "reply truncated", "answered": False}),
         ("audit", {"issues": [], "summary": "reply truncated"}),
         ("target", None),
         ("describe", None),
@@ -1597,6 +1675,133 @@ def test_a_truncated_reply_is_never_re_asked_and_takes_the_final_fallback(
     assert result == fallback
     assert len(router_requests) == 1
     assert "finish_reason=length, reasoning_tokens=2950" in caplog.text
+
+
+@pytest.fixture
+def normalization_prompt(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> str:
+    router_responses.append(chat_response(content='{"instruction_template":"Tap Search"}'))
+    vlm.normalize_edge(router_client, ["Tap Search"], settings=PAGE_DETAIL)
+
+    (request,) = router_requests
+    body = as_object_dict(json.loads(request.content))
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    content = as_object_dict(messages[-1])["content"]
+    assert isinstance(content, str)
+    return content
+
+
+def _normalization_example(prompt: str, index: int) -> dict[str, object]:
+    outputs = [
+        line.strip().removeprefix("Output: ")
+        for line in prompt.splitlines()
+        if line.strip().startswith("Output: ")
+    ]
+    assert len(outputs) == 4
+    return as_object_dict(json.loads(outputs[index]))
+
+
+@pytest.mark.parametrize(
+    ("index", "is_template", "different_actions"),
+    [(0, True, False), (1, False, False), (2, True, False), (3, False, True)],
+    ids=["search", "unchanged", "location", "different-actions"],
+)
+def test_normalization_output_examples_are_json_with_the_response_fields(
+    normalization_prompt: str, index: int, is_template: bool, different_actions: bool
+) -> None:
+    example = _normalization_example(normalization_prompt, index)
+
+    assert set(example) == {
+        "different_actions",
+        "instruction_template",
+        "observation_template",
+        "is_template",
+        "param_names",
+        "examples",
+    }
+    assert isinstance(example["instruction_template"], str)
+    assert isinstance(example["observation_template"], str)
+    assert isinstance(example["param_names"], list)
+    assert isinstance(example["examples"], list)
+    assert example["is_template"] is is_template
+    assert example["different_actions"] is different_actions
+    if not is_template:
+        assert example["instruction_template"] == (
+            "" if different_actions else "Tap the Settings icon"
+        )
+        assert example["observation_template"] == ""
+        assert example["param_names"] == []
+        assert example["examples"] == []
+
+
+def test_normalization_guidance_uses_single_brace_placeholder_names(
+    normalization_prompt: str,
+) -> None:
+    guidance = normalization_prompt.split("\n\nReturn a JSON object:\n", 1)[0]
+
+    assert "{{" not in guidance
+    assert "}}" not in guidance
+    for name in ("placeholder", "query", "location", "item_name", "date", "amount"):
+        assert f"{{{name}}}" in guidance
+
+
+@pytest.mark.parametrize(
+    ("index", "name", "values"),
+    [(0, "query", ["egg", "milk"]), (2, "location", ["Waterloo", "221B Baker Street"])],
+)
+def test_normalization_parameter_examples_match_single_brace_templates(
+    normalization_prompt: str, index: int, name: str, values: list[str]
+) -> None:
+    output = _normalization_example(normalization_prompt, index)
+    instruction = as_str(output["instruction_template"], "")
+    observation = as_str(output["observation_template"], "")
+    placeholder = f"{{{name}}}"
+
+    assert re.findall(r"\{+[^{}]+\}+", instruction) == [placeholder]
+    assert re.findall(r"\{+[^{}]+\}+", observation) == [placeholder]
+    assert output["param_names"] == [name]
+    examples = output["examples"]
+    assert isinstance(examples, list)
+    assert len(examples) == len(values)
+    for example, value in zip(examples, values, strict=True):
+        concrete = as_object_dict(example)
+        assert concrete["params"] == {name: value}
+        assert concrete["instruction"] == instruction.replace(placeholder, value)
+
+
+def test_normalize_edge_preserves_literal_input_braces_and_template_reply(
+    router_client: OpenRouter,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    instruction = "Type '{query}' and '{{literal_query}}' in the start location field"
+    observation = '{"location": {"name": "{{literal_name}}"}} and {unfinished'
+    reply = {
+        "different_actions": False,
+        "instruction_template": "Type '{{location}}' in the start location field",
+        "observation_template": "start location field shows {{location}}",
+        "is_template": True,
+        "param_names": ["location"],
+        "examples": [],
+    }
+    router_responses.append(chat_response(content=json.dumps(reply)))
+
+    result = vlm.normalize_edge(router_client, [instruction], [observation], settings=PAGE_DETAIL)
+
+    (request,) = router_requests
+    body = as_object_dict(json.loads(request.content))
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    prompt = as_object_dict(messages[-1])["content"]
+    assert isinstance(prompt, str)
+    assert prompt.endswith(f'- Instruction: "{instruction}" → Observation: "{observation}"\n')
+    assert result == reply
 
 
 def test_normalize_edge_pairs_each_instruction_with_its_own_observation(
@@ -1675,7 +1880,13 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
 
     def request() -> object:
         if operation == "description":
-            return vlm.describe_page_and_state(router_client, png_screenshot, settings=PAGE_DETAIL)
+            return vlm.describe_page_and_state(
+                router_client,
+                vlm.DescribeRequest(
+                    screenshot_b64=png_screenshot,
+                ),
+                settings=PAGE_DETAIL,
+            )
         return vlm.plan_next_action(
             router_client,
             vlm.PlanRequest(
@@ -1697,7 +1908,11 @@ def test_a_truncated_reply_without_a_fallback_raises_at_once(
             "normalize_edge",
             {"instruction_template": "search milk", "is_template": False},
         ),
-        ("merge_audit", "node_merge_audit", {"issues": [], "summary": "reply truncated"}),
+        (
+            "merge_audit",
+            "node_merge_audit",
+            {"issues": [], "summary": "reply truncated", "answered": False},
+        ),
         ("audit", "graph_audit", {"issues": [], "summary": "reply truncated"}),
         ("target", "exploration_target", None),
         ("describe", "action_description", None),
@@ -1835,7 +2050,13 @@ def test_a_page_description_that_still_times_out_raises(
     timing_out_client: OpenRouter, png_screenshot: str
 ) -> None:
     with pytest.raises(httpx.ReadTimeout, match="no complete response"):
-        vlm.describe_page_and_state(timing_out_client, png_screenshot, settings=PAGE_DETAIL)
+        vlm.describe_page_and_state(
+            timing_out_client,
+            vlm.DescribeRequest(
+                screenshot_b64=png_screenshot,
+            ),
+            settings=PAGE_DETAIL,
+        )
 
 
 def test_a_content_filtered_reply_is_logged_by_name_and_handled_as_partial_content(
@@ -2324,3 +2545,70 @@ def test_text_planning_establishes_the_intended_field_before_typing(
     assert "tap the intended field as a separate action, then observe before typing" in prompt
     assert "current screenshot description" in prompt
     assert "current caret or field highlight" in prompt
+
+
+def test_observed_feedback_scope_preserves_app_controls_and_action_context(
+    router_client: OpenRouter,
+    router_requests: list[httpx.Request],
+    router_responses: list[httpx.Response],
+    png_screenshot: str,
+    chat_response: Callable[..., httpx.Response],
+) -> None:
+    router_responses.extend(
+        [
+            chat_response(
+                content='{"page_description":"Calculator","state":{},"elements":[{"description":"App Share","position":"top"}]}'
+            ),
+            chat_response(content='{"element":1,"instruction":"Tap unobscured app Share"}'),
+            chat_response(content='{"action":"wait"}'),
+            chat_response(content='{"same":true}'),
+        ]
+    )
+    vlm.describe_page_and_state(
+        router_client,
+        vlm.DescribeRequest(screenshot_b64=png_screenshot, system_feedback=True),
+        settings=PAGE_DETAIL,
+    )
+    vlm.plan_next_action(
+        router_client,
+        vlm.PlanRequest(
+            screenshot_b64=png_screenshot,
+            page_description="Calculator",
+            node="s0",
+            explored_edges=[],
+            app_name="Calculator",
+            system_feedback=True,
+        ),
+        settings=PAGE_DETAIL,
+    )
+    vlm.predict_next_action(
+        router_client,
+        vlm.ActionRequest(
+            screenshot_b64=png_screenshot,
+            instruction="Tap unobscured app Share",
+            action_history=["Copy app result"],
+            overall_task="Inspect calculator actions",
+            system_feedback=True,
+        ),
+        settings=PAGE_DETAIL,
+    )
+    vlm.verify_same_node(
+        router_client,
+        existing=vlm.DescribedScreenshot(png_screenshot, "Calculator", system_feedback=True),
+        new=vlm.DescribedScreenshot(png_screenshot, "Calculator"),
+        settings=PAGE_DETAIL,
+    )
+    bodies = [json.loads(r.content) for r in router_requests]
+    prompts = [
+        " ".join(
+            part.get("text", "")
+            for m in body["messages"]
+            for part in (m["content"] if isinstance(m["content"], list) else [])
+        )
+        for body in bodies
+    ]
+    assert all("clipboard feedback" in prompt for prompt in prompts)
+    assert "App Copy and Share controls outside the mask remain available" in prompts[1]
+    assert "Copy app result" in prompts[2]
+    assert "Inspect calculator actions" in prompts[2]
+    assert "compare the app outside them" in prompts[3]

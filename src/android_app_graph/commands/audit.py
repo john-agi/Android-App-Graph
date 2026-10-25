@@ -26,24 +26,39 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import yaml
 from openrouter import OpenRouter
 
+from android_app_graph.commands.audit_policy import (
+    INSPECTION_HINT,
+    execution_decision,
+    inspection_block_reason,
+)
 from android_app_graph.device import (
     AdbController,
+    AdbDisplayAccess,
     AppLaunch,
     DeviceController,
+    DeviceUnreachableError,
+    InputRejectedError,
+    StartupRecovery,
+    UnresolvedPermissionError,
     grant_runtime_permissions,
+    input_region_hint,
     is_outside_app,
     keyboard_status,
     launch_app,
+    resolve_permission_prompt,
     restart_app,
     return_to_app,
     soft_keyboard_hint,
@@ -54,6 +69,12 @@ from android_app_graph.member_groups import (
     TEXT_GROUPING_FLOOR,
     MemberCheck,
 )
+from android_app_graph.run_environment import (
+    RunBaselineError,
+    RunEnvironment,
+    UnsafeReplayError,
+    mutation_config,
+)
 from android_app_graph.step_log import (
     Observation,
     StepRecorder,
@@ -61,6 +82,7 @@ from android_app_graph.step_log import (
     TransitionRecord,
     read_exploration_transitions,
 )
+from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
 from android_app_graph.utils import (
     MatchingSettings,
     ModelSettings,
@@ -70,6 +92,7 @@ from android_app_graph.utils import (
     resolve_audit_timeout,
     resolve_matching_settings,
     resolve_model_settings,
+    resolve_unreachable_limit,
 )
 from android_app_graph.utils.graph_manager import (
     EXTERNAL_WEB_BACK_PRESSES,
@@ -80,6 +103,7 @@ from android_app_graph.utils.graph_manager import (
     MemberVerdict,
     MemberVerdicts,
     MergeProposal,
+    PathStep,
     SetupTrail,
     open_menu_in,
 )
@@ -103,6 +127,9 @@ RE_EXPLORE_ROLES = (*AUDIT_ROLES, "instruction", "action")
 def run_audit(graph: GraphManager, app_name: str, report_path: Path) -> dict[str, Any]:
     """Run the LLM audit and save the report."""
     result = graph.run_audit(app_name=app_name)
+    for issue in result.get("issues", []):
+        if issue.get("type") in {"retry_edge", "explore_node"}:
+            issue["execution_policy"] = execution_decision(issue).as_record()
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", encoding="utf-8") as f:
@@ -315,18 +342,77 @@ class _Step:
     open_menu: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _SkippedAction:
+    instruction: str
+    reason: str
+
+
+class _InspectionBlockedError(ValueError):
+    """A recorded navigation instruction crosses the audit's inspection boundary."""
+
+
+def _check_instruction_policy(run: _ReExploreRun, source: str, instruction: str) -> None:
+    blocked = inspection_block_reason(instruction, context=run.graph.latest_description(source))
+    if blocked is not None:
+        raise _InspectionBlockedError(blocked)
+
+
+def _check_setup_policy(run: _ReExploreRun, source: str, setup: Sequence[object]) -> None:
+    for edge in run.graph.get_all_edges_from_node(source):
+        for actions, instruction in zip(edge["actions"], edge["instructions"], strict=True):
+            if any(action in actions for action in setup):
+                _check_instruction_policy(run, source, instruction)
+
+
+def _check_navigation_policy(run: _ReExploreRun, path: list[PathStep]) -> None:
+    for source, step in pairwise(path):
+        _check_setup_policy(run, source.node, step.setup)
+        edge = run.graph.graph.get_edge_data(source.node, step.node, {})
+        for action, instruction in zip(
+            edge.get("actions", []), edge.get("instructions", []), strict=True
+        ):
+            if action == step.action:
+                _check_instruction_policy(run, source.node, instruction)
+
+
 def _identify(
     run: _ReExploreRun, device_state: dict[str, Any], *, expected_observation: str | None = None
 ) -> str:
     """Record a match of the screen in ``device_state``, which the caller expects to show
     the screen of ``expected_observation`` when it names one, and return its node."""
+    if device_state.get("system_surface") is not None:
+        run.graph.record_external_app_visit(Observation.from_state(device_state))
+        device_state = _recover_system_surface(run, device_state)
     observation = Observation.from_state(device_state)
     run.recorder.record_match(observation, expected_observation)
     return run.graph.identify_state(observation, expected_observation=expected_observation)
 
 
+def _recover_system_surface(run: _ReExploreRun, state: dict[str, Any]) -> dict[str, Any]:
+    with run.recorder.source("system_surface_recovery"):
+        run.recorder.record_system_event(
+            {"status": "boundary_recovery", "surface": state.get("system_surface")}
+        )
+        recovered = (
+            resolve_permission_prompt(
+                run.recorder,
+                run.app_launch,
+                state,
+                run.recorder.record_system_event,
+                StartupRecovery(run.recorder, run.session.unreachable_limit, logger),
+            )
+            if state.get("system_surface") == "permission"
+            else return_to_app(run.recorder, run.app_launch, logger)
+        )
+        run.recorder.record_system_event(
+            {"status": "boundary_resolved", "package": recovered.get("package")}
+        )
+        return recovered
+
+
 def _left_app(run: _ReExploreRun, device_state: dict[str, Any]) -> bool:
-    """A keyboard or system dialog on top of the app does not count as leaving it."""
+    """Use the observation's owner to distinguish app state from another destination."""
     return is_outside_app(device_state.get("package", "").strip(), run.target.package_name)
 
 
@@ -360,12 +446,17 @@ def _navigate_to(run: _ReExploreRun, target_node: str) -> str | None:
         )
         path = run.graph.find_path(opened_on, target_node) or path
 
+    _check_navigation_policy(run, path)
+
     actual = opened_on
     if len(path) > 1:
-        for step in path[1:]:
-            for setup_action in step.setup:
-                _execute(run.recorder, setup_action)
-            _execute(run.recorder, step.action)
+        try:
+            for step in path[1:]:
+                for setup_action in step.setup:
+                    _execute(run.recorder, setup_action)
+                _execute(run.recorder, step.action)
+        except (InputRejectedError, SystemOverlayActionError) as error:
+            logger.warning("Replay input is unreachable: %s; identifying the current screen", error)
         actual = _identify(
             run,
             run.recorder.get_state(),
@@ -413,10 +504,8 @@ def _leave_external_web(run: _ReExploreRun, expected_observation: str | None) ->
 
 def _plan_and_act(
     run: _ReExploreRun, node: str, device_state: dict[str, Any], page_description: str
-) -> _Step | None:
-    """Plan a step from *node*, shown in *device_state*, execute its action, and return
-    it, or ``None`` when the action model waits.
-    """
+) -> _Step | _SkippedAction | None:
+    """Return an executed step, a policy skip, or ``None`` for an action-model wait."""
     before = Observation.from_state(device_state)
     explored_edges = run.graph.get_all_edges_from_node(node)
 
@@ -426,28 +515,37 @@ def _plan_and_act(
         keyboard_status(keyboard_hint), run.graph.observation_state(before)
     )
 
+    input_status += input_region_hint(device_state)
+    input_status += run.recorder.input_rejection_hint
+
     planned_instruction, element = plan_next_action(
         client=run.client,
         request=PlanRequest(
-            screenshot_b64=before.screenshot_b64,
+            screenshot_b64=before.app_image,
             page_description=page_description,
             node=node,
             explored_edges=explored_edges,
             app_name=run.target.app_name,
             input_status=input_status,
             back_leaves_app=run.graph.back_leaves_app(node),
+            system_feedback=bool(before.system_overlays),
         ),
         settings=run.session.instruction,
     )
+    context = f"{run.graph.latest_description(node)} {run.graph.observation_state(before)}"
+    blocked = inspection_block_reason(planned_instruction, context=context)
+    if blocked is not None:
+        return _SkippedAction(planned_instruction, blocked)
 
     action, _history_entry = predict_next_action(
         client=run.client,
         request=ActionRequest(
-            screenshot_b64=before.screenshot_b64,
+            screenshot_b64=before.app_image,
             instruction=f"{planned_instruction}\n{input_status}",
             screen_w=run.recorder.w,
             screen_h=run.recorder.h,
             action_history=[],
+            system_feedback=bool(before.system_overlays),
         ),
         settings=run.session.action,
     )
@@ -460,12 +558,14 @@ def _plan_and_act(
         )
         action = {"action": "back"}
         instruction = "Press back"
-        run.recorder.exe_action(action)
-    elif action.get("action") == "wait":
+    if action.get("action") == "wait":
         time.sleep(1)
         return None
-    else:
+    try:
         run.recorder.exe_action(action)
+    except (InputRejectedError, SystemOverlayActionError) as error:
+        logger.warning("App input is unreachable: %s; counting a wait", error)
+        return None
     return _Step(
         start=run.recorder.last_match,
         before=before,
@@ -541,6 +641,46 @@ def _record_step(
     return new_node, step_result
 
 
+def _record_system_step(
+    run: _ReExploreRun, source: str, step: _Step, state: dict[str, Any], number: int
+) -> tuple[str, dict[str, Any]]:
+    """Keep the executed app input's boundary and its separately recovered app screen."""
+    after = Observation.from_state(state)
+    boundary = run.graph.record_external_app_visit(after)
+    run.graph.add_edge(
+        source,
+        boundary,
+        action=[step.action],
+        details=EdgeDetails(
+            instruction=step.instruction,
+            target_observation=f"[system surface: {after.system_surface}]",
+        ),
+    )
+    run.recorder.record_transition(
+        Transition(
+            before=step.before,
+            after=after,
+            instruction=step.planned_instruction,
+            element=step.element,
+            action=step.action,
+            from_node=source,
+            to_node=boundary,
+        )
+    )
+    recovered = _identify(run, _recover_system_surface(run, state), expected_observation=step.start)
+    run.graph.save_graph(run.target.graph_path)
+    return recovered, {
+        "step": number,
+        "from": source,
+        "to": boundary,
+        "instruction": step.instruction,
+        "action": step.action,
+        "status": "system_boundary",
+        "system_surface": after.system_surface,
+        "recovered_to": recovered,
+    }
+
+
 def _last_state(run: _ReExploreRun, node: str) -> dict[str, Any]:
     """Return the state the latest visit to ``node`` recorded."""
     return run.graph.graph.nodes[node].get("last_detail_snapshot", {})
@@ -558,6 +698,7 @@ def _explore_steps(
     from the description of the screen the device was last identified on. ``arrived`` says
     the replay before them arrived at the node, so the setup of the first step is known."""
     current_node = start_from
+    excluded: dict[str, list[str]] = {}
     step_results: list[dict[str, Any]] = []
     trail = SetupTrail(run.graph.resolve_node_id)
     trail.begin(start_from, _last_state(run, start_from) if arrived else None)
@@ -567,14 +708,38 @@ def _explore_steps(
         if run.graph.get_node(current_node) is None:
             break
 
-        page_desc = f"{run.graph.latest_description(current_node)}\n[AUDIT HINT: {hint}]"
+        page_desc = (
+            f"{run.graph.latest_description(current_node)}\n[AUDIT HINT: {hint}]\n{INSPECTION_HINT}"
+        )
+        if skipped_instructions := excluded.get(current_node):
+            page_desc += "\nExcluded by the inspection policy:\n" + "\n".join(skipped_instructions)
         step = _plan_and_act(run, current_node, device_state, page_desc)
         if step is None:
+            continue
+        if isinstance(step, _SkippedAction):
+            instructions = excluded.setdefault(current_node, [])
+            if step.instruction not in instructions:
+                instructions.append(step.instruction)
+            step_results.append(
+                {
+                    "step": step_i + 1,
+                    "status": "skipped",
+                    "instruction": step.instruction,
+                    "reason": step.reason,
+                }
+            )
             continue
 
         time.sleep(0.5)
         device_state = run.recorder.get_state()
 
+        if device_state.get("system_surface") is not None:
+            current_node, outcome = _record_system_step(
+                run, current_node, step, device_state, step_i + 1
+            )
+            step_results.append(outcome)
+            trail.begin(current_node, None)
+            continue
         if _left_app(run, device_state):
             logger.warning("Left app during re-explore, pressing back")
             with run.recorder.source("external_app_recovery"):
@@ -599,6 +764,9 @@ def _explore_steps(
 
 
 def _replay_to(run: _ReExploreRun, node: str) -> str | None:
+    path = run.graph.find_path(run.graph.resolve_node_id(run.start_node), node)
+    if path is not None:
+        _check_navigation_policy(run, path)
     with run.recorder.source("navigation_replay"):
         restart_app(run.recorder, run.app_launch, logger)
         return _navigate_to(run, node)
@@ -625,6 +793,7 @@ def _correct_flagged_edge(
             target,
         )
         return {"status": "unverified", "reached": source}
+    _check_setup_policy(run, source, setup)
     for setup_action in setup:
         _execute(run.recorder, setup_action)
     before = run.recorder.get_state()
@@ -648,6 +817,9 @@ def _correct_flagged_edge(
         )
     )
 
+    if after.get("system_surface") is not None:
+        run.graph.record_external_app_visit(Observation.from_state(after))
+        _recover_system_surface(run, after)
     if reached != target:
         if not run.graph.move_edge_action(source, target, index, reached):
             return {"status": "unverified", "reached": reached}
@@ -655,7 +827,7 @@ def _correct_flagged_edge(
 
     label = describe_executed_action(
         client=run.client,
-        screenshot_b64=before["screenshot"],
+        screenshot_b64=Observation.from_state(before).app_image,
         action=action,
         screen_size=(run.recorder.w, run.recorder.h),
         settings=run.session.instruction,
@@ -664,6 +836,17 @@ def _correct_flagged_edge(
         return {"status": "relabel_failed"}
     run.graph.relabel_edge_action(source, target, index, label)
     return {"status": "relabelled", "instruction": label}
+
+
+def _guarded_correction(
+    run: _ReExploreRun, source: str, target: str, instruction: str
+) -> dict[str, Any]:
+    """Correct a reachable flagged action, retaining why an input is skipped."""
+    try:
+        with run.recorder.source("edge_retry"):
+            return _correct_flagged_edge(run, source, target, instruction)
+    except (InputRejectedError, SystemOverlayActionError) as error:
+        return {"status": "skipped", "reason": str(error)}
 
 
 def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
@@ -679,23 +862,29 @@ def _retry_edge(run: _ReExploreRun, issue: dict[str, Any]) -> dict[str, Any]:
         logger.warning("Source node %s is external, skipping", source)
         return {"issue": issue, "status": "skipped", "reason": "external source"}
 
+    _check_instruction_policy(run, source, instruction)
     logger.info("Retrying edge: %s → %s (instruction: '%s')", source, target, instruction)
     reached = _replay_to(run, source)
     source, target = run.graph.resolve_node_id(source), run.graph.resolve_node_id(target)
     if reached != source:
         return {"issue": issue, "status": "unverified", "reached": reached}
 
-    with run.recorder.source("edge_retry"):
-        outcome = _correct_flagged_edge(run, source, target, instruction)
+    outcome = _guarded_correction(run, source, target, instruction)
     logger.info("Flagged edge %s → %s: %s", source, target, outcome)
-    if outcome["status"] == "unverified":
+    if outcome["status"] in {"unverified", "skipped"}:
         return {"issue": issue, **outcome}
     source = run.graph.resolve_node_id(source)
     # Only an executed flagged action has moved the device off the source.
     executed = outcome["status"] != "instruction_not_found"
-    if executed and _replay_to(run, source) != run.graph.resolve_node_id(source):
-        logger.warning("Replay after the correction missed %s; not exploring", source)
-        return {"issue": issue, **outcome, "steps": []}
+    if executed:
+        try:
+            reached = _replay_to(run, source)
+        except (_InspectionBlockedError, UnsafeReplayError) as error:
+            outcome = {**outcome, "reason": str(error)}
+            reached = None
+        if reached != run.graph.resolve_node_id(source):
+            logger.warning("Replay after the correction missed %s; not exploring", source)
+            return {"issue": issue, **outcome, "steps": []}
 
     target = run.graph.resolve_node_id(target)
     target_desc = run.graph.node_descriptions(target) if target in run.graph.graph else target
@@ -778,6 +967,7 @@ def re_explore_issues(
         graph_steps_dir(target.graph_path),
         run_kind="audit",
         source="re_explore",
+        target_package=target.package_name,
     )
     run = _ReExploreRun(
         graph=graph,
@@ -788,19 +978,37 @@ def re_explore_issues(
         client=client,
         start_node=start_node,
     )
-    for issue in issues:
-        itype = issue.get("type", "")
+    try:
+        for issue in issues:
+            itype = issue.get("type", "")
+            if itype not in {"retry_edge", "explore_node"}:
+                continue
+            decision = execution_decision(issue)
+            if not decision.executable:
+                results.append(
+                    {
+                        "issue": issue,
+                        "status": "skipped",
+                        "reason": decision.reason,
+                        "execution_policy": decision.as_record(),
+                    }
+                )
+                continue
 
-        if itype == "retry_edge":
-            results.append(_retry_edge(run, issue))
-        elif itype == "explore_node":
-            results.append(_explore_node(run, issue))
+            try:
+                handler = _retry_edge if itype == "retry_edge" else _explore_node
+                results.append(handler(run, issue))
+            except (_InspectionBlockedError, UnsafeReplayError) as exc:
+                results.append({"issue": issue, "status": "skipped", "reason": str(exc)})
+    except UnresolvedPermissionError, UnresolvedSystemOverlayError:
+        graph.save_graph(target.graph_path)
+        raise
 
     return results
 
 
 class ReExploreSession(NamedTuple):
-    """Device controller, role settings and step budget needed by ``--re-explore``.
+    """Device controller, role settings and limits needed by ``--re-explore``.
 
     Built as a unit so ``re_explore_issues`` takes non-optional arguments: the
     audit-only path never constructs one and never touches a device.
@@ -809,6 +1017,7 @@ class ReExploreSession(NamedTuple):
     controller: DeviceController
     instruction: ModelSettings
     action: ModelSettings
+    unreachable_limit: float
     steps_per_issue: int = 5
 
 
@@ -816,12 +1025,15 @@ def _open_re_explore_session(
     config: dict[str, Any],
     settings: dict[str, ModelSettings],
     steps_per_issue: int,
+    *,
+    unreachable_limit: float,
 ) -> ReExploreSession:
     """Build the device session for ``--re-explore``."""
     return ReExploreSession(
-        controller=AdbController(config, logger),
+        controller=AdbController(config, logger, unreachable_limit=unreachable_limit),
         instruction=settings["instruction"],
         action=settings["action"],
+        unreachable_limit=unreachable_limit,
         steps_per_issue=steps_per_issue,
     )
 
@@ -947,21 +1159,40 @@ def _re_explore_app(
     package_name = app["package_name"]
     logger.info("Starting re-exploration for %d issues...", len(issues))
 
-    grant_runtime_permissions(run.config["device"]["udid"], package_name)
-    launch_activity = launch_app(run.config, app, logger)
-    time.sleep(4)
-
-    target = ReExploreTarget(
-        app_name=app_name,
-        package_name=package_name,
-        graph_path=_app_file(run.graph_dir, app_name, "_audited"),
-        launch_activity=launch_activity,
+    executable = any(execution_decision(issue).executable for issue in issues)
+    environment = (
+        RunEnvironment(
+            session.controller,
+            AdbDisplayAccess(run.config["device"]["udid"]),
+            _app_file(run.graph_dir, app_name),
+            mutation=mutation_config(run.config.get("experiment", {}).get("mutation", {})),
+            logger=logger,
+        )
+        if executable
+        else nullcontext(session.controller)
     )
-    re_results = re_explore_issues(graph, issues, target=target, session=session, client=run.client)
+    with environment as managed:
+        session = session._replace(controller=managed)
+        launch_activity = None
+        if executable:
+            recovery = StartupRecovery(session.controller, session.unreachable_limit, logger)
+            grant_runtime_permissions(run.config["device"]["udid"], package_name, recovery)
+            launch_activity = launch_app(run.config, app, logger, recovery)
+            time.sleep(4)
 
-    results_path = _app_file(run.graph_dir, app_name, "_re_explore")
-    _write_json(results_path, re_results)
-    logger.info("Re-exploration results saved to %s", results_path)
+        target = ReExploreTarget(
+            app_name=app_name,
+            package_name=package_name,
+            graph_path=_app_file(run.graph_dir, app_name, "_audited"),
+            launch_activity=launch_activity,
+        )
+        re_results = re_explore_issues(
+            graph, issues, target=target, session=session, client=run.client
+        )
+
+        results_path = _app_file(run.graph_dir, app_name, "_re_explore")
+        _write_json(results_path, re_results)
+        logger.info("Re-exploration results saved to %s", results_path)
 
 
 def _report_no_path_to_start(
@@ -1041,6 +1272,14 @@ def _audit_app(run: _AuditRun, app: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except DeviceUnreachableError as exc:
+        sys.stderr.write(f"app-graph-audit: error: {exc}\n")
+        return 1
+
+
+def _main(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1056,13 +1295,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         check_config_keys(config)
+        mutation_config(exp_config.get("mutation", {}))
         selected_apps = select_apps_for_audit(
             config,
             graph_dir,
             app_name=args.app,
             re_explore=args.re_explore,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, TypeError) as exc:
         parser.error(str(exc))
 
     try:
@@ -1070,6 +1310,7 @@ def main(argv: list[str] | None = None) -> int:
             vlm_config, roles=RE_EXPLORE_ROLES if args.re_explore else AUDIT_ROLES
         )
         matching = resolve_matching_settings(vlm_config)
+        unreachable_limit = resolve_unreachable_limit(config) if args.re_explore else None
         api_key = resolve_api_key()
     except ValueError as exc:
         parser.error(str(exc))
@@ -1079,8 +1320,10 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(level=logging.INFO)
 
     session = (
-        _open_re_explore_session(config, settings, args.steps_per_issue)
-        if args.re_explore
+        _open_re_explore_session(
+            config, settings, args.steps_per_issue, unreachable_limit=unreachable_limit
+        )
+        if unreachable_limit is not None
         else None
     )
 
@@ -1094,8 +1337,12 @@ def main(argv: list[str] | None = None) -> int:
             matching=matching,
             session=session,
         )
-        for app in selected_apps:
-            _audit_app(run, app)
+        try:
+            for app in selected_apps:
+                _audit_app(run, app)
+        except RunBaselineError as error:
+            sys.stderr.write(f"app-graph-audit: error: {error}\n")
+            return 1
 
     token_tracker.print_summary()
     logger.info("Audit complete.")

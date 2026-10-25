@@ -19,9 +19,16 @@ from openrouter import OpenRouter
 from openrouter.errors import OpenRouterError
 from PIL import Image
 
-from android_app_graph.device import DeviceController, DeviceUnreachableError, StillOutsideAppError
+from android_app_graph.device import (
+    DeviceController,
+    DeviceUnreachableError,
+    InputRejectedError,
+    PermissionGrants,
+    StillOutsideAppError,
+)
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
@@ -49,7 +56,7 @@ _TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
 
 def _screen(activity: str, color: str) -> dict[str, object]:
     buffer = io.BytesIO()
-    Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+    Image.new("RGB", (100, 200), color).save(buffer, format="PNG")
     screenshot = base64.b64encode(buffer.getvalue()).decode("ascii")
     return {"activity": activity, "screenshot": screenshot, "package": "com.demo"}
 
@@ -1296,7 +1303,13 @@ class _ScriptedDevice:
 
 def _recording(device: DeviceController, kobe: Kobe) -> StepRecorder:
     """Record ``device`` in the step log of ``kobe``, as Kobe records the device it is given."""
-    return StepRecorder(device, kobe.controller.steps, run_kind="explore", source="main_loop")
+    return StepRecorder(
+        device,
+        kobe.controller.steps,
+        run_kind="explore",
+        source="main_loop",
+        target_package=kobe.package_name,
+    )
 
 
 def _explore_one_step_the_action_model_ends(
@@ -1762,7 +1775,6 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     kobe.graph.add_edge("s0_home", "s1_settings", {"action": "tap"})
     router_responses.extend(
         [
-            chat_response(content='{"issues":[],"summary":"no duplicates"}'),
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
@@ -1770,7 +1782,7 @@ def test_coverage_checkpoint_asks_the_page_detail_model_where_to_continue(
     assert kobe.maybe_continue_from_coverage_checkpoint(50, 100, "s0_home") == "s1_settings"
     assert [json.loads(request.content)["model"] for request in router_requests] == [
         "provider/page_detail"
-    ] * 2
+    ]
 
 
 def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
@@ -1805,7 +1817,6 @@ def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
     kobe.coverage_checkpoint_top_k = 2
     router_responses.extend(
         [
-            chat_response(content='{"issues":[],"summary":"no duplicates"}'),
             chat_response(content='{"node_id":"s0_home","reason":"top-level sections"}'),
         ]
     )
@@ -1815,10 +1826,9 @@ def test_coverage_checkpoint_offers_the_start_screen_ranked_below_its_top_k(
 
     bodies = [json.loads(request.content) for request in router_requests]
     assert [body["response_format"]["json_schema"]["name"] for body in bodies] == [
-        "node_merge_audit",
         "exploration_target",
     ]
-    assert "node_id=s0_home" in bodies[1]["messages"][0]["content"]
+    assert "node_id=s0_home" in bodies[0]["messages"][0]["content"]
 
 
 @pytest.mark.usefixtures("no_sleep")
@@ -1839,7 +1849,6 @@ def test_coverage_checkpoint_restarts_the_app_before_replaying_to_its_target(
     replaying_kobe.graph.add_edge("s1_settings", "s2_detail", action=[open_detail])
     router_responses.extend(
         [
-            chat_response(content='{"issues":[],"summary":"no duplicates"}'),
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
@@ -1883,7 +1892,7 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
     if navigation_fails:
         graph.add_edge("s1_list_dup", "s2_detail", {"action": "tap"})
         monkeypatch.setattr(replaying_kobe, "navigate_to_node", _fail_navigation)
-    duplicate = {"type": "merge_nodes", "node_a": "s0_list", "node_b": "s1_list_dup"}
+    duplicate = {"type": "merge_nodes", "node_a": "n0", "node_b": "n1"}
     target = '{"node_id":"s2_detail","reason":"unexplored"}'
     click = '{"action":"click","coordinate":[500,500]}'
     router_responses.extend(
@@ -1920,7 +1929,7 @@ def test_a_checkpoint_merge_keeps_the_screen_the_device_is_on_out_of_the_candida
     kobe.graph.embed_missing_members()
     kobe.graph.graph.add_node("s0_home", replay_misses=0)
     kobe.graph.add_edge("s0_home", "s1_list", {"action": "tap"})
-    duplicate = {"type": "merge_nodes", "node_a": "s1_list", "node_b": "s2_list_dup"}
+    duplicate = {"type": "merge_nodes", "node_a": "n0", "node_b": "n1"}
     router_responses.extend(
         [
             chat_response(content=json.dumps({"issues": [duplicate], "summary": "duplicate"})),
@@ -1982,9 +1991,6 @@ def _in_app(activity: str, color: str) -> dict[str, object]:
     return {**_screen(f"com.demo.{activity}", color), "package": "com.demo"}
 
 
-_NO_DUPLICATES = '{"issues":[],"summary":"no duplicates"}'
-
-
 @pytest.mark.usefixtures("no_sleep")
 def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is_on(
     tmp_path: Path,
@@ -2030,7 +2036,6 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         [
             chat_response(content='{"element":null,"instruction":"Open settings"}'),
             chat_response(content=_TAP_REPLY),
-            chat_response(content=_NO_DUPLICATES),
             chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
             chat_response(content='{"element":null,"instruction":"Open the sort menu"}'),
             chat_response(content=_TAP_REPLY),
@@ -2093,7 +2098,6 @@ def test_a_checkpoint_whose_launch_fails_restarts_the_app_once_more_and_continue
     _settings_and_detail(explorer)
     router_responses.extend(
         [
-            chat_response(content=_NO_DUPLICATES),
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
@@ -2131,7 +2135,6 @@ def test_a_checkpoint_whose_replay_fails_on_a_web_page_presses_back_off_it(
     explorer.graph.add_edge("s1_list", "s2_detail", action=[open_item])
     router_responses.extend(
         [
-            chat_response(content=_NO_DUPLICATES),
             chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
         ]
     )
@@ -2165,7 +2168,6 @@ def test_a_checkpoint_that_fails_before_the_restart_keeps_the_steps_node_and_sta
     _settings_and_detail(explorer)
     router_responses.extend(
         [
-            chat_response(content=_NO_DUPLICATES),
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
@@ -2202,8 +2204,26 @@ def _explore_into_a_permission_dialog(
         "activity": _DIALOG_ACTIVITY,
         "screenshot": png_screenshot,
         "package": "com.google.android.permissioncontroller",
+        "system_surface": "permission",
+        "permission_requester": "com.demo",
+        "xml": '<hierarchy><node resource-id="com.android.permissioncontroller:id/permission_allow_button" enabled="true" bounds="[0,0][100,100]"/></hierarchy>',
     }
     device = _ScriptedDevice(home, dialog, home)
+    monkeypatch.setattr(
+        "android_app_graph.device.grant_runtime_permissions",
+        lambda *_args: PermissionGrants(
+            ("android.permission.CAMERA",), ("android.permission.CAMERA",)
+        ),
+    )
+    monkeypatch.setattr(
+        "android_app_graph.device.run_adb",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            "  Permission [android.permission.CAMERA] (1):\n    sourcePackage=android prot=dangerous\n",
+            "",
+        ),
+    )
     monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
     router_responses.extend(
         [
@@ -2212,9 +2232,6 @@ def _explore_into_a_permission_dialog(
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"element":null,"instruction":"Tap Take photo"}'),
             chat_response(content='{"action":"click","coordinate":[500,500]}'),
-            # The dialog shows home's pixels, but of another package: no exact match.
-            httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"camera permission dialog"}'),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -2224,7 +2241,7 @@ def _explore_into_a_permission_dialog(
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
+def test_a_target_permission_is_resolved_without_app_coverage(
     kobe: Kobe,
     png_screenshot: str,
     router_responses: list[httpx.Response],
@@ -2232,25 +2249,25 @@ def test_a_permission_dialog_is_recorded_as_a_screen_of_the_app(
     embedding_body: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pressing back on a permission dialog would deny the permission."""
+    """The existing target grant policy resolves the prompt without a denial."""
     device = _explore_into_a_permission_dialog(
         kobe, png_screenshot, router_responses, chat_response, embedding_body, monkeypatch
     )
 
-    tap = {"action": "tap", "x": 50, "y": 100}
-    assert device.actions == [tap]
+    tap = {"action": "tap", "x": 16, "y": 16}
+    assert device.actions == [tap, {"action": "tap", "x": 50, "y": 50}]
     graph = kobe.graph.graph
     nodes = {data["activity"]: node for node, data in graph.nodes(data=True)}
     assert set(nodes) == {"com.demo.Home", _DIALOG_ACTIVITY}
     dialog_node = graph.nodes[nodes[_DIALOG_ACTIVITY]]
-    assert kobe.graph.latest_description(nodes[_DIALOG_ACTIVITY]) == "camera permission dialog"
-    assert "is_external" not in dialog_node
+    assert dialog_node["is_external"] is True
+    assert dialog_node["system_surface"] == "permission"
     edge = graph.edges[nodes["com.demo.Home"], nodes[_DIALOG_ACTIVITY]]
     assert edge["actions"] == [[tap]]
 
 
 @pytest.mark.usefixtures("no_sleep")
-def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
+def test_a_permission_boundary_is_excluded_from_all_app_targets(
     kobe: Kobe,
     png_screenshot: str,
     router_requests: list[httpx.Request],
@@ -2266,10 +2283,10 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
     )
 
     graph = kobe.graph
-    nodes = {data["package"]: node for node, data in graph.graph.nodes(data=True)}
-    assert set(nodes) == {"com.demo", "com.google.android.permissioncontroller"}
+    nodes = {data.get("package"): node for node, data in graph.graph.nodes(data=True)}
+    assert set(nodes) == {"com.demo", None}
     home = nodes["com.demo"]
-    assert graph.get_resume_target() == nodes["com.google.android.permissioncontroller"]
+    assert graph.get_resume_target() == home
     assert graph.get_resume_target(package_name="com.demo") == home
     checkpoint = graph.get_exploration_target_candidates(package_name="com.demo")
     assert [candidate["node_id"] for candidate in checkpoint] == [home]
@@ -2278,12 +2295,11 @@ def test_a_permission_dialog_is_matched_only_with_dialogs_and_never_replayed_to(
         for request in router_requests
         if b"No known-screen descriptions are supplied" in request.content
     ]
-    assert len(described_without_known_screens) == 2
+    assert len(described_without_known_screens) == 1
 
 
 _SEARCH = "com.google.android.settings.intelligence"
 _SEARCH_SCREEN = {**_screen(f"{_SEARCH}.SearchActivity", "orange"), "package": _SEARCH}
-_KEYBOARD = "com.google.android.inputmethod.latin"
 _TAP = {"action": "tap", "x": 50, "y": 100}
 
 
@@ -2438,7 +2454,7 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
     screens_by_log: Callable[..., DeviceController],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    keyboard = {**_screen("com.demo.Home", "gray"), "package": _KEYBOARD}
+    keyboard = {**_screen("com.demo.Home", "gray"), "package": "com.demo"}
     explorer = _explorer(
         screens_by_log(HOME_SCREEN, _SEARCH_SCREEN, keyboard), tmp_path, router_client
     )
@@ -2452,13 +2468,13 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
         httpx.Response(200, json=embedding_body),
         chat_response(content='{"page_description":"home with the keyboard shown"}'),
         httpx.Response(200, json=embedding_body),
+        chat_response(content='{"same":true}'),
     )
 
     assert device_log == [_TAP, _BACK]
     assert _node_packages(explorer) == {
         "s0": "com.demo",
         f"ext_{_SEARCH}": None,
-        "s1": _KEYBOARD,
     }
 
 
@@ -3602,7 +3618,7 @@ def _dump_timed_out() -> subprocess.TimeoutExpired:
 
 def _read_failed(diagnostic: str) -> subprocess.CalledProcessError:
     return subprocess.CalledProcessError(
-        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window"], stderr=diagnostic
+        1, ["adb", "-s", "test-device", "shell", "dumpsys", "window", "-a"], stderr=diagnostic
     )
 
 
@@ -3885,7 +3901,6 @@ def test_a_checkpoint_whose_navigation_times_out_reads_nothing_more_from_the_dev
     _settings_and_detail(explorer)
     router_responses.extend(
         [
-            chat_response(content=_NO_DUPLICATES),
             chat_response(content='{"node_id":"s1_settings","reason":"unexplored"}'),
         ]
     )
@@ -3931,8 +3946,12 @@ def _recovery_explorer(
 @pytest.mark.parametrize(
     "diagnostic", ["Permission denied", "invalid option -- bad", "Can't find service: window"]
 )
+@pytest.mark.parametrize(
+    "read", [["dumpsys", "window", "-a"], ["dumpsys", "activity", "activities"], ["wm", "size"]]
+)
 def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     diagnostic: str,
+    read: list[str],
     tmp_path: Path,
     router_client: OpenRouter,
     no_sleep: list[float],
@@ -3942,7 +3961,9 @@ def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     log: list[object] = []
     monkeypatch.setattr(subprocess, "run", _adb_probed(log, "answer"))
     monkeypatch.setattr(time, "monotonic", lambda: sum(no_sleep))
-    failure = _read_failed(diagnostic)
+    failure = subprocess.CalledProcessError(
+        1, ["adb", "-s", "test-device", "shell", *read], stderr=diagnostic
+    )
     explorer = _recovery_explorer(log, [failure], tmp_path, router_client, monkeypatch)
 
     with pytest.raises(subprocess.CalledProcessError) as raised:
@@ -3952,7 +3973,7 @@ def test_permanent_recovery_read_failures_stop_with_command_diagnostics(
     assert log == [_PROBE]
     assert no_sleep == []
     assert any(
-        "dumpsys window" in line and "exit 1" in line and diagnostic in line
+        " ".join(read) in line and "exit 1" in line and diagnostic in line
         for line in caplog.messages
     )
 
@@ -4039,7 +4060,15 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
 @pytest.mark.parametrize(
     ("read_command", "stderr", "stdout", "failures", "diagnostic", "excluded", "stops"),
     [
-        (["shell", "dumpsys", "window"], b"error: closed", None, 2, "error: closed", "", False),
+        (
+            ["shell", "dumpsys", "window", "-a"],
+            b"error: closed",
+            None,
+            2,
+            "error: closed",
+            "",
+            False,
+        ),
         (
             ["exec-out", "uiautomator dump /dev/stdout"],
             "android.os.DeadObjectException",
@@ -4050,7 +4079,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             None,
             "Window{private-screen}\nerror: device offline",
             2,
@@ -4068,7 +4097,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             b"unclassified " + b"x" * 1100 + b"private-tail",
             None,
             1,
@@ -4077,7 +4106,7 @@ def test_recovery_identification_failure_is_outside_device_retry_policy(
             False,
         ),
         (
-            ["shell", "dumpsys", "window"],
+            ["shell", "dumpsys", "window", "-a"],
             None,
             "Permission denied\nWindow{private-screen}",
             1,
@@ -4150,7 +4179,12 @@ def test_recovery_uses_bounded_error_diagnostics_and_preserves_observation_paylo
             "com.demo",
             "android.permission.CAMERA",
         ],
-        ["adb", "-s", "other-device", "shell", "dumpsys", "window"],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "window", "-a"],
+        ["adb", "-s", "other-device", "shell", "dumpsys", "activity", "activities"],
+        ["adb", "-s", "test-device", "shell", "input", "tap", "10", "20"],
+        ["adb", "-s", "other-device", "shell", "wm", "size"],
+        ["adb", "-s", "test-device", "shell", "wm", "density", "reset"],
+        ["adb", "-s", "test-device", "shell", "settings", "put", "system", "font_scale", "1"],
     ],
 )
 def test_recovery_stops_nonzero_commands_outside_its_observation_reads(
@@ -4240,3 +4274,366 @@ def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
     assert device.actions == actions
     assert explorer.graph.total_steps_completed == 3
     assert explorer.graph.graph.nodes["s0"]["state_schema"]["focused_field"][0] == "Name"
+
+
+class _TimedFeedbackDevice(_ScriptedDevice):
+    def __init__(self, *screens: dict[str, object]) -> None:
+        super().__init__(*screens)
+        self.reads = 0
+
+    @override
+    def get_state(self, **_kwargs: float | None) -> dict[str, object]:
+        state = self._screens[min(self.reads, len(self._screens) - 1)]
+        self.reads += 1
+        return state
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("max_steps", [1, 2])
+def test_system_feedback_defers_a_covered_action_within_the_step_budget(
+    kobe: Kobe, png_screenshot: str, monkeypatch: pytest.MonkeyPatch, max_steps: int
+) -> None:
+    app: dict[str, object] = {
+        "package": "com.demo",
+        "activity": "Home",
+        "screenshot": png_screenshot,
+    }
+    feedback = {**app, "system_overlays": [[0, 100, 100, 150]]}
+    device = _TimedFeedbackDevice(feedback, app, app)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    kobe.graph.graph.add_node(
+        "s0",
+        package="com.demo",
+        activity="Home",
+        state_schema={},
+        last_detail_snapshot={},
+        observations=[],
+        visit_count=1,
+        replay_misses=0,
+        interactable_elements=[{"description": "App Share", "position": "top", "explored": False}],
+    )
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0")
+    monkeypatch.setattr(kobe.graph, "latest_description", lambda _node: "Calculator")
+    monkeypatch.setattr(kobe.graph, "normalize_all_edges", lambda: 0)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    pending: list[bool] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int]:
+        pending.append(
+            request.unexplored_elements[0]["explored"] if request.unexplored_elements else True
+        )
+        return "Tap app Share", 1
+
+    actions = iter([{"action": "tap", "x": 50, "y": 125}, {"action": "tap", "x": 10, "y": 20}])
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (next(actions), "")
+    )
+    kobe.explore(max_steps=max_steps)
+    assert kobe.graph.total_steps_completed == max_steps
+    assert pending == [False] * max_steps
+    assert device.actions == ([] if max_steps == 1 else [{"action": "tap", "x": 10, "y": 20}])
+    assert kobe.graph.graph.number_of_edges() == max_steps - 1
+    assert kobe.graph.graph.nodes["s0"]["interactable_elements"][0]["explored"] is (max_steps == 2)
+    records = [json.loads(path.read_text()) for path in kobe.controller.steps.glob("*.json")]
+    skipped = [
+        r for r in records if r["kind"] == "system_event" and r.get("status") == "action_skipped"
+    ]
+    assert len(skipped) == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_replay_stops_before_a_system_feedback_target_and_records_its_actual_node(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, device_log: list[object]
+) -> None:
+    _settings_and_detail(kobe)
+    screen = {**HOME_SCREEN, "system_overlays": [[0, 0, 100, 100]]}
+    device = _TimedFeedbackDevice(screen, screen)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    assert kobe.navigate_to_node("s2_detail") == "s0_home"
+    assert kobe.graph.graph.nodes["s2_detail"]["replay_misses"] == 1
+    assert device.actions == []
+    assert device_log == _FIRST_RESTART
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_startup_dismisses_a_focused_shade_and_retains_its_boundary_identity(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = HOME_SCREEN
+    shade = {
+        **app,
+        "package": "com.android.systemui",
+        "activity": "NotificationShade",
+        "system_surface": "notification_shade",
+    }
+    device = _TimedFeedbackDevice(shade, app)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    kobe.graph.graph.add_node(
+        "s0",
+        package="com.demo",
+        activity="Home",
+        observations=[],
+        state_schema={},
+        last_detail_snapshot={},
+        visit_count=1,
+        replay_misses=0,
+    )
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0")
+    monkeypatch.setattr(kobe.graph, "latest_description", lambda _node: "Home")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", lambda **_kwargs: ("Wait", None))
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: ({"action": "wait"}, "")
+    )
+    kobe.explore(max_steps=1)
+    boundary = kobe.graph.graph.nodes["ext_com.android.systemui"]
+    assert boundary["system_surface"] == "notification_shade"
+    assert boundary["is_external"] is True
+    assert kobe.graph.get_resume_target() == "s0"
+    assert device.actions == [{"action": "back"}]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_an_unresolved_startup_permission_saves_its_boundary_before_stopping(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from android_app_graph.device import UnresolvedPermissionError
+
+    prompt = {
+        **HOME_SCREEN,
+        "package": "com.android.permissioncontroller",
+        "activity": "GrantPermissionsActivity",
+        "system_surface": "permission",
+        "permission_requester": "com.android.inputmethod.latin",
+    }
+    device = _TimedFeedbackDevice(prompt)
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    with pytest.raises(UnresolvedPermissionError, match="not verified as target"):
+        kobe.explore(max_steps=1)
+    assert kobe.graph_path.is_file()
+    assert device.actions == []
+    assert list(kobe.graph.graph) == ["ext_com.android.permissioncontroller"]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize(
+    "surface", ["notification_shade", "permission", "notification_shade_restart"]
+)
+def test_system_recovery_preserves_the_replay_expectation(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    app = {**HOME_SCREEN, "activity": "com.demo.Detail"}
+    restart = surface == "notification_shade_restart"
+    boundary = {
+        **app,
+        "package": "com.android.systemui",
+        "system_surface": "notification_shade" if restart else surface,
+    }
+    device = (
+        _TimedFeedbackDevice(HOME_SCREEN, boundary, boundary, HOME_SCREEN)
+        if restart
+        else _TimedFeedbackDevice(HOME_SCREEN, boundary, app)
+    )
+    monkeypatch.setattr(kobe, "controller", _recording(device, kobe))
+    kobe.graph.graph.add_nodes_from(["s0_home", "s1_detail"], replay_misses=0)
+    kobe.graph.add_edge("s0_home", "s1_detail", action=[{"action": "tap", "x": 1, "y": 2}])
+    monkeypatch.setattr("android_app_graph.kobe.restart_app", lambda *_args: None)
+    monkeypatch.setattr(
+        kobe.graph,
+        "identify_state",
+        lambda observation, **_kwargs: (
+            "s1_detail" if observation.activity == "com.demo.Detail" else "s0_home"
+        ),
+    )
+    monkeypatch.setattr(kobe.graph, "earliest_member", lambda node: node + "-observation")
+    if surface == "permission":
+        monkeypatch.setattr(
+            "android_app_graph.kobe.resolve_permission_prompt",
+            lambda controller, *_args: controller.get_state(),
+        )
+    monkeypatch.setattr(
+        "android_app_graph.device.restart_into_app",
+        lambda controller, *_args: controller.get_state(),
+    )
+    assert kobe.navigate_to_node("s1_detail") == ("s0_home" if restart else "s1_detail")
+    matches = [json.loads(p.read_text()) for p in sorted(kobe.controller.steps.glob("*.json"))]
+    assert [r["expected_observation"] for r in matches if r["kind"] == "match"] == [
+        "s0_home-observation",
+        "s0_home-observation" if restart else "s1_detail-observation",
+    ]
+
+
+@pytest.mark.parametrize("phase", ["replay", "capture"])
+@pytest.mark.parametrize("failure", ["permission", "overlay"])
+def test_resume_preserves_graph_evidence_when_system_recovery_stops(
+    kobe: Kobe, monkeypatch: pytest.MonkeyPatch, phase: str, failure: str
+) -> None:
+    from android_app_graph.device import UnresolvedPermissionError
+    from android_app_graph.system_surfaces import UnresolvedSystemOverlayError
+
+    error = UnresolvedPermissionError if failure == "permission" else UnresolvedSystemOverlayError
+    kobe.graph.graph.add_node("s0", replay_misses=0)
+
+    def stop(*_args: object, **_kwargs: object) -> NoReturn:
+        kobe.graph.graph.add_node("ext_boundary", is_external=True, replay_misses=0)
+        msg = "unresolved boundary"
+        raise error(msg)
+
+    monkeypatch.setattr(kobe, "navigate_to_node", stop if phase == "replay" else lambda _node: "s0")
+    if phase == "capture":
+        monkeypatch.setattr(kobe.controller, "get_state", stop)
+    with pytest.raises(error, match="unresolved boundary"):
+        kobe.explore(max_steps=1, resume_from="s0")
+    assert kobe.graph_path.is_file()
+    assert "ext_boundary" in kobe.graph_path.read_text()
+
+
+def test_an_ime_target_records_its_own_settings_as_app_coverage(
+    tmp_path: Path, png_screenshot: str, router_client: OpenRouter
+) -> None:
+    package = "com.touchtype.swiftkey"
+    device = _Device(
+        {
+            "activity": package + ".Settings",
+            "screenshot": png_screenshot,
+            "package": package,
+            "system_surface": "ime_settings",
+        }
+    )
+    explorer = Kobe(
+        device,
+        ExplorerConfig(
+            app_name="keyboard",
+            package_name=package,
+            graph_dir=tmp_path,
+            vlm_config={role: {"model": f"provider/{role}"} for role in _ROLES},
+        ),
+        client=router_client,
+        logger=logging.getLogger("test"),
+    )
+    state = explorer.controller.get_state()
+    assert state["system_surface"] is None
+    assert Observation.from_state(state).system_surface is None
+    record = json.loads((explorer.controller.steps / "000000.json").read_text())
+    assert record["package"] == package
+    assert record["system_surface"] is None
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("resume_from", ["auto", "s1_settings"])
+def test_display_rejected_resume_identifies_the_current_screen_and_explores(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    resume_from: str,
+) -> None:
+    kobe.graph.graph.add_node("s0_home", replay_misses=0)
+    kobe.graph.graph.add_node("s1_settings", replay_misses=0)
+    replayed: list[str] = []
+
+    def replay(node_id: str) -> NoReturn:
+        replayed.append(node_id)
+        message = "Coordinate replay requires its recorded display state or fresh grounding"
+        raise UnsafeReplayError(message)
+
+    monkeypatch.setattr(kobe, "navigate_to_node", replay)
+    monkeypatch.setattr(kobe.graph, "get_resume_target", lambda **_kwargs: "s1_settings")
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0_home")
+    _describing_by_node_id(kobe, monkeypatch)
+    planned_from: list[object] = []
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", _planner("Wait", planned_from))
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+
+    kobe.explore(max_steps=1, resume_from=resume_from)
+
+    assert replayed == ["s1_settings"]
+    assert planned_from == ["s0_home"]
+    assert kobe.graph.total_steps_completed == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_unreachable_planned_inputs_consume_steps_and_preserve_unexplored_targets(
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    regions = {"display": [0, 0, 720, 1280], "tap": [[0, 1184, 720, 1280]], "gesture": []}
+    device = _Screens({**HOME_SCREEN, "input_regions": regions})
+    explorer = _explorer(device, tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    explorer.graph.graph.nodes["s0_home"]["interactable_elements"] = [
+        {"description": "Import & Export", "explored": False}
+    ]
+    _identifying(explorer, monkeypatch, "s0_home")
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    planning_hints: list[str] = []
+
+    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int]:
+        planning_hints.append(request.input_status)
+        return "Open Import & Export", 1
+
+    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
+    action = {"action": "tap", "x": 257, "y": 1190}
+    monkeypatch.setattr(
+        "android_app_graph.kobe.predict_next_action", lambda **_kwargs: (action, "")
+    )
+
+    def reject(_action: dict[str, object]) -> None:
+        reason = "App input targets a system touch region"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    explorer.explore(max_steps=2)
+
+    assert explorer.graph.total_steps_completed == 2
+    assert len(planning_hints) == 2
+    assert all("1184" not in hint for hint in planning_hints)
+    assert "rejected" not in planning_hints[0]
+    assert "Previous tap was rejected: App input targets a system touch region" in planning_hints[1]
+    assert device.actions == []
+    assert list(explorer.graph.graph.edges) == []
+    assert explorer.graph.get_unexplored_elements("s0_home") == [
+        {"description": "Import & Export", "explored": False}
+    ]
+    records = step_records(explorer.controller.steps)
+    assert len([record for record in records if record["kind"] == "action_rejected"]) == 2
+    assert not any(record["kind"] == "transition" for record in records)
+    assert records[0]["input_regions"] == regions
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("in_setup", [False, True])
+def test_a_replay_stops_at_an_unreachable_input_and_identifies_its_actual_arrival(
+    in_setup: bool,
+    tmp_path: Path,
+    router_client: OpenRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    device_log: list[object],
+) -> None:
+    device = _Screens(HOME_SCREEN)
+    explorer = _explorer(device, tmp_path, router_client)
+    _list_reached_from_home(explorer)
+    blocked = {"action": "tap", "x": 257, "y": 1190}
+    later = {"action": "tap", "x": 50, "y": 100}
+    explorer.graph.add_edge(
+        "s0_home",
+        "s1_list",
+        action=[later] if in_setup else [blocked, later],
+        details=EdgeDetails(setup=[blocked] if in_setup else []),
+    )
+    _identifying(explorer, monkeypatch, "s0_home", "s0_home")
+
+    def reject(_action: dict[str, object]) -> None:
+        reason = "App input targets a system touch region"
+        raise InputRejectedError(reason, None)
+
+    monkeypatch.setattr(device, "exe_action", reject)
+    assert explorer.navigate_to_node("s1_list") == "s0_home"
+    assert device.actions == []
+    assert device_log == _FIRST_RESTART
+    assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 1

@@ -217,7 +217,7 @@ def shorten_words(text: str | None, max_words: int = 6, max_chars: int = 42) -> 
 
 def shorten_edge_label(text: str | None, max_words: int = 8, max_chars: int = 52) -> str:
     text = re.sub(r"\[[^\]]*\]", " ", str(text or ""))
-    text = re.sub(r"\{\{[^}]+\}\}", "value", text)
+    text = re.sub(r"\{+[^{}]+\}+", "value", text)
     text = re.sub(r"\([^)]*\)", " ", text)
     text = re.sub(
         r"\b(?:the|a|an|to|on|in|with|button|icon|option)\b", " ", text, flags=re.IGNORECASE

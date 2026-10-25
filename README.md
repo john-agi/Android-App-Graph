@@ -66,6 +66,17 @@ graph TD;
     cli["android_app_graph.cli"] --> dev;
     cli --> kobe;
     cli --> logging;
+    cli --> gf;
+    cli --> pay;
+    cli --> env["android_app_graph.run_environment"];
+    cmd --> env;
+    steps --> env;
+    env --> dev;
+    env --> display["android_app_graph.display_state"];
+    env --> gf;
+    env --> pay;
+    dev --> display;
+    display --> pay;
     kobe --> dev;
     kobe --> gf;
     kobe --> steps;
@@ -81,6 +92,8 @@ graph TD;
     gm --> steps;
     gm --> vlm;
     gf --> pay;
+    dev --> pay;
+    steps --> dev;
     steps --> gf;
     steps --> pay;
     steps --> img;
@@ -100,12 +113,15 @@ graph TD;
   `pyproject.toml` enforces the range `>=0.12.9,<0.13` with `required-version`;
   run `uv self update 0.12.9` if yours is outside it.
 - Android SDK with `adb` on `PATH`
-- A running emulator, Android container such as Redroid, or USB-debugging device on
-  `adb devices`, with the target app installed. `device.udid` in the config is its
-  serial. `device.avd_name` is read only when `adb devices` lists nothing:
+- A device running Android 16 (API 36) or later, listed by `adb devices` with the
+  target app installed. This can be an emulator, an Android container such as
+  Redroid, or a device with USB debugging enabled. `device.udid` in the config is
+  its serial. `device.avd_name` is read only when `adb devices` lists nothing:
   exploration then copies that AVD to `<avd_name>_dup` and starts the copy with
-  `emulator`, which must be on `PATH`. When `adb devices` fails or times out, adb cannot reach its server, and
-  `app-graph` copies and starts nothing: it exits with status 1 and an error naming
+  `emulator`, which must be on `PATH`. The source AVD's `.ini` file must declare a
+  non-empty `target`; the copy preserves that target. When `adb devices` fails or
+  times out, adb cannot reach its server, and `app-graph` copies and starts nothing:
+  it exits with status 1 and an error naming
   the server's address, `ADB_SERVER_SOCKET` or else
   `tcp:<ANDROID_ADB_SERVER_ADDRESS>:<ANDROID_ADB_SERVER_PORT>`, by default
   `tcp:localhost:5037`, and adb's error or the timeout. `device.unreachable_limit`
@@ -231,9 +247,9 @@ with each request:
 
 A role's positive, finite `request_timeout` (or `timeout`) in seconds replaces these
 for every call of the role. A screenshot embedding takes the `embedding` block's
-timeout when the `image_embedding` block sets none. The graph audit and node-merge
-audit send the whole graph in one prompt, so they take
-`page_detail.audit_request_timeout` instead, default 300 seconds.
+timeout when the `image_embedding` block sets none. The graph audit and each
+checkpoint duplicate-proposal request take `page_detail.audit_request_timeout`,
+default 300 seconds.
 
 Each attempt ends at that timeout by the wall clock, counted from when the
 request is sent, so connecting and the response headers count too. httpx's own
@@ -502,8 +518,8 @@ apps left. When the switcher shows no app, its overview panel without an app car
 explorer presses Home at once.
 
 Before exploring, and before `app-graph-audit --re-explore`, the app is granted
-every permission it requests with `adb shell pm grant`, so no permission prompt
-interrupts exploration. The grants stay on the device. Permissions that
+every permission it requests with `adb shell pm grant`. The grants stay on the
+device. Permissions that
 `pm grant` refuses, such as `INTERNET`, are logged and skipped.
 
 The app is then launched with `adb shell am start -n <component>`. The component is
@@ -520,6 +536,72 @@ For long runs, use the auto-resume wrapper:
 ```bash
 ./scripts/run_explore.sh -c configs/explore.yaml
 ```
+
+### Device baseline and run mutations
+
+`app-graph` captures a display baseline before app startup and keeps it in
+`<graph_dir>/<app>/<app>_run.json`. The sidecar belongs to that graph path and
+ADB device. Resume uses its original baseline; an existing graph requires its
+sidecar. A missing sidecar or a graph/device identity mismatch stops the CLI
+with an operator error. Keep a graph and its sidecar at their recorded path
+on the recorded device. For a new baseline, configure a fresh `graph_dir`
+and build a new graph; preserve existing graph files as read-only evidence.
+Library callers scope their `DeviceController` through the
+`RunEnvironment` context manager and its typed `DisplayAccess` backend.
+
+The supported baseline includes physical size/density, the presence and values
+of their overrides, the raw font-scale setting, night mode, custom schedule
+start/end times, persistent night settings and temporary activation flags.
+An absent setting stays distinct from its effective default. Unsupported
+capture output stops startup with a diagnostic.
+
+Display changes carry UTC timestamps, observation IDs and step sources in the
+sidecar. Observation records also retain their display configuration. Saved
+coordinate actions carry `recorded_display` evidence through normalization and
+graph save/load. Replay compares it with current settings and native screenshot
+size, even when the old coordinates fit inside the new frame. A mismatch or
+missing evidence records a rejected action and requires the recorded display
+state or fresh grounding. Fresh app actions continue under the current display
+configuration. A resume whose coordinate replay is rejected identifies the
+current screen and continues with freshly planned actions. Audit results retain
+an applied edge correction when the return replay is rejected.
+
+On completion, interruption or handled failure, cleanup attempts only supported
+display restoration within one bounded deadline. Verification allows one selective
+retry for remaining differences, including late default-font writes after a
+display reset. Its per-command results,
+verified final state and remaining commands are written to the sidecar.
+`lifecycle: active` retains pending restoration instructions while the run is
+open; `restored` describes supported display settings, and `pending` records
+unresolved restoration. Temporary activation flags that the shell cannot
+restore remain explicit verification failures. Cleanup errors preserve the
+original run error and graph. If final report storage fails, the persisted
+active baseline remains the operator's recovery source.
+
+Optional mutation metadata describes the disposable device and app cleanup:
+
+```yaml
+experiment:
+  mutation:
+    disposable_device: true
+    cleanup_recipe: "Stop timers and restore the fake seed, or reset the assigned device"
+    seed_manifest: logs/seed-manifest.json
+```
+
+The recipe is descriptive and is not executed. The optional manifest names one
+explicit public-storage subdirectory and its expected file hashes:
+
+```json
+{"root": "/sdcard/AppGraphSeed", "files": {"/sdcard/AppGraphSeed/note.txt": "<SHA-256>"}}
+```
+
+The sidecar preserves that manifest and the observed starting hashes, then
+reports added, removed and changed files in that scope. It reads hashes rather
+than copying file contents or private app data. Alarms, timers, app preferences
+and seed cleanup remain the operator's explicit recipe or authorized fleet
+reset. The explorer performs no implicit fleet reset or general app-data
+rollback. Graph-only audit stays device-free; audit re-exploration uses the same
+baseline lifecycle and replay checks.
 
 ### Replaying to a node
 
@@ -570,7 +652,8 @@ screen can reach, and favours nodes with many unexplored elements, few outgoing
 edges and few visits. Each checkpoint lets the model choose among the
 `experiment.coverage_checkpoint_top_k` highest-ranked nodes, and also offers the
 app's start screen while it has unexplored elements, in the last of those places
-when it ranks below them.
+when it ranks below them. Its duplicate-node pass uses
+[bounded checkpoint evidence](#checkpoint-evidence).
 
 Back on the start screen leaves the app for the home screen, as does Back on the
 screen an app opens on instead, and exploration then restarts the app onto the same
@@ -613,21 +696,45 @@ example when it only closed that app's keyboard. The explorer then restarts the
 app the same way, force-stopping it before the launch, because a launch alone
 resumes the app's task with the other app's screen still on top. If another app
 is still in front after the restart, exploration stops with an error naming its
-package. No screen of another app gets a node: whenever another app is in front
-when the explorer identifies a screen, such as at the end of a replay, it restarts
-the app first, and stops with the same error if the app does not come back. It
+package. When another app is in front during screen identification, such as at
+the end of a replay, the explorer restarts the app first, and stops with the same error if the app does not come back. It
 never records an edge out of an `ext_` node, so a replay never passes through one.
 The screen-description model decides what
 counts as external web, so the app's own screens get regular nodes even when they
-run in a web view or mention a privacy policy. A permission prompt or system dialog
-belongs to another package but sits on top of the app, so it gets a regular node
-and no back press. The keyboard also belongs to another package; a page with the
-keyboard shown shares the page's node, and the keyboard's visibility is recorded
-in the node's state.
-`app-graph-audit --re-explore` records external web pages and these dialogs the
-same way. A re-explore step that opens another app records nothing; the audit
-presses back, restarts the app if another app is still in front, and stops with
-the same error if the restart does not bring the app back.
+run in a web view or mention a privacy policy.
+
+Independently navigable system surfaces have explicit external identities: the
+notification shade, runtime permission controller and keyboard settings do not
+count as app coverage or become checkpoint, replay or resume targets. The visible
+shade window takes precedence over the underlying focused app. An attached
+keyboard preserves that app's identity and its visibility is page state. The target
+package's own pages remain app coverage, including Settings and keyboard settings
+when their package is the target.
+
+A standard runtime permission prompt is resolved only when its activity's launch
+record identifies the target as its requester and the target's declared dangerous
+permissions receive the run's existing grants. Its standard Allow button can then
+close the prompt. The step log keeps the requester, grant results and recovery
+input separately from app transitions. An unknown requester, unsupported button
+or repeated prompt saves the evidence and stops for an explicit permission decision.
+
+Android clipboard feedback retains its SystemUI ownership while the underlying
+app remains eligible. Captures read its visible window's explicit touchable region
+before the screenshot; raw images and native region coordinates remain in the step
+log. Model images mask those regions, and app coordinate inputs covered by current
+or captured feedback are deferred. Normal exploration counts that deferral as a
+wait without marking the target explored; audit exploration consumes an iteration,
+and replay stops its path. App Copy/Share and unobscured controls remain available.
+No automatic Back press dismisses a clipboard preview. A visible clipboard window
+with unavailable region geometry saves its raw capture and stops with an explicit
+ownership error. Window metadata and screenshots are consecutive device reads. The step log records their observed ownership.
+Persisted observations require explicit native size and ownership fields; graph
+loading and building report missing or malformed metadata before model calls.
+An explicit null represents unavailable evidence under the supported boundary policy.
+
+`app-graph-audit --re-explore` applies the same ownership and permission boundaries.
+A re-explore step that opens another app presses Back, restarts the app if another
+app remains in front, and stops if the target does not return.
 
 Every node other than an `ext_` one records the package the device reported for
 its screen, and the explorer and the audit match a screen only with nodes of its
@@ -646,12 +753,14 @@ takes about 12 seconds.
 Every read of the screen, in exploration and in the audit, runs three adb commands:
 the UI dump, the screenshot and `dumpsys window`. Each one that times out is run
 once more, with a warning naming the command (`adb ... timed out after 30 s;
-retrying once`). An input that times out is not sent again: it may have reached the
-device, and sending it again could act twice.
+retrying once`). An exploration input that times out is sent once: it may have
+reached the device. Startup checks the recovered screen before continuing an
+uncertain input.
 
 When a read times out the second time, or an input or another adb command of an
-exploration step times out, the explorer logs the command and starts one recovery
-deadline: `device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
+exploration step times out, or a startup device phase times out, the explorer logs
+the phase, serial and command and starts one recovery deadline:
+`device.unreachable_limit` seconds, 1800 (30 minutes) by default. Recovery
 checks the shell with `adb shell true`, then captures the complete UI dump,
 screenshot and window state. A successful shell check leaves that deadline in
 force. Each probe, observation read, retry and 30-second interval uses the time
@@ -667,7 +776,20 @@ in the same episode stops. The recovery log names the device, read phase, comman
 and exit status, with up to 1024 characters of error diagnostics or `diagnostics
 absent`. Screenshot bytes and successful observation payloads stay out of that log.
 
-The interrupted step counts toward `--max-steps`, and
+Startup covers the screen-size read, clearing recent apps, reading requested
+permissions, each permission grant, launcher resolution, app launch, and the initial
+or resume-position observation. Each completed phase stays complete. A timed-out
+grant retries only that permission; an ordinary refused grant is logged and skipped.
+An uncertain recent-app tap or swipe is followed by a fresh observation; a clear-all
+tap uses the button's current position if it still appears. An uncertain launch
+checks whether the app is in front. Interrupted resume navigation continues from
+the recovered app screen. Startup recovery counts no exploration action, adds no
+edge, and retains the loaded graph and its counters.
+
+`app-graph-audit --re-explore` uses the same outage limit during device startup.
+A basic audit runs without validating or using `device.unreachable_limit`.
+
+The interrupted exploration step counts toward `--max-steps`, and
 its `Step N/M` line shows `interrupted` as its action. What its action did is
 unknown, so a step interrupted before it recorded its edge records none, and the
 [setup](#graph-edges) of the next action is unknown. An outage after the step was
@@ -679,9 +801,36 @@ Past the limit, exploration saves the graph and logs `Device <udid> unreachable 
 <N> minutes. Exploration stopped at step <n>. Graph saved. Re-run to resume.`, and
 `app-graph` exits with status 1 and `app-graph: error: Device <udid> unreachable for
 <N> minutes`, without a traceback; `scripts/run_explore.sh` then starts it again,
-resuming from the saved graph. Only the exploration loop waits: an adb command that
-times out as a run starts, or in `app-graph-audit`, stops the command with its
-error. The explorer never restarts the adb server, which other runs can share.
+resuming from the saved graph. A startup outage before the graph loads leaves its
+saved files intact. `app-graph-audit --re-explore` uses the same startup recovery for
+its device initialization, permission grants and launch; its action recovery follows
+the audit error policy. The explorer never restarts the adb server, which other runs
+can share.
+
+### App input boundaries
+
+Action grounding uses each capture's native display dimensions, including rotation.
+Before every app tap, hold or swipe, the device reads its current window insets.
+Taps and holds stay outside visible system touch regions; swipes start outside
+system gesture regions. A visible gesture navigation bar can pass ordinary taps
+through to app content. Keyboard keys and unobscured app controls stay available.
+
+Reveal a partly obscured control or choose an unobscured point on that same control.
+An unreachable coordinate, unavailable geometry or a display change between capture
+and its input defers the input with a recorded reason. Exploration counts one wait
+without marking the target explored. The rejected action kind and reason accompany
+the next exploration or audit plan while its app, activity, image and input regions
+stay the same; an accepted input or changed observation clears that feedback.
+Replay checks each input against current regions after the preceding action, so
+intermediate rotations can be traversed. A rejected replay input stops the replay
+and identifies the screen reached. Audit retries report the skipped action.
+Dispatched inputs retain their requested coordinates.
+
+The detection uses the default display's authoritative `InsetsState` in
+`dumpsys window`. Its visible `tappableElement`, `systemGestures` and
+`mandatorySystemGestures` sources define regions that follow the current window
+geometry. Step records keep native pixel bounds; model instructions give
+coordinate-free reachability guidance.
 
 ### Step log
 
@@ -708,10 +857,16 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 
 | `kind` | Written for | Also holds |
 |---|---|---|
-| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash` and `black` |
-| `action` | each action sent to the device | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash`, `black` and captured `input_regions` |
+| `action` | each input request, before ownership checks and device dispatch | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
+| `action_rejected` | each unreachable app coordinate input, with no input dispatched | `action_record`, the rejected request's ID, its `action`, the `reason` and current `input_regions` |
+| `system_event` | ownership recovery or rejected input | `observation`, `status`, and event-specific evidence; statuses are `action_skipped`, `boundary_recovery`, `boundary_resolved`, `permission_observed`, `permission_grants`, `permission_resolved` and `permission_unresolved` |
 | `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, and `expected_observation`, a screenshot of the screen the run expects it to show, or `null` |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
+
+An `action` record preserves a request, not proof of dispatch. Both captured-feedback
+and dispatch-time rejection add an `action_skipped` system event and produce no app
+transition.
 
 An action, match or transition record takes `activity` and `package` from the
 screenshot it was taken from. A replay acts without looking, so a replayed action
@@ -730,9 +885,9 @@ started from.
 The status bar's clock and icons change on their own, so `pixel_hash` leaves them
 out. It is the SHA-256 of the image's decoded pixels, mode and size below its top
 `status_bar_rows` rows. Those rows cover `status_bar`, `[left, top, right, bottom]`
-in screen pixels, which every capture reads from the `statusBars` (`ITYPE_STATUS_BAR`
-before Android 14) `InsetsSource` of the `dumpsys window` output it already reads
-for the package and activity: `ceil(bottom * image height / screenshot height)`, and
+in screen pixels, which every capture reads from the `statusBars` `InsetsSource`
+of the `dumpsys window` output it already reads for the package and activity:
+`ceil(bottom * image height / screenshot height)`, and
 3 rows more when encoding shrank the image, because shrinking with LANCZOS blends
 each row into the 3 rows on either side of it. The frame follows the display cutout and the rotation; on a Pixel 9
 emulator it is 142 of 2424 rows in portrait. A bar that is hidden, as in immersive
@@ -770,7 +925,19 @@ observation or an exact image match.
 The planner uses that report and the current caret or field highlight to identify
 where text goes. When the intended field's focus is unclear, it taps that field as
 one step and observes the result before typing. An already identified active field
-can receive text directly. Type clears and enters text as one recorded action.
+can receive text directly.
+
+On the [supported Android versions](#prerequisites), Type replaces the complete focused
+value as one recorded action. It targets standard editable fields that handle Android
+Select All and delete keyboard editing: a keyboard Ctrl+A combination selects the value,
+one Delete removes it, and the requested text is entered with shell quoting and virtual
+keyboard character support.
+Replacement is independent of the previous value's length, caret position and selection.
+Custom widgets, intercepted shortcuts and other IMEs are outside the validated support.
+An adb command's successful exit reports command acceptance, without acknowledging
+the widget's selection or resulting value. A clearing-command error or timeout stops
+Type before text entry. Input is never retried because it may already have reached
+the field.
 
 ### Graph nodes
 
@@ -1196,9 +1363,8 @@ stay apart unless "same" answers on other pairs join them.
 
 The "same" answers join the nodes into clusters, with no "different" answer inside
 any of them, and each cluster is merged into its lowest-numbered node. The coverage
-checkpoint's merge audit verifies the model's pairs the same way and proposes none
-from images or descriptions, since every checkpoint would otherwise propose again each
-pair an earlier one kept apart.
+checkpoint verifies its model-proposed pairs with these rounds and keeps its
+[checkpoint evidence caches](#checkpoint-evidence) on the graph manager.
 
 `<app_name>_merge.json` holds:
 
@@ -1212,6 +1378,51 @@ pair an earlier one kept apart.
   the verifier's `reason` and `reused` for an asked pair or the asked pairs it is
   `deduced_from`, and the `status`: `merged`, with the node both are `kept` in,
   `kept_separate`, or `skipped` with the `reason` the pair cannot be verified.
+
+#### Checkpoint evidence
+
+A checkpoint considers every unordered pair of in-app nodes with members in the same
+package. Nodes are ordered by their numeric ID, then name, and divided into blocks of
+64. Each block has one within-block request when it has at least two nodes; each pair
+of blocks has one cross-block request. Cross-block requests consider pairs with one
+node in each block. The model uses local IDs whose mapping is owned by that request.
+Proposals outside its scope are reported as skipped.
+
+Each request contains at most 128 nodes and 128 KiB of graph evidence in UTF-8 bytes.
+A node supplies up to three distinct member descriptions, 128 bytes each, its package
+and activities, and up to two incoming and two outgoing neighbor descriptions, 64
+bytes each. Descriptions are ordered lexically; repeated edge actions leave this
+input unchanged. The app label uses at most 128 UTF-8 bytes. The logged full JSON-body
+bound includes the fixed prompt, response schema, model settings, response-healing
+plugin and JSON framing, with up to six encoded bytes per content byte for escaping.
+Returned usage supplies the actual prompt-token count.
+
+The complete pair coverage has quadratic cold work. For a single package:
+
+| Nodes | Proposal requests with a cold cache |
+|---:|---:|
+| 64 | 1 |
+| 100 | 3 |
+| 1,000 | 136 |
+| 3,000 | 1,128 |
+
+A graph manager keeps complete proposal replies keyed by ordered node IDs, the exact
+batch text, app label, rule/schema and model settings. A matching request reuses its
+proposals, including after revisits that preserve its displayed descriptions and
+navigation context. Cache misses run concurrently, up to 16 requests at a time;
+cache writes and report results follow batch order. Separately, answered member questions
+are keyed by both members' IDs, masked image bytes, system feedback context and
+descriptions, and by the verifier's rule/schema and resolved settings. A matching
+question reuses its answer while rounds
+retain their deductions. Changes make the affected evidence eligible again. Timeouts,
+malformed replies and out-of-scope proposal replies remain eligible for a fresh
+request. Saving keeps these in-memory caches; loading a graph and a new process start
+with empty caches.
+
+Checkpoint logs report eligible and excluded nodes/pairs, each batch's size and input
+bytes, skipped proposals, unanswered batches, proposal requests/cache hits and member
+verifier requests/cache hits. Those request counts describe invocations; transport
+attempts and their usage follow [Requests and recovery](#requests-and-recovery).
 
 #### Member checks
 
@@ -1302,8 +1513,32 @@ merges. When the graph has no start node, `start_node` is `null` and both lists
 are empty.
 
 With `--re-explore`, the audit then works through the other issues on the
-device, following the node IDs each issue names through those merges. For each
-`retry_edge` issue, an edge whose instruction looks wrong for where it leads, it:
+device, following the node IDs each issue names through those merges. Each
+`retry_edge` and `explore_node` has an `execution` assessment: `effect` is
+`inspection`, `side_effect` or `uncertain`, with a concrete `reason`. The saved
+audit adds `execution_policy`, the local inspection policy's `executable`
+decision and reason. Re-exploration requires a reasoned inspection assessment
+and checks the description, retry instruction and expected pages for explicit
+commitments. Missing assessments, consequential advice and uncertain operations
+are saved as `skipped` before navigation. When every proposal is skipped, the
+app's permissions, launch and display baseline stay untouched.
+
+Inspection includes opening a dialer, editing disposable form data, reading
+settings, opening a Share chooser, and viewing a confirmation followed by
+Cancel. Calls, actual sends, destructive confirmations, purchases, account
+enrollment and security changes stay unexecuted. A recorded instruction receives
+the same commitment check before navigation replay. Recorded setup actions are
+checked against their instructions on the source node before replay or retry.
+Confirmation checks include the source node's description. Each newly planned
+audit instruction is checked before action grounding; a skipped instruction
+consumes one of `--steps-per-issue` and records its reason. Subsequent plans on
+that node receive the excluded instructions so they can choose another action.
+These checks use the model's effect assessment and conservative language rules. Their limits include model
+misclassification, unfamiliar wording and an action grounded onto the wrong
+control; they provide no proof of an app control's real effect.
+
+For each permitted `retry_edge` issue, whose instruction looks wrong for its
+destination, it:
 
 1. replays to the edge's source node (see [Replaying to a node](#replaying-to-a-node));
 2. finds the flagged instruction on the edge by exact match, with the action
@@ -1317,7 +1552,9 @@ device, following the node IDs each issue names through those merges. For each
    - the edge's target: the transition is real and its label is wrong. The
      instruction model describes the action from the screenshot taken before it
      ran, and that description replaces the instruction.
-4. replays to the source again, and stops if this replay misses it;
+4. replays to the source again, and stops if this replay misses it or crosses the
+   inspection boundary; the correction's outcome remains recorded, with `reason`
+   when policy blocks the replay;
 5. runs `--steps-per-issue` exploration steps from the source, with a hint about
    the flagged edge.
 
@@ -1335,7 +1572,7 @@ Each issue's outcome is saved to `<app_name>_re_explore.json` as its `status`:
 | `relabel_failed` | The action reached the target, but the instruction model gave no usable description | Unchanged |
 | `instruction_not_found` | The edge is gone, or the instruction is not on it word for word, for example because the auditor paraphrased it. Steps 3 and 4 are skipped | Unchanged |
 | `unverified` | The replay missed the source, the action's setup is unknown and no recorded action opens the menu it was sent in (see [Graph edges](#graph-edges)), so it is not sent, or the action left for an app with no `ext_<package>` node; `reached` is where it ended. Nothing is explored | Unchanged |
-| `skipped` | The source node is not in the graph, or is an `ext_` node, which keeps no outgoing edge | Unchanged |
+| `skipped` | The inspection policy excludes the proposal or a replay instruction, or the source node is missing or external; `reason` records why | Unchanged |
 
 One replay can be misled by content that changes between runs, such as a feed;
 the outcome records what each correction was based on.

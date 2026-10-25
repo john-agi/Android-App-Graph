@@ -18,8 +18,18 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
+
+from android_app_graph.display_state import NIGHT_KEYS, DisplayState
+from android_app_graph.payloads import as_int
+from android_app_graph.system_surfaces import (
+    SystemOverlayActionError,
+    check_overlay_action,
+    permission_requester,
+    window_ownership,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +140,8 @@ def _focused_package_activity(dumpsys_window: str) -> tuple[str, str]:
     return "unknown", "unknown"
 
 
-# AOSP's InsetsSource.dump(): the type is "statusBars" from API 34, "ITYPE_STATUS_BAR" before.
 _STATUS_BAR_SOURCE = re.compile(
-    r"InsetsSource\b.*?\btype=(?:statusBars|ITYPE_STATUS_BAR)\b"
+    r"InsetsSource\b.*?\btype=statusBars\b"
     r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"
     r".*?\bvisible=(true|false)\b"
 )
@@ -157,9 +166,117 @@ def status_bar_frame(dumpsys_window: str) -> list[int] | None:
     return None
 
 
+_DISPLAY_FRAME = re.compile(r"mDisplayFrame=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)")
+_INPUT_SOURCE = re.compile(
+    r"^\s*InsetsSource\b.*?\btype=(tappableElement|systemGestures|mandatorySystemGestures)\b"
+    r".*?\bframe=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\].*?\bvisible=(true|false)\b"
+)
+
+
+class InputRegions(NamedTuple):
+    """Display coordinates and the visible system touch and gesture-start regions."""
+
+    display: tuple[int, int, int, int]
+    tap: tuple[tuple[int, int, int, int], ...]
+    gesture: tuple[tuple[int, int, int, int], ...]
+
+    def as_dict(self) -> dict[str, list[int] | list[list[int]]]:
+        """Return the geometry carried by observations and rejected-action records."""
+        return {
+            "display": list(self.display),
+            "tap": [list(frame) for frame in self.tap],
+            "gesture": [list(frame) for frame in self.gesture],
+        }
+
+    def reject_reason(self, action: Mapping[str, object]) -> str | None:
+        """Return why an app input is unreachable at its coordinates, or ``None``."""
+        swipe = action["action"] == "swipe"
+        start = _input_point(action, "x1", "y1") if swipe else _input_point(action, "x", "y")
+        end = _input_point(action, "x2", "y2") if swipe else start
+        if start is None or end is None:
+            return "App input has invalid coordinates"
+        points = (start, end)
+        if any(not _contains(self.display, point) for point in points):
+            return "App input is outside the display"
+        if any(_contains(frame, start) for frame in self.tap):
+            return "App input targets a system touch region; reveal the control or choose an unobscured point"
+        if swipe and any(_contains(frame, start) for frame in self.gesture):
+            return "App swipe starts in a system gesture region; use an interior app control"
+        return None
+
+
+def _input_point(action: Mapping[str, object], x_name: str, y_name: str) -> tuple[int, int] | None:
+    x, y = as_int(action.get(x_name)), as_int(action.get(y_name))
+    return (x, y) if x is not None and y is not None else None
+
+
+def _contains(frame: tuple[int, int, int, int], point: tuple[int, int]) -> bool:
+    left, top, right, bottom = frame
+    return left <= point[0] < right and top <= point[1] < bottom
+
+
+def input_regions(dumpsys_window: str) -> InputRegions | None:
+    """Read the first display's authoritative InsetsState, excluding provider copies.
+
+    Tappable-element sources identify touch-consuming bars; gesture sources identify
+    where swipes enter system navigation. A gesture-navigation bar can be transparent
+    to ordinary app taps, so its visual navigation-bar frame is not a tap exclusion.
+    """
+    _, found, block = dumpsys_window.partition("WindowInsetsStateController")
+    if not found:
+        return None
+    block = block.partition("InsetsSourceProviders:")[0]
+    display = _DISPLAY_FRAME.search(block)
+    if display is None:
+        return None
+    left, top, right, bottom = (int(value) for value in display.groups())
+    taps: list[tuple[int, int, int, int]] = []
+    gestures: list[tuple[int, int, int, int]] = []
+    known_source = False
+    for line in block.splitlines():
+        source = _INPUT_SOURCE.search(line)
+        if source is None:
+            continue
+        known_source = True
+        if source.group(6) != "true":
+            continue
+        x1, y1, x2, y2 = (int(value) for value in source.groups()[1:5])
+        if x1 >= x2 or y1 >= y2:
+            continue
+        frames = taps if source.group(1) == "tappableElement" else gestures
+        frame = (x1, y1, x2, y2)
+        if frame not in frames:
+            frames.append(frame)
+    return (
+        InputRegions((left, top, right, bottom), tuple(taps), tuple(gestures))
+        if known_source
+        else None
+    )
+
+
+class InputRejectedError(ValueError):
+    """An app input has no reachable target at its requested display coordinates."""
+
+    def __init__(self, reason: str, regions: InputRegions | None) -> None:
+        super().__init__(reason)
+        self.regions = regions.as_dict() if regions is not None else None
+
+
+def input_region_hint(state: Mapping[str, object]) -> str:
+    """Give both model coordinate frames the same reachable-target policy."""
+    if state.get("input_regions") is None:
+        return ""
+    return (
+        "\nSystem navigation regions consume app inputs. "
+        "App taps and holds stay outside system touch regions; "
+        "app swipes start outside system gesture regions. "
+        "Reveal an obscured control or use an unobscured point on that same control. "
+        "When it cannot be reached, choose another app control or wait."
+    )
+
+
 _GESTURE_MS = 1000
 _DEFAULT_WAIT_SECONDS = 3
-_CLEAR_KEY_PRESSES = 20
 
 _CLEAR_ALL_ID = "com.android.launcher3:id/clear_all"
 # Each swipe moves the recent apps by one app, so Clear all is reached past at most this
@@ -182,16 +299,22 @@ def _ui_nodes(ui_dump: str) -> list[dict[str, str]]:
     return [dict(_NODE_ATTRIBUTE.findall(node)) for node in _UI_NODE.findall(ui_dump)]
 
 
+def _shows_recent_apps(ui_dump: str) -> bool:
+    """Recognize Launcher3's overview panel by its resource name in any package.
+
+    Launchers built on Launcher3, including the Pixel launcher, share this view name.
+    """
+    return any(
+        node.get("resource-id", "").endswith(":id/overview_panel") for node in _ui_nodes(ui_dump)
+    )
+
+
 def _shows_no_recent_apps(ui_dump: str) -> bool:
     """Return whether ``uiautomator dump`` output shows the recent apps screen with no
     app in it: an ``overview_panel`` node and no ``task_view`` node, an app's card.
-
-    The ids are matched by name in any package, as Launcher3 and the launchers built on
-    it, such as the Pixel launcher, name these views alike.
     """
     resource_ids = [node.get("resource-id", "") for node in _ui_nodes(ui_dump)]
-    shows_recent_apps = any(rid.endswith(":id/overview_panel") for rid in resource_ids)
-    return shows_recent_apps and not any(":id/task_view" in rid for rid in resource_ids)
+    return _shows_recent_apps(ui_dump) and not any(":id/task_view" in rid for rid in resource_ids)
 
 
 def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
@@ -214,36 +337,63 @@ def _clear_all_center(ui_dump: str) -> tuple[int, int] | None:
 class AdbController:
     """Reads the screen of the device ``config["device"]["udid"]`` and acts on it over adb."""
 
-    def __init__(self, config: dict[str, Any], logger: logging.Logger) -> None:
+    def __init__(
+        self, config: dict[str, Any], logger: logging.Logger, *, unreachable_limit: float
+    ) -> None:
         self.config = config
         self._logger = logger
         self._serial = ["-s", config["device"]["udid"]]
-        size = run_adb([*self._serial, "shell", "wm", "size"], output="capture", check=True)
+        recovery = StartupRecovery(self, unreachable_limit, logger)
+        size = recovery.command("screen size", [*self._serial, "shell", "wm", "size"], check=True)
         match = re.search(r"(\d+)x(\d+)", size.stdout)
         if match is None:
             msg = "Failed to get screen size"
             raise ValueError(msg)
         self.w = int(match.group(1))
         self.h = int(match.group(2))
+        self._observed_display: tuple[int, int, int, int] | None = None
 
     def get_state(self, *, deadline: float | None = None) -> dict[str, Any]:
         """Return the UI hierarchy XML, a base64 PNG screenshot, the focused package and
-        activity, both ``"unknown"`` when ``dumpsys window`` names none, and the
-        ``status_bar`` frame that ``status_bar_frame`` reads from the same dump.
+        activity, explicit system-boundary ownership, clipboard touch regions and the
+        ``status_bar`` frame from WindowManager. The window read precedes the image so
+        observed feedback ownership survives its dismissal during capture.
         ``deadline`` bounds every read and retry by the remaining monotonic time.
         """
         xml = self._ui_dump(deadline)
-        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"], deadline)
         dumpsys = self._read(
-            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window"], deadline
+            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window", "-a"], deadline
         )
+        png = self._read(_adb_stdout_bytes, [*self._serial, "exec-out", "screencap -p"], deadline)
         package, activity = _focused_package_activity(dumpsys)
+        ownership = window_ownership(dumpsys, package, activity)
+        requester = None
+        if ownership.system_surface == "permission":
+            activities = self._read(
+                _adb_stdout_text,
+                [*self._serial, "shell", "dumpsys", "activity", "activities"],
+                deadline,
+            )
+            requester = permission_requester(activities, dumpsys)
+        regions = input_regions(dumpsys)
+        if regions is not None:
+            self._observed_display = regions.display
+            left, top, right, bottom = regions.display
+            self.w, self.h = right - left, bottom - top
         return {
             "xml": xml,
             "screenshot": base64.b64encode(png).decode("ascii"),
-            "package": package,
-            "activity": activity,
+            "package": ownership.package,
+            "activity": ownership.activity,
+            "underlying_package": ownership.underlying_package,
+            "system_surface": ownership.system_surface,
+            "system_overlays": [list(region) for region in ownership.system_overlays],
+            "permission_requester": requester,
             "status_bar": status_bar_frame(dumpsys),
+            **(
+                {"system_overlay_error": ownership.overlay_error} if ownership.overlay_error else {}
+            ),
+            "input_regions": regions.as_dict() if regions is not None else None,
         }
 
     def _ui_dump(self, deadline: float | None = None) -> str:
@@ -269,15 +419,17 @@ class AdbController:
 
         A ``long_press`` is held for ``_GESTURE_MS`` whatever its ``duration`` says.
         """
+        if action["action"] in {"tap", "long_press", "swipe"}:
+            self._check_input(action)
         match action["action"]:
             case "tap":
                 self._tap(action["x"], action["y"])
             case "long_press":
                 x, y = action["x"], action["y"]
-                self._swipe(x, y, x, y, _GESTURE_MS)
+                self._swipe((x, y), (x, y), _GESTURE_MS)
             case "swipe":
                 duration = action.get("duration", action.get("time", _GESTURE_MS))
-                self._swipe(action["x1"], action["y1"], action["x2"], action["y2"], duration)
+                self._swipe((action["x1"], action["y1"]), (action["x2"], action["y2"]), duration)
             case "type":
                 self._clear()
                 self._type(action["text"])
@@ -291,18 +443,53 @@ class AdbController:
                 msg = f"Unknown device action: {unknown!r}"
                 raise ValueError(msg)
 
-    def terminate_all_apps(self) -> None:
+        # A sent action can rotate the display; only the next capture grounds a new plan.
+        self._observed_display = None
+
+    def _check_input(self, action: Mapping[str, object]) -> None:
+        """Check current system input geometry once, immediately before coordinate input."""
+        dumpsys = self._read(
+            _adb_stdout_text, [*self._serial, "shell", "dumpsys", "window", "-a"], None
+        )
+        package, activity = _focused_package_activity(dumpsys)
+        ownership = window_ownership(dumpsys, package, activity)
+        if ownership.overlay_error is not None:
+            raise SystemOverlayActionError(ownership.overlay_error)
+        check_overlay_action(action, ownership.system_overlays)
+        regions = input_regions(dumpsys)
+        if regions is None:
+            reason = "System input regions are unavailable; app input is deferred"
+            raise InputRejectedError(reason, None)
+        if self._observed_display is not None and self._observed_display != regions.display:
+            reason = "Display geometry changes after the observation; capture it again"
+            raise InputRejectedError(reason, regions)
+        reason = regions.reject_reason(action)
+        if reason is not None:
+            raise InputRejectedError(reason, regions)
+
+    def terminate_all_apps(self, recovery: StartupRecovery) -> None:
         """Open recent apps and tap their Clear all button, which ``_scroll_to_clear_all``
         brings on screen, or press Home when they show no app.
 
         When Clear all does not appear, log a warning and press Home; the recent apps
         stay.
         """
-        self._press("KEYCODE_APP_SWITCH")
-        ui_dump = self._scroll_to_clear_all()
+
+        def open_recents(deadline: float | None, state: dict[str, Any] | None) -> None:
+            if state is None or not _shows_recent_apps(state.get("xml", "")):
+                self._press("KEYCODE_APP_SWITCH", deadline=deadline)
+
+        recovery.run("recent apps", open_recents)
+        ui_dump = self._scroll_to_clear_all(recovery)
         clear_all = _clear_all_center(ui_dump)
         if clear_all is not None:
-            self._tap(*clear_all)
+
+            def clear_recents(deadline: float | None, state: dict[str, Any] | None) -> None:
+                target = clear_all if state is None else _clear_all_center(state.get("xml", ""))
+                if target is not None:
+                    self._tap(*target, deadline=deadline)
+
+            recovery.run("clear recent apps", clear_recents)
             time.sleep(1.5)
             return
         if not _shows_no_recent_apps(ui_dump):
@@ -310,9 +497,11 @@ class AdbController:
                 "Clear all did not appear in recent apps after %d swipes; pressing Home.",
                 _CLEAR_ALL_SWIPES,
             )
-        self._press("KEYCODE_HOME")
+        recovery.run(
+            "home", lambda deadline, _state: self._press("KEYCODE_HOME", deadline=deadline)
+        )
 
-    def _scroll_to_clear_all(self) -> str:
+    def _scroll_to_clear_all(self, recovery: StartupRecovery) -> str:
         """Return the UI dump of the recent apps on screen once it shows Clear all or no
         app, swiping the list from left to right before each look after the first, at
         most ``_CLEAR_ALL_SWIPES`` times.
@@ -320,17 +509,29 @@ class AdbController:
         In a left-to-right layout that swipe moves the list toward its oldest app, which
         Clear all follows.
         """
-        ui_dump = self._ui_dump()
+        ui_dump = recovery.run(
+            "recent apps observation", lambda deadline, _state: self._ui_dump(deadline)
+        )
+        middle = int(0.5 * self.h)
         for _ in range(_CLEAR_ALL_SWIPES):
             if _clear_all_center(ui_dump) is not None or _shows_no_recent_apps(ui_dump):
                 return ui_dump
-            middle = int(0.5 * self.h)
-            self._swipe(int(0.1 * self.w), middle, int(0.9 * self.w), middle, _RECENT_APPS_SWIPE_MS)
+            recovery.input(
+                "scroll recent apps",
+                lambda deadline: self._swipe(
+                    (int(0.1 * self.w), middle),
+                    (int(0.9 * self.w), middle),
+                    _RECENT_APPS_SWIPE_MS,
+                    deadline=deadline,
+                ),
+            )
             time.sleep(1)
-            ui_dump = self._ui_dump()
+            ui_dump = recovery.run(
+                "recent apps observation", lambda deadline, _state: self._ui_dump(deadline)
+            )
         return ui_dump
 
-    def _input(self, *args: str, check: bool = False) -> None:
+    def _input(self, *args: str, check: bool = False, deadline: float | None = None) -> None:
         """Run ``adb shell input`` with ``args``. A timeout raises
         ``subprocess.TimeoutExpired`` at once: the input may have reached the device, and
         sending it again could act twice.
@@ -338,24 +539,30 @@ class AdbController:
         run_adb(
             [*self._serial, "shell", "input", *args],
             output="discard",
-            timeout=_INPUT_TIMEOUT_SECONDS,
+            timeout=min(_INPUT_TIMEOUT_SECONDS, _observation_timeout(args, deadline)),
             check=check,
         )
 
-    def _tap(self, x: int, y: int) -> None:
-        self._input("tap", str(x), str(y))
+    def _tap(self, x: int, y: int, *, deadline: float | None = None) -> None:
+        self._input("tap", str(x), str(y), deadline=deadline)
 
-    def _swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int) -> None:
-        self._input("swipe", str(x1), str(y1), str(x2), str(y2), str(duration))
+    def _swipe(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        duration: int,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        self._input("swipe", *(str(value) for value in (*start, *end, duration)), deadline=deadline)
 
-    def _press(self, keycode: str) -> None:
-        self._input("keyevent", keycode)
+    def _press(self, keycode: str, *, deadline: float | None = None) -> None:
+        self._input("keyevent", keycode, deadline=deadline)
         time.sleep(1)
 
     def _clear(self) -> None:
-        for _ in range(_CLEAR_KEY_PRESSES):
-            self._input("keyevent", "KEYCODE_DEL")
-            time.sleep(0.2)
+        self._input("keyboard", "keycombination", "KEYCODE_CTRL_LEFT", "KEYCODE_A", check=True)
+        self._input("keyboard", "keyevent", "KEYCODE_DEL", check=True)
 
     def _type(self, text: str) -> None:
         """Type ``text`` with ``input text``, which turns each character into key events
@@ -371,6 +578,96 @@ class AdbController:
             if chunk:
                 self._input("text", shlex.quote(chunk), check=True)
                 time.sleep(1)
+
+
+class AdbDisplayAccess:
+    """Supported display configuration and explicit public seed-directory hashes."""
+
+    def __init__(self, udid: str) -> None:
+        self._serial = ["-s", udid]
+
+    def _read(self, command: tuple[str, ...], deadline: float) -> str:
+        try:
+            return self._run(command, deadline)
+        except subprocess.TimeoutExpired:
+            logger.warning("Display read %s timed out; retrying once", shlex.join(command))
+            return self._run(command, deadline)
+
+    def _run(self, command: tuple[str, ...], deadline: float) -> str:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, 0)
+        return run_adb(
+            [*self._serial, "shell", *(shlex.quote(argument) for argument in command)],
+            output="capture",
+            check=True,
+            timeout=min(_PROBE_TIMEOUT_SECONDS, remaining),
+        ).stdout.strip()
+
+    def capture(self, *, deadline: float | None = None) -> DisplayState:
+        bound = time.monotonic() + _READ_TIMEOUT_SECONDS if deadline is None else deadline
+        size = self._read(("wm", "size"), bound)
+        density = self._read(("wm", "density"), bound)
+        dump = self._read(("dumpsys", "uimode"), bound)
+        custom = re.search(r"customStart=([0-9:.]+)\s+customEnd=?([0-9:.]+)", dump)
+        overrides = re.search(r"mOverrideOn/Off=(true|false)/(true|false)", dump)
+        if custom is None or overrides is None:
+            msg = "The device does not expose supported custom night configuration"
+            raise ValueError(msg)
+        settings = {key: self._setting("secure", key, bound) for key in NIGHT_KEYS}
+        return DisplayState.from_dict(
+            {
+                "physical_size": self._wm_value(size, "Physical size", pair=True),
+                "size_override": self._wm_value(size, "Override size", pair=True),
+                "physical_density": self._wm_value(density, "Physical density", pair=False),
+                "density_override": self._wm_value(density, "Override density", pair=False),
+                "font_scale": self._setting("system", "font_scale", bound),
+                "night_mode": self._read(("cmd", "uimode", "night"), bound).removeprefix(
+                    "Night mode: "
+                ),
+                "custom_start": custom.group(1),
+                "custom_end": custom.group(2),
+                "night_settings": settings,
+                "night_overrides": [value == "true" for value in overrides.groups()],
+            }
+        )
+
+    def _setting(self, namespace: str, key: str, deadline: float) -> str | None:
+        value = self._read(("settings", "get", namespace, key), deadline)
+        return None if value == "null" else value
+
+    @staticmethod
+    def _wm_value(output: str, label: str, *, pair: bool) -> object:
+        pattern = rf"(?m)^{label}: (\d+)x(\d+)\s*$" if pair else rf"(?m)^{label}: (\d+)\s*$"
+        match = re.search(pattern, output)
+        if match is None:
+            if label in output:
+                msg = f"Malformed display setting: {label}"
+                raise ValueError(msg)
+            return None
+        return [int(match[1]), int(match[2])] if pair else int(match[1])
+
+    def execute(self, command: tuple[str, ...], *, deadline: float) -> None:
+        self._run(command, deadline)
+
+    def seed_hashes(self, root: str, *, deadline: float | None = None) -> dict[str, str]:
+        bound = time.monotonic() + _READ_TIMEOUT_SECONDS if deadline is None else deadline
+        try:
+            output = self._read(
+                ("find", root, "-type", "f", "-exec", "sha256sum", "{}", "+"), bound
+            )
+        except subprocess.CalledProcessError as exc:
+            if "No such file or directory" in (exc.stderr or ""):
+                return {}
+            raise
+        hashes: dict[str, str] = {}
+        for line in output.splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+            if match is None or not match[2].startswith(root.rstrip("/") + "/"):
+                msg = "The seed directory hash output is malformed"
+                raise ValueError(msg)
+            hashes[match[2]] = match[1]
+        return hashes
 
 
 class _AvdHost(NamedTuple):
@@ -466,24 +763,27 @@ class EmulatorManager:
         itself and at this machine's SDK.
         """
         host = _avd_host()
+        avd_ini = host.avd_root_dir / f"{avd_name}.ini"
+        with avd_ini.open(encoding="utf-8") as f:
+            target = next(
+                (line.removeprefix("target=").strip() for line in f if line.startswith("target=")),
+                "",
+            )
+        if not target:
+            msg = f"AVD metadata '{avd_ini}' requires a non-empty target."
+            raise ValueError(msg)
         dup_name = f"{avd_name}_dup"
         shutil.copytree(
             host.avd_root_dir / f"{avd_name}.avd",
             host.avd_root_dir / f"{dup_name}.avd",
             dirs_exist_ok=True,
         )
-        shutil.copy(host.avd_root_dir / f"{avd_name}.ini", host.avd_root_dir / f"{dup_name}.ini")
-        self._rewrite_avd_ini(host, dup_name)
+        self._rewrite_avd_ini(host, dup_name, target)
         self._rewrite_config_ini(host, dup_name)
         self._rewrite_hardware_qemu_ini(host, dup_name)
 
-    def _rewrite_avd_ini(self, host: _AvdHost, avd_name: str) -> None:
+    def _rewrite_avd_ini(self, host: _AvdHost, avd_name: str, target: str) -> None:
         avd_ini = host.avd_root_dir / f"{avd_name}.ini"
-        with avd_ini.open(encoding="utf-8") as f:
-            target = next(
-                (line.removeprefix("target=").strip() for line in f if line.startswith("target=")),
-                "android-35",
-            )
         avd_ini.write_text(
             f"avd.ini.encoding=UTF-8\npath={host.avd_root_dir / f'{avd_name}.avd'}\n"
             f"path.rel=avd/{avd_name}.avd\ntarget={target}",
@@ -523,7 +823,9 @@ class EmulatorManager:
         self._logger.info("AVD hardware file '%s' modified.", hardware_ini)
 
 
-def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logger) -> str:
+def launch_app(
+    config: dict[str, Any], app: dict[str, Any], logger: logging.Logger, recovery: StartupRecovery
+) -> str:
     """Start ``app``, an entry of ``config["apps"]``, with ``am start -n`` and return the
     component started, which ``AppLaunch.component`` names: its ``launch_activity``, or
     else the package's launcher activity.
@@ -534,9 +836,17 @@ def launch_app(config: dict[str, Any], app: dict[str, Any], logger: logging.Logg
     """
     udid = config["device"]["udid"]
     launch = AppLaunch(app["name"], app["package_name"], app.get("launch_activity"))
-    component = launch.component(udid, logger)
+    component = recovery.run(
+        "launcher resolution",
+        lambda deadline, _state: launch.component(udid, logger, deadline=deadline),
+    )
     logger.info("Launching app %s via activity %s ...", app["name"], component)
-    _start_activity(udid, component)
+
+    def start(deadline: float | None, state: dict[str, Any] | None) -> None:
+        if state is None or is_outside_app(state.get("package", ""), app["package_name"]):
+            _start_activity(udid, component, deadline=deadline)
+
+    recovery.run("app launch", start)
     return component
 
 
@@ -574,15 +884,17 @@ class AppLaunch:
         self.package_name = package_name
         self._component = launch_activity
 
-    def component(self, udid: str, logger: logging.Logger) -> str:
+    def component(self, udid: str, logger: logging.Logger, *, deadline: float | None = None) -> str:
         """Return the component to start, asking ``udid`` for the launcher activity on the
         first call when no ``launch_activity`` is configured."""
         if self._component is None:
-            self._component = _launcher_activity(udid, self.package_name, logger)
+            self._component = _launcher_activity(udid, self.package_name, logger, deadline=deadline)
         return self._component
 
 
-def _launcher_activity(udid: str, package_name: str, logger: logging.Logger) -> str:
+def _launcher_activity(
+    udid: str, package_name: str, logger: logging.Logger, *, deadline: float | None = None
+) -> str:
     """Return the activity ``pm resolve-activity`` resolves the package's launcher intent
     to, or else the first that ``pm query-activities`` lists for it.
 
@@ -592,10 +904,16 @@ def _launcher_activity(udid: str, package_name: str, logger: logging.Logger) -> 
     """
     pm = ["-s", udid, "shell", "pm"]
     intent = [*_LAUNCHER_INTENT, package_name]
-    resolved = run_adb([*pm, "resolve-activity", "--brief", *intent], output="capture", check=True)
+    resolve = [*pm, "resolve-activity", "--brief", *intent]
+    resolved = run_adb(
+        resolve, output="capture", check=True, timeout=_observation_timeout(resolve, deadline)
+    )
     if components := _package_components(resolved.stdout, package_name):
         return components[0]
-    listed = run_adb([*pm, "query-activities", "--brief", *intent], output="capture", check=True)
+    query = [*pm, "query-activities", "--brief", *intent]
+    listed = run_adb(
+        query, output="capture", check=True, timeout=_observation_timeout(query, deadline)
+    )
     components = _package_components(listed.stdout, package_name)
     if not components:
         msg = f"{package_name} has no launcher activity; set launch_activity for it in the config"
@@ -638,16 +956,15 @@ def restart_app(controller: DeviceController, app: AppLaunch, logger: logging.Lo
     time.sleep(_LAUNCH_SETTLE_SECONDS)
 
 
-def _start_activity(udid: str, component: str, *flags: str) -> None:
+def _start_activity(udid: str, component: str, *flags: str, deadline: float | None = None) -> None:
     """Start ``component`` on the device ``udid`` with ``am start -n`` and ``flags``.
 
     Raises ``ActivityStartError`` naming the component and adb's error when ``am start``
     reports that it could not start it.
     """
+    args = ["-s", udid, "shell", "am", "start", "-n", component, *flags]
     started = run_adb(
-        ["-s", udid, "shell", "am", "start", "-n", component, *flags],
-        output="capture",
-        check=False,
+        args, output="capture", check=False, timeout=_observation_timeout(args, deadline)
     )
     if _start_failed(started):
         msg = f"am start could not start {component}: {_adb_error(started)}"
@@ -718,18 +1035,28 @@ def _remaining_recovery_time(udid: str, deadline: float, limit: float) -> float:
     return remaining
 
 
+@dataclass(slots=True)
+class _RecoveryEpisode:
+    deadline: float
+    confirmation_used: bool = False
+
+
 def wait_for_device_state(
-    controller: DeviceController, limit: float, logger: logging.Logger
+    controller: DeviceController,
+    limit: float,
+    logger: logging.Logger,
+    *,
+    episode: _RecoveryEpisode | None = None,
 ) -> dict[str, Any]:
-    """Recover a complete observation within one deadline after an exploration outage.
+    """Recover a complete observation within one deadline after a device outage.
 
     Only the observation reads qualify for nonzero recovery. One unclassified failure
     gets a confirmation observation; the allowance belongs to the entire episode.
     """
     udid = controller.config["device"]["udid"]
     started = time.monotonic()
-    deadline = started + limit
-    confirmation_used = False
+    episode = episode or _RecoveryEpisode(started + limit)
+    deadline = episode.deadline
     while True:
         remaining = _remaining_recovery_time(udid, deadline, limit)
         if _answers(udid, min(_PROBE_TIMEOUT_SECONDS, remaining)):
@@ -739,9 +1066,9 @@ def wait_for_device_state(
                 logger.warning("Device %s observation is unavailable: %s", udid, timeout)
             except subprocess.CalledProcessError as failure:
                 policy = _recovery_read_failure(udid, failure, logger)
-                if policy == "stop" or (policy == "confirm" and confirmation_used):
+                if policy == "stop" or (policy == "confirm" and episode.confirmation_used):
                     raise
-                confirmation_used |= policy == "confirm"
+                episode.confirmation_used |= policy == "confirm"
             else:
                 _remaining_recovery_time(udid, deadline, limit)
                 logger.info(
@@ -752,6 +1079,62 @@ def wait_for_device_state(
                 return state
         remaining = _remaining_recovery_time(udid, deadline, limit)
         time.sleep(min(_CHECK_INTERVAL_SECONDS, remaining))
+
+
+class StartupRecovery:
+    """Resume one startup phase within its device-outage deadline.
+
+    Reads and idempotent commands retry their phase. Inputs with uncertain completion
+    yield the recovered screen to their caller, which inspects it before continuing.
+    """
+
+    def __init__(self, controller: DeviceController, limit: float, logger: logging.Logger) -> None:
+        self.controller = controller
+        self.limit = limit
+        self.logger = logger
+
+    def run[T](
+        self, phase: str, operation: Callable[[float | None, dict[str, Any] | None], T]
+    ) -> T:
+        udid = self.controller.config["device"]["udid"]
+        episode: _RecoveryEpisode | None = None
+        state: dict[str, Any] | None = None
+        while True:
+            deadline = episode.deadline if episode is not None else None
+            if deadline is not None:
+                _remaining_recovery_time(udid, deadline, self.limit)
+            try:
+                result = operation(deadline, state)
+            except subprocess.TimeoutExpired as timeout:
+                if episode is None:
+                    episode = _RecoveryEpisode(time.monotonic() + self.limit)
+                self.logger.warning(
+                    "Device %s is unreachable during startup %s: %s. Waiting up to %g minutes.",
+                    udid,
+                    phase,
+                    timeout,
+                    self.limit / 60,
+                )
+                state = wait_for_device_state(
+                    self.controller, self.limit, self.logger, episode=episode
+                )
+            else:
+                if deadline is not None:
+                    _remaining_recovery_time(udid, deadline, self.limit)
+                return result
+
+    def command(
+        self, phase: str, args: list[str], *, check: bool
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run(
+            phase,
+            lambda deadline, _state: run_adb(
+                args, output="capture", check=check, timeout=_observation_timeout(args, deadline)
+            ),
+        )
+
+    def input(self, phase: str, action: Callable[[float | None], None]) -> None:
+        self.run(phase, lambda deadline, state: action(deadline) if state is None else None)
 
 
 def _answers(udid: str, timeout: float) -> bool:
@@ -770,8 +1153,20 @@ def _read_phase(command: object, udid: str) -> str | None:
             return "hierarchy"
         case [str(), "-s", serial, "exec-out", "screencap -p"] if serial == udid:
             return "screenshot"
-        case [str(), "-s", serial, "shell", "dumpsys", "window"] if serial == udid:
+        case [str(), "-s", serial, "shell", "dumpsys", "window", "-a"] if serial == udid:
             return "window"
+        case [str(), "-s", serial, "shell", "dumpsys", "activity", "activities"] if serial == udid:
+            return "activity"
+        case [str(), "-s", serial, "shell", *arguments] if serial == udid:
+            display_reads = (
+                ("wm", "size"),
+                ("wm", "density"),
+                ("dumpsys", "uimode"),
+                ("cmd", "uimode", "night"),
+                ("settings", "get", "system", "font_scale"),
+                *(("settings", "get", "secure", key) for key in NIGHT_KEYS),
+            )
+            return "display" if tuple(arguments) in display_reads else None
         case _:
             return None
 
@@ -859,42 +1254,13 @@ def _recovery_read_failure(
     return "confirm"
 
 
-_SYSTEM_OVERLAY_PACKAGES = frozenset(
-    {
-        "com.google.android.inputmethod.latin",
-        "com.android.inputmethod.latin",
-        "com.samsung.android.honeyboard",
-        "com.swiftkey.swiftkey",
-        "com.touchtype.swiftkey",
-        "com.android.systemui",
-        "com.android.permissioncontroller",
-        "com.google.android.permissioncontroller",
-        "com.android.packageinstaller",
-        "android",
-    }
-)
-
-
-def is_system_overlay(package: str) -> bool:
-    """Return whether ``package`` is a keyboard, the status bar or a system dialog.
-
-    These take focus on top of the app without navigating away from it, so the
-    explorer records their screens, such as a permission prompt, as part of the app.
-    """
-    if package in _SYSTEM_OVERLAY_PACKAGES:
-        return True
-    lower = package.lower()
-    return "inputmethod" in lower or "keyboard" in lower
-
-
 def is_outside_app(package: str, app_package: str) -> bool:
-    """Return whether ``package``, the package the device reports in front, belongs to
-    an app other than ``app_package``.
+    """Return whether the observed owner belongs to a destination outside the target app.
 
-    A system overlay sits on top of the app without leaving it, and an empty package
-    names no app.
+    Attached keyboards retain the underlying app owner at capture; independently
+    navigable system windows have their own owner.
     """
-    return bool(package) and package != app_package and not is_system_overlay(package)
+    return bool(package) and package != app_package
 
 
 class StillOutsideAppError(RuntimeError):
@@ -920,10 +1286,16 @@ def restart_into_app(
 
 
 def return_to_app(
-    controller: DeviceController, app: AppLaunch, logger: logging.Logger
+    controller: DeviceController,
+    app: AppLaunch,
+    logger: logging.Logger,
+    *,
+    on_restart: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Press Back after a step opened another app and return the state of the app's
     screen, restarting the app with ``restart_into_app`` when Back does not return to it.
+
+    ``on_restart`` runs before the restart so callers can reset their expected screen.
 
     Back pops only the top activity, so the other app can stay in front, for example
     when Back only closed its keyboard. A launch would then resume the app's task with
@@ -938,32 +1310,142 @@ def return_to_app(
     logger.warning(
         "Back left %s in front of %s. Restarting %s.", package, app.package_name, app.name
     )
+    if on_restart is not None:
+        on_restart()
     return restart_into_app(controller, app, logger)
 
 
-def grant_runtime_permissions(udid: str, package_name: str) -> None:
+class PermissionGrants(NamedTuple):
+    """The target package's declared permissions and successful authorized grants."""
+
+    requested: tuple[str, ...]
+    granted: tuple[str, ...]
+
+
+class UnresolvedPermissionError(RuntimeError):
+    """A permission request needs a decision outside the run's verified grant policy."""
+
+
+def resolve_permission_prompt(
+    controller: DeviceController,
+    app: AppLaunch,
+    state: dict[str, Any],
+    on_event: Callable[[Mapping[str, object]], None],
+    recovery: StartupRecovery,
+) -> dict[str, Any]:
+    """Resolve one standard target-app runtime prompt under its existing grant policy.
+
+    Caller identity comes from the focused permission activity's launch record. The
+    standard Allow button only closes a request whose declared runtime permissions
+    the existing policy already grants. Unknown requests stop with evidence.
+    """
+    requester = state.get("permission_requester")
+    on_event({"status": "permission_observed", "requester": requester, "target": app.package_name})
+    if requester != app.package_name:
+        msg = f"Permission requester {requester!r} is not verified as target {app.package_name}"
+        on_event({"status": "permission_unresolved", "reason": msg})
+        raise UnresolvedPermissionError(msg)
+    grants = grant_runtime_permissions(
+        controller.config["device"]["udid"], app.package_name, recovery
+    )
+    result = run_adb(
+        ["-s", controller.config["device"]["udid"], "shell", "dumpsys", "package", "permissions"],
+        output="capture",
+        check=True,
+    )
+    permission_records = re.split(r"(?=^  Permission \[)", result.stdout, flags=re.MULTILINE)
+    runtime = {
+        match.group(1)
+        for record in permission_records
+        if re.search(r"\bprot=dangerous(?:\W|$)", record)
+        and (match := re.search(r"Permission \[([\w.]+)\]", record)) is not None
+    }
+    requested = runtime.intersection(grants.requested)
+    on_event(
+        {
+            "status": "permission_grants",
+            "requested": list(grants.requested),
+            "runtime_requested": sorted(requested),
+            "granted": list(grants.granted),
+        }
+    )
+    if not requested or not requested.issubset(grants.granted):
+        msg = (
+            "Target runtime permission request is not fully covered by successful authorized grants"
+        )
+        on_event({"status": "permission_unresolved", "reason": msg})
+        raise UnresolvedPermissionError(msg)
+    state = controller.get_state()
+    if state.get("system_surface") != "permission":
+        return _resolved_permission_state(state, app.package_name, on_event)
+    if state.get("permission_requester") == app.package_name:
+        for node in _ui_nodes(state.get("xml", "")):
+            resource = node.get("resource-id", "").partition(":id/")[2]
+            if not node.get("resource-id", "").startswith(
+                "com.android.permissioncontroller:id/"
+            ) or resource not in {
+                "permission_allow_button",
+                "permission_allow_foreground_only_button",
+            }:
+                continue
+            bounds = _BOUNDS.fullmatch(node.get("bounds", ""))
+            if bounds is None or node.get("enabled") != "true":
+                continue
+            left, top, right, bottom = (int(v) for v in bounds.groups())
+            if left >= right or top >= bottom:
+                continue
+            controller.exe_action(
+                {"action": "tap", "x": (left + right) // 2, "y": (top + bottom) // 2}
+            )
+            state = controller.get_state()
+            if state.get("system_surface") != "permission":
+                return _resolved_permission_state(state, app.package_name, on_event)
+            break
+    msg = "Target permission dialog remains unresolved after its authorized grants"
+    on_event({"status": "permission_unresolved", "reason": msg})
+    raise UnresolvedPermissionError(msg)
+
+
+def _resolved_permission_state(
+    state: dict[str, Any], target: str, on_event: Callable[[Mapping[str, object]], None]
+) -> dict[str, Any]:
+    if state.get("package") != target:
+        msg = f"Permission recovery reached {state.get('package')!r} instead of target {target}"
+        on_event({"status": "permission_unresolved", "reason": msg})
+        raise UnresolvedPermissionError(msg)
+    on_event({"status": "permission_resolved", "package": target})
+    return state
+
+
+def grant_runtime_permissions(
+    udid: str, package_name: str, recovery: StartupRecovery
+) -> PermissionGrants:
     """Grant ``package_name`` every permission it requests.
 
-    A permission prompt that appears during exploration would be dismissed, which
-    denies the permission and leaves the feature behind it unexplored. ``pm grant``
-    refuses permissions that are not runtime permissions, such as ``INTERNET``, so
-    a refusal is only logged.
+    Startup and target-prompt recovery use the same declared-permission policy.
+    ``pm grant`` refuses permissions such as ``INTERNET`` that require no runtime
+    grant; each refusal is logged, and the result retains the successful grants.
     """
     shell = ["-s", udid, "shell"]
-    dumpsys = run_adb([*shell, "dumpsys", "package", package_name], output="capture", check=True)
+    dumpsys = recovery.command(
+        "requested permissions", [*shell, "dumpsys", "package", package_name], check=True
+    )
     permissions = _requested_permissions(dumpsys.stdout)
-    granted = 0
+    granted: list[str] = []
     for permission in permissions:
-        grant = run_adb(
-            [*shell, "pm", "grant", package_name, permission], output="capture", check=False
+        grant = recovery.command(
+            f"permission grant {permission}",
+            [*shell, "pm", "grant", package_name, permission],
+            check=False,
         )
         if grant.returncode == 0:
-            granted += 1
+            granted.append(permission)
         else:
             logger.info("Could not grant %s to %s: %s", permission, package_name, _adb_error(grant))
     logger.info(
-        "Granted %d of %d requested permissions to %s", granted, len(permissions), package_name
+        "Granted %d of %d requested permissions to %s", len(granted), len(permissions), package_name
     )
+    return PermissionGrants(tuple(permissions), tuple(granted))
 
 
 def _requested_permissions(dumpsys_output: str) -> list[str]:

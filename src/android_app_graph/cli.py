@@ -11,14 +11,19 @@ import yaml
 
 from android_app_graph.device import (
     AdbController,
+    AdbDisplayAccess,
     AdbServerUnreachableError,
     AvdManager,
     DeviceUnreachableError,
     EmulatorManager,
+    StartupRecovery,
     grant_runtime_permissions,
     launch_app,
 )
+from android_app_graph.graph_files import app_graph_path
 from android_app_graph.kobe import EXPLORATION_ROLES, ExplorerConfig, Kobe
+from android_app_graph.payloads import as_object_dict
+from android_app_graph.run_environment import RunBaselineError, RunEnvironment, mutation_config
 from android_app_graph.utils import (
     check_config_keys,
     open_client,
@@ -88,11 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """Run app-graph. When adb cannot reach its server, or the device stays unreachable
-    past ``device.unreachable_limit``, exit with status 1 and the error, without a
-    traceback."""
+    past ``device.unreachable_limit``, or a graph requires a matching baseline,
+    exit with status 1 and a diagnostic."""
     try:
         _explore()
-    except (AdbServerUnreachableError, DeviceUnreachableError) as exc:
+    except (AdbServerUnreachableError, DeviceUnreachableError, RunBaselineError) as exc:
         sys.exit(f"app-graph: error: {exc}")
 
 
@@ -105,18 +110,20 @@ def _explore() -> None:
     vlm_config = config.get("vlm", {})
     try:
         check_config_keys(config)
+        mutation = mutation_config(as_object_dict(config.get("experiment", {})).get("mutation", {}))
         resolve_model_settings(vlm_config, roles=EXPLORATION_ROLES)
         resolve_matching_settings(vlm_config)
         unreachable_limit = resolve_unreachable_limit(config)
         api_key = resolve_api_key()
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         parser.error(str(exc))
 
     setup_logging(level=logging.INFO)
     logger = logging.getLogger("android_app_graph.explorer")
 
     check_avd(EmulatorManager(logger), config, logger)
-    controller = AdbController(config, logger)
+    controller = AdbController(config, logger, unreachable_limit=unreachable_limit)
+    recovery = StartupRecovery(controller, unreachable_limit, logger)
 
     exp_config = config.get("experiment", {})
     graph_dir = exp_config.get("graph_dir", "graphs")
@@ -131,30 +138,39 @@ def _explore() -> None:
             app_name = app["name"]
             package_name = app["package_name"]
 
-            logger.info("Terminating all running apps...")
-            controller.terminate_all_apps()
-            time.sleep(1)
-
-            grant_runtime_permissions(config["device"]["udid"], package_name)
-            launch_activity = launch_app(config, app, logger)
-            time.sleep(4)
-
-            explorer_config = ExplorerConfig(
-                app_name=app_name,
-                package_name=package_name,
-                vlm_config=vlm_config,
-                graph_dir=graph_dir,
-                max_steps=max_steps,
-                coverage_checkpoint_steps=coverage_checkpoint_steps,
-                coverage_checkpoint_top_k=coverage_checkpoint_top_k,
-                launch_activity=launch_activity,
-                unreachable_limit=unreachable_limit,
+            graph_path = app_graph_path(Path(graph_dir), app_name)
+            environment = RunEnvironment(
+                controller,
+                AdbDisplayAccess(config["device"]["udid"]),
+                graph_path,
+                mutation=mutation,
+                logger=logger,
             )
-            kobe = Kobe(controller, explorer_config, client=client, logger=logger)
-            try:
-                kobe.explore(resume_from=resume_from)
-            finally:
-                kobe.save_graph()
+            with environment as managed:
+                logger.info("Terminating all running apps...")
+                controller.terminate_all_apps(recovery)
+                time.sleep(1)
+
+                grant_runtime_permissions(config["device"]["udid"], package_name, recovery)
+                launch_activity = launch_app(config, app, logger, recovery)
+                time.sleep(4)
+
+                explorer_config = ExplorerConfig(
+                    app_name=app_name,
+                    package_name=package_name,
+                    vlm_config=vlm_config,
+                    graph_dir=graph_dir,
+                    max_steps=max_steps,
+                    coverage_checkpoint_steps=coverage_checkpoint_steps,
+                    coverage_checkpoint_top_k=coverage_checkpoint_top_k,
+                    launch_activity=launch_activity,
+                    unreachable_limit=unreachable_limit,
+                )
+                kobe = Kobe(managed, explorer_config, client=client, logger=logger)
+                try:
+                    kobe.explore(resume_from=resume_from)
+                finally:
+                    kobe.save_graph()
 
 
 if __name__ == "__main__":
