@@ -54,6 +54,18 @@ def _visible(block: str) -> bool:
     return "mHasSurface=true" in block and "isVisible=true" in block
 
 
+def _focused_system_surface(block: str, owner: re.Match[str] | None) -> tuple[str, str] | None:
+    if "ty=NOTIFICATION_SHADE" in block:
+        return "NotificationShade", "notification_shade"
+    if (
+        owner is not None
+        and owner.group(1) == "com.android.systemui"
+        and "ty=STATUS_BAR_SUB_PANEL" in block
+    ):
+        return "SystemUIDialog", "system_dialog"
+    return None
+
+
 def window_ownership(dump: str, package: str, activity: str) -> WindowOwnership:
     """Use focused and visible display-zero windows, preserving clipboard touch regions.
 
@@ -93,12 +105,10 @@ def window_ownership(dump: str, package: str, activity: str) -> WindowOwnership:
             overlays.extend(valid)
         if match.group(1) != focus_id:
             continue
-        if "ty=NOTIFICATION_SHADE" in block:
-            package, activity, surface = (
-                "com.android.systemui",
-                "NotificationShade",
-                "notification_shade",
-            )
+        focused_surface = _focused_system_surface(block, owner)
+        if focused_surface is not None:
+            package = "com.android.systemui"
+            activity, surface = focused_surface
         elif "ty=INPUT_METHOD" in block:
             package, activity = underlying, underlying_activity
     if package in _PERMISSION_PACKAGES and "GrantPermissionsActivity" in activity:
