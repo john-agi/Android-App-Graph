@@ -101,6 +101,7 @@ class _Move:
     instruction: str
     planned_instruction: str
     planned_element: int | None
+    required_pointers: int | None
     detail_before: dict[str, Any]
     tokens_before: dict[str, int]
 
@@ -660,6 +661,14 @@ class Kobe:
         move = self._plan_move(position, tokens_before)
         if move is None:
             return self._wait_at(position, tokens_before, max_steps)
+        if move.action.get("action") == "unsupported":
+            self.controller.record_unsupported_action(
+                move.planned_instruction, move.required_pointers, move.action
+            )
+            state = self.controller.get_state()
+            self._count_step(move.source, [move.action], move.source, tokens_before, max_steps)
+            self.save_graph()
+            return self._continue_after(move.source, state, max_steps)
         if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
             continued = self._continue_from_ranked_target(
                 position,
@@ -790,7 +799,7 @@ class Kobe:
         input_status += self.controller.input_rejection_hint
 
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
-        instruction, planned_element = plan_next_action(
+        plan = plan_next_action(
             client=self.client,
             request=PlanRequest(
                 screenshot_b64=screenshot,
@@ -810,7 +819,8 @@ class Kobe:
             client=self.client,
             request=ActionRequest(
                 screenshot_b64=screenshot,
-                instruction=f"{instruction}\n{input_status}",
+                instruction=f"{plan.instruction}\n{input_status}",
+                required_pointers=plan.required_pointers,
                 screen_w=self.controller.w,
                 screen_h=self.controller.h,
                 action_history=[],
@@ -819,11 +829,11 @@ class Kobe:
             settings=self.action,
         )
 
-        recorded_instruction = instruction
+        recorded_instruction = plan.instruction
         if action.get("action") == "end":
             self.logger.info(
                 '  Action agent said end for: "%s", recording as back',
-                instruction,
+                plan.instruction,
             )
             action = {"action": "back"}
             recorded_instruction = "Press back"
@@ -836,8 +846,9 @@ class Kobe:
             before=observation,
             action=action,
             instruction=recorded_instruction,
-            planned_instruction=instruction,
-            planned_element=planned_element,
+            planned_instruction=plan.instruction,
+            planned_element=plan.element,
+            required_pointers=plan.required_pointers,
             detail_before=detail_before,
             tokens_before=tokens_before,
         )

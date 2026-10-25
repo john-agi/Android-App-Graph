@@ -721,12 +721,14 @@ change account settings, or perform any action that has real-world side effects.
 You are ONLY exploring the app's UI structure — navigate and observe, but never \
 commit or submit anything. If a screen requires login/signup to proceed, go back instead.
 
-Reply with ONLY a JSON object with two keys:
+Reply with ONLY a JSON object with three keys:
 - "element": the number of the element in the list of elements NOT interacted with yet \
 that your instruction acts on, or null when it acts on none of them (for example going \
 back, scrolling, or typing into an already focused field).
 - "instruction": a single ATOMIC action. Each instruction = one tap, one type, one \
 swipe, or one back. Never combine steps.
+- "required_pointers": the nonnegative integer number of simultaneous touch pointers \
+required by the instruction. Report 0 for non-touch input and 1 for supported gestures.
 
 Example instructions:
 - Tap the "Network & internet" menu item near the top of the settings list
@@ -739,7 +741,7 @@ Example instructions:
 - Go back to the previous screen
 
 Example reply:
-{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen"}}"""
+{{"element": 2, "instruction": "Tap the rounded search bar at the top of the screen", "required_pointers": 1}}"""
 
 BACK_LEAVES_APP_LINE = (
     "Back on this screen leaves the app for the home screen, so choose an action on this "
@@ -752,7 +754,7 @@ You may call one or more functions to assist with the user query.
 
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
-{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is 999x999.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end"], "type": "string"}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application options menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action"], "type": "object"}}}}}}
+{{"type": "function", "function": {{"name": "mobile_use", "description": "Use a touchscreen to interact with a mobile device, and take screenshots.\\n* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n* The screen's resolution is 999x999.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.", "parameters": {{"properties": {{"action": {{"description": "The action to perform. The available actions are:\\n* `click`: Click the point on the screen with coordinate (x, y).\\n* `long_press`: Press the point on the screen with coordinate (x, y) for specified seconds.\\n* `swipe`: Swipe from the starting point with coordinate (x, y) to the end point with coordinates2 (x2, y2).\\n* `type`: Input the specified text into the activated input box.\\n* `system_button`: Press the system button.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `end`: Signal that the current task is completed. Use this when the task goal has been achieved.", "enum": ["click", "long_press", "swipe", "type", "system_button", "wait", "end", "unsupported"], "type": "string"}}, "required_pointers": {{"type": "integer", "minimum": 0, "description": "Required simultaneous touch pointers, independently of coordinates."}}, "reason": {{"type": "string", "description": "Required nonempty explanation for action=unsupported. Unsupported requests send no input; they do not mean end."}}, "coordinate": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=click`, `action=long_press`, and `action=swipe`.", "type": "array"}}, "coordinate2": {{"description": "(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=swipe`.", "type": "array"}}, "text": {{"description": "Required only by `action=type`.", "type": "string"}}, "time": {{"description": "The seconds to wait. Required only by `action=long_press` and `action=wait`.", "type": "number"}}, "button": {{"description": "Back means returning to the previous interface, Home means returning to the desktop, Menu means opening the application options menu, and Enter means pressing the enter. Required only by `action=system_button`", "enum": ["Back", "Home", "Menu", "Enter"], "type": "string"}}}}, "required": ["action", "required_pointers"], "type": "object"}}}}}}
 </tools>
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
@@ -1968,6 +1970,32 @@ def _end(_args: dict[str, object], _screen_w: int, _screen_h: int) -> dict[str, 
     return {"action": "end"}
 
 
+MAX_GESTURE_POINTERS = 1
+GESTURE_CAPABILITIES = (
+    f"The executor supports at most {MAX_GESTURE_POINTERS} pointer: a tap, long press, "
+    "or straight swipe. It cannot perform multi-finger or curved gestures. "
+    "Declare required_pointers independently of coordinates: 0 for type, system buttons, "
+    "wait or end; 1 for a tap, long press or swipe; the actual count for a multi-finger "
+    "request. Never replace an unsupported gesture with a supported gesture."
+)
+
+
+def _pointer_requirement(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _pointer_failure(pointers: int | None) -> str | None:
+    if pointers is None:
+        return "required_pointers must be a nonnegative JSON integer"
+    if pointers > MAX_GESTURE_POINTERS:
+        return f"Gesture requires {pointers} pointers; executor supports {MAX_GESTURE_POINTERS}"
+    return None
+
+
+def _unsupported(pointers: int | None, reason: str) -> dict[str, object]:
+    return {"action": "unsupported", "required_pointers": pointers, "reason": reason}
+
+
 _MOBILE_USE_ACTIONS: dict[str, Callable[[dict[str, object], int, int], dict[str, object]]] = {
     "click": _click,
     "long_press": _long_press,
@@ -1983,20 +2011,42 @@ _MOBILE_USE_ACTIONS: dict[str, Callable[[dict[str, object], int, int], dict[str,
 
 
 def tool_call_to_action(
-    args: dict[str, object], screen_w: int = 1080, screen_h: int = 1920
+    args: dict[str, object],
+    screen_w: int = 1080,
+    screen_h: int = 1920,
+    *,
+    expected_pointers: int | None = None,
 ) -> dict[str, object]:
     """Convert mobile_use arguments using the contract in README.md#action-responses."""
     nested = args.get("arguments")
     if isinstance(nested, dict):
         args = {**args, **as_object_dict(nested)}
 
+    pointers = _pointer_requirement(args.get("required_pointers"))
+    if reason := _pointer_failure(pointers):
+        return _unsupported(pointers, reason)
     action = args.get("action", "")
+    if action == "unsupported":
+        reason = as_str(args.get("reason"), "").strip()
+        return _unsupported(pointers, reason or "Unsupported gesture has no nonempty reason")
     # A JSON list or object as the action is unhashable, and must stay a ValueError.
     convert = _MOBILE_USE_ACTIONS.get(action) if isinstance(action, str) else None
     if convert is None:
         msg = f"Unknown action: {action}"
         raise ValueError(msg)
-    return convert(args, screen_w, screen_h)
+    primitive_pointers = int(action in {"click", "long_press", "swipe"})
+    if pointers != primitive_pointers:
+        return _unsupported(pointers, f"{action} requires required_pointers={primitive_pointers}")
+    converted = convert(args, screen_w, screen_h)
+    if (
+        expected_pointers is not None
+        and pointers != expected_pointers
+        and convert not in {_wait, _end}
+    ):
+        return _unsupported(
+            pointers, f"Grounded pointer count differs from planned {expected_pointers}"
+        )
+    return converted
 
 
 _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
@@ -2011,10 +2061,24 @@ _NEXT_ACTION_PLAN_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "One atomic action: one tap, one type, one swipe, or one back.",
         },
+        "required_pointers": {
+            "type": "integer",
+            "minimum": 0,
+            "description": GESTURE_CAPABILITIES,
+        },
     },
-    "required": ["element", "instruction"],
+    "required": ["element", "instruction", "required_pointers"],
     "additionalProperties": False,
 }
+
+
+@dataclass(frozen=True)
+class ActionPlan:
+    """A model-declared pointer requirement travels independently of its instruction."""
+
+    instruction: str
+    element: int | None
+    required_pointers: int | None
 
 
 # A self-loop gains an action for every state its screen can be put in, such as each day an
@@ -2110,15 +2174,15 @@ def plan_next_action(
     request: PlanRequest,
     *,
     settings: ModelSettings,
-) -> tuple[str, int | None]:
+) -> ActionPlan:
     """Use a reasoning VLM to decide WHAT to do next as a natural language instruction.
 
     This separates the "what" (exploration strategy) from the "how" (coordinate grounding).
     Each instruction is ONE atomic action (one tap, one type, one swipe, or one back).
 
     Returns:
-        ``(instruction, element)``, where ``element`` is the number of the listed
-        unexplored element the instruction acts on, or None.
+        The instruction, its listed element number, and the declared pointer requirement.
+        A missing or invalid requirement remains unknown and cannot authorize input.
     """
 
     instructions_str = (
@@ -2148,13 +2212,18 @@ def plan_next_action(
         if request.system_feedback
         else ""
     )
-    prompt = ownership_hint + NEXT_ACTION_PLAN_PROMPT.format(
-        app_name=request.app_name,
-        page_description=request.page_description,
-        input_status=request.input_status,
-        back_leaves_app_line=BACK_LEAVES_APP_LINE if request.back_leaves_app else "",
-        explored_instructions=instructions_str,
-        unexplored_elements_section=unexplored_section,
+    prompt = (
+        GESTURE_CAPABILITIES
+        + "\n"
+        + ownership_hint
+        + NEXT_ACTION_PLAN_PROMPT.format(
+            app_name=request.app_name,
+            page_description=request.page_description,
+            input_status=request.input_status,
+            back_leaves_app_line=BACK_LEAVES_APP_LINE if request.back_leaves_app else "",
+            explored_instructions=instructions_str,
+            unexplored_elements_section=unexplored_section,
+        )
     )
 
     messages: list[ChatMessagesTypedDict] = [
@@ -2182,7 +2251,7 @@ def plan_next_action(
     instruction = as_str(plan.get("instruction"), raw).strip()
     element = as_int(plan.get("element"))
     logger.info("Planned instruction: %s (element: %s)", instruction, element)
-    return instruction, element
+    return ActionPlan(instruction, element, _pointer_requirement(plan.get("required_pointers")))
 
 
 ACTION_DESCRIPTION_PROMPT = """\
@@ -2358,7 +2427,7 @@ def _unparsed_reason(raw: str) -> str:
     return "it had no <tool_call> block with valid JSON"
 
 
-def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[str, object], str]:
+def _read_action(resp: ChatResult, request: ActionRequest) -> tuple[dict[str, object], str]:
     """Turn an action reply into a device action and its history entry."""
     raw = message_text(resp)
     try:
@@ -2368,7 +2437,12 @@ def _read_action(resp: ChatResult, screen_w: int, screen_h: int) -> tuple[dict[s
     if tool_args is None:
         raise _MalformedActionOutputError(_unparsed_reason(raw), raw)
     try:
-        action = tool_call_to_action(tool_args, screen_w=screen_w, screen_h=screen_h)
+        action = tool_call_to_action(
+            tool_args,
+            screen_w=request.screen_w,
+            screen_h=request.screen_h,
+            expected_pointers=request.required_pointers,
+        )
     except (TypeError, ValueError, AttributeError, IndexError, OverflowError) as exc:
         reason = f"the mobile_use arguments were invalid: {exc}"
         raise _MalformedActionOutputError(reason, raw) from exc
@@ -2383,6 +2457,7 @@ class ActionRequest:
 
     Attributes:
         instruction: The high-level task instruction.
+        required_pointers: The validated planning requirement; None means unknown.
         screen_w: Actual device screen width in pixels.
         screen_h: Actual device screen height in pixels.
         action_history: List of NL descriptions of previous actions taken.
@@ -2392,6 +2467,7 @@ class ActionRequest:
 
     screenshot_b64: str
     instruction: str
+    required_pointers: int | None
     screen_w: int = 1080
     screen_h: int = 1920
     action_history: list[str] | None = None
@@ -2412,11 +2488,14 @@ def predict_next_action(
 
     Returns:
         (device_action, history_entry):
-        - device_action: device action dict (may be {"action": "end"})
+        - device_action: executable primitive, end, or explicit unsupported result
         - history_entry: NL description for the agent's action history
     """
 
-    system_prompt = NEXT_ACTION_SYSTEM_PROMPT.format()
+    if reason := _pointer_failure(request.required_pointers):
+        return _unsupported(request.required_pointers, reason), reason
+
+    system_prompt = GESTURE_CAPABILITIES + "\n" + NEXT_ACTION_SYSTEM_PROMPT.format()
 
     if request.action_history:
         history_text = "\n".join(f"Step {i + 1}: {h}" for i, h in enumerate(request.action_history))
@@ -2437,10 +2516,15 @@ def predict_next_action(
         if request.system_feedback
         else ""
     )
-    user_prompt = ownership_hint + NEXT_ACTION_USER_PROMPT.format(
-        instruction=request.instruction,
-        overall_task_section=overall_task_section,
-        history_section=history_section,
+    user_prompt = (
+        f"The planner declares required_pointers={request.required_pointers}. "
+        "Return unsupported with a reason when the instruction cannot be executed as declared.\n"
+        + ownership_hint
+        + NEXT_ACTION_USER_PROMPT.format(
+            instruction=request.instruction,
+            overall_task_section=overall_task_section,
+            history_section=history_section,
+        )
     )
 
     messages: list[ChatMessagesTypedDict] = [
@@ -2467,7 +2551,7 @@ def predict_next_action(
             client, call_type="action", settings=settings, messages=[*messages, *retry]
         )
         try:
-            return _read_action(resp, request.screen_w, request.screen_h)
+            return _read_action(resp, request)
         except _MalformedActionOutputError as exc:
             failure = exc
             raise
