@@ -331,3 +331,37 @@ def test_closing_a_stalled_capture_prevents_late_publication(
     calls = reader.calls
     current.capture("periodic")
     assert reader.calls == calls
+
+
+def test_failed_capture_keeps_counts_of_the_last_published_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = Reader()
+    original_capture = reader.capture
+    original_write = Path.write_bytes
+
+    def capture() -> dict[str, SourceRead]:
+        sources = original_capture()
+        if reader.calls > 1:
+            sources["crash"] = SourceRead(
+                b"123.000 1000 42 42 E AndroidRuntime: FATAL EXCEPTION: main\n"
+                b"123.000 1000 42 42 E AndroidRuntime: Process: com.example, PID: 42\n",
+                "ok",
+            )
+        return sources
+
+    def write(path: Path, data: bytes) -> int:
+        if path.name == ".0001-metadata.txt.partial":
+            msg = "controlled persistence failure"
+            raise OSError(msg)
+        return original_write(path, data)
+
+    monkeypatch.setattr(reader, "capture", capture)
+    monkeypatch.setattr(Path, "write_bytes", write)
+    with collector(tmp_path, reader) as current:
+        pass
+    report = json.loads((current.directory / "report.json").read_text())
+    assert report["captures"] == 1
+    assert report["collection_error"] == "OSError"
+    assert report["latest_snapshot_target_process_name_counts"]["java_fatal"] == 0
+    assert not (current.directory / "0001.json").exists()
