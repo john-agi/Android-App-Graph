@@ -521,7 +521,9 @@ def _identifying(
     answers = iter(visits)
     answered: dict[str, str] = {}
 
-    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+    def identify(
+        observation: Observation, *, expected_observation: str | None = None, **_kwargs: object
+    ) -> str:
         known = answered.get(expected_observation or "")
         expected.append(known or graph.node_of(expected_observation))
         visit = next(answers)
@@ -560,9 +562,11 @@ def _write_member(graph_path: Path, node_id: str) -> None:
         "state": {},
         "elements": [],
         "is_external_web": False,
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     append_json_line(
-        identify_file_path(graph_path), {"observation": observation_id, "describe": describe}
+        identify_file_path(graph_path),
+        {"observation": observation_id, "describe": describe, "modal_context": []},
     )
 
 
@@ -742,6 +746,7 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
 
     records = step_records(graph_path.parent / "steps")
     assert [(record["kind"], record["source"]) for record in records] == [
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
         ("action", "navigation_replay"),
@@ -754,16 +759,16 @@ def test_a_re_exploration_step_is_recorded_as_an_audit_transition(
         ("transition", "re_explore"),
     ]
     assert {record["run_kind"] for record in records} == {"audit"}
-    assert records[2]["observation"] == records[0]["id"]
+    assert records[3]["observation"] == records[1]["id"]
     matches = [record for record in records if record["kind"] == "match"]
     assert [(r["observation"], r["expected_observation"]) for r in matches] == [
-        ("000000", "s0_home-observation"),
-        ("000003", "s1_detail-observation"),
-        ("000007", None),
+        ("000001", "s0_home-observation"),
+        ("000004", "s1_detail-observation"),
+        ("000008", None),
     ]
-    assert {key: records[9][key] for key in _STEP_FIELDS} == {
-        "before": "000005",
-        "after": "000007",
+    assert {key: records[10][key] for key in _STEP_FIELDS} == {
+        "before": "000006",
+        "after": "000008",
         "instruction": "tap the first button",
         "element": None,
         "action": tap,
@@ -942,7 +947,9 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search page"}'),
+            chat_response(
+                content='{"page_description": "Chat search page", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -967,7 +974,9 @@ def test_re_explore_records_the_edge_from_the_node_the_verifier_rejected(
             # The replay to the start node ends on its screen: an exact match.
             httpx.Response(200, json=embedding_body),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search results"}'),
+            chat_response(
+                content='{"page_description": "Chat search results", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(verdict)),
             *[httpx.Response(200, json=embedding_body) for _ in range(2)],
@@ -1060,7 +1069,7 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
         [
             httpx.Response(200, json=embedding_body),
             chat_response(
-                content='{"page_description":"Chat search page","state":{"focused_field":"Search"}}'
+                content='{"page_description": "Chat search page", "state": {"focused_field": "Search"}, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
             httpx.Response(200, json=embedding_body),
         ]
@@ -1076,7 +1085,7 @@ def test_re_exploration_plans_from_and_records_each_screen_s_own_description(
             httpx.Response(200, json=embedding_body),
             httpx.Response(200, json=embedding_body),
             chat_response(
-                content='{"page_description":"Chat search results","state":{"focused_field":null}}'
+                content='{"page_description": "Chat search results", "state": {"focused_field": null}, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=same),
@@ -1547,6 +1556,7 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
 
     records = step_records(tmp_path / "steps")
     assert [(record["kind"], record["source"]) for record in records] == [
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
         ("observation", "edge_retry"),
@@ -1554,16 +1564,17 @@ def test_a_retried_edge_is_recorded_as_a_transition_to_the_node_it_reaches(
         ("observation", "edge_retry"),
         ("match", "edge_retry"),
         ("transition", "edge_retry"),
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
     ]
-    assert (records[5]["observation"], records[5]["expected_observation"]) == (
-        "000004",
+    assert (records[6]["observation"], records[6]["expected_observation"]) == (
+        "000005",
         "s1_detail-observation",
     )
-    assert {key: records[6][key] for key in _STEP_FIELDS} == {
-        "before": "000002",
-        "after": "000004",
+    assert {key: records[7][key] for key in _STEP_FIELDS} == {
+        "before": "000003",
+        "after": "000005",
         "instruction": _FLAGGED,
         "element": None,
         "action": [_DETAIL_TAP],
@@ -2140,7 +2151,9 @@ def test_re_explore_returns_to_the_app_and_records_nothing_when_a_step_leaves_it
 
     answered: dict[str, str] = {}
 
-    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+    def identify(
+        observation: Observation, *, expected_observation: str | None = None, **_kwargs: object
+    ) -> str:
         known = answered.get(expected_observation or "")
         expected.append(known or graph.node_of(expected_observation))
         answered[observation.observation_id] = nodes[observation.activity]

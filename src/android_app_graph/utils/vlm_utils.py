@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from openrouter import OpenRouter
@@ -26,6 +26,7 @@ from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
 from android_app_graph.checkpoint import APP_NAME_BYTES, CHECKPOINT_INPUT_BYTES
+from android_app_graph.modal_context import Surface
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
@@ -342,6 +343,26 @@ Examples:
 - Input: ["Tap the three-dot overflow menu in the top-right corner", "Swipe upward on the alarm list", "Tap the switch of the 7:00 AM alarm"]
   Output: {"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}"""
 
+_SCREEN_IDENTITY_POLICY = """\
+Screen identity policy:
+Modal dialogs, picker dialogs and modal bottom sheets are separate screens from the \
+page underneath, including time, date, radio-choice and confirmation dialogs. Identify \
+the foreground interaction window: it asks for a decision or input before returning to \
+the containing screen. Dimming supports this distinction; it is not required.
+Anchored menus (overflow, dropdown, popup and context menus) and expanded page controls \
+are state of their containing screen. An anchored menu over a modal is that modal's state.
+Compare the modal purpose and opening navigation destination. A different opening \
+destination or semantic purpose means DIFFERENT screens, even for identical picker layouts. \
+Selected values, input modes and underlying scroll positions are state of the SAME modal. \
+For example, clock-face and text-entry time pickers for one alarm are the same modal; \
+an alarm time picker and a bedtime time picker are different screens. Preserve the visible \
+opening destination in the modal's description and in every refined description, so its \
+return edge names a consistent destination. Use visible titles, selected navigation, \
+background controls and the supplied descriptions as evidence; report uncertainty when \
+the opening destination is hidden instead of inventing one.
+
+"""
+
 PAGE_DESCRIBE_AND_STATE_PROMPT = """\
 You are an expert at analyzing mobile app screenshots. You are helping build a navigation \
 graph of an app where each node is a distinct SCREEN TYPE (template).
@@ -359,11 +380,9 @@ Good: "search results page", "route planning page", "location search page" \
 Bad: "search results for Big Ben", "route from home to work", "John's profile page" \
 All user-specific data belongs in "state", never in "page_description". \
 The on-screen keyboard, which input field has focus, how far a list is scrolled, \
-an overflow menu, dropdown, picker, popup or context menu open over the screen, and which \
+an overflow menu, dropdown, popup or context menu open over the screen, and which \
 of its sections are expanded never change "page_description"; record them in "state". \
-A dialog, bottom sheet or full-screen picker that has its own purpose, such as a \
-"data usage warning dialog", is a screen of its own: describe the dialog, and record a \
-menu open over it in "state". \
+Describe a modal by its purpose and opening navigation destination. \
 Always describe what you actually see. \
 {description_hint}
 
@@ -375,7 +394,7 @@ For the "state" object, focus on:
 - "last_visible_item": the last list/menu item visible on screen
 - "focused_field": the input field that has focus, or null when none has
 - "keyboard_visible": whether the on-screen keyboard is shown
-- "open_menu": the overflow menu, dropdown, picker, popup or context menu open over the \
+- "open_menu": the overflow menu, dropdown, popup or context menu open over the \
   screen, named by what opened it (e.g. "overflow menu", "Security dropdown"), or null \
   when none is open
 - "expanded_sections": on a screen with collapsible sections, the ones shown expanded, \
@@ -420,6 +439,16 @@ such as a browser or a custom tab that displays an address bar or a URL. The app
 screens are false, including screens it renders in a web view and screens that mention \
 or link to a website, a privacy policy or terms of service.
 
+5. "surface": classify the foreground as "page" or "modal" using the screen identity policy.
+For a page use relation "unknown" and return_depth 0. For a modal, compare the supplied
+preceding capture, actual input and active modal frames: "open" means a newly opened
+modal, including a nested modal; "continue" means the same active modal with changed
+values/input mode/menu state; "return" means a previously active outer modal revealed
+again, with return_depth equal to that frame's supplied depth. All other relations use
+return_depth 0. Use "unknown" when the opening or relationship cannot be established.
+A previous capture alone does not prove an opening. Do not infer origins from expected
+replay destinations. Keep the opening destination and purpose in the description.
+
 Return ONLY the JSON object, nothing else.
 Example:
 {{"page_description": "product search results", "state": {{"search_query": "keyboard", "filter_brand": "logitech"}}, \
@@ -431,7 +460,7 @@ Example:
 {{"description": "Home tab", "position": "bottom navigation bar"}}, \
 {{"description": "Cart tab", "position": "bottom navigation bar"}}, \
 {{"description": "Account tab", "position": "bottom navigation bar"}}], \
-"is_external_web": false}}"""
+"is_external_web": false, "surface": {{"kind": "page", "relation": "unknown", "return_depth": 0}}}}"""
 
 NODE_VERIFY_PROMPT = """\
 You are comparing two mobile app screenshots to decide if they are the SAME screen or DIFFERENT screens.
@@ -443,7 +472,7 @@ them the same page — even if the content (list items, search results, text in 
 For example, a search results page showing different queries is still the same screen. \
 They are also the SAME screen when they differ only in whether the on-screen keyboard is shown, \
 which input field has focus, how far a list is scrolled, whether an overflow menu, dropdown, \
-picker, popup or context menu is open over the screen, or which of its sections are expanded \
+popup or context menu is open over the screen, or which of its sections are expanded \
 or collapsed. A menu open over a dialog leaves it the same dialog.
 
 Two screenshots are DIFFERENT screens if they serve different purposes in the app's workflow, \
@@ -451,8 +480,8 @@ even if they look visually similar. Pay close attention to:
 - Screen titles, headers, or labels (e.g. "Choose start location" vs "Choose destination")
 - The stage in a multi-step flow (e.g. step 1 vs step 2 of a booking)
 - Different form sections or tabs that change the screen's function
-- A dialog, bottom sheet or full-screen picker that has its own purpose, such as a \
-"Data usage warning" dialog, is a DIFFERENT screen from the page beneath it.
+- A modal is DIFFERENT from its containing page; compare its modal purpose and opening \
+navigation destination with those of another modal.
 - A search page and a search result list page is considered different usually, though sometimes the search page also provide some suggestions.
 
 A destination the app names in its own navigation, such as a tab, a bottom navigation bar \
@@ -472,8 +501,9 @@ If they are the SAME screen:
 If they are DIFFERENT screens, you must also provide a slightly more specific description of the \
 second screenshot that distinguishes it from the first. Usually adding one or two extra \
 distinguishing words is enough. Keep the description concise (under 10 words). \
-Name the screen by its purpose, never by its current state: leave out the on-screen keyboard, \
-which input field has focus, how far a list is scrolled, any overflow menu, dropdown, picker, \
+Name the screen by its purpose, preserving its modal purpose and opening navigation destination. \
+Leave out the on-screen keyboard, \
+which input field has focus, how far a list is scrolled, any overflow menu, dropdown, \
 popup or context menu open over it, and which of its sections are expanded, even when the \
 screenshot shows them:
 {"same": false, "reason": "brief explanation", \
@@ -543,6 +573,16 @@ _EDGE_TEMPLATE_SCHEMA: dict[str, Any] = {
 _PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "surface": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["page", "modal"]},
+                "relation": {"type": "string", "enum": ["open", "continue", "return", "unknown"]},
+                "return_depth": {"type": "integer", "minimum": 0, "maximum": 4},
+            },
+            "required": ["kind", "relation", "return_depth"],
+            "additionalProperties": False,
+        },
         "page_description": {
             "type": "string",
             "description": "The screen type in under 10 words, with no user-specific content.",
@@ -578,7 +618,7 @@ _PAGE_DESCRIPTION_SCHEMA: dict[str, Any] = {
             "or custom tab showing an address bar or URL; the app's own web views are false.",
         },
     },
-    "required": ["page_description", "state", "elements", "is_external_web"],
+    "required": ["page_description", "state", "elements", "is_external_web", "surface"],
     "additionalProperties": False,
 }
 
@@ -924,7 +964,7 @@ def build_image_message(screenshot_b64: str) -> ChatContentImageTypedDict:
 
 def _parse_page_description(
     text: str,
-) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
     result = json.loads(strip_json_fences(text))
     if not isinstance(result, dict):
         msg = "Expected page description to be a JSON object"
@@ -954,7 +994,13 @@ def _parse_page_description(
     if not isinstance(is_external_web, bool):
         msg = "Expected is_external_web to be a boolean"
         raise TypeError(msg)
-    return description, as_object_dict(state), elements, is_external_web
+    return (
+        description,
+        as_object_dict(state),
+        elements,
+        is_external_web,
+        Surface.from_record(payload.get("surface")),
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -965,6 +1011,10 @@ class DescribeRequest:
     known_descriptions: list[str] | None = None
     existing_keys: list[str] | None = None
     system_feedback: bool = False
+    opening_context: str = (
+        "No preceding matched capture is available. A visible modal has unknown origin."
+    )
+    opening_images: tuple[tuple[str, str], ...] = ()
 
 
 def describe_page_and_state(
@@ -972,7 +1022,7 @@ def describe_page_and_state(
     request: DescribeRequest,
     *,
     settings: ModelSettings,
-) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+) -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
     """Describe a screen, retrying failed requests and malformed descriptions.
 
     The model always writes its own description based on what it sees. The
@@ -985,7 +1035,7 @@ def describe_page_and_state(
             with the observed system-feedback scope.
 
     Returns:
-        (page_description, state_dict, elements_list, is_external_web)
+        (page_description, state_dict, elements_list, is_external_web, surface)
         where elements_list is a list of {"description": str, "position": str} dicts
         and is_external_web is true only for web content from outside the app.
     """
@@ -1039,13 +1089,16 @@ def describe_page_and_state(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt},
+                {"type": "text", "text": f"{_SCREEN_IDENTITY_POLICY}{prompt}"},
+                {"type": "text", "text": request.opening_context},
+                *_opening_images(request.opening_images),
+                {"type": "text", "text": "Current capture to describe:"},
                 build_image_message(screenshot_b64),
             ],
         }
     ]
 
-    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
+    def request_description() -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
         resp = _send_chat_once(
             client,
             call_type="page_describe_and_state",
@@ -1063,13 +1116,13 @@ def describe_page_and_state(
             msg = "Malformed page description"
             raise UnusableOutputError(msg) from exc
 
-    page_description, state, elements, is_external_web = call_with_retry(
+    page_description, state, elements, is_external_web, surface = call_with_retry(
         "[API] page describe and state", request_description
     )
     logger.debug("Page description: %s", page_description)
     logger.debug("Page state: %s", state)
     logger.debug("Elements: %d found", len(elements))
-    return page_description, state, elements, is_external_web
+    return page_description, state, elements, is_external_web, surface
 
 
 def _no_verifier_answer(reason: str) -> dict[str, Any]:
@@ -1084,6 +1137,17 @@ class DescribedScreenshot:
     screenshot_b64: str
     description: str
     system_feedback: bool = False
+    opening_context: str = ""
+    modal_origin: Literal["unspecified", "page", "known", "unknown"] = "unspecified"
+    opening_images: tuple[tuple[str, str], ...] = ()
+
+
+def _opening_images(images: tuple[tuple[str, str], ...]) -> list[ChatContentItemsTypedDict]:
+    content: list[ChatContentItemsTypedDict] = []
+    for caption, image in images:
+        content.append({"type": "text", "text": caption})
+        content.append(build_image_message(image))
+    return content
 
 
 def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItemsTypedDict]:
@@ -1095,6 +1159,8 @@ def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItems
     return [
         {"type": "text", "text": f'{label}, described as "{screenshot.description}":{ownership}'},
         build_image_message(screenshot.screenshot_b64),
+        {"type": "text", "text": screenshot.opening_context},
+        *_opening_images(screenshot.opening_images),
     ]
 
 
@@ -1142,7 +1208,7 @@ def verify_same_node(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": NODE_VERIFY_PROMPT},
+                        {"type": "text", "text": f"{_SCREEN_IDENTITY_POLICY}{NODE_VERIFY_PROMPT}"},
                         *_shown("First screenshot (existing node)", existing),
                         *_shown("Second screenshot (new screen)", new),
                     ],
@@ -1599,7 +1665,7 @@ def audit_merge_nodes(
             client,
             call_type="node_merge_audit",
             settings=settings,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"{_SCREEN_IDENTITY_POLICY}{prompt}"}],
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
         )
     except TruncatedReplyError, httpx.TimeoutException:
@@ -1750,7 +1816,7 @@ def audit_graph(
             client,
             call_type="graph_audit",
             settings=settings,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"{_SCREEN_IDENTITY_POLICY}{prompt}"}],
             response_format=_structured_output("graph_audit", _GRAPH_AUDIT_SCHEMA),
         )
     except TruncatedReplyError, httpx.TimeoutException:

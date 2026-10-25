@@ -40,6 +40,7 @@ from android_app_graph.graph_files import (
     save_embeddings,
     text_embeddings_path,
 )
+from android_app_graph.modal_context import MatchInput, Surface
 from android_app_graph.payloads import as_object_dict
 from android_app_graph.step_log import Observation, StepRecorder, save_image_embeddings
 from android_app_graph.utils import DEFAULT_MATCHING, MatchingSettings, ModelSettings, vlm_utils
@@ -65,6 +66,7 @@ from android_app_graph.utils.vlm_utils import (
     DescribedScreenshot,
     DescribeRequest,
     TokenTracker,
+    _parse_page_description,
 )
 
 PACKAGE = "com.example.app"
@@ -181,13 +183,14 @@ def described_as_screen(observation_id: str) -> dict[str, object]:
         "state": {},
         "elements": [],
         "is_external_web": False,
+        "surface": Surface().as_record(),
     }
 
 
 def write_describe(steps_dir: Path, observation_id: str, describe: object) -> None:
     """Give ``observation_id`` the describe output ``describe`` in the identify file of
     ``graph_beside(steps_dir)``."""
-    line = {"observation": observation_id, "describe": describe}
+    line = {"observation": observation_id, "describe": describe, "modal_context": []}
     append_json_line(identify_file_path(graph_beside(steps_dir)), line)
 
 
@@ -284,7 +287,9 @@ def add_screen(
         return
     for member in gm.graph.nodes[node_id].get("observations", []):
         describe = {**described_as_screen(member), "page_description": description}
-        append_json_line(gm.identify_file, {"observation": member, "describe": describe})
+        append_json_line(
+            gm.identify_file, {"observation": member, "describe": describe, "modal_context": []}
+        )
 
 
 def save_with_text_vectors(gm: GraphManager, path: Path) -> None:
@@ -328,6 +333,7 @@ class FakeVlm:
     descriptions: list[tuple[str, dict[str, Any], list[dict[str, str]]]] = field(
         default_factory=list
     )
+    surfaces: list[Surface] = field(default_factory=list)
     external_web: set[str] = field(default_factory=set)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     images: dict[str, list[float]] = field(default_factory=dict)
@@ -351,14 +357,20 @@ class FakeVlm:
         request: DescribeRequest,
         *,
         settings: ModelSettings | None = None,
-    ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool]:
+    ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool, Surface]:
         call = {"client": client, "screenshot": request.screenshot_b64, "settings": settings}
         call.update(
             known_descriptions=request.known_descriptions, existing_keys=request.existing_keys
         )
         self.calls.append(("describe", call))
         description, state, elements = self.descriptions.pop(0)
-        return description, state, elements, description in self.external_web
+        return (
+            description,
+            state,
+            elements,
+            description in self.external_web,
+            self.surfaces.pop(0) if self.surfaces else Surface(),
+        )
 
     def verify_same_node(
         self,
@@ -546,7 +558,9 @@ def test_identify_state_records_the_describe_output_and_the_decision(
                 "state": {"tab": "home"},
                 "elements": elements,
                 "is_external_web": False,
+                "surface": Surface().as_record(),
             },
+            "modal_context": [],
             "identify": {
                 "stage": "new",
                 "expected_observation": None,
@@ -621,6 +635,7 @@ def test_an_exact_match_reuses_the_member_s_describe_output_without_describing_o
         "state": {"tab": "home"},
         "elements": elements,
         "is_external_web": False,
+        "surface": Surface().as_record(),
         "copied_from": first_observation.observation_id,
     }
     assert record["identify"] == {
@@ -788,8 +803,18 @@ def test_identify_state_verifies_against_the_member_image_in_the_step_log(
 
     gm.identify_state(screen(HOME, SHOT_B, PACKAGE))
 
-    assert vlm.calls[6][1]["existing"] == DescribedScreenshot(b64(b"member-image"), "Home screen")
-    assert vlm.calls[6][1]["new"] == DescribedScreenshot(SHOT_B, "Home screen with banner")
+    assert vlm.calls[6][1]["existing"] == DescribedScreenshot(
+        b64(b"member-image"),
+        "Home screen",
+        opening_context="Foreground is a page, with no active modal opening.",
+        modal_origin="page",
+    )
+    assert vlm.calls[6][1]["new"] == DescribedScreenshot(
+        SHOT_B,
+        "Home screen with banner",
+        opening_context="Foreground is a page, with no active modal opening.",
+        modal_origin="page",
+    )
 
 
 def test_identify_state_verified_match_does_not_repeat_a_known_activity(
@@ -1633,7 +1658,13 @@ def test_an_exact_match_with_a_member_without_a_description_vector_raises_naming
     assert gm.graph.nodes["s0_home"]["observations"] == ["000001"]
 
 
-DESCRIBED = {"page_description": "Home", "state": {}, "elements": [], "is_external_web": False}
+DESCRIBED = {
+    "page_description": "Home",
+    "state": {},
+    "elements": [],
+    "is_external_web": False,
+    "surface": Surface().as_record(),
+}
 
 
 @pytest.mark.parametrize(
@@ -4973,7 +5004,7 @@ def describe_members(path: Path, membership: Membership) -> None:
     """Give each member of ``membership`` a describe output in the identify file of the
     graph at ``path``."""
     for member in membership["observations"]:
-        line = {"observation": member, "describe": described_as_screen(member)}
+        line = {"observation": member, "describe": described_as_screen(member), "modal_context": []}
         append_json_line(identify_file_path(path), line)
 
 
@@ -5588,9 +5619,17 @@ def test_run_node_merge_audit_merges_a_confirmed_duplicate(
     # The more-visited node's member comes first, and each side's image comes from the
     # step log, with the description of its own screen.
     assert vlm.calls[0][1]["existing"] == DescribedScreenshot(
-        b64(b"home-two-image"), "Home screen again"
+        b64(b"home-two-image"),
+        "Home screen again",
+        opening_context="Foreground is a page, with no active modal opening.",
+        modal_origin="page",
     )
-    assert vlm.calls[0][1]["new"] == DescribedScreenshot(b64(b"home-image"), "Home screen")
+    assert vlm.calls[0][1]["new"] == DescribedScreenshot(
+        b64(b"home-image"),
+        "Home screen",
+        opening_context="Foreground is a page, with no active modal opening.",
+        modal_origin="page",
+    )
 
 
 def test_a_merge_proposal_names_the_lower_numbered_node_first() -> None:
@@ -6043,3 +6082,245 @@ def test_persisted_system_boundaries_keep_their_external_ownership(
     manager.load_graph(path)
     assert manager.get_resume_target() is None
     assert vlm.calls == []
+
+
+def test_identical_modal_pixels_with_unknown_origins_require_verification(
+    vlm: FakeVlm, screen: Screens, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hidden modal origin is not established by repeated pixels."""
+
+    def describe(
+        client: OpenRouter | None, request: DescribeRequest, *, settings: ModelSettings
+    ) -> tuple[str, dict[str, object], list[dict[str, str]], bool, Surface]:
+        description, state, elements, external, _surface = vlm.describe_page_and_state(
+            client, request, settings=settings
+        )
+        return _parse_page_description(
+            json.dumps(
+                {
+                    "page_description": description,
+                    "state": state,
+                    "elements": elements,
+                    "is_external_web": external,
+                    "surface": {"kind": "modal", "relation": "unknown", "return_depth": 0},
+                }
+            )
+        )
+
+    monkeypatch.setattr(gm_module, "describe_page_and_state", describe)
+    vlm.descriptions.extend(
+        [("Copy destination sort sheet", {}, []), ("Move destination sort sheet", {}, [])]
+    )
+    vlm.verdicts.append({"same": False, "reason": "The observed origins differ"})
+    manager = make_manager(screen.steps_dir)
+    first = manager.identify_state(screen(HOME, SHOT_A, PACKAGE))
+    second = manager.identify_state(screen(HOME, SHOT_A, PACKAGE))
+
+    assert first != second
+    assert vlm.kinds().count("describe") == 2
+    assert vlm.kinds().count("verify") == 1
+
+
+def test_modal_opener_evidence_survives_revisits_aliases_and_saved_audit(
+    vlm: FakeVlm, screen: Screens, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-member evidence distinguishes origins and follows current node membership."""
+    shown: list[tuple[DescribedScreenshot, DescribedScreenshot]] = []
+
+    def verify(
+        _client: OpenRouter | None,
+        *,
+        existing: DescribedScreenshot,
+        new: DescribedScreenshot,
+        settings: ModelSettings,
+    ) -> dict[str, object]:
+        assert settings == PAGE_DETAIL
+        shown.append((existing, new))
+        same = existing.screenshot_b64 == new.screenshot_b64 and [
+            image for _, image in existing.opening_images
+        ] == [image for _, image in new.opening_images]
+        return {"same": same, "reason": "The captured opening destinations are compared"}
+
+    monkeypatch.setattr(gm_module, "verify_same_node", verify)
+    vlm.descriptions.extend(
+        [
+            ("Copy destination", {}, []),
+            ("Sort dialog", {}, []),
+            ("Move destination", {}, []),
+            ("Sort dialog", {}, []),
+            ("Sort dialog", {"selected": "name"}, []),
+            ("Copy destination", {}, []),
+        ]
+    )
+    vlm.surfaces.extend(
+        [
+            Surface(),
+            Surface("modal", "open"),
+            Surface(),
+            Surface("modal", "open"),
+            Surface("modal", "open"),
+            Surface(),
+        ]
+    )
+    manager = make_manager(screen.steps_dir)
+    copy = screen(HOME, SHOT_A)
+    copy_node = manager.identify_state(copy)
+    copy_sort = screen(HOME, SHOT_B)
+    first = manager.identify_state(
+        copy_sort, match_input=MatchInput(copy.observation_id, ({"action": "tap"},))
+    )
+    move = screen(HOME, SHOT_C)
+    manager.identify_state(move)
+    move_sort = screen(HOME, SHOT_B)
+    second = manager.identify_state(
+        move_sort, match_input=MatchInput(move.observation_id, ({"action": "tap"},))
+    )
+    assert first != second
+    comparison = next(
+        (left, right) for left, right in shown if left.opening_images and right.opening_images
+    )
+    assert "Copy destination" in comparison[0].opening_images[0][0]
+    assert "Move destination" in comparison[1].opening_images[0][0]
+
+    revisit = screen(HOME, SHOT_A)
+    assert manager.identify_state(revisit) == copy_node
+    reopened = screen(HOME, SHOT_B)
+    assert (
+        manager.identify_state(
+            reopened, match_input=MatchInput(revisit.observation_id, ({"action": "tap"},))
+        )
+        == first
+    )
+    assert reopened.observation_id != copy_sort.observation_id
+    alias = manager.identify_state(screen(HOME, b64(b"alias capture")))
+    assert manager.merge_nodes(alias, copy_node)
+    restored = with_text_vectors(manager, screen.steps_dir)
+    before = len(shown)
+    restored.verify_members(copy_sort.observation_id, reopened.observation_id, verdicts={})
+    assert len(shown) == before + 1
+    existing, new = shown[-1]
+    assert existing.opening_images == new.opening_images
+    assert f"current graph node {alias}" in existing.opening_images[0][0]
+    assert existing.opening_images[0][1] == SHOT_A
+    assert (
+        screen.decision(copy_sort)["modal_context"][0]["source"]["previous"] == copy.observation_id
+    )
+
+
+def test_unknown_modal_origin_stays_unresolved_and_cannot_bridge_known_destinations(
+    vlm: FakeVlm, screen: Screens, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown members do not conceal an established contradictory modal opening."""
+    calls: list[tuple[DescribedScreenshot, DescribedScreenshot]] = []
+
+    def verify(
+        _client: OpenRouter | None,
+        *,
+        existing: DescribedScreenshot,
+        new: DescribedScreenshot,
+        settings: ModelSettings,
+    ) -> dict[str, object]:
+        assert settings == PAGE_DETAIL
+        calls.append((existing, new))
+        same = existing.screenshot_b64 == new.screenshot_b64
+        if existing.opening_images and new.opening_images:
+            same = same and existing.opening_images == new.opening_images
+        return {"same": same, "reason": "Compare observed destinations when available"}
+
+    monkeypatch.setattr(gm_module, "verify_same_node", verify)
+    vlm.descriptions.extend(
+        [
+            ("Sort dialog", {}, []),
+            ("Copy destination", {}, []),
+            ("Sort dialog", {}, []),
+            ("Move destination", {}, []),
+            ("Sort dialog", {}, []),
+        ]
+    )
+    vlm.surfaces.extend(
+        [
+            Surface("modal", "unknown"),
+            Surface(),
+            Surface("modal", "open"),
+            Surface(),
+            Surface("modal", "open"),
+        ]
+    )
+    manager = make_manager(screen.steps_dir)
+    unknown = screen(HOME, SHOT_B)
+    unknown_node = manager.identify_state(unknown)
+    copy = screen(HOME, SHOT_A)
+    manager.identify_state(copy)
+    copy_sort = screen(HOME, SHOT_B)
+    copy_node = manager.identify_state(
+        copy_sort, match_input=MatchInput(copy.observation_id, ({"action": "tap"},))
+    )
+    move = screen(HOME, SHOT_C)
+    manager.identify_state(move)
+    move_sort = screen(HOME, SHOT_B)
+    move_node = manager.identify_state(
+        move_sort, match_input=MatchInput(move.observation_id, ({"action": "tap"},))
+    )
+    assert len({unknown_node, copy_node, move_node}) == 3
+    count = len(calls)
+    unknown_answer = manager.verify_members(
+        unknown.observation_id, copy_sort.observation_id, verdicts={}
+    )
+    assert not unknown_answer.answered
+    assert "unresolved" in unknown_answer.reason
+    assert len(calls) == count
+
+    assert manager.merge_nodes(unknown_node, copy_node)
+    witnesses = manager.closest_members(unknown_node, move_node)
+    assert witnesses.existing == copy_sort.observation_id
+    assert witnesses.new == move_sort.observation_id
+    vlm.descriptions.append(("Sort dialog", {}, []))
+    vlm.surfaces.append(Surface("modal", "open"))
+    repeated_move = screen(HOME, SHOT_B)
+    assert (
+        manager.identify_state(
+            repeated_move,
+            expected_observation=unknown.observation_id,
+            match_input=MatchInput(move.observation_id, ({"action": "tap"},)),
+        )
+        == move_node
+    )
+    assert (
+        screen.decision(repeated_move)["identify"]["verifications"][0]["member"]
+        == copy_sort.observation_id
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("surface", None),
+        ("surface", {"kind": [], "relation": "unknown", "return_depth": 0}),
+        ("modal_context", {}),
+    ],
+)
+def test_load_graph_names_invalid_modal_metadata_and_preserves_loaded_nodes(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """Invalid modal metadata produces the graph's actionable load diagnostic."""
+    path = tmp_path / "graph.json"
+    membership = members(tmp_path / "steps")
+    write_graph(path, [{"id": "s0_home", "replay_misses": 0, **membership}])
+    write_text_vectors(path, membership)
+    identify = identify_file_path(path)
+    lines = read_json_lines(identify)
+    for line in lines:
+        if field == "surface":
+            line["describe"] = {**as_object_dict(line["describe"]), field: value}
+        else:
+            line[field] = value
+    identify.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    manager = make_manager()
+    add_screen(manager, "s9_stale", "Stale screen")
+
+    with pytest.raises(ValueError, match="Explore the app again") as error:
+        manager.load_graph(path)
+
+    assert str(path) in str(error.value)
+    assert "Explore the app again into a new graph directory." in str(error.value)
+    assert list(manager.graph.nodes) == ["s9_stale"]

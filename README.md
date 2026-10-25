@@ -706,6 +706,13 @@ pressed. A step on a node with at least 12 self-loops in its last 15 outcomes co
 ranked target the same way, before it plans (see [Explore an App](#explore-an-app)),
 and plans as usual when no other node is ranked.
 
+When a ranked continuation reaches its selected node on a checkpoint boundary,
+the due merge audit runs and exploration retains that arrival, resolving its node
+ID through any audit merge. The next step starts from there under the usual
+exploration, step-limit and recovery rules. A failed continuation or an arrival at another node
+keeps the checkpoint's target selection and replay. A continuation at `max_steps`
+ends the run, as other final steps do.
+
 When a replay for `--resume-from`, a checkpoint or a continuation from a ranked target
 lands on a node other than its target, from whichever screen it starts, it counts a
 miss on the target, saved in the graph file as the node's `replay_misses`. The ranking
@@ -901,8 +908,8 @@ run), `run_kind` (`explore` or `audit`), `source`, a UTC `timestamp`, and the
 | `observation` | each screenshot | `width` and `height` of its image, the `status_bar` frame, `status_bar_rows`, `pixel_hash`, `black` and captured `input_regions` |
 | `action` | each input request, before ownership checks and device dispatch | `observation`, the run's latest screenshot before it (`null` when the run has none), and the `action` |
 | `action_rejected` | each unreachable app coordinate input, with no input dispatched | `action_record`, the rejected request's ID, its `action`, the `reason` and current `input_regions` |
-| `system_event` | ownership recovery or rejected input | `observation`, `status`, and event-specific evidence; statuses are `action_skipped`, `boundary_recovery`, `boundary_resolved`, `permission_observed`, `permission_grants`, `permission_resolved` and `permission_unresolved` |
-| `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, and `expected_observation`, a screenshot of the screen the run expects it to show, or `null` |
+| `system_event` | ownership recovery or rejected input | `observation`, `status`, and event-specific evidence; statuses are `task_restart`, `action_skipped`, `boundary_recovery`, `boundary_resolved`, `permission_observed`, `permission_grants`, `permission_resolved` and `permission_unresolved` |
+| `match` | each screenshot the run asks [screen matching](#screen-matching) to place, written before it is placed | `observation`, that screenshot, `expected_observation`, a screenshot of the screen the run expects it to show or `null`, and `match_input`, its preceding matched observation and up to eight actual actions; null actions mark an interrupted or longer input chain |
 | `transition` | each edge the graph is given | `before` and `after` observation IDs, the planner's `instruction` and `element`, the executed `action`, and `from_node` and `to_node` as they were then |
 
 An `action` record preserves a request, not proof of dispatch. Both captured-feedback
@@ -990,7 +997,7 @@ A node is a screen by its purpose. What changes on a screen without changing its
 purpose is the node's state, which the screen description model records on each
 visit: whether the on-screen keyboard is shown (`keyboard_visible`), the focused
 field (`focused_field`), how far a list is scrolled (`first_visible_item` and
-`last_visible_item`), the overflow menu, dropdown, picker, popup or context menu
+`last_visible_item`), the anchored overflow menu, dropdown, popup or context menu
 open over the screen (`open_menu`, naming the menu, or `null`), and which sections
 are expanded (`expanded_sections`). The verifier counts screens that differ only in
 these as the same screen. So opening or closing a menu is a self-loop whose
@@ -999,9 +1006,29 @@ is a self-loop recording the value it changed, and choosing one that leaves the
 screen is an edge to where it leads. A menu's options join the screen's elements as
 rows revealed by scrolling do, and an option's action records the tap that opened
 the menu in its [setup](#graph-edges), or, when its setup is unknown, the menu it was
-sent in, so a replay opens the menu before choosing the option. A dialog, bottom
-sheet or full-screen picker that has its own purpose, such as a data usage warning
-dialog, is a node of its own, and a menu open over it is that node's state.
+sent in, so a replay opens the menu before choosing the option.
+
+Modal dialogs, picker dialogs and modal bottom sheets are nodes distinct from the
+page underneath: time, date, radio-choice and confirmation dialogs each ask for a
+decision or input before returning to their containing screen. Dimming supports
+this distinction. An anchored menu open over a modal is that modal's state.
+The modal's purpose and opening navigation destination identify its node. Selected
+values, clock-face or text-entry input modes, and the underlying scroll position
+are state. An alarm time picker and a Bedtime time picker are different nodes;
+changing one alarm picker's time or input mode keeps its node. Descriptions and
+verifier refinements preserve the opening destination. Each match records the
+preceding matched capture and actual input. The description model uses that evidence
+to distinguish a new modal, a state change, a nested modal and a return to an outer
+modal. Up to four active opening frames follow each member into saved graphs,
+rebuilds and audit verification. Capture IDs name evidence; current node membership
+and the captured opening screen establish the destination across visits and merges.
+Missing input or a nesting chain beyond that bound makes the origin explicitly
+unknown. Modal captures always receive description and verification, including
+identical images; pixels alone cannot establish a hidden opening destination.
+A modal with an unknown opening cannot confirm identity with one whose opening is
+known. The comparison remains unresolved and can leave an extra uncertain node.
+A node with known opening evidence supplies a known member to verification, so an
+unknown member cannot hide a contradictory destination.
 
 A destination the app names in its own navigation, such as a tab, a bottom
 navigation bar item or a navigation drawer entry, is a node of its own too, even when
@@ -1079,12 +1106,14 @@ both are described below the steps.
 1. **Image embedding.** The screenshot is embedded (see
    [Embedding caches](#embedding-caches)).
 2. **Exact match.** A member with a `describe` output and the screenshot's
-   `pixel_hash` decides alone when every such member belongs to one node: the screen
+   `pixel_hash` decides alone when every such member belongs to one node and is
+   described as a page: the screen
    copies that member's description, state, elements and description vector, so
    neither the description model nor the verifier runs. Members of two nodes with the
-   same hash decide nothing.
-3. **Description.** The description model describes the screen, given every
-   distinct description of the members of the package's in-app nodes, in the step
+   same hash decide nothing. A matching modal member takes the description and
+   verification path with its recorded opening evidence.
+3. **Description.** The description model describes the screen, given a bounded selection of
+   relevant descriptions, in the step
    order of the first member described so: a screen of a listed type takes that
    description word for word. Web content from outside the app goes to `ext_web`. The
    description is embedded (see [Embedding caches](#embedding-caches)).
@@ -1164,7 +1193,9 @@ line holds the screenshot's `observation` ID, its `describe` output unless it is
 black, and `identify`.
 
 `describe` holds the screen description model's `page_description`, `state`,
-`elements` and `is_external_web`; an exact match copies them from the member it
+`elements`, `is_external_web` and the foreground `surface` classification and modal
+relationship. Each line also keeps `modal_context`, the active opening frames for
+that member. An exact page match copies its description fields from the member it
 matched and names it in `copied_from`. `identify` holds what decided the screen's
 node:
 

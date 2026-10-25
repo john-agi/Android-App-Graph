@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, override
@@ -28,6 +29,7 @@ from android_app_graph.device import (
 )
 from android_app_graph.graph_files import identify_file_path, read_json_lines
 from android_app_graph.kobe import ExplorerConfig, Kobe, NoPathError
+from android_app_graph.payloads import as_object_dict
 from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
@@ -349,7 +351,9 @@ def test_a_rejected_page_description_leaves_no_node(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             *(
                 response
@@ -389,7 +393,9 @@ def test_navigating_to_the_start_node_restarts_the_app_and_identifies_the_screen
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             # The replay ends on the start node's own pixels: an exact match.
             httpx.Response(200, json=embedding_body),
@@ -883,7 +889,9 @@ def test_exploration_wait_recovery_respects_step_limit(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -927,7 +935,9 @@ def test_an_exploration_step_asks_the_explored_device_whether_its_keyboard_is_up
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"instruction":"Tap Search","element":null,"required_pointers":1}'
@@ -957,7 +967,9 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the About row","required_pointers":1}'
@@ -965,8 +977,7 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
             chat_response(
-                content='{"page_description":"About page with privacy policy link",'
-                '"is_external_web":false}'
+                content='{"page_description": "About page with privacy policy link", "is_external_web": false, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
             ),
             httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
             chat_response(content=_DIFFERENT),
@@ -1005,7 +1016,11 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
         tmp_path,
         router_client,
     )
-    home = {"page_description": "home", "elements": [{"description": "About", "position": "top"}]}
+    home = {
+        "page_description": "home",
+        "elements": [{"description": "About", "position": "top"}],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
+    }
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
@@ -1016,7 +1031,9 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
             ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"about"}'),
+            chat_response(
+                content='{"page_description": "about", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json={**embedding_body, "data": [_ORTHOGONAL]}),
             chat_response(content=_DIFFERENT),
         ]
@@ -1087,14 +1104,18 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
             ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"news article","is_external_web":true}'),
+            chat_response(
+                content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             # Back shows home again: an exact match.
             httpx.Response(200, json=embedding_body),
         ]
@@ -1148,14 +1169,18 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
             ),
             chat_response(content=action_reply),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"news article","is_external_web":true}'),
+            chat_response(
+                content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -1197,12 +1222,14 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
     settings = _screen("com.demo.Settings", "gray")
     device = screens_by_log(HOME_SCREEN, *[web_page] * len(leaving), HOME_SCREEN, settings)
     explorer = _explorer(device, tmp_path, router_client)
-    external = '{"page_description":"news article","is_external_web":true}'
+    external = '{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
     orthogonal = {"object": "embedding", "index": 0, "embedding": [0.75, -0.25]}
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
@@ -1223,7 +1250,9 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
             ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"settings"}'),
+            chat_response(
+                content='{"page_description": "settings", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json={**embedding_body, "data": [orthogonal]}),
             chat_response(content=_DIFFERENT),
         ]
@@ -1357,6 +1386,7 @@ def _explore_one_step_the_action_model_ends(
             {"description": "Search box", "position": "top left"},
             {"description": "Settings icon", "position": "top right"},
         ],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     plan = {"required_pointers": 1, "element": 2, "instruction": "Tap the Settings icon"}
     router_responses.extend(
@@ -1486,7 +1516,11 @@ def test_a_step_that_leaves_the_app_records_its_screen_on_the_app_s_node(
         ("transition", "main_loop"),
         ("action", "external_app_recovery"),
         ("observation", "external_app_recovery"),
-        *([("observation", "external_app_recovery")] if relaunched else []),
+        *(
+            [("system_event", "external_app_recovery"), ("observation", "external_app_recovery")]
+            if relaunched
+            else []
+        ),
         ("match", "main_loop"),
     ]
     assert (records[4]["after"], records[4]["to_node"]) == ("000003", "ext_com.android.launcher3")
@@ -1528,6 +1562,7 @@ def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_reject
     search_page = {
         "page_description": "Chat search page",
         "elements": [{"description": "Search button", "position": "top"}],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     verdict = {
         "same": False,
@@ -1547,7 +1582,9 @@ def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_reject
                 tool_arguments='{"action":"click","coordinate":[500,500],"required_pointers":1}',
             ),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search results"}'),
+            chat_response(
+                content='{"page_description": "Chat search results", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(verdict)),
             *[httpx.Response(200, json=embedding_body) for _ in range(2)],
@@ -1601,11 +1638,15 @@ def test_the_planner_and_a_new_edge_take_the_screen_s_own_description(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search page"}'),
+            chat_response(
+                content='{"page_description": "Chat search page", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"Chat search results"}'),
+            chat_response(
+                content='{"page_description": "Chat search results", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=same),
             chat_response(content=_TAP_REPLY),
@@ -2107,6 +2148,7 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
         ("observation", "main_loop"),
         ("match", "main_loop"),
         *step,
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
         ("action", "navigation_replay"),
@@ -2274,7 +2316,9 @@ def _explore_into_a_permission_dialog(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Tap Take photo","required_pointers":1}'
@@ -2371,7 +2415,9 @@ def _explore_from_home_into_another_app(
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content=_TAP_REPLY),
             *identifying,
@@ -2468,10 +2514,13 @@ def test_a_step_that_leaves_the_app_marks_the_element_the_planner_names(
             {"description": "Dark mode toggle", "position": "top"},
             {"description": "Search button", "position": "top right"},
         ],
+        "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
     }
     identifying_the_web_page = [
         httpx.Response(200, json=embedding_body),
-        chat_response(content='{"page_description":"news article","is_external_web":true}'),
+        chat_response(
+            content='{"page_description": "news article", "is_external_web": true, "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        ),
     ]
     router_responses.extend(
         [
@@ -2518,7 +2567,9 @@ def test_a_keyboard_in_front_after_the_back_press_counts_as_the_app(
         embedding_body,
         monkeypatch,
         httpx.Response(200, json=embedding_body),
-        chat_response(content='{"page_description":"home with the keyboard shown"}'),
+        chat_response(
+            content='{"page_description": "home with the keyboard shown", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+        ),
         httpx.Response(200, json=embedding_body),
         chat_response(content='{"same":true}'),
     )
@@ -2594,7 +2645,9 @@ def _identifying(explorer: Kobe, monkeypatch: pytest.MonkeyPatch, *visits: _Visi
     answers = iter(visits)
     answered: dict[str, str] = {}
 
-    def identify(observation: Observation, *, expected_observation: str | None = None) -> str:
+    def identify(
+        observation: Observation, *, expected_observation: str | None = None, **_kwargs: object
+    ) -> str:
         known = answered.get(expected_observation or "")
         expected.append(known or explorer.graph.node_of(expected_observation))
         visit = next(answers)
@@ -2754,6 +2807,292 @@ def _numbered_steps(messages: list[str]) -> list[str]:
     return [message.split(" | ")[0] for message in messages if re.search(r"Step [0-9]*/", message)]
 
 
+def _saturate_sources(kobe: Kobe, monkeypatch: pytest.MonkeyPatch, *nodes: str) -> None:
+    monkeypatch.setattr(
+        kobe,
+        "_recent_outcomes",
+        {node: deque([True] * 12 + [False] * 3, maxlen=15) for node in nodes},
+    )
+
+
+@pytest.mark.parametrize("saturated", [False, True], ids=["guarded-back", "saturated"])
+@pytest.mark.parametrize("merge_at", [None, "arrival", "audit"])
+@pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_keeps_its_due_merge_audit_and_next_local_step(
+    kobe: Kobe,
+    saturated: bool,
+    merge_at: str | None,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counted continuation retains its arrival through a scheduled merge audit."""
+    _list_reached_from_home(kobe, "s2_alias")
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    if saturated:
+        _saturate_sources(kobe, monkeypatch, "s0_home")
+    else:
+        router_responses.append(chat_response(content=_BACK_REPLY))
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    choices: list[str] = []
+    navigations: list[str] = []
+    audits: list[int] = []
+
+    def choose(current: str) -> str:
+        choices.append(current)
+        return "s1_list" if current == "s0_home" else "s0_home"
+
+    def navigate(target: str) -> str:
+        navigations.append(target)
+        if merge_at == "arrival":
+            assert kobe.graph.merge_nodes("s2_alias", "s1_list")
+            return "s2_alias"
+        return target
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        assert app_name == "demo"
+        audits.append(kobe.graph.total_steps_completed)
+        if merge_at == "audit":
+            assert kobe.graph.merge_nodes("s2_alias", "s1_list")
+        return {"merged_count": int(merge_at == "audit")}
+
+    monkeypatch.setattr(kobe, "_choose_continuation_target", choose)
+    monkeypatch.setattr(kobe, "navigate_to_node", navigate)
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=51)
+
+    arrival = "s2_alias" if merge_at else "s1_list"
+    assert navigations == ["s1_list"]
+    assert choices == ["s0_home"]
+    assert audits == [50]
+    assert planned_from == ([] if saturated else ["s0_home"]) + [arrival]
+    assert _numbered_steps(caplog.messages) == [
+        f"Step 50/51: s0_home --[continue]--> {'s2_alias' if merge_at == 'arrival' else 's1_list'}",
+        f"Step 51/51: {arrival} --[wait]--> {arrival}",
+    ]
+    saved = json.loads(kobe.graph_path.read_text())
+    assert saved["total_steps_completed"] == 51
+
+
+@pytest.mark.parametrize("arrival", [None, "s2_other"], ids=["unreachable", "wrong-arrival"])
+@pytest.mark.usefixtures("no_sleep")
+def test_unsuccessful_ranked_arrival_keeps_ordinary_checkpoint_relocation(
+    kobe: Kobe,
+    arrival: str | None,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unsuccessful continuation leaves the due checkpoint free to select a target."""
+    _list_reached_from_home(kobe, "s2_other")
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    _saturate_sources(kobe, monkeypatch, "s0_home")
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    choices: list[str] = []
+    navigations: list[str] = []
+    audits: list[int] = []
+
+    def choose(current: str) -> str:
+        choices.append(current)
+        return "s1_list" if current == "s0_home" else "s0_home"
+
+    def navigate(target: str) -> str:
+        navigations.append(target)
+        if len(navigations) == 1:
+            if arrival is None:
+                raise NoPathError(target)
+            return arrival
+        return target
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        assert app_name == "demo"
+        audits.append(kobe.graph.total_steps_completed)
+        return {"merged_count": 0}
+
+    monkeypatch.setattr(kobe, "_choose_continuation_target", choose)
+    monkeypatch.setattr(kobe, "navigate_to_node", navigate)
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=51)
+
+    assert choices == ["s0_home", arrival or "s0_home"]
+    assert navigations == ["s1_list", "s0_home" if arrival else "s1_list"]
+    assert audits == [50]
+    assert planned_from == [navigations[-1]]
+    assert len(_numbered_steps(caplog.messages)) == 2
+    assert kobe.graph.total_steps_completed == 51
+
+
+@pytest.mark.parametrize(
+    ("interval", "maximum", "start"),
+    [(0, 51, 49), (50, 50, 49), (50, 50, 48)],
+    ids=["disabled", "final-step", "off-boundary"],
+)
+@pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_preserves_checkpoint_and_step_limits(
+    kobe: Kobe,
+    interval: int,
+    maximum: int,
+    start: int,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An arrival audits only at an enabled boundary before the final step."""
+    _list_reached_from_home(kobe)
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = start
+    kobe.coverage_checkpoint_steps = interval
+    _saturate_sources(kobe, monkeypatch, "s0_home")
+    monkeypatch.setattr(kobe, "_choose_continuation_target", lambda _current: "s1_list")
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda target: target)
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    audits: list[str] = []
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        audits.append(app_name)
+        return {"merged_count": 0}
+
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+
+    kobe.explore(max_steps=maximum)
+
+    assert not audits
+    assert planned_from == ["s1_list"] * (maximum - start - 1)
+    assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == maximum
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
+@pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_audit_stop_preserves_the_counted_continuation(
+    kobe: Kobe,
+    error: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An interrupted audit saves the completed continuation without planning another step."""
+    _list_reached_from_home(kobe)
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    _saturate_sources(kobe, monkeypatch, "s0_home")
+    monkeypatch.setattr(kobe, "_choose_continuation_target", lambda _current: "s1_list")
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda target: target)
+    audits: list[str] = []
+
+    def audit(*, app_name: str) -> NoReturn:
+        audits.append(app_name)
+        raise error
+
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    with pytest.raises(error):
+        kobe.explore(max_steps=51)
+
+    assert audits == ["demo"]
+    assert not planned_from
+    assert _numbered_steps(caplog.messages) == ["Step 50/51: s0_home --[continue]--> s1_list"]
+    assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 50
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_obeys_the_next_steps_saturation_rule(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retaining an arrival permits a fresh continuation on the following counted step."""
+    _list_reached_from_home(kobe)
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    _saturate_sources(kobe, monkeypatch, "s0_home", "s1_list")
+    monkeypatch.setattr(
+        kobe,
+        "_choose_continuation_target",
+        lambda node: "s1_list" if node == "s0_home" else "s0_home",
+    )
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda target: target)
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    audits: list[int] = []
+
+    def audit(*, app_name: str) -> dict[str, int]:
+        assert app_name == "demo"
+        audits.append(kobe.graph.total_steps_completed)
+        return {"merged_count": 0}
+
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=52)
+
+    assert audits == [50]
+    assert planned_from == ["s0_home"]
+    assert _numbered_steps(caplog.messages) == [
+        "Step 50/52: s0_home --[continue]--> s1_list",
+        "Step 51/52: s1_list --[continue]--> s0_home",
+        "Step 52/52: s0_home --[wait]--> s0_home",
+    ]
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_ranked_arrival_audit_outage_resumes_from_the_recovered_screen(
+    kobe: Kobe,
+    router_responses: list[httpx.Response],
+    chat_response: Callable[..., httpx.Response],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Recovery replaces the arrival with a fresh observation after an audit outage."""
+    _list_reached_from_home(kobe, "s2_recovered")
+    _identifying(kobe, monkeypatch, "s0_home")
+    planned_from = _planning_back(monkeypatch)
+    kobe.graph.total_steps_completed = 49
+    _saturate_sources(kobe, monkeypatch, "s0_home")
+    monkeypatch.setattr(kobe, "_choose_continuation_target", lambda _current: "s1_list")
+    monkeypatch.setattr(kobe, "navigate_to_node", lambda target: target)
+    router_responses.append(chat_response(content=_WAIT_REPLY))
+    audits: list[str] = []
+    recoveries: list[subprocess.TimeoutExpired] = []
+
+    def audit(*, app_name: str) -> NoReturn:
+        audits.append(app_name)
+        command = "adb"
+        raise subprocess.TimeoutExpired(command, 30)
+
+    def recover(error: subprocess.TimeoutExpired) -> tuple[str, dict[str, object]]:
+        recoveries.append(error)
+        return "s2_recovered", as_object_dict(kobe.controller.get_state())
+
+    monkeypatch.setattr(kobe.graph, "run_node_merge_audit", audit)
+    monkeypatch.setattr(kobe, "_recover_from_outage", recover)
+    caplog.set_level(logging.INFO, logger="test")
+
+    kobe.explore(max_steps=51)
+
+    assert audits == ["demo"]
+    assert len(recoveries) == 1
+    assert planned_from == ["s2_recovered"]
+    assert _numbered_steps(caplog.messages) == [
+        "Step 50/51: s0_home --[continue]--> s1_list",
+        "Step 51/51: s2_recovered --[wait]--> s2_recovered",
+    ]
+    assert json.loads(kobe.graph_path.read_text())["total_steps_completed"] == 51
+
+
 @pytest.mark.parametrize(
     "action_reply", [_BACK_REPLY, '{"action":"end","required_pointers":0}'], ids=["back", "end"]
 )
@@ -2815,6 +3154,7 @@ def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     assert [(r["kind"], r["source"]) for r in step_records(explorer.controller.steps)] == [
         ("observation", "main_loop"),
         ("match", "main_loop"),
+        ("system_event", "navigation_replay"),
         ("observation", "navigation_replay"),
         ("match", "navigation_replay"),
         ("action", "navigation_replay"),
@@ -3863,7 +4203,9 @@ def test_every_screen_identify_state_takes_is_embedded_and_its_decision_recorded
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"page_description":"home"}'),
+            chat_response(
+                content='{"page_description": "home", "surface": {"kind": "page", "relation": "unknown", "return_depth": 0}}'
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(
                 content='{"element":null,"instruction":"Scroll down","required_pointers":1}'
@@ -4553,7 +4895,13 @@ def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
             [
                 httpx.Response(200, json=embedding_body),
                 chat_response(
-                    content=json.dumps({"page_description": "Card editor", "state": state})
+                    content=json.dumps(
+                        {
+                            "page_description": "Card editor",
+                            "state": state,
+                            "surface": {"kind": "page", "relation": "unknown", "return_depth": 0},
+                        }
+                    )
                 ),
                 httpx.Response(200, json=embedding_body),
             ]
@@ -4961,8 +5309,14 @@ def test_unsupported_gestures_count_once_without_input_edges_or_element_credit(
     checkpoints: list[int] = []
 
     def checkpoint(
-        step: int, _limit: int, node: str, state: dict[str, Any]
+        step: int,
+        _limit: int,
+        node: str,
+        state: dict[str, Any],
+        *,
+        preserve_arrival: bool,
     ) -> tuple[str, dict[str, Any]]:
+        assert not preserve_arrival
         checkpoints.append(step)
         return node, state
 
