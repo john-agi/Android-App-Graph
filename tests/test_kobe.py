@@ -5074,3 +5074,27 @@ def test_unsupported_gestures_count_once_without_input_edges_or_element_credit(
         "Previous instruction was unsupported"
         in json.loads(router_requests[1].content)["messages"][0]["content"][0]["text"]
     )
+
+
+@pytest.mark.usefixtures("no_sleep")
+def test_fresh_graph_entry_establishes_observed_preparation(
+    replaying_kobe: Kobe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new graph retains its first observed entry as known preparation state."""
+    kobe = replaying_kobe
+    states = iter(({"folder": "root"}, {"folder": "Pictures"}))
+
+    def identify(state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        kobe.graph.graph.add_node(
+            "s0",
+            package="com.demo",
+            replay_misses=0,
+            observations=[state["observation_id"]],
+            last_detail_snapshot=next(states),
+        )
+        return "s0", state
+
+    monkeypatch.setattr(kobe, "_identify", identify)
+    _describing_by_node_id(kobe, monkeypatch)
+    _explore_sending(kobe, monkeypatch, {"action": "tap", "x": 20, "y": 30})
+    assert kobe.graph.graph["s0"]["s0"]["setups"] == [[]]
