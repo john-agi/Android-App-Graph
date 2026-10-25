@@ -59,8 +59,8 @@ class AdbFailureReader:
             "printf 'boot='; cat /proc/sys/kernel/random/boot_id; "
             "printf 'epoch='; date +%s; printf 'uptime='; cat /proc/uptime; "
             "printf 'timezone='; getprop persist.sys.timezone; "
-            "printf 'user='; am get-current-user; "
-            f"cmd package list packages -U {package}; "
+            "app_graph_user=$(am get-current-user); printf 'user=%s\\n' \"$app_graph_user\"; "
+            f'cmd package list packages -U --user "$app_graph_user" {package}; '
             "printf 'process_samples\n'; "
             f"ps -A -o PID,UID,NAME | awk -v p={package} "
             "'$3 == p || index($3, p \":\") == 1 {print}'; "
@@ -287,6 +287,7 @@ class FailureMonitor:
             "evidence": [asdict(event) for event in events],
             "target_process_name_counts": counts,
             "evidence_scope": "retained_snapshot; occurrences can overlap other captures",
+            "fingerprint_scope": "raw record content, not a unique event or process identity",
             "process_samples": "current non-atomic metadata; historical instances remain unresolved",
         }
         if not self._publish(

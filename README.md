@@ -870,7 +870,8 @@ Ordered record overlap identifies repeated or newly retained log records.
 Identical repeated records, missing overlap, empty history, failed/truncated
 reads, boot changes and clock discontinuities leave interval coverage unknown.
 Split records can gain process attribution in a later overlapping snapshot;
-the header fingerprint stays stable. Buffers can overwrite or lose records
+the header fingerprint stays stable and identifies content, not a unique event.
+Buffers can overwrite or lose records
 between polls, including records with identical contents. Every report therefore
 keeps its full-run failure census `unknown`, even when every read succeeds.
 An empty snapshot does not establish zero crashes. The collector preserves
