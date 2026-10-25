@@ -63,6 +63,7 @@ from android_app_graph.utils.graph_manager import (
 from android_app_graph.utils.vlm_utils import (
     MAX_REQUESTS_IN_FLIGHT,
     DescribedScreenshot,
+    DescribeRequest,
     TokenTracker,
 )
 
@@ -158,7 +159,17 @@ def write_member_record(steps_dir: Path, observation_id: str) -> None:
     hash in ``steps_dir``, and its describe output in the identify file of
     ``graph_beside(steps_dir)``, which describes it as ``Screen <observation_id>``."""
     steps_dir.mkdir(parents=True, exist_ok=True)
-    record = {"id": observation_id, "kind": "observation", "pixel_hash": f"member-{observation_id}"}
+    record = {
+        "id": observation_id,
+        "kind": "observation",
+        "native_size": None,
+        "system_surface": None,
+        "system_overlays": [],
+        "underlying_package": None,
+        "permission_requester": None,
+        "system_overlay_error": None,
+        "pixel_hash": f"member-{observation_id}",
+    }
     (steps_dir / f"{observation_id}.json").write_text(json.dumps(record), "utf-8")
     write_describe(steps_dir, observation_id, described_as_screen(observation_id))
 
@@ -211,6 +222,12 @@ class Screens:
         record = {
             "id": observation_id,
             "kind": "observation",
+            "native_size": None,
+            "system_surface": None,
+            "system_overlays": [],
+            "underlying_package": None,
+            "permission_requester": None,
+            "system_overlay_error": None,
             "package": package,
             "pixel_hash": pixel_hash,
         }
@@ -331,13 +348,14 @@ class FakeVlm:
     def describe_page_and_state(
         self,
         client: OpenRouter | None,
-        screenshot_b64: str,
-        known_descriptions: list[str] | None = None,
-        existing_keys: list[str] | None = None,
+        request: DescribeRequest,
+        *,
         settings: ModelSettings | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, str]], bool]:
-        call = {"client": client, "screenshot": screenshot_b64, "settings": settings}
-        call.update(known_descriptions=known_descriptions, existing_keys=existing_keys)
+        call = {"client": client, "screenshot": request.screenshot_b64, "settings": settings}
+        call.update(
+            known_descriptions=request.known_descriptions, existing_keys=request.existing_keys
+        )
         self.calls.append(("describe", call))
         description, state, elements = self.descriptions.pop(0)
         return description, state, elements, description in self.external_web
@@ -1489,6 +1507,7 @@ def test_a_screen_that_differs_only_inside_the_status_bar_is_an_exact_match(
         tmp_path / "steps",
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(recorder.steps)
     vlm.descriptions.extend([("Home screen", {}, [])] * 2)
@@ -1508,6 +1527,7 @@ def test_a_reloaded_graph_matches_its_members_exactly(vlm: FakeVlm, tmp_path: Pa
         steps_dir,
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(steps_dir)
     vlm.descriptions.append(("Home screen", {"tab": "home"}, []))
@@ -1637,7 +1657,7 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     """Exact matching and member checks read both from every member of an in-app node,
     the pixel hash from its record in the step log and the describe output from the
     identify file, except a black one, whose description comes from its activity; a
-    member of an ``ext_`` node needs neither."""
+    member of an ``ext_`` node retains ownership metadata without either."""
     steps_dir = tmp_path / "steps"
     home = members(steps_dir, b"home", b"home-2")
     undescribed = home["observations"][1]
@@ -1645,13 +1665,20 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     if record is None:
         step_record.unlink()
     else:
-        step_record.write_text(json.dumps(record), "utf-8")
+        ownership = json.loads(step_record.read_text())
+        for field in ("pixel_hash", "black", "activity"):
+            ownership.pop(field, None)
+        step_record.write_text(json.dumps({**ownership, **record}), "utf-8")
     line = {"observation": undescribed}
     append_json_line(
         identify_file_path(graph_beside(steps_dir)),
         line if describe is None else {**line, "describe": describe},
     )
     browser = write_observation_image(steps_dir, b"browser")
+    browser_record = json.loads((steps_dir / f"{home['observations'][0]}.json").read_text())
+    browser_record.update(id=browser)
+    browser_record.pop("pixel_hash")
+    (steps_dir / f"{browser}.json").write_text(json.dumps(browser_record))
     path = tmp_path / "graph.json"
     write_graph(
         path,
@@ -1662,13 +1689,17 @@ def test_load_graph_rejects_an_in_app_member_without_a_pixel_hash_and_describe_o
     )
 
     with pytest.raises(
-        ValueError, match="no pixel hash, or that have no describe output"
+        ValueError,
+        match="has no observation record"
+        if record is None
+        else "no pixel hash, or that have no describe output",
     ) as excinfo:
         make_manager().load_graph(path)
 
     message = str(excinfo.value)
-    assert f"in {identify_file_path(path)} and are not of a black screenshot" in message
-    assert f"[{undescribed!r}]" in message
+    if record is not None:
+        assert f"in {identify_file_path(path)} and are not of a black screenshot" in message
+    assert undescribed in message
     assert str(path) in message
     assert "Explore the app again into a new graph directory" in message
 
@@ -1711,7 +1742,11 @@ def _secure(activity: str, package: str = PACKAGE) -> tuple[str, Image.Image, st
 def _captures(steps_dir: Path, *screens: tuple[str, Image.Image, str]) -> list[Observation]:
     """Observations of ``screens`` as a StepRecorder on ``steps_dir`` captures them."""
     recorder = StepRecorder(
-        _ActivityDevice(*screens), steps_dir, run_kind="explore", source="main_loop"
+        _ActivityDevice(*screens),
+        steps_dir,
+        run_kind="explore",
+        source="main_loop",
+        target_package="com.demo",
     )
     return [Observation.from_state(recorder.get_state()) for _ in screens]
 
@@ -1867,6 +1902,7 @@ def test_a_screen_black_below_the_status_bar_alone_is_described_not_copied_from_
         tmp_path / "steps",
         run_kind="explore",
         source="main_loop",
+        target_package="com.demo",
     )
     gm = make_manager(recorder.steps)
     black_screen = Observation.from_state(recorder.get_state())
@@ -1928,8 +1964,8 @@ def test_a_graph_loads_with_black_members_that_have_no_describe_output_or_descri
     assert loaded.graph.nodes[pattern_node]["observations"] == [pattern.observation_id]
 
 
-def _merge_audit_proposes(monkeypatch: pytest.MonkeyPatch, node_a: str, node_b: str) -> None:
-    proposal = FakeAudit(result={"issues": [{"node_a": node_a, "node_b": node_b}]})
+def _merge_audit_proposes(monkeypatch: pytest.MonkeyPatch) -> None:
+    proposal = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n1"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", proposal)
 
 
@@ -1942,7 +1978,7 @@ def test_the_merge_audit_keeps_black_nodes_of_different_activities_apart_unverif
     pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), _secure(SET_PIN))
     gm = make_manager(steps_dir)
     pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
-    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+    _merge_audit_proposes(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger=gm_module.logger.name):
         result = gm.run_node_merge_audit()
@@ -1970,10 +2006,11 @@ def test_the_merge_audit_verifies_a_black_node_and_one_not_all_black_or_sharing_
     steps_dir = tmp_path / "steps"
     pattern, pin = _captures(steps_dir, _secure(SET_PATTERN), pin_screen)
     gm = make_manager(steps_dir)
-    pattern_node, pin_node = gm.identify_state(pattern), gm.identify_state(pin)
+    gm.identify_state(pattern)
+    pin_node = gm.identify_state(pin)
     if not shown:
         gm.graph.nodes[pin_node]["observations"].append(pattern.observation_id)
-    _merge_audit_proposes(monkeypatch, pattern_node, pin_node)
+    _merge_audit_proposes(monkeypatch)
     vlm.calls.clear()
 
     result = gm.run_node_merge_audit()
@@ -3367,6 +3404,8 @@ def test_an_edge_answered_as_different_actions_keeps_no_template(
 @pytest.mark.parametrize(
     "template",
     [
+        "{instruction}",
+        "{action} {target_element}",
         "{{instruction}}",
         "{{action}} {{target_element}} {{interaction_details}}",
         'Search for "{{query}}"\nTap the "{{filter}}" chip',
@@ -3374,7 +3413,16 @@ def test_an_edge_answered_as_different_actions_keeps_no_template(
         'Search for "{{query}}" | Tap the "{{filter}}" chip',
         'Search for "{{query}}" OR Tap the "{{filter}}" chip',
     ],
-    ids=["placeholder", "placeholders", "lines", "numbered", "bar", "OR"],
+    ids=[
+        "single-placeholder",
+        "single-placeholders",
+        "placeholder",
+        "placeholders",
+        "lines",
+        "numbered",
+        "bar",
+        "OR",
+    ],
 )
 def test_a_template_of_only_placeholders_or_of_several_actions_counts_as_different_actions(
     template: str,
@@ -5409,10 +5457,15 @@ def test_audits_send_their_own_timeout(
     router_requests: list[httpx.Request],
     router_responses: list[httpx.Response],
     chat_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    write_member_graph: Callable[..., None],
 ) -> None:
     manager = GraphManager(
         client=router_client, page_detail=PAGE_DETAIL, embedding=EMBEDDING, audit_timeout=120
     )
+    path = tmp_path / "graph.json"
+    write_member_graph(path, {"s0": [("000001", [1.0, 0.0])], "s1": [("000002", [0.0, 1.0])]})
+    manager.load_graph(path)
     router_responses.append(chat_response(content='{"issues": [], "summary": "fine"}'))
     if operation == "audit":
         assert manager.run_audit()["summary"] == "fine"
@@ -5427,34 +5480,38 @@ def test_run_node_merge_audit_without_a_client_reports_no_merges() -> None:
     assert result == {"issues": [], "results": [], "merged_count": 0}
 
 
-def test_run_node_merge_audit_skips_a_missing_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s9_missing"}]})
+def test_run_node_merge_audit_skips_a_missing_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n99"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen")
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", **members(tmp_path / "steps"))
+    add_screen(gm, "s1_other", "Other screen", **members(tmp_path / "steps"))
 
     result = gm.run_node_merge_audit(app_name="Example")
 
     assert result["merged_count"] == 0
     assert result["results"][0]["status"] == "skipped"
-    assert result["results"][0]["reason"] == "node missing"
+    assert result["results"][0]["reason"] == "pair outside request scope"
 
 
 def test_run_node_merge_audit_skips_a_self_pair(
-    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm
+    monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
     """An auditor naming one node twice keeps the node."""
-    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s0_home"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n0"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
-    gm = make_manager()
-    add_screen(gm, "s0_home", "Home screen", visit_count=3)
+    gm = make_manager(steps_dir=tmp_path / "steps")
+    add_screen(gm, "s0_home", "Home screen", visit_count=3, **members(tmp_path / "steps"))
+    add_screen(gm, "s1_other", "Other screen", **members(tmp_path / "steps"))
 
     result = gm.run_node_merge_audit()
 
     assert result["merged_count"] == 0
     assert result["results"][0]["status"] == "skipped"
     assert result["results"][0]["reason"] == "same node"
-    assert list(gm.graph.nodes) == ["s0_home"]
+    assert list(gm.graph.nodes) == ["s0_home", "s1_other"]
     assert gm.graph.nodes["s0_home"]["visit_count"] == 3
     assert vlm.kinds() == []
 
@@ -5473,7 +5530,8 @@ def test_run_node_merge_audit_skips_a_node_without_members(
 
     result = gm.run_node_merge_audit()
 
-    assert result["results"][0]["reason"] == "missing screenshot"
+    assert result["results"] == []
+    assert fake.calls == []
     assert vlm.kinds() == []
 
 
@@ -5493,8 +5551,8 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
 
     result = gm.run_node_merge_audit()
 
-    assert result["results"][0]["status"] == "skipped"
-    assert result["results"][0]["reason"] == "external node"
+    assert result["results"] == []
+    assert fake.calls == []
     assert result["merged_count"] == 0
     assert vlm.kinds() == []
 
@@ -5502,9 +5560,7 @@ def test_run_node_merge_audit_never_verifies_an_external_node(
 def test_run_node_merge_audit_merges_a_confirmed_duplicate(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
-    fake = FakeAudit(
-        result={"issues": [{"node_a": "s2_home_two", "node_b": "s0_home"}], "summary": "one pair"}
-    )
+    fake = FakeAudit(result={"issues": [{"node_a": "n1", "node_b": "n0"}], "summary": "one pair"})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": True, "reason": "same screen"})
     steps_dir = tmp_path / "steps"
@@ -5548,7 +5604,7 @@ def test_a_merge_proposal_names_the_lower_numbered_node_first() -> None:
 def test_run_node_merge_audit_orders_non_numeric_ids_last(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path, other: str
 ) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": other, "node_b": "s0"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": "n1", "node_b": "n0"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": True, "reason": "same screen"})
     gm = make_manager(steps_dir=tmp_path / "steps")
@@ -5565,7 +5621,7 @@ def test_run_node_merge_audit_orders_non_numeric_ids_last(
 def test_run_node_merge_audit_keeps_a_rejected_pair_separate(
     monkeypatch: pytest.MonkeyPatch, vlm: FakeVlm, tmp_path: Path
 ) -> None:
-    fake = FakeAudit(result={"issues": [{"node_a": "s0_home", "node_b": "s1_home_two"}]})
+    fake = FakeAudit(result={"issues": [{"node_a": "n0", "node_b": "n1"}]})
     monkeypatch.setattr(gm_module, "audit_merge_nodes", fake)
     vlm.verdicts.append({"same": False, "reason": "different banner"})
     gm = make_manager(steps_dir=tmp_path / "steps")
@@ -5899,3 +5955,91 @@ def test_observation_focus_comes_from_its_image_and_preserves_unknown(
     unknown = dataclasses.replace(screen(HOME, SHOT_B, PACKAGE), pixel_hash="unobserved-image")
     assert graph.observation_state(unknown) == {}
     assert len(vlm.calls) == calls
+
+
+def test_normalization_deduplication_and_reload_preserve_recorded_display_evidence(
+    normalizer: FakeNormalizer,
+    tmp_path: Path,
+) -> None:
+    normalizer.result = {"is_template": False}
+    gm = make_manager()
+    steps = tmp_path / "steps"
+    add_screen(gm, "s0_home", "Home", **members(steps))
+    add_screen(gm, "s1_results", "Results", **members(steps))
+    display: dict[str, object] = {"settings": {"font_scale": "1.0"}, "native_size": [720, 1280]}
+    action: dict[str, object] = {"action": "tap", "x": 100, "y": 200, "recorded_display": display}
+    details = EdgeDetails(instruction="Open results")
+    gm.add_edge("s0_home", "s1_results", action, details=details)
+    gm.add_edge("s0_home", "s1_results", action, details=details)
+    other = {**action, "recorded_display": {**display, "native_size": [1080, 1920]}}
+    gm.add_edge(
+        "s0_home", "s1_results", other, details=EdgeDetails(instruction="Open results again")
+    )
+    gm.normalize_all_edges()
+    path = tmp_path / "graph.json"
+    save_with_text_vectors(gm, path)
+    loaded = make_manager()
+    loaded.load_graph(path)
+    loaded.normalize_all_edges()
+    actions = loaded.graph["s0_home"]["s1_results"]["actions"]
+    assert actions == [action, other]
+    assert loaded.find_edge_action("s0_home", "s1_results", "Open results") == (0, action)
+
+
+def test_missing_ownership_record_stops_member_image_processing_before_model_calls(
+    tmp_path: Path, vlm: FakeVlm
+) -> None:
+    manager = make_manager(tmp_path)
+    manager.graph.add_node("s0", package=PACKAGE, observations=["000000"])
+    with pytest.raises(ValueError, match="Observation 000000 has no record"):
+        manager.embed_missing_members()
+    assert vlm.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("system_surface", "permission"), ("system_overlay_error", "Unknown clipboard geometry")],
+)
+def test_graph_loading_rejects_unsupported_ownership_on_app_members(
+    field: str, value: str, tmp_path: Path, vlm: FakeVlm
+) -> None:
+    steps = tmp_path / "steps"
+    membership = members(steps, b"app")
+    member = membership["observations"][0]
+    record_path = steps / f"{member}.json"
+    record = json.loads(record_path.read_text())
+    record[field] = value
+    record_path.write_text(json.dumps(record))
+    path = graph_beside(steps)
+    write_graph(path, [{"id": "s0", "replay_misses": 0, **membership}])
+    with pytest.raises(ValueError, match="unsupported ownership"):
+        make_manager().load_graph(path)
+    assert vlm.calls == []
+
+
+def test_persisted_system_boundaries_keep_their_external_ownership(
+    tmp_path: Path, vlm: FakeVlm
+) -> None:
+    steps = tmp_path / "steps"
+    membership = members(steps, b"permission")
+    member = membership["observations"][0]
+    record_path = steps / f"{member}.json"
+    record = json.loads(record_path.read_text())
+    record["system_surface"] = "permission"
+    record_path.write_text(json.dumps(record))
+    path = graph_beside(steps)
+    write_graph(
+        path,
+        [
+            {
+                "id": "ext_com.android.permissioncontroller",
+                "replay_misses": 0,
+                "system_surface": "permission",
+                **membership,
+            }
+        ],
+    )
+    manager = make_manager()
+    manager.load_graph(path)
+    assert manager.get_resume_target() is None
+    assert vlm.calls == []

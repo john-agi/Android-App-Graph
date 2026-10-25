@@ -17,8 +17,13 @@ from android_app_graph.device import (
     DeviceController,
     DeviceUnreachableError,
     ForceStopRefusedError,
+    InputRejectedError,
+    StartupRecovery,
+    UnresolvedPermissionError,
+    input_region_hint,
     is_outside_app,
     keyboard_status,
+    resolve_permission_prompt,
     restart_app,
     restart_into_app,
     return_to_app,
@@ -26,7 +31,9 @@ from android_app_graph.device import (
     wait_for_device_state,
 )
 from android_app_graph.graph_files import app_graph_path, graph_steps_dir, identify_file_path
+from android_app_graph.run_environment import UnsafeReplayError
 from android_app_graph.step_log import Observation, StepRecorder, Transition
+from android_app_graph.system_surfaces import SystemOverlayActionError, UnresolvedSystemOverlayError
 from android_app_graph.utils import (
     DEFAULT_UNREACHABLE_LIMIT,
     resolve_audit_timeout,
@@ -183,7 +190,11 @@ class Kobe:
         else:
             self.logger.info("No existing graph at %s. Starting fresh.", self.graph_path)
         self.controller = StepRecorder(
-            controller, steps_dir, run_kind="explore", source="main_loop"
+            controller,
+            steps_dir,
+            run_kind="explore",
+            source="main_loop",
+            target_package=self.package_name,
         )
         self._setup_trail = SetupTrail(self.graph.resolve_node_id)
         self._self_loops_in_a_row: dict[str, int] = {}
@@ -399,34 +410,36 @@ class Kobe:
             target_node,
         )
 
-        for i, (node_id, action, setup) in enumerate(path):
-            if i == 0:
-                continue  # the first entry is the node the replay starts on and carries no action
-
-            self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
-            if isinstance(action, list):
-                self.logger.info(
-                    "  Replay %d/%d: %s --> %s via %d compound actions",
-                    i,
-                    len(path) - 1,
-                    path[i - 1][0],
-                    node_id,
-                    len(action),
-                )
-                for sub_action in action:
-                    self.controller.exe_action(sub_action)
-                    time.sleep(0.5)
-            else:
-                self.logger.info(
-                    "  Replay %d/%d: %s --> %s via %s",
-                    i,
-                    len(path) - 1,
-                    path[i - 1][0],
-                    node_id,
-                    action.get("action", "?"),
-                )
-                self.controller.exe_action(action)
-            time.sleep(1)  # brief pause for the UI to settle
+        try:
+            for i, (node_id, action, setup) in enumerate(path[1:], start=1):
+                self._replay_setup(setup, path[i - 1][0], f"{i}/{len(path) - 1}")
+                if isinstance(action, list):
+                    self.logger.info(
+                        "  Replay %d/%d: %s --> %s via %d compound actions",
+                        i,
+                        len(path) - 1,
+                        path[i - 1][0],
+                        node_id,
+                        len(action),
+                    )
+                    for sub_action in action:
+                        self.controller.exe_action(sub_action)
+                        time.sleep(0.5)
+                else:
+                    self.logger.info(
+                        "  Replay %d/%d: %s --> %s via %s",
+                        i,
+                        len(path) - 1,
+                        path[i - 1][0],
+                        node_id,
+                        action.get("action", "?"),
+                    )
+                    self.controller.exe_action(action)
+                time.sleep(1)  # brief pause for the UI to settle
+        except (InputRejectedError, SystemOverlayActionError) as error:
+            self.logger.warning(
+                "Replay input is unreachable: %s; identifying the current screen", error
+            )
 
         actual_node, _ = self._identify(
             self.controller.get_state(),
@@ -482,7 +495,7 @@ class Kobe:
                   - "auto": the top-ranked exploration target, chosen without a model call.
 
         The graph is auto-saved after every step so crashes lose at most one step. A
-        device that stops answering during a step is waited for, up to
+        device that stops answering during startup or a step is waited for, up to
         ``unreachable_limit`` seconds; past it ``DeviceUnreachableError`` is raised.
         """
         max_steps = max_steps if max_steps is not None else self.max_steps
@@ -499,9 +512,13 @@ class Kobe:
             self.save_graph()
             return
 
-        position = self._starting_position(resume_from, start_step, max_steps)
-
         try:
+            try:
+                position = self._starting_position(resume_from, start_step, max_steps)
+            except subprocess.TimeoutExpired as timeout:
+                phase = "startup resume position" if resume_from else "startup initial observation"
+                node, state = self._recover_from_outage(timeout, phase=phase)
+                position = _Position(node, state)
             while self.graph.total_steps_completed < max_steps:
                 position = self._explore_step_through_outage(position, max_steps)
         except KeyboardInterrupt:
@@ -550,19 +567,30 @@ class Kobe:
                 start_step,
                 max_steps,
             )
-        if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
-            if resume_from == "auto":
-                resume_from = self.graph.get_resume_target(package_name=self.package_name)
-                self.logger.info("Auto-selected resume target: %s", resume_from)
+        try:
+            if resume_from is not None and self.graph.graph.number_of_nodes() > 0:
+                if resume_from == "auto":
+                    resume_from = self.graph.get_resume_target(package_name=self.package_name)
+                    self.logger.info("Auto-selected resume target: %s", resume_from)
 
-            if resume_from and resume_from in self.graph.graph:
-                node = self.navigate_to_node(resume_from)
-                return _Position(node, self.controller.get_state())
-            self.logger.warning(
-                "Node %s not found in graph. Starting from current screen.",
-                resume_from,
-            )
-        node, device_state = self._identify(self.controller.get_state())
+                if resume_from and resume_from in self.graph.graph:
+                    try:
+                        node = self.navigate_to_node(resume_from)
+                    except UnsafeReplayError as error:
+                        self.logger.warning(
+                            "Resume replay rejected; identifying the current screen: %s", error
+                        )
+                    else:
+                        return _Position(node, self.controller.get_state())
+                else:
+                    self.logger.warning(
+                        "Node %s not found in graph. Starting from current screen.",
+                        resume_from,
+                    )
+            node, device_state = self._identify(self.controller.get_state())
+        except UnresolvedPermissionError, UnresolvedSystemOverlayError:
+            self.save_graph()
+            raise
         self._setup_trail.begin(node, None)
         return _Position(node, device_state)
 
@@ -588,13 +616,14 @@ class Kobe:
         return _Position(node, device_state)
 
     def _recover_from_outage(
-        self, timeout: subprocess.TimeoutExpired
+        self, timeout: subprocess.TimeoutExpired, *, phase: str = "exploration step"
     ) -> tuple[str, dict[str, Any]]:
         """Recover an observation and identify it with an unknown action setup."""
         udid = self.controller.config["device"]["udid"]
         self.logger.warning(
-            "Device %s is unreachable: %s. Waiting up to %g minutes for a complete observation.",
+            "Device %s is unreachable during %s: %s. Waiting up to %g minutes for a complete observation.",
             udid,
+            phase,
             timeout,
             self.unreachable_limit / 60,
         )
@@ -620,14 +649,7 @@ class Kobe:
                 return continued
         move = self._plan_move(position, tokens_before)
         if move is None:
-            time.sleep(1)
-            device_state = self.controller.get_state()
-            self._count_step(
-                position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
-            )
-            self.save_graph()
-            return _Position(position.node, device_state)
-
+            return self._wait_at(position, tokens_before, max_steps)
         if move.action.get("action") == "back" and self.graph.back_leaves_app(position.node):
             continued = self._continue_from_ranked_target(
                 position,
@@ -637,7 +659,27 @@ class Kobe:
             )
             if continued is not None:
                 return continued
-        self.controller.exe_action(move.action)
+        return self._execute_move(move, position, tokens_before, max_steps)
+
+    def _execute_move(
+        self,
+        move: _Move,
+        position: _Position,
+        tokens_before: dict[str, int],
+        max_steps: int,
+    ) -> _Position:
+        """Execute a reachable input and count a deferred input as a bounded wait."""
+        try:
+            self.controller.exe_action(move.action)
+        except InputRejectedError as error:
+            self.logger.warning("App input is unreachable: %s; counting a wait", error)
+            return self._wait_at(position, tokens_before, max_steps)
+        except SystemOverlayActionError as error:
+            self.logger.info("App action waits for system feedback: %s", error)
+            node, state = self._identify(self.controller.get_state())
+            self._count_step(move.source, [{"action": "wait"}], node, tokens_before, max_steps)
+            self.save_graph()
+            return self._continue_after(node, state, max_steps)
         time.sleep(0.5)
         device_state = self.controller.get_state()
         package = device_state.get("package", "").strip()
@@ -649,6 +691,18 @@ class Kobe:
         if new_node == EXTERNAL_WEB_NODE:
             return self._record_external_web_step(move, device_state, max_steps)
         return self._record_in_app_step(move, new_node, device_state, max_steps)
+
+    def _wait_at(
+        self, position: _Position, tokens_before: dict[str, int], max_steps: int
+    ) -> _Position:
+        """Spend one bounded step waiting, preserving the target's unexplored status."""
+        time.sleep(1)
+        device_state = self.controller.get_state()
+        self._count_step(
+            position.node, [{"action": "wait"}], position.node, tokens_before, max_steps
+        )
+        self.save_graph()
+        return _Position(position.node, device_state)
 
     def _saturated(self, node: str) -> bool:
         """Return whether the last ``SATURATING_SELF_LOOP_STEPS`` steps planned on ``node``
@@ -699,7 +753,8 @@ class Kobe:
         The planner is given the description of the screen the device was last identified
         on, the node's latest member.
         """
-        screenshot = position.device_state["screenshot"]
+        observation = Observation.from_state(position.device_state)
+        screenshot = observation.app_image
         node_data = self._require_node(position.node)
 
         detail_before = dict(node_data.get("last_detail_snapshot", {}))
@@ -713,6 +768,9 @@ class Kobe:
             self.graph.observation_state(Observation.from_state(position.device_state)),
         )
 
+        input_status += input_region_hint(position.device_state)
+        input_status += self.controller.input_rejection_hint
+
         unexplored_elements = self.graph.get_unexplored_elements(position.node)
         instruction, planned_element = plan_next_action(
             client=self.client,
@@ -725,6 +783,7 @@ class Kobe:
                 unexplored_elements=unexplored_elements,
                 input_status=input_status,
                 back_leaves_app=self.graph.back_leaves_app(position.node),
+                system_feedback=bool(observation.system_overlays),
             ),
             settings=self.instruction,
         )
@@ -737,6 +796,7 @@ class Kobe:
                 screen_w=self.controller.w,
                 screen_h=self.controller.h,
                 action_history=[],
+                system_feedback=bool(observation.system_overlays),
             ),
             settings=self.action,
         )
@@ -755,7 +815,7 @@ class Kobe:
         return _Move(
             source=position.node,
             start=self.controller.last_match,
-            before=Observation.from_state(position.device_state),
+            before=observation,
             action=action,
             instruction=recorded_instruction,
             planned_instruction=instruction,
@@ -912,18 +972,46 @@ class Kobe:
         show the screen of ``expected_observation`` when it names one, and return its
         node and that state.
 
-        Another app's screen gets no node: with another app in front, the app is
-        restarted first, and the node and state returned are those of the screen the
-        restart shows, which is expected to be the start node.
+        System surfaces retain a boundary node, then recover the app while preserving
+        the caller's expectation. A restart expects the start node, including a restart
+        needed when Back does not dismiss a system surface. Other apps restart directly.
         """
+
+        def expect_start() -> None:
+            nonlocal expected_observation
+            expected_observation = self.graph.earliest_member(self.graph.get_start_node())
+
         package = device_state.get("package", "")
         if is_outside_app(package, self.package_name):
             self.logger.warning(
-                "%s is in front of %s. Restarting %s.", package, self.package_name, self.app_name
+                "%s is in front of %s. Recovering %s.", package, self.package_name, self.app_name
             )
-            with self.controller.source("external_app_recovery"):
-                device_state = restart_into_app(self.controller, self.app_launch, self.logger)
-            expected_observation = self.graph.earliest_member(self.graph.get_start_node())
+            if device_state.get("system_surface") is not None:
+                self.graph.record_external_app_visit(Observation.from_state(device_state))
+                with self.controller.source("system_surface_recovery"):
+                    self.controller.record_system_event(
+                        {"status": "boundary_recovery", "surface": device_state["system_surface"]}
+                    )
+                    device_state = (
+                        resolve_permission_prompt(
+                            self.controller,
+                            self.app_launch,
+                            device_state,
+                            self.controller.record_system_event,
+                            StartupRecovery(self.controller, self.unreachable_limit, self.logger),
+                        )
+                        if device_state.get("system_surface") == "permission"
+                        else return_to_app(
+                            self.controller, self.app_launch, self.logger, on_restart=expect_start
+                        )
+                    )
+                    self.controller.record_system_event(
+                        {"status": "boundary_resolved", "package": device_state.get("package")}
+                    )
+            else:
+                with self.controller.source("external_app_recovery"):
+                    device_state = restart_into_app(self.controller, self.app_launch, self.logger)
+                expect_start()
         observation = Observation.from_state(device_state)
         self.controller.record_match(observation, expected_observation)
         node = self.graph.identify_state(observation, expected_observation=expected_observation)
@@ -1005,6 +1093,15 @@ class Kobe:
             ),
         )
         self.graph.mark_element_explored(move.source, move.planned_element)
+        if device_state.get("system_surface") == "permission":
+            with self.controller.source("system_surface_recovery"):
+                return ext_node_id, resolve_permission_prompt(
+                    self.controller,
+                    self.app_launch,
+                    device_state,
+                    self.controller.record_system_event,
+                    StartupRecovery(self.controller, self.unreachable_limit, self.logger),
+                )
         with self.controller.source("external_app_recovery"):
             return ext_node_id, return_to_app(self.controller, self.app_launch, self.logger)
 

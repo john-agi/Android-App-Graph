@@ -26,6 +26,7 @@ from android_app_graph.graph_files import (
 from android_app_graph.payloads import as_object_dict, as_str
 from android_app_graph.step_log import (
     load_image_embeddings,
+    observation_ownership,
     read_records,
     recorded_observation,
     step_order,
@@ -109,6 +110,8 @@ def read_recorded_log(steps: Path, run_kinds: Collection[str]) -> RecordedLog:
     if unrecorded:
         msg = f"{steps} has match records of observations without a record: {unrecorded}"
         raise ValueError(msg)
+    for record in observations.values():
+        observation_ownership(record)
     return log
 
 
@@ -117,15 +120,20 @@ def require_image_vectors(log: RecordedLog, model: str) -> dict[str, list[float]
     step log's ``image_emb.json``, which a build never writes; raise ``ValueError`` naming
     how many of them have none."""
     vectors = load_image_embeddings(log.steps, model=model)
-    missing = [observation for observation in log.matched if observation not in vectors]
+    matched = [
+        observation
+        for observation in log.matched
+        if observation_ownership(log.observations[observation]).surface is None
+    ]
+    missing = [observation for observation in matched if observation not in vectors]
     if missing:
         msg = (
-            f"{len(missing)} of the {len(log.matched)} screenshot(s) the log matches have no "
+            f"{len(missing)} of the {len(matched)} app screenshot(s) the log matches have no "
             f"image vector of {model} in {image_embeddings_path(log.steps)}. Configure the "
             "image-embedding model that embedded the log."
         )
         raise ValueError(msg)
-    return {observation: vectors[observation] for observation in log.matched}
+    return {observation: vectors[observation] for observation in matched}
 
 
 @dataclass(frozen=True, kw_only=True)

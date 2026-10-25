@@ -25,6 +25,7 @@ from openrouter.components.costdetails import CostDetails
 from openrouter.operations.createembeddings import CreateEmbeddingsResponseBody
 from openrouter.types import UNSET
 
+from android_app_graph.checkpoint import APP_NAME_BYTES, CHECKPOINT_INPUT_BYTES
 from android_app_graph.payloads import as_float_list, as_int, as_object_dict, as_str, as_str_dict
 from android_app_graph.retrying import UnusableOutputError, call_with_retry, send_within_deadline
 from android_app_graph.screen_image import MEDIA_TYPE
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _COORDINATE_AXES = 2
+_JSON_ESCAPE_BYTES = 6
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -299,8 +301,8 @@ the common pattern, or answer that they are different actions.
 
 Rules:
 - Replace specific user-provided values (search queries, names, addresses, numbers, dates, \
-  item selections) with descriptive {{placeholder}} names like {{query}}, {{location}}, \
-  {{item_name}}, {{date}}, {{amount}}, etc.
+  item selections) with descriptive {placeholder} names like {query}, {location}, \
+  {item_name}, {date}, {amount}, etc.
 - Keep the action verb and UI element references as-is (e.g. "Tap the search bar" stays unchanged).
 - If only one instruction is given, still normalize it — replace any concrete value with a placeholder.
 - If multiple instructions are given, find the common pattern and merge them.
@@ -312,33 +314,33 @@ Rules:
   set different_actions to true and leave every other field empty. Never join several actions \
   into one template, by line breaks, numbering, "|", "OR" or "or", and never answer with a \
   template made of placeholders alone or of a verb and placeholders, such as \
-  "{{action}} {{target_element}}" or "Tap {{target}}".
+  "{action} {target_element}" or "Tap {target}".
 
 Return a JSON object:
-{{
+{
   "different_actions": true/false (true when the instructions are different actions),
   "instruction_template": "the normalized instruction template",
   "observation_template": "the normalized observation template (or empty string if none)",
   "is_template": true/false (true if any placeholders were inserted),
   "param_names": ["list", "of", "placeholder", "names"] (empty if is_template is false),
   "examples": [
-    {{"instruction": "original instruction 1", "params": {{"query": "egg"}}}},
-    {{"instruction": "original instruction 2", "params": {{"query": "milk"}}}}
+    {"instruction": "original instruction 1", "params": {"query": "egg"}},
+    {"instruction": "original instruction 2", "params": {"query": "milk"}}
   ]
-}}
+}
 
 Examples:
 - Input: ["Search for egg", "Search for milk"]
-  Output: {{"different_actions": false, "instruction_template": "Search for {{query}}", "observation_template": "search results for {{query}}", "is_template": true, "param_names": ["query"], "examples": [{{"instruction": "Search for egg", "params": {{"query": "egg"}}}}, {{"instruction": "Search for milk", "params": {{"query": "milk"}}}}]}}
+  Output: {"different_actions": false, "instruction_template": "Search for {query}", "observation_template": "search results for {query}", "is_template": true, "param_names": ["query"], "examples": [{"instruction": "Search for egg", "params": {"query": "egg"}}, {"instruction": "Search for milk", "params": {"query": "milk"}}]}
 
 - Input: ["Tap the Settings icon"]
-  Output: {{"different_actions": false, "instruction_template": "Tap the Settings icon", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}
+  Output: {"different_actions": false, "instruction_template": "Tap the Settings icon", "observation_template": "", "is_template": false, "param_names": [], "examples": []}
 
 - Input: ["Type 'Waterloo' in the start location field", "Type '221B Baker Street' in the start location field"]
-  Output: {{"different_actions": false, "instruction_template": "Type '{{location}}' in the start location field", "observation_template": "start location field shows {{location}}", "is_template": true, "param_names": ["location"], "examples": [{{"instruction": "Type 'Waterloo' in the start location field", "params": {{"location": "Waterloo"}}}}, {{"instruction": "Type '221B Baker Street' in the start location field", "params": {{"location": "221B Baker Street"}}}}]}}
+  Output: {"different_actions": false, "instruction_template": "Type '{location}' in the start location field", "observation_template": "start location field shows {location}", "is_template": true, "param_names": ["location"], "examples": [{"instruction": "Type 'Waterloo' in the start location field", "params": {"location": "Waterloo"}}, {"instruction": "Type '221B Baker Street' in the start location field", "params": {"location": "221B Baker Street"}}]}
 
 - Input: ["Tap the three-dot overflow menu in the top-right corner", "Swipe upward on the alarm list", "Tap the switch of the 7:00 AM alarm"]
-  Output: {{"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}}"""
+  Output: {"different_actions": true, "instruction_template": "", "observation_template": "", "is_template": false, "param_names": [], "examples": []}"""
 
 _SCREEN_IDENTITY_POLICY = """\
 Screen identity policy:
@@ -972,11 +974,19 @@ def _parse_page_description(
     return description, as_object_dict(state), elements, is_external_web
 
 
+@dataclass(frozen=True, kw_only=True)
+class DescribeRequest:
+    """An app image with bounded context and observed system-feedback ownership."""
+
+    screenshot_b64: str
+    known_descriptions: list[str] | None = None
+    existing_keys: list[str] | None = None
+    system_feedback: bool = False
+
+
 def describe_page_and_state(
     client: OpenRouter,
-    screenshot_b64: str,
-    known_descriptions: list[str] | None = None,
-    existing_keys: list[str] | None = None,
+    request: DescribeRequest,
     *,
     settings: ModelSettings,
 ) -> tuple[str, dict[str, object], list[dict[str, str]], bool]:
@@ -988,15 +998,17 @@ def describe_page_and_state(
     location search").
 
     Args:
-        known_descriptions: A selection of distinct descriptions of screens already
-            seen in the same package.
-        existing_keys: State keys already seen across same-package nodes.
+        request: The app image, selected same-package descriptions and state keys,
+            with the observed system-feedback scope.
 
     Returns:
         (page_description, state_dict, elements_list, is_external_web)
         where elements_list is a list of {"description": str, "position": str} dicts
         and is_external_web is true only for web content from outside the app.
     """
+    screenshot_b64 = request.screenshot_b64
+    known_descriptions, existing_keys = request.known_descriptions, request.existing_keys
+    system_feedback = request.system_feedback
     if known_descriptions:
         listed = "\n".join(f'  - "{d}"' for d in known_descriptions)
         known_descriptions_section = (
@@ -1027,7 +1039,15 @@ def describe_page_and_state(
             "dynamic parameters that define this screen's state."
         )
 
-    prompt = PAGE_DESCRIBE_AND_STATE_PROMPT.format(
+    ownership_hint = (
+        (
+            "Gray masked regions are observed system-owned clipboard feedback. Describe only the "
+            "underlying app and its visible controls; masked feedback supplies no app elements or state.\n"
+        )
+        if system_feedback
+        else ""
+    )
+    prompt = ownership_hint + PAGE_DESCRIBE_AND_STATE_PROMPT.format(
         known_descriptions_section=known_descriptions_section,
         existing_keys_section=existing_keys_section,
         description_hint=description_hint,
@@ -1080,13 +1100,29 @@ class DescribedScreenshot:
 
     screenshot_b64: str
     description: str
+    system_feedback: bool = False
 
 
 def _shown(label: str, screenshot: DescribedScreenshot) -> list[ChatContentItemsTypedDict]:
+    ownership = (
+        " Gray masked regions are unavailable system-owned clipboard feedback; compare the app outside them."
+        if screenshot.system_feedback
+        else ""
+    )
     return [
-        {"type": "text", "text": f'{label}, described as "{screenshot.description}":'},
+        {"type": "text", "text": f'{label}, described as "{screenshot.description}":{ownership}'},
         build_image_message(screenshot.screenshot_b64),
     ]
+
+
+def node_verification_context(settings: ModelSettings) -> dict[str, object]:
+    """Return the rule, output schema and resolved settings a member question uses."""
+    return {
+        "prompt": NODE_VERIFY_PROMPT,
+        "schema": _NODE_VERIFICATION_SCHEMA,
+        "settings": settings._asdict(),
+        "timeout": settings.timeout("node_verify"),
+    }
 
 
 def verify_same_node(
@@ -1321,6 +1357,20 @@ For example:
 - A "search results page" with no edge for tapping a result item
 For each, describe what edges/actions are likely missing.
 
+## Unattended execution policy
+Every retry_edge and explore_node includes an execution assessment with effect
+"inspection", "side_effect" or "uncertain", and a concrete reason. Inspection includes
+opening a dialer, an editable form, a share chooser, or a confirmation dialog followed
+by Cancel, and reading settings. Temporary form edits on disposable data remain usable.
+Keep executable suggestions within these inspection actions. Placing a call (including
+with a controlled test number), actually sending data, confirming deletion or clearing
+history, purchases, account enrollment and security changes are side_effect operations.
+Record their missing coverage as non-executable advice rather than an instruction to
+try them. Use uncertain when the operation's effect is unclear. A recorded action is
+not permission to repeat it: assess the retry instruction too. Describe opening a
+confirmation and cancelling separately from committing it. Every expected_pages entry
+must stay within the assessment; a safe entry cannot authorize a consequential one.
+
 Return a JSON object:
 {{
   "issues": [
@@ -1337,14 +1387,16 @@ Return a JSON object:
       "description": "why this edge looks wrong",
       "source_node": "node_id where the edge starts",
       "target_node": "node_id where the edge currently goes (wrongly)",
-      "instruction": "the edge instruction that looks mismatched"
+      "instruction": "the edge instruction that looks mismatched",
+      "execution": {{"effect": "inspection" | "side_effect" | "uncertain", "reason": "operation and effect"}}
     }},
     {{
       "type": "explore_node",
       "severity": "high" | "medium" | "low",
       "description": "what is likely missing from this node",
       "node": "node_id that needs more exploration",
-      "expected_pages": ["page that should be reachable from this node", "another reachable page"]
+      "expected_pages": ["page that should be reachable from this node", "another reachable page"],
+      "execution": {{"effect": "inspection" | "side_effect" | "uncertain", "reason": "operation and effect"}}
     }}
   ],
   "summary": "one-paragraph overall assessment of graph quality"
@@ -1410,6 +1462,21 @@ _NODE_MERGE_AUDIT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_AUDIT_EXECUTION_ASSESSMENT: dict[str, object] = {
+    "type": "object",
+    "description": "Assessment of unattended execution under the inspection policy.",
+    "properties": {
+        "effect": {
+            "type": "string",
+            "enum": ["inspection", "side_effect", "uncertain"],
+            "description": "Whether the whole proposed operation stays within inspection.",
+        },
+        "reason": {"type": "string", "description": "The concrete operation and its effect."},
+    },
+    "required": ["effect", "reason"],
+    "additionalProperties": False,
+}
+
 _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1444,6 +1511,7 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
                                 "type": "string",
                                 "description": "The edge instruction that looks mismatched.",
                             },
+                            "execution": _AUDIT_EXECUTION_ASSESSMENT,
                         },
                         "required": [
                             "type",
@@ -1452,6 +1520,7 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
                             "source_node",
                             "target_node",
                             "instruction",
+                            "execution",
                         ],
                         "additionalProperties": False,
                     },
@@ -1477,8 +1546,16 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
                                 "items": {"type": "string"},
                                 "description": "Pages that should be reachable from this node.",
                             },
+                            "execution": _AUDIT_EXECUTION_ASSESSMENT,
                         },
-                        "required": ["type", "severity", "description", "node", "expected_pages"],
+                        "required": [
+                            "type",
+                            "severity",
+                            "description",
+                            "node",
+                            "expected_pages",
+                            "execution",
+                        ],
                         "additionalProperties": False,
                     },
                 ]
@@ -1494,18 +1571,46 @@ _GRAPH_AUDIT_SCHEMA: dict[str, Any] = {
 }
 
 
+def node_merge_context(settings: ModelSettings) -> dict[str, object]:
+    """Return the duplicate-proposal rule, schema and resolved request settings."""
+    return {
+        "prompt": NODE_MERGE_AUDIT_PROMPT,
+        "schema": _NODE_MERGE_AUDIT_SCHEMA,
+        "settings": settings._asdict(),
+        "timeout": settings.timeout("node_merge_audit"),
+    }
+
+
+def node_merge_prompt(graph_summary: str, app_name: str) -> str:
+    """Render the duplicate-proposal request's text for sending and size reporting."""
+    return NODE_MERGE_AUDIT_PROMPT.format(app_name=app_name, graph_description=graph_summary)
+
+
+def node_merge_request_bound(settings: ModelSettings) -> int:
+    """Bound the request's JSON bytes, including schema, settings and escaped content."""
+    fixed: dict[str, object] = {
+        "model": settings.model,
+        "temperature": settings.temperature,
+        "stream": False,
+        "messages": [{"role": "user", "content": ""}],
+        "plugins": [{"id": "response-healing"}],
+        "response_format": _structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
+    }
+    text_bound = (
+        CHECKPOINT_INPUT_BYTES + APP_NAME_BYTES + len(node_merge_prompt("", "").encode("utf-8"))
+    )
+    return len(json.dumps(fixed).encode("utf-8")) + _JSON_ESCAPE_BYTES * text_bound
+
+
 def audit_merge_nodes(
     client: OpenRouter,
     graph_summary: str,
     app_name: str = "",
     *,
     settings: ModelSettings,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Ask a model only for duplicate-node merge candidates."""
-    prompt = NODE_MERGE_AUDIT_PROMPT.format(
-        app_name=app_name,
-        graph_description=graph_summary,
-    )
+    prompt = node_merge_prompt(graph_summary, app_name)
     try:
         resp = send_chat(
             client,
@@ -1515,18 +1620,23 @@ def audit_merge_nodes(
             response_format=_structured_output("node_merge_audit", _NODE_MERGE_AUDIT_SCHEMA),
         )
     except TruncatedReplyError, httpx.TimeoutException:
-        return {"issues": [], "summary": "reply truncated"}
+        return {"issues": [], "summary": "reply truncated", "answered": False}
     raw = strip_json_fences(message_text(resp))
     try:
-        result = json.loads(raw)
+        result = as_object_dict(json.loads(raw))
     except json.JSONDecodeError:
         logger.warning("Failed to parse node merge audit JSON. Raw:\n%s", raw)
-        return {"issues": [], "summary": "parse error"}
+        return {"issues": [], "summary": "parse error", "answered": False}
 
-    issues = [issue for issue in result.get("issues", []) if issue.get("type") == "merge_nodes"]
+    listed = result.get("issues")
+    if not isinstance(listed, list):
+        return {"issues": [], "summary": "missing issues", "answered": False}
+    issues = [
+        issue for item in listed if (issue := as_object_dict(item)).get("type") == "merge_nodes"
+    ]
     return {
         "issues": issues,
-        "summary": result.get("summary", ""),
+        "summary": as_str(result.get("summary"), ""),
     }
 
 
@@ -1958,6 +2068,7 @@ class PlanRequest:
         input_status: OS keyboard visibility and current screenshot focus evidence.
         back_leaves_app: Whether Back on this screen leaves the app, which the prompt
             then says.
+        system_feedback: Ownership evidence marks gray image regions as system feedback.
     """
 
     screenshot_b64: str
@@ -1968,6 +2079,7 @@ class PlanRequest:
     unexplored_elements: list[dict[str, Any]] | None = None
     input_status: str = "Keyboard visibility and focused field are unknown."
     back_leaves_app: bool = False
+    system_feedback: bool = False
 
 
 def _tried_actions(edge: dict[str, Any]) -> list[tuple[str, str]]:
@@ -2046,7 +2158,16 @@ def plan_next_action(
     else:
         unexplored_section = ""
 
-    prompt = NEXT_ACTION_PLAN_PROMPT.format(
+    ownership_hint = (
+        (
+            "Gray masked regions are unavailable system-owned clipboard feedback. Select an "
+            "unobscured app control, or wait for an ordinary observation. App Copy and Share "
+            "controls outside the mask remain available.\n"
+        )
+        if request.system_feedback
+        else ""
+    )
+    prompt = ownership_hint + NEXT_ACTION_PLAN_PROMPT.format(
         app_name=request.app_name,
         page_description=request.page_description,
         input_status=request.input_status,
@@ -2285,6 +2406,7 @@ class ActionRequest:
         screen_h: Actual device screen height in pixels.
         action_history: List of NL descriptions of previous actions taken.
         overall_task: Optional real task for supplementary context.
+        system_feedback: Ownership evidence marks gray image regions as system feedback.
     """
 
     screenshot_b64: str
@@ -2293,6 +2415,7 @@ class ActionRequest:
     screen_h: int = 1920
     action_history: list[str] | None = None
     overall_task: str = ""
+    system_feedback: bool = False
 
 
 def predict_next_action(
@@ -2325,7 +2448,15 @@ def predict_next_action(
     else:
         overall_task_section = ""
 
-    user_prompt = NEXT_ACTION_USER_PROMPT.format(
+    ownership_hint = (
+        (
+            "Gray masked regions belong to system clipboard feedback. Act only on an "
+            "unobscured app control; wait if the intended target is covered.\n"
+        )
+        if request.system_feedback
+        else ""
+    )
+    user_prompt = ownership_hint + NEXT_ACTION_USER_PROMPT.format(
         instruction=request.instruction,
         overall_task_section=overall_task_section,
         history_section=history_section,

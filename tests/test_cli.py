@@ -6,6 +6,7 @@ import json
 import logging
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import NoReturn
 
@@ -79,10 +80,12 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     launch_activities: list[str | None] = []
 
     class Device:
-        def __init__(self, _config: dict[str, object], _logger: logging.Logger) -> None:
+        def __init__(
+            self, _config: dict[str, object], _logger: logging.Logger, **_kwargs: object
+        ) -> None:
             events.append("device")
 
-        def terminate_all_apps(self) -> None:
+        def terminate_all_apps(self, _recovery: device.StartupRecovery) -> None:
             events.append("terminate")
 
     class Explorer:
@@ -119,16 +122,24 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
     monkeypatch.setattr(cli, "AdbController", Device)
     monkeypatch.setattr(cli, "EmulatorManager", lambda _logger: object())
     monkeypatch.setattr(cli, "Kobe", Explorer)
+    monkeypatch.setattr(
+        cli, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
     monkeypatch.setattr(cli, "check_avd", check_avd)
     grants: list[tuple[str, str]] = []
 
-    def grant(udid: str, package_name: str) -> None:
+    def grant(udid: str, package_name: str, _recovery: device.StartupRecovery) -> None:
         grants.append((udid, package_name))
         events.append("grant")
 
     monkeypatch.setattr(cli, "grant_runtime_permissions", grant)
 
-    def launch(_config: dict[str, object], app: dict[str, str], _logger: logging.Logger) -> str:
+    def launch(
+        _config: dict[str, object],
+        app: dict[str, str],
+        _logger: logging.Logger,
+        _recovery: device.StartupRecovery,
+    ) -> str:
         events.append("launch")
         return app.get("launch_activity", f"{app['package_name']}/.Home")
 
@@ -259,10 +270,10 @@ def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
             raise server
 
     class Device:
-        def __init__(self, *_args: object) -> None:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def terminate_all_apps(self) -> None:
+        def terminate_all_apps(self, _recovery: device.StartupRecovery) -> None:
             pass
 
     class Explorer:
@@ -281,6 +292,9 @@ def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
     monkeypatch.setattr(cli, "grant_runtime_permissions", lambda *_args: None)
     monkeypatch.setattr(cli, "launch_app", lambda *_args: None)
     monkeypatch.setattr(cli, "Kobe", Explorer)
+    monkeypatch.setattr(
+        cli, "RunEnvironment", lambda controller, *_args, **_kwargs: nullcontext(controller)
+    )
     monkeypatch.setattr(sys, "argv", ["app-graph", "-c", str(config)])
 
     with pytest.raises(SystemExit) as caught:
@@ -300,6 +314,19 @@ class _NoRunningAvd:
 
     def duplicate_avd(self, avd_name: str) -> None:
         self.duplicated.append(avd_name)
+
+
+def test_check_avd_uses_a_connected_device_without_creating_an_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    avds = _NoRunningAvd()
+    monkeypatch.setattr(
+        avds, "get_running_avd_list", lambda: [{"udid": "test-device", "status": "device"}]
+    )
+
+    cli.check_avd(avds, {"device": {"udid": "test-device"}}, logging.getLogger("test"))
+
+    assert avds.duplicated == []
 
 
 @pytest.mark.usefixtures("no_sleep")

@@ -49,6 +49,17 @@ from typing import Any, Literal, NamedTuple
 import networkx as nx
 from openrouter import OpenRouter
 
+from android_app_graph.checkpoint import (
+    APP_NAME_BYTES,
+    CheckpointReport,
+    IdentityBatch,
+    IdentityNode,
+    MergeHint,
+    ProposalReply,
+    clipped_text,
+    evidence_key,
+    identity_batches,
+)
 from android_app_graph.graph_files import (
     PER_ACTION_LISTS,
     append_json_line,
@@ -57,7 +68,6 @@ from android_app_graph.graph_files import (
     identify_file_path,
     load_embeddings,
     member_problems,
-    observation_image_b64,
     read_json_lines,
     require_known_edge_endpoints,
     save_embeddings,
@@ -86,7 +96,9 @@ from android_app_graph.step_log import (
     Observation,
     TransitionRecord,
     load_image_embeddings,
+    observation_ownership,
     read_observation_record,
+    recorded_observation,
     save_image_embeddings,
     step_order,
 )
@@ -98,6 +110,7 @@ from android_app_graph.utils import (
 )
 from android_app_graph.utils.vlm_utils import (
     DescribedScreenshot,
+    DescribeRequest,
     audit_graph,
     audit_merge_nodes,
     call_concurrently,
@@ -105,6 +118,10 @@ from android_app_graph.utils.vlm_utils import (
     describe_page_and_state,
     get_embedding,
     get_image_embedding,
+    node_merge_context,
+    node_merge_prompt,
+    node_merge_request_bound,
+    node_verification_context,
     normalize_edge,
     score_by_cosine,
     token_tracker,
@@ -502,6 +519,15 @@ class MemberQuestion(NamedTuple):
 
     existing: str
     new: str
+
+
+class _MemberReply(NamedTuple):
+    verdict: MemberVerdict
+    evidence: str | None
+
+
+def _shown_member_key(member: str, shown: DescribedScreenshot) -> str:
+    return evidence_key([member, shown.description, shown.screenshot_b64, shown.system_feedback])
 
 
 class ShownMembers(NamedTuple):
@@ -955,6 +981,18 @@ def _require_saved_fields(graph: dict[str, Any], path: Path, steps_dir: Path) ->
         problems.append(f"no matching settings, a whole number for each of {settings}")
     if problems:
         raise unloadable_graph(path, problems)
+    for node in graph["nodes"]:
+        for member in node["observations"]:
+            record = read_observation_record(steps_dir, member)
+            if record is None:
+                msg = f"member {member!r} has no observation record"
+                raise unloadable_graph(path, [msg])
+            ownership = observation_ownership(record)
+            if ownership.error is not None or (
+                ownership.surface is not None and not str(node["id"]).startswith("ext_")
+            ):
+                msg = f"member {member!r} has unsupported ownership for node {node['id']!r}"
+                raise unloadable_graph(path, [msg])
 
 
 def _raise_for_members_without(vector: str, without: Mapping[str, Sequence[str]]) -> None:
@@ -1103,6 +1141,9 @@ class GraphManager:
         # reads them back.
         self._descriptions: dict[str, str] = {}
         self._stored_screens: dict[str, _StoredScreen] = {}
+        self._checkpoint_verdicts: MemberVerdicts = {}
+        self._checkpoint_evidence: dict[frozenset[str], str] = {}
+        self._checkpoint_proposals: dict[str, ProposalReply] = {}
         self.total_steps_completed = 0
 
     def _page_detail(self) -> tuple[OpenRouter, ModelSettings] | None:
@@ -1441,14 +1482,29 @@ class GraphManager:
         cost_before = token_tracker.summary().get(usage_key, {}).get("cost", 0.0)
         try:
             for member in missing:
-                self._image_vectors[member] = self._embed_image(
-                    observation_image_b64(steps_dir, member)
-                )
+                self._image_vectors[member] = self._embed_image(self._app_member_image(member))
         finally:
             save_image_embeddings(steps_dir, self._image_vectors, model=image_embedding.model)
         cost = token_tracker.summary().get(usage_key, {}).get("cost", 0.0) - cost_before
         logger.info("Embedded %d member image(s) for $%.6f", len(missing), cost)
         return len(missing)
+
+    def _member_observation(self, member: str) -> Observation:
+        steps = self._require_steps_dir()
+        record = read_observation_record(steps, member)
+        if record is None:
+            msg = f"Observation {member} has no record"
+            raise ValueError(msg)
+        return recorded_observation(steps, record)
+
+    def _app_member_image(self, member: str) -> str:
+        return self._member_observation(member).app_image
+
+    def _described_app_member(self, member: str, description: str) -> DescribedScreenshot:
+        observed = self._member_observation(member)
+        return DescribedScreenshot(
+            observed.app_image, description, system_feedback=bool(observed.system_overlays)
+        )
 
     def identify_state(
         self, observation: Observation, *, expected_observation: str | None = None
@@ -1484,6 +1540,8 @@ class GraphManager:
         takes no describe output and has no description vector, so the ``text`` source
         never ranks a node by it.
         """
+        if observation.system_surface is not None:
+            return self.record_external_app_visit(observation)
         client, page_detail = self._require_page_detail()
         self._require_embedding()
         self._require_steps_dir()
@@ -1492,7 +1550,7 @@ class GraphManager:
         same_package = self._same_package_nodes(observation.package)
         image_vector = self._image_vectors.get(observation.observation_id)
         if image_vector is None:
-            image_vector = self._embed_image(observation.screenshot_b64)
+            image_vector = self._embed_image(observation.app_image)
             self._image_vectors[observation.observation_id] = image_vector
         if observation.black:
             return self._record_black_screen(observation, same_package.node_ids, decision)
@@ -1503,12 +1561,15 @@ class GraphManager:
         described = _Described(
             *describe_page_and_state(
                 client,
-                observation.screenshot_b64,
-                known_descriptions=self._package_descriptions(
-                    same_package.node_ids, image_vector, decision.expected_node
-                )
-                or None,
-                existing_keys=same_package.keys or None,
+                DescribeRequest(
+                    screenshot_b64=observation.app_image,
+                    known_descriptions=self._package_descriptions(
+                        same_package.node_ids, image_vector, decision.expected_node
+                    )
+                    or None,
+                    existing_keys=same_package.keys or None,
+                    system_feedback=bool(observation.system_overlays),
+                ),
                 settings=page_detail,
             )
         )
@@ -1727,6 +1788,8 @@ class GraphManager:
                 is_external=True,
             )
         node_data = self.graph.nodes[node_id]
+        if observation.system_surface is not None:
+            node_data["system_surface"] = observation.system_surface
         node_data["visit_count"] = node_data.get("visit_count", 0) + 1
         _add_member(node_data, observation.observation_id)
         return node_id
@@ -1863,11 +1926,11 @@ class GraphManager:
         (description,) = self._member_descriptions(node_id, [member])
         return verify_same_node(
             client,
-            existing=DescribedScreenshot(
-                observation_image_b64(self._require_steps_dir(), member), description
-            ),
+            existing=self._described_app_member(member, description),
             new=DescribedScreenshot(
-                identification.observation.screenshot_b64, identification.screen.description
+                identification.observation.app_image,
+                identification.screen.description,
+                system_feedback=bool(identification.observation.system_overlays),
             ),
             settings=page_detail,
         )
@@ -1891,6 +1954,8 @@ class GraphManager:
         two screens, and a later call asks the pair again. When a call raises, the answers
         already returned are kept in ``verdicts`` before the error is raised.
         """
+        if verdicts is self._checkpoint_verdicts:
+            self._validate_checkpoint_answers(questions)
         first_asked: dict[frozenset[str], int] = {}
         for index, question in enumerate(questions):
             pair = frozenset((question.existing, question.new))
@@ -1926,7 +1991,6 @@ class GraphManager:
         before any question is asked.
         """
         client, page_detail = self._require_page_detail()
-        steps_dir = self._require_steps_dir()
         descriptions: dict[str, str] = {}
         undescribed: list[str] = []
         for question in questions:
@@ -1943,31 +2007,75 @@ class GraphManager:
         replies: dict[frozenset[str], MemberVerdict] = {}
 
         def described(member: str) -> DescribedScreenshot:
-            return DescribedScreenshot(
-                observation_image_b64(steps_dir, member), descriptions[member]
-            )
+            return self._described_app_member(member, descriptions[member])
 
-        def ask(question: MemberQuestion) -> MemberVerdict:
+        def ask(question: MemberQuestion) -> _MemberReply:
+            existing, new = described(question.existing), described(question.new)
+            evidence = (
+                self._checkpoint_question_key(question, existing, new, page_detail)
+                if verdicts is self._checkpoint_verdicts
+                else None
+            )
             reply = verify_same_node(
                 client,
-                existing=described(question.existing),
-                new=described(question.new),
+                existing=existing,
+                new=new,
                 settings=page_detail,
             )
-            return MemberVerdict(
-                reply.get("same") is True,
-                as_str(reply.get("reason"), ""),
-                answered=reply.get("answered") is not False,
+            return _MemberReply(
+                MemberVerdict(
+                    reply.get("same") is True,
+                    as_str(reply.get("reason"), ""),
+                    answered=reply.get("answered") is not False
+                    and isinstance(reply.get("same"), bool),
+                ),
+                evidence,
             )
 
-        def keep(question: MemberQuestion, verdict: MemberVerdict) -> None:
+        def keep(question: MemberQuestion, reply: _MemberReply) -> None:
             pair = frozenset((question.existing, question.new))
+            verdict = reply.verdict
             replies[pair] = verdict
             if verdict.answered:
                 verdicts[pair] = verdict
+                if reply.evidence is not None:
+                    self._checkpoint_evidence[pair] = reply.evidence
 
         call_concurrently("node_verify", ask, questions, keep)
         return replies
+
+    @staticmethod
+    def _checkpoint_question_key(
+        question: MemberQuestion,
+        existing: DescribedScreenshot,
+        new: DescribedScreenshot,
+        settings: ModelSettings,
+    ) -> str:
+        members = sorted(
+            (
+                _shown_member_key(question.existing, existing),
+                _shown_member_key(question.new, new),
+            )
+        )
+        return evidence_key([node_verification_context(settings), members])
+
+    def _validate_checkpoint_answers(self, questions: Sequence[MemberQuestion]) -> None:
+        _, settings = self._require_page_detail()
+        for question in questions:
+            pair = frozenset(question)
+            if pair not in self._checkpoint_verdicts:
+                continue
+            descriptions = [self.description(member) for member in question]
+            current = None
+            if all(isinstance(description, str) for description in descriptions):
+                shown = [
+                    self._described_app_member(member, as_str(description, ""))
+                    for member, description in zip(question, descriptions, strict=True)
+                ]
+                current = self._checkpoint_question_key(question, shown[0], shown[1], settings)
+            if current != self._checkpoint_evidence.get(pair):
+                del self._checkpoint_verdicts[pair]
+                self._checkpoint_evidence.pop(pair, None)
 
     def _refine(
         self, identification: _Identification, node_id: str, verdict: dict[str, Any]
@@ -2436,12 +2544,9 @@ class GraphManager:
     def _stored_identification(
         self, node_id: str, member: str, verdicts: MemberVerdicts
     ) -> _Identification:
-        steps_dir = self._require_steps_dir()
         stored = self._stored_screens[member]
-        observation = Observation(
-            observation_id=member,
-            screenshot_b64=observation_image_b64(steps_dir, member),
-            activity=self._member_activity(member),
+        observation = replace(
+            self._member_observation(member),
             package=as_str(self.graph.nodes[node_id].get("package"), ""),
             pixel_hash=stored.pixel_hash,
             black=stored.black_activity is not None,
@@ -3240,6 +3345,9 @@ class GraphManager:
         self._text_vectors = text_vectors
         self._descriptions = descriptions
         self._stored_screens = stored_screens
+        self._checkpoint_verdicts.clear()
+        self._checkpoint_evidence.clear()
+        self._checkpoint_proposals.clear()
         self._node_aliases = {
             old: new
             for old, new in as_str_dict(data.get("node_aliases")).items()
@@ -3625,37 +3733,219 @@ class GraphManager:
                 self.merge_nodes(keep, remove)
         return [Merge(cluster[0], cluster[1:]) for cluster in clusters if len(cluster) > 1]
 
-    def run_node_merge_audit(self, app_name: str = "") -> dict[str, Any]:
-        """Run a lightweight node-merge audit and merge verified duplicates.
+    def _checkpoint_node(self, node_id: str) -> IdentityNode:
+        data = self.graph.nodes[node_id]
+        members = _member_observations(data)
+        descriptions = tuple(sorted({self.description(member) or "" for member in members}))
 
-        Only the model's pairs are verified: image and text proposals would bring back at
-        every checkpoint each pair an earlier one kept apart.
-        """
+        def neighbors(nodes: Iterable[str]) -> tuple[str, ...]:
+            return tuple(
+                sorted(
+                    {
+                        description
+                        for neighbor in nodes
+                        if neighbor != node_id and not self._is_external(neighbor)
+                        for member in _member_observations(self.graph.nodes[neighbor])
+                        if (description := self.description(member))
+                    }
+                )
+            )
+
+        incoming = neighbors(self.graph.predecessors(node_id))
+        outgoing = neighbors(self.graph.successors(node_id))
+        activities = data.get("activities", [data.get("activity", "")])
+        named_activities = tuple(sorted(value for value in activities if isinstance(value, str)))
+        package = as_str(data.get("package"), "")
+        return IdentityNode(
+            node_id,
+            package,
+            named_activities,
+            descriptions,
+            incoming,
+            outgoing,
+        )
+
+    def _checkpoint_groups(self) -> dict[str, list[str]]:
+        packages: dict[str, list[str]] = {}
+        for node in sorted(self.graph, key=self._node_numeric_order):
+            node_id = _node_id(node)
+            if self._is_external(node_id) or not _member_observations(self.graph.nodes[node_id]):
+                continue
+            package = as_str(self.graph.nodes[node_id].get("package"), "")
+            packages.setdefault(package, []).append(node_id)
+        return packages
+
+    def checkpoint_batches(self) -> Iterator[IdentityBatch]:
+        """Yield bounded requests covering every same-package, in-app member-node pair."""
+        packages = self._checkpoint_groups()
+        for package in sorted(packages):
+            if len(packages[package]) > 1:
+                yield from identity_batches(
+                    [self._checkpoint_node(node) for node in packages[package]]
+                )
+
+    @staticmethod
+    def _checkpoint_reply(value: Mapping[str, object]) -> ProposalReply:
+        listed = value.get("issues")
+        if not isinstance(listed, list):
+            return ProposalReply((), "missing issues", answered=False)
+        hints: list[MergeHint] = []
+        answered = value.get("answered") is not False
+        for raw in listed:
+            issue = as_object_dict(raw)
+            first, second = issue.get("node_a"), issue.get("node_b")
+            if not isinstance(first, str) or not isinstance(second, str):
+                answered = False
+                continue
+            hints.append(
+                MergeHint(
+                    first,
+                    second,
+                    as_str(issue.get("severity"), "medium"),
+                    as_str(issue.get("description"), ""),
+                )
+            )
+        return ProposalReply(tuple(hints), as_str(value.get("summary"), ""), answered)
+
+    def _checkpoint_proposal_replies(
+        self,
+        batches: Sequence[IdentityBatch],
+        client: OpenRouter,
+        settings: ModelSettings,
+        app_name: str,
+    ) -> list[tuple[ProposalReply, bool]]:
+        context = node_merge_context(settings)
+        keys = [evidence_key([context, app_name, batch.evidence]) for batch in batches]
+        replies = {
+            index: (self._checkpoint_proposals[key], True)
+            for index, key in enumerate(keys)
+            if key in self._checkpoint_proposals
+        }
+
+        def call(index: int) -> ProposalReply:
+            batch = batches[index]
+            reply = self._checkpoint_reply(
+                audit_merge_nodes(client, batch.text, app_name=app_name, settings=settings)
+            )
+            if any(not batch.permits(hint.first, hint.second) for hint in reply.hints):
+                reply = replace(reply, answered=False)
+            return reply
+
+        def keep(index: int, reply: ProposalReply) -> None:
+            replies[index] = reply, False
+            if reply.answered:
+                self._checkpoint_proposals[keys[index]] = reply
+
+        call_concurrently(
+            "node_merge_audit",
+            call,
+            [index for index in range(len(batches)) if index not in replies],
+            keep,
+        )
+        return [replies[index] for index in range(len(batches))]
+
+    def run_node_merge_audit(self, app_name: str = "") -> CheckpointReport:
+        """Propose duplicates in bounded complete batches and reuse unchanged evidence."""
         page_detail = self._page_detail()
         if page_detail is None:
             logger.warning("No page_detail settings — cannot run node merge audit")
             return {"issues": [], "results": [], "merged_count": 0}
         client, settings = page_detail
-
-        graph_text = self.format_for_audit()
-        logger.info("Running node merge audit (%d chars)...", len(graph_text))
-        audit_result = audit_merge_nodes(
-            client,
-            graph_text,
-            app_name=app_name,
-            settings=settings._replace(request_timeout=self.audit_timeout),
+        settings = settings._replace(request_timeout=self.audit_timeout)
+        app_name = clipped_text(app_name, APP_NAME_BYTES)
+        issues: list[dict[str, object]] = []
+        rejected: list[dict[str, object]] = []
+        summaries: list[str] = []
+        groups = self._checkpoint_groups()
+        node_count = self.graph.number_of_nodes()
+        candidate_nodes = sum(len(nodes) for nodes in groups.values())
+        eligible_pairs = sum(len(nodes) * (len(nodes) - 1) // 2 for nodes in groups.values())
+        logger.info(
+            "Checkpoint identity scope: %d candidate nodes, %d excluded nodes, %d eligible "
+            "pairs, %d excluded pairs; JSON request bound=%d bytes",
+            candidate_nodes,
+            node_count - candidate_nodes,
+            eligible_pairs,
+            node_count * (node_count - 1) // 2 - eligible_pairs,
+            node_merge_request_bound(settings),
         )
-        issues = audit_result.get("issues", [])
-        report = self.verify_merge_proposals(self.merge_proposals(issues, sources=()), {})
+        pairs = requests = reused = unanswered = input_bytes = largest = 0
+        batches = list(self.checkpoint_batches())
+        replies = self._checkpoint_proposal_replies(batches, client, settings, app_name)
+        for index, (batch, (reply, known)) in enumerate(zip(batches, replies, strict=True)):
+            size = len(node_merge_prompt(batch.text, app_name).encode("utf-8"))
+            pairs += batch.pair_count
+            requests += not known
+            reused += known
+            unanswered += not reply.answered
+            input_bytes += 0 if known else size
+            largest = max(largest, size)
+            summaries.append(reply.summary)
+            logger.info(
+                "Checkpoint proposal batch %d: %d nodes, %d candidate pairs, %d input bytes, "
+                "reused=%s, answered=%s",
+                index + 1,
+                len(batch.nodes),
+                batch.pair_count,
+                size,
+                known,
+                reply.answered,
+            )
+            for hint in reply.hints:
+                issue = hint.as_record(batch)
+                if batch.permits(hint.first, hint.second):
+                    issues.append(issue)
+                else:
+                    rejected.append(
+                        {
+                            **issue,
+                            "status": "skipped",
+                            "reason": (
+                                "same node"
+                                if hint.first == hint.second and batch.node(hint.first) is not None
+                                else "pair outside request scope"
+                            ),
+                            "batch": index + 1,
+                        }
+                    )
+        report = self.verify_merge_proposals(
+            self.merge_proposals(issues, sources=()), self._checkpoint_verdicts
+        )
+        verifier_requests = sum(
+            pair.get("asked") is True and pair.get("reused") is not True for pair in report.pairs
+        )
+        verifier_reused = sum(pair.get("reused") is True for pair in report.pairs)
 
         logger.info(
-            "Node merge audit complete: %d issue(s), %d node(s) merged",
+            "Node merge audit complete: %d issue(s), %d node(s) merged; %d candidate pairs, "
+            "%d proposal requests, %d proposal cache hits, %d verifier requests, %d verifier cache hits; "
+            "%d skipped proposals, %d unanswered batches",
             len(issues),
             report.merged_count,
+            pairs,
+            requests,
+            reused,
+            verifier_requests,
+            verifier_reused,
+            len(rejected),
+            unanswered,
         )
         return {
             "issues": issues,
-            "results": report.pairs,
+            "results": [*report.pairs, *rejected],
             "merged_count": report.merged_count,
-            "summary": audit_result.get("summary", ""),
+            "summary": "\n".join(dict.fromkeys(summaries)),
+            "candidate_pairs": pairs,
+            "candidate_nodes": candidate_nodes,
+            "excluded_nodes": node_count - candidate_nodes,
+            "excluded_pairs": node_count * (node_count - 1) // 2 - pairs,
+            "proposal_requests": requests,
+            "proposal_reused": reused,
+            "proposal_unanswered": unanswered,
+            "proposal_input_bytes": input_bytes,
+            "largest_proposal_input_bytes": largest,
+            "proposal_request_byte_bound": node_merge_request_bound(settings),
+            "verifier_requests": verifier_requests,
+            "verifier_reused": verifier_reused,
+            "skipped_proposals": len(rejected),
         }

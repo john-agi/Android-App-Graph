@@ -1,0 +1,14 @@
+  mCurrentFocus=Window{2d9e082 u0 com.android.settings/com.android.settings.Settings}
+  mFocusedApp=ActivityRecord{212307035 u0 com.android.settings/.Settings t151}
+  WindowInsetsStateController
+    InsetsState
+      mDisplayFrame=Rect(0, 0 - 720, 1280)
+        InsetsSource id=3 type=ime frame=[0,0][0,0] visible=false flags= sideHint=NONE boundingRects=null
+        InsetsSource id=22310001 type=navigationBars frame=[0,1184][720,1280] visible=true flags=INSETS_ROUNDED_CORNER sideHint=BOTTOM boundingRects=null
+        InsetsSource id=22310004 type=systemGestures frame=[0,0][0,0] visible=true flags= sideHint=NONE boundingRects=null
+        InsetsSource id=22310005 type=mandatorySystemGestures frame=[0,1184][720,1280] visible=true flags= sideHint=BOTTOM boundingRects=null
+        InsetsSource id=22310006 type=tappableElement frame=[0,1184][720,1280] visible=true flags= sideHint=BOTTOM boundingRects=null
+        InsetsSource id=22310024 type=systemGestures frame=[0,0][0,0] visible=true flags= sideHint=NONE boundingRects=null
+        InsetsSource id=551e0000 type=statusBars frame=[0,0][720,48] visible=true flags= sideHint=TOP boundingRects=null
+        InsetsSource id=551e0005 type=mandatorySystemGestures frame=[0,0][720,48] visible=true flags= sideHint=TOP boundingRects=null
+        InsetsSource id=551e0006 type=tappableElement frame=[0,0][720,48] visible=true flags= sideHint=TOP boundingRects=null
