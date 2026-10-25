@@ -8,6 +8,7 @@ import subprocess
 import sys
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn
 
 import httpx
@@ -17,6 +18,8 @@ from openrouter import OpenRouter
 from android_app_graph import cli, device
 from android_app_graph.cli import build_parser, main
 from android_app_graph.kobe import ExplorerConfig
+
+pytestmark = pytest.mark.usefixtures("fake_failure_reader")
 
 
 def test_help_exits_zero(
@@ -89,6 +92,8 @@ def test_main_opens_one_client_for_every_app_and_closes_it_once(
             events.append("terminate")
 
     class Explorer:
+        controller = SimpleNamespace(run_id="test-run")
+
         def __init__(
             self,
             controller: Device,
@@ -277,6 +282,8 @@ def test_main_exits_with_the_error_when_adb_or_the_device_cannot_be_reached(
             pass
 
     class Explorer:
+        controller = SimpleNamespace(run_id="test-run")
+
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 

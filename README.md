@@ -874,6 +874,60 @@ The detection uses the default display's authoritative `InsetsState` in
 geometry. Step records keep native pixel bounds; model instructions give
 coordinate-free reachability guidance.
 
+### Android failure evidence
+
+`app-graph` writes read-only device snapshots to
+`graphs/<app_name>/failures/<session_id>/`. Each invocation, including a resumed
+graph, starts a fresh session with a baseline of retained history. `report.json`
+separates the host outcome (`completed`, `host_failure`, `operator_stop` or
+`device_outage`) from application evidence. Each numbered capture retains raw
+files, SHA-256 hashes, source status, device boot identity and device/host times.
+The session records its exploration step-log `run_id` once exploration is
+initialized. Crash records use device epoch time; exit history renders device
+wall time. Current timezone and process metadata accompany each snapshot;
+historical clock continuity remains unknown.
+
+The crash buffer supplies Java `FATAL EXCEPTION` and native-signal evidence.
+Android's package-filtered exit history separately supplies `recorded_exit`
+records, including its reason and user/UID fields. A Java header alone does not
+establish process death. Counts describe target process names in one retained
+snapshot; snapshots can overlap and their counts are not added. Other process
+names and records with unresolved process names remain explicitly classified.
+Process-name labels compare the recorded name with the package or its `:suffix`
+processes. Apps can use custom or shared names, so these labels establish name
+matches rather than historical package ownership.
+Historical process instances remain unresolved: a current PID, UID or window
+cannot establish the identity of a past process. Current process metadata includes
+available `/proc` start ticks for inspection and is a non-atomic sample.
+
+Collection takes a baseline, polls every 60 seconds after the preceding capture,
+and takes a final snapshot. Each capture has an eight-second ADB deadline and
+limits of 32 KiB for device/process metadata, 256 KiB and 512 records for the
+crash buffer, and 64 KiB for exit history. A session retains at most 1,024
+captures, reserving its last slot for shutdown; reaching that limit leaves later
+coverage unknown. Startup can wait eight seconds. Shutdown waits at most eight
+seconds for an active collector and eight seconds for the final read. Filesystem
+failures are logged; abrupt host termination can leave a partial capture or a
+report whose outcome is `running`. A collector that exceeds the shutdown wait
+keeps that incomplete outcome and logs it. Writes stage outside the publication
+lock and check session closure before atomic publication; a stalled operating
+system write can leave a `.partial` file after closure. ADB deadlines and thread
+join waits do not promise to interrupt filesystem operations.
+
+Ordered record overlap identifies repeated or newly retained log records.
+Identical repeated records, missing overlap, empty history, failed/truncated
+reads, boot changes and clock discontinuities leave interval coverage unknown.
+Split records can gain process attribution in a later overlapping snapshot;
+the header fingerprint stays stable and identifies content, not a unique event.
+Buffers can overwrite or lose records
+between polls, including records with identical contents. Every report therefore
+keeps its full-run failure census `unknown`, even when every read succeeds.
+An empty snapshot does not establish zero crashes. The collector preserves
+existing buffers and makes no graph, replay or recovery decisions. Capture UTC
+windows can be compared with the [step log](#step-log); temporal proximity does
+not establish that an action caused a failure. Device-free audits and audit
+re-exploration use their existing logs.
+
 ### Step log
 
 Exploration and `app-graph-audit --re-explore` record every screenshot they take,

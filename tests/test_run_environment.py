@@ -10,6 +10,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn, override
 
 import pytest
@@ -91,6 +92,7 @@ class _Controller:
 
 class _Explorer:
     def __init__(self, script: _Script) -> None:
+        self.controller = SimpleNamespace(run_id="test-run")
         self.script = script
 
     def explore(self, *, resume_from: str | None) -> None:
@@ -128,7 +130,7 @@ def _configure_cli(monkeypatch: pytest.MonkeyPatch, root: Path, script: _Script)
     monkeypatch.setattr(cli, "launch_app", lambda *_args: "com.demo/.Main")
 
 
-@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.usefixtures("no_sleep", "fake_failure_reader")
 @pytest.mark.parametrize("failure", [None, "interrupt", "error", "startup"])
 def test_cli_restores_original_display_values_on_each_exit(
     monkeypatch: pytest.MonkeyPatch,
