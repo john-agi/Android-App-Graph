@@ -121,7 +121,7 @@ def exit_evidence(text: str, package: str) -> list[FailureEvidence]:
             r"timestamp=(.*?) pid=(\d+) realUid=(\d+) packageUid=(\d+) definingUid=\d+ user=(\d+)",
             block,
         )
-        reason = re.search(r"process=(\S+) reason=(\d+ \([^)]*\))", block)
+        reason = re.search(r"process=(\S+) reason=(.*?) subreason=", block)
         if identity is None or reason is None:
             continue
         timestamp, pid, uid, package_uid, user = identity.groups()

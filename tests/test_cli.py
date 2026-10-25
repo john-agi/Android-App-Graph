@@ -19,16 +19,7 @@ from android_app_graph import cli, device
 from android_app_graph.cli import build_parser, main
 from android_app_graph.kobe import ExplorerConfig
 
-
-@pytest.fixture(autouse=True)
-def fake_failure_reader(monkeypatch: pytest.MonkeyPatch) -> None:
-    from android_app_graph.failure_monitor import SourceRead
-
-    class Reader:
-        def capture(self) -> dict[str, SourceRead]:
-            return {name: SourceRead(b"", "ok") for name in ("metadata", "crash", "exits")}
-
-    monkeypatch.setattr(cli, "AdbFailureReader", lambda *_args: Reader())
+pytestmark = pytest.mark.usefixtures("fake_failure_reader")
 
 
 def test_help_exits_zero(
