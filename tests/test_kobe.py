@@ -33,7 +33,7 @@ from android_app_graph.screen_image import encode_screenshot
 from android_app_graph.step_log import Observation, StepRecorder
 from android_app_graph.utils import DEFAULT_UNREACHABLE_LIMIT, MatchingSettings
 from android_app_graph.utils.graph_manager import EXTERNAL_WEB_NODE, EdgeDetails
-from android_app_graph.utils.vlm_utils import ActionRequest, PlanRequest
+from android_app_graph.utils.vlm_utils import ActionPlan, ActionRequest, PlanRequest
 
 _ROLES = ("page_detail", "embedding", "instruction", "action")
 _FORCE_STOP = ["adb", "-s", "test-device", "shell", "am", "force-stop", "com.demo"]
@@ -51,7 +51,7 @@ _HOME_START = _clear_task_start("com.demo/.Home")
 # The run's first restart asks the device for the launcher activity; later ones reuse it.
 _FIRST_RESTART = [_FORCE_STOP, _RESOLVE_LAUNCHER, _HOME_START]
 _RESTART = [_FORCE_STOP, _HOME_START]
-_TAP_REPLY = '{"action":"click","coordinate":[500,500]}'
+_TAP_REPLY = '{"action":"click","coordinate":[500,500],"required_pointers":1}'
 
 
 def _screen(activity: str, color: str) -> dict[str, object]:
@@ -888,9 +888,17 @@ def test_exploration_wait_recovery_respects_step_limit(
         ]
     )
     for _ in range(2):
-        router_responses.append(chat_response(content="Tap Search"))
+        router_responses.append(
+            chat_response(
+                content='{"instruction":"Tap Search","element":null,"required_pointers":1}'
+            )
+        )
         router_responses.extend(
-            chat_response(content='{"action":"invented"}' if malformed else '{"action":"wait"}')
+            chat_response(
+                content='{"action":"invented","required_pointers":0}'
+                if malformed
+                else '{"action":"wait","required_pointers":0}'
+            )
             for _ in range(2 if malformed else 1)
         )
     kobe.explore(max_steps=2)
@@ -921,8 +929,10 @@ def test_an_exploration_step_asks_the_explored_device_whether_its_keyboard_is_up
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content="Tap Search"),
-            chat_response(content='{"action":"wait"}'),
+            chat_response(
+                content='{"instruction":"Tap Search","element":null,"required_pointers":1}'
+            ),
+            chat_response(content='{"action":"wait","required_pointers":0}'),
         ]
     )
     kobe.explore(max_steps=1)
@@ -949,7 +959,9 @@ def test_an_in_app_screen_that_mentions_a_privacy_policy_gets_a_node_and_an_edge
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Tap the About row"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap the About row","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
             chat_response(
@@ -999,7 +1011,9 @@ def test_an_exploration_step_is_recorded_in_the_step_log(
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(home)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":1,"instruction":"Tap the About row"}'),
+            chat_response(
+                content='{"element":1,"instruction":"Tap the About row","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"about"}'),
@@ -1075,7 +1089,9 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"news article","is_external_web":true}'),
@@ -1109,7 +1125,7 @@ def test_an_external_web_page_is_recorded_on_ext_web_and_left_by_external_web_re
     ("action_reply", "executed", "recorded"),
     [
         (_TAP_REPLY, "tap", "Tap the privacy policy link"),
-        ('{"action":"end"}', "back", "Press back"),
+        ('{"action":"end","required_pointers":0}', "back", "Press back"),
     ],
 )
 @pytest.mark.usefixtures("no_sleep")
@@ -1134,7 +1150,9 @@ def test_an_external_web_page_gets_an_edge_to_the_shared_node_and_a_back_press(
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
+            ),
             chat_response(content=action_reply),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"news article","is_external_web":true}'),
@@ -1186,7 +1204,9 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Tap the privacy policy link"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap the privacy policy link","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             *[
                 response
@@ -1198,7 +1218,9 @@ def test_the_explorer_presses_back_until_it_leaves_an_external_web_page(
             ],
             # Home again, before or after a restart: an exact match.
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Tap Settings"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap Settings","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"settings"}'),
@@ -1247,8 +1269,15 @@ def test_a_step_marks_exactly_the_element_the_planner_names(
     instruction = "Tap the floating action button in the bottom right"
     router_responses.extend(
         [
-            chat_response(content=json.dumps({"element": element, "instruction": instruction})),
-            chat_response(content="", tool_arguments='{"action":"click","coordinate":[900,900]}'),
+            chat_response(
+                content=json.dumps(
+                    {"required_pointers": 1, "element": element, "instruction": instruction}
+                )
+            ),
+            chat_response(
+                content="",
+                tool_arguments='{"action":"click","coordinate":[900,900],"required_pointers":1}',
+            ),
             chat_response(content='{"is_template":false}'),
         ]
     )
@@ -1329,14 +1358,14 @@ def _explore_one_step_the_action_model_ends(
             {"description": "Settings icon", "position": "top right"},
         ],
     }
-    plan = {"element": 2, "instruction": "Tap the Settings icon"}
+    plan = {"required_pointers": 1, "element": 2, "instruction": "Tap the Settings icon"}
     router_responses.extend(
         [
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(page)),
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(plan)),
-            chat_response(content='{"action":"end"}'),
+            chat_response(content='{"action":"end","required_pointers":0}'),
             # Back shows home again: an exact match.
             httpx.Response(200, json=embedding_body),
         ]
@@ -1510,8 +1539,13 @@ def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_reject
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(search_page)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":1,"instruction":"Tap the Search button"}'),
-            chat_response(content="", tool_arguments='{"action":"click","coordinate":[500,500]}'),
+            chat_response(
+                content='{"element":1,"instruction":"Tap the Search button","required_pointers":1}'
+            ),
+            chat_response(
+                content="",
+                tool_arguments='{"action":"click","coordinate":[500,500],"required_pointers":1}',
+            ),
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"Chat search results"}'),
             httpx.Response(200, json=embedding_body),
@@ -1530,15 +1564,17 @@ def test_a_step_that_starts_a_node_is_recorded_from_the_node_the_verifier_reject
     assert "add_edge: missing node(s)" not in caplog.text
 
 
-_WAIT_REPLY = '{"action":"wait"}'
+_WAIT_REPLY = '{"action":"wait","required_pointers":0}'
 
 
-def _planner(instruction: str, planned_from: list[object]) -> Callable[..., tuple[str, int | None]]:
+def _planner(
+    instruction: str, planned_from: list[object], *, required_pointers: int = 1
+) -> Callable[..., ActionPlan]:
     """A ``plan_next_action`` that records the page description of each screen it plans from."""
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int | None]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         planned_from.append(request.page_description)
-        return instruction, None
+        return ActionPlan(instruction, None, required_pointers)
 
     return plan
 
@@ -1751,7 +1787,9 @@ def test_exploration_with_coverage_checkpoints_off_sends_only_the_steps_requests
     for _ in range(2):
         router_responses.extend(
             [
-                chat_response(content='{"element":null,"instruction":"Tap Sort"}'),
+                chat_response(
+                    content='{"element":null,"instruction":"Tap Sort","required_pointers":1}'
+                ),
                 chat_response(content=_TAP_REPLY),
             ]
         )
@@ -1894,15 +1932,19 @@ def test_a_checkpoint_that_merges_away_the_current_node_continues_from_the_kept_
         monkeypatch.setattr(replaying_kobe, "navigate_to_node", _fail_navigation)
     duplicate = {"type": "merge_nodes", "node_a": "n0", "node_b": "n1"}
     target = '{"node_id":"s2_detail","reason":"unexplored"}'
-    click = '{"action":"click","coordinate":[500,500]}'
+    click = '{"action":"click","coordinate":[500,500],"required_pointers":1}'
     router_responses.extend(
         [
-            chat_response(content='{"element":null,"instruction":"Tap the first item"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap the first item","required_pointers":1}'
+            ),
             chat_response(content="", tool_arguments=click),
             chat_response(content=json.dumps({"issues": [duplicate], "summary": "duplicate"})),
             chat_response(content='{"same":true,"reason":"same list"}'),
             *([chat_response(content=target)] if navigation_fails else []),
-            chat_response(content='{"element":null,"instruction":"Open the first item"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Open the first item","required_pointers":1}'
+            ),
             chat_response(content="", tool_arguments=click),
         ]
     )
@@ -2034,10 +2076,14 @@ def test_a_checkpoint_whose_replay_fails_continues_from_the_screen_the_device_is
     _describing_by_node_id(explorer, monkeypatch)
     router_responses.extend(
         [
-            chat_response(content='{"element":null,"instruction":"Open settings"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Open settings","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             chat_response(content='{"node_id":"s2_detail","reason":"unexplored"}'),
-            chat_response(content='{"element":null,"instruction":"Open the sort menu"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Open the sort menu","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
         ]
     )
@@ -2230,8 +2276,12 @@ def _explore_into_a_permission_dialog(
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Tap Take photo"}'),
-            chat_response(content='{"action":"click","coordinate":[500,500]}'),
+            chat_response(
+                content='{"element":null,"instruction":"Tap Take photo","required_pointers":1}'
+            ),
+            chat_response(
+                content='{"action":"click","coordinate":[500,500],"required_pointers":1}'
+            ),
             httpx.Response(200, json=embedding_body),
         ]
     )
@@ -2428,7 +2478,9 @@ def test_a_step_that_leaves_the_app_marks_the_element_the_planner_names(
             httpx.Response(200, json=embedding_body),
             chat_response(content=json.dumps(home)),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":2,"instruction":"Tap the Search button"}'),
+            chat_response(
+                content='{"element":2,"instruction":"Tap the Search button","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             *(identifying_the_web_page if reached == EXTERNAL_WEB_NODE else []),
             # Back shows home again: an exact match.
@@ -2677,7 +2729,7 @@ def test_a_replay_expects_the_node_it_replays_to(
     assert identified == ["s0_home", "s1_list", "s0_home"]
 
 
-_BACK_REPLY = '{"action":"system_button","button":"Back"}'
+_BACK_REPLY = '{"action":"system_button","button":"Back","required_pointers":0}'
 _OPEN_LIST = {"action": "tap", "coordinate": [10, 20]}
 
 
@@ -2686,7 +2738,8 @@ def _planning_back(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     of each screen it plans from is appended to."""
     planned_from: list[object] = []
     monkeypatch.setattr(
-        "android_app_graph.kobe.plan_next_action", _planner("Go back", planned_from)
+        "android_app_graph.kobe.plan_next_action",
+        _planner("Go back", planned_from, required_pointers=0),
     )
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     return planned_from
@@ -2701,7 +2754,9 @@ def _numbered_steps(messages: list[str]) -> list[str]:
     return [message.split(" | ")[0] for message in messages if re.search(r"Step [0-9]*/", message)]
 
 
-@pytest.mark.parametrize("action_reply", [_BACK_REPLY, '{"action":"end"}'], ids=["back", "end"])
+@pytest.mark.parametrize(
+    "action_reply", [_BACK_REPLY, '{"action":"end","required_pointers":0}'], ids=["back", "end"]
+)
 @pytest.mark.usefixtures("no_sleep")
 def test_back_on_the_start_screen_continues_from_a_ranked_target_instead(
     action_reply: str,
@@ -2981,7 +3036,9 @@ def test_the_planner_is_told_that_back_leaves_the_app_where_it_does(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     router_responses.extend(
         [
-            chat_response(content='{"element":null,"instruction":"Scroll down"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Scroll down","required_pointers":1}'
+            ),
             chat_response(content=_WAIT_REPLY),
         ]
     )
@@ -3033,7 +3090,7 @@ def test_back_on_the_start_screen_passes_over_a_target_whose_last_replay_missed(
     assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 1
 
 
-_SCROLL_DOWN_PLAN = '{"element":null,"instruction":"Scroll down"}'
+_SCROLL_DOWN_PLAN = '{"element":null,"instruction":"Scroll down","required_pointers":1}'
 
 
 def _toggles(explorer: Kobe, *days: int) -> None:
@@ -3385,7 +3442,9 @@ def test_every_screen_identify_state_takes_is_embedded_and_its_decision_recorded
             httpx.Response(200, json=embedding_body),
             chat_response(content='{"page_description":"home"}'),
             httpx.Response(200, json=embedding_body),
-            chat_response(content='{"element":null,"instruction":"Scroll down"}'),
+            chat_response(
+                content='{"element":null,"instruction":"Scroll down","required_pointers":1}'
+            ),
             chat_response(content=_TAP_REPLY),
             httpx.Response(200, json=embedding_body),
         ]
@@ -4051,9 +4110,9 @@ def test_typing_plans_use_current_focus_and_keep_field_selection_atomic(
     plans: list[PlanRequest] = []
     grounding: list[ActionRequest] = []
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, None]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         plans.append(request)
-        return next(instructions), None
+        return ActionPlan(next(instructions), None, 1)
 
     def act(*, request: ActionRequest, **_kwargs: object) -> tuple[dict[str, object], str]:
         grounding.append(request)
@@ -4136,11 +4195,11 @@ def test_system_feedback_defers_a_covered_action_within_the_step_budget(
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     pending: list[bool] = []
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         pending.append(
             request.unexplored_elements[0]["explored"] if request.unexplored_elements else True
         )
-        return "Tap app Share", 1
+        return ActionPlan("Tap app Share", 1, 1)
 
     actions = iter([{"action": "tap", "x": 50, "y": 125}, {"action": "tap", "x": 10, "y": 20}])
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
@@ -4201,7 +4260,9 @@ def test_startup_dismisses_a_focused_shade_and_retains_its_boundary_identity(
     monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0")
     monkeypatch.setattr(kobe.graph, "latest_description", lambda _node: "Home")
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
-    monkeypatch.setattr("android_app_graph.kobe.plan_next_action", lambda **_kwargs: ("Wait", None))
+    monkeypatch.setattr(
+        "android_app_graph.kobe.plan_next_action", lambda **_kwargs: ActionPlan("Wait", None, 0)
+    )
     monkeypatch.setattr(
         "android_app_graph.kobe.predict_next_action", lambda **_kwargs: ({"action": "wait"}, "")
     )
@@ -4391,9 +4452,9 @@ def test_unreachable_planned_inputs_consume_steps_and_preserve_unexplored_target
     monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
     planning_hints: list[str] = []
 
-    def plan(*, request: PlanRequest, **_kwargs: object) -> tuple[str, int]:
+    def plan(*, request: PlanRequest, **_kwargs: object) -> ActionPlan:
         planning_hints.append(request.input_status)
-        return "Open Import & Export", 1
+        return ActionPlan("Open Import & Export", 1, 1)
 
     monkeypatch.setattr("android_app_graph.kobe.plan_next_action", plan)
     action = {"action": "tap", "x": 257, "y": 1190}
@@ -4455,3 +4516,57 @@ def test_a_replay_stops_at_an_unreachable_input_and_identifies_its_actual_arriva
     assert device.actions == []
     assert device_log == _FIRST_RESTART
     assert explorer.graph.graph.nodes["s1_list"]["replay_misses"] == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("pointers", [None, 3])
+def test_unsupported_gestures_count_once_without_input_edges_or_element_credit(
+    pointers: int | None,
+    kobe: Kobe,
+    monkeypatch: pytest.MonkeyPatch,
+    router_responses: list[httpx.Response],
+    router_requests: list[httpx.Request],
+    chat_response: Callable[..., httpx.Response],
+    step_records: Callable[[Path], list[dict[str, Any]]],
+) -> None:
+    instruction = "Swipe upward with three fingers through the center of the settings list"
+    element = {"description": "Settings list", "position": "center", "explored": False}
+    kobe.graph.graph.add_node("s0", replay_misses=0, interactable_elements=[element])
+    monkeypatch.setattr(kobe.graph, "identify_state", lambda *_args, **_kwargs: "s0")
+    _describing_by_node_id(kobe, monkeypatch)
+    monkeypatch.setattr("android_app_graph.kobe.soft_keyboard_hint", lambda _udid: "")
+    checkpoints: list[int] = []
+
+    def checkpoint(
+        step: int, _limit: int, node: str, state: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        checkpoints.append(step)
+        return node, state
+
+    monkeypatch.setattr(kobe, "_apply_coverage_checkpoint_after_step", checkpoint)
+    router_responses.extend(
+        chat_response(
+            content=json.dumps(
+                {"instruction": instruction, "element": 1, "required_pointers": pointers}
+            )
+        )
+        for _ in range(3)
+    )
+    kobe.explore(max_steps=3)
+    records = step_records(kobe.controller.steps)
+    unsupported = [r for r in records if r["kind"] == "unsupported_action"]
+    assert len(unsupported) == 3
+    assert [r["instruction"] for r in unsupported] == [instruction] * 3
+    assert all(r["planned_required_pointers"] == pointers and r["reason"] for r in unsupported)
+    assert all(r["observation"] is not None for r in unsupported)
+    assert not any(r["kind"] in {"action", "transition"} for r in records)
+    assert kobe.graph.total_steps_completed == 3
+    assert checkpoints == [1, 2, 3]
+    assert kobe.graph.graph.number_of_edges() == 0
+    assert kobe.graph.graph.nodes["s0"]["interactable_elements"] == [element]
+    assert kobe.graph_path.exists()
+    assert len(router_requests) == 3
+    assert (
+        "Previous instruction was unsupported"
+        in json.loads(router_requests[1].content)["messages"][0]["content"][0]["text"]
+    )
