@@ -6489,3 +6489,23 @@ def test_saved_action_source_with_unresolved_ownership_is_rejected(screen: Scree
     )
     with pytest.raises(ValueError, match="Action source"):
         make_manager(screen.steps_dir).load_graph(path)
+
+
+def test_merged_equal_actions_keep_the_selected_variant_index(screen: Screens) -> None:
+    """A shorter merged preparation retains its own action-source identity."""
+    gm, _first = action_context_graph(screen, [_SCROLL])
+    current = screen(activity=SETTINGS)
+    record = {**screen.record(current), "activity": SETTINGS}
+    (screen.steps_dir / f"{current.observation_id}.json").write_text(json.dumps(record))
+    add_screen(gm, "s2", "Alternate home", activity=SETTINGS, observations=[current.observation_id])
+    gm.add_edge(
+        "s2",
+        "s1",
+        dict(_TAP),
+        details=EdgeDetails(setup=[], action_source=current.observation_id),
+    )
+    gm.merge_nodes("s0", "s2")
+    path = gm.find_path("s0", "s1")
+    assert path is not None
+    assert path[1].setup == ()
+    assert path[1]._asdict().get("action_index") == 1
