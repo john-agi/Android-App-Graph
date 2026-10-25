@@ -1251,12 +1251,17 @@ def verify_replay_action(
 The CURRENT second screenshot follows reconstruction of a menu whose opening history
 was unknown. Decide whether the action addresses the same operation and visible controls
 now. This is action applicability, not page identity: one screen's ordinary and selected
-menus can place different operations at identical coordinates. Compare the exact target,
-menu entries, selection mode, toolbar and visible operation. Do not infer selection or
-hidden prerequisites from the intended action. Different content or selection count alone
-is acceptable when the same action still has the same meaning and target. A changed target,
-covered control or uncertain operation means applicable=false. Matching pixels alone do not
-prove hidden state. Return applicable (boolean) and reason (string)."""
+menus can place different operations at identical coordinates. The target is the UI control
+and its operation, not the identity of selected items that supply that operation's data.
+Do not require the original selected items to remain selected for an operation on the
+current selection. Visible selection mode and the menu can establish that context even
+when the menu obscures individual selection marks. Different content or selection count
+is acceptable only when the same operation remains at the same coordinates. Reject a
+different operation at the recorded coordinates, including rows shifted by selection count.
+Compare menu entries, selection mode, toolbar and the actual control. Do not infer missing
+selection mode or hidden prerequisites from the intended action. A covered control or
+uncertain operation means applicable=false. Matching pixels alone do not prove hidden
+state. Return applicable (boolean) and reason (string)."""
     try:
         response = send_chat(
             client,
