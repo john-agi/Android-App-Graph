@@ -634,6 +634,14 @@ baseline lifecycle and replay checks.
 
 ### Replaying to a node
 
+Explicit replay destinations belong to the target app. `Kobe.navigate_to_node` and
+manual `--resume-from` reject external boundary nodes (`ext_` IDs or nodes marked
+`is_external`) with `ValueError` before replay restarts the app or sends recorded
+input. The check follows stored aliases. External nodes and their incoming edges
+remain evidence of boundary visits in the graph. Automatic target selection also
+excludes these nodes. CLI startup performs its usual device setup before the resume
+decision.
+
 `--resume-from`, the coverage checkpoint every `experiment.coverage_checkpoint_steps`
 steps, a step that continues from a ranked target (below) and each issue that
 `app-graph-audit --re-explore` works on reach their node by replaying recorded actions
